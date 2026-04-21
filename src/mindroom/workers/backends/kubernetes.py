@@ -419,18 +419,23 @@ class KubernetesWorkerBackend:
                         deployment_ready_fn=self._deployment_ready,
                         on_poll_tick=poll_reporter,
                     )
+                    final_annotations = dict(annotations)
+                    final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
+                    self._resources.patch_deployment(worker_id, annotations=final_annotations)
                 except Exception as exc:
                     failure_reason = str(exc)
                     finalize_progress("failed", failure_reason)
-                    self.record_failure(worker_key, failure_reason, now=timestamp)
+                    self.record_failure(
+                        worker_key,
+                        failure_reason,
+                        now=timestamp,
+                        annotations_override=annotations,
+                    )
                     if isinstance(exc, WorkerBackendError):
                         raise
                     raise WorkerBackendError(failure_reason) from exc
 
                 finalize_progress("ready", None)
-                final_annotations = dict(annotations)
-                final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
-                self._resources.patch_deployment(worker_id, annotations=final_annotations)
                 deployment.metadata.annotations = {
                     **dict(deployment.metadata.annotations or {}),
                     **final_annotations,
@@ -518,7 +523,14 @@ class KubernetesWorkerBackend:
             cleaned.append(self._handle_from_deployment(deployment, now=timestamp))
         return cleaned
 
-    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
+    def record_failure(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float | None = None,
+        annotations_override: dict[str, str] | None = None,
+    ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
         worker_id = self._worker_id(worker_key)
@@ -528,6 +540,8 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(msg)
 
         annotations = dict(deployment.metadata.annotations or {})
+        if annotations_override is not None:
+            annotations.update(annotations_override)
         annotations[resources.ANNOTATION_LAST_USED_AT] = str(timestamp)
         annotations[resources.ANNOTATION_WORKER_STATUS] = "failed"
         annotations[resources.ANNOTATION_FAILURE_REASON] = failure_reason

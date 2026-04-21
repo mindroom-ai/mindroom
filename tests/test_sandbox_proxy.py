@@ -11,9 +11,15 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
+from unittest.mock import patch
 
 import pytest
+from agno.agent import Agent
+from agno.agent._tools import parse_tools
+from agno.models.base import Model
+from agno.models.response import ModelResponse
 from agno.tools import Toolkit
+from agno.tools.function import Function, FunctionCall
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
@@ -28,6 +34,7 @@ from mindroom.constants import (
     shell_extra_env_values,
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.hooks import HookRegistry
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
     TOOL_METADATA,
@@ -39,7 +46,8 @@ from mindroom.tool_system.metadata import (
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context, worker_progress_pump_scope
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
@@ -49,11 +57,11 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import WorkerSpec
+from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
 from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
@@ -157,6 +165,33 @@ def _recording_client_class(
             return _FakeResponse(payload)
 
     return _FakeClient
+
+
+class _MinimalModel(Model):
+    """Minimal model surface for exercising Agno's async tool execution path."""
+
+    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok")
+
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok")
+
+    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
+        yield ModelResponse(content="ok")
+
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        yield ModelResponse(content="ok")
+
+    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
+        return response
+
+    def _parse_provider_response_delta(
+        self,
+        response: ModelResponse,
+        *_args: object,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        return response
 
 
 def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1991,6 +2026,128 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
         ),
     ):
         await entrypoint("pwd")
+
+
+@pytest.mark.asyncio
+async def test_sync_only_worker_routed_tool_surfaces_progress_in_real_async_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sync-only proxied tools should emit worker progress before the async call result resolves."""
+    release_execute = threading.Event()
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+
+    class _FakeWorkerManager:
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
+            del now
+            assert progress_sink is not None
+            progress_sink(
+                WorkerReadyProgress(
+                    phase="cold_start",
+                    worker_key=spec.worker_key,
+                    backend_name="kubernetes",
+                    elapsed_seconds=1.0,
+                ),
+            )
+            return WorkerHandle(
+                worker_id="worker-1",
+                worker_key=spec.worker_key,
+                endpoint="http://worker/api/sandbox-runner/execute",
+                auth_token=_TEST_AUTH_TOKEN,
+                status="ready",
+                backend_name="kubernetes",
+                last_used_at=0.0,
+                created_at=0.0,
+            )
+
+        def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
+            del worker_key, now
+            return None
+
+    class _BlockingClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            del json, headers
+            assert url == "http://worker/api/sandbox-runner/execute"
+            release_execute.wait(timeout=1.0)
+            return _FakeResponse({"ok": True, "result": "proxied"})
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=_worker_target(runtime_paths, "shared", "code", execution_identity),
+    )
+    assert tool.async_functions == {}
+    tool = prepend_tool_hook_bridge(
+        tool,
+        build_tool_hook_bridge(
+            HookRegistry.empty(),
+            agent_name="code",
+            dispatch_context=None,
+            config=Config(agents={"code": AgentConfig(display_name="Code")}, models={}),
+            runtime_paths=runtime_paths,
+        ),
+    )
+
+    model = _MinimalModel(id="fake-model", provider="fake")
+    agent = Agent(id="code", model=model)
+    parsed_tools = parse_tools(agent, [tool], model, async_mode=True)
+    read_file = next(
+        function for function in parsed_tools if isinstance(function, Function) and function.name == "read_file"
+    )
+
+    progress_queue: asyncio.Queue[object] = asyncio.Queue()
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=_FakeWorkerManager()),
+        patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _BlockingClient),
+        worker_progress_pump_scope(asyncio.get_running_loop(), progress_queue),
+    ):
+        call_task = asyncio.create_task(
+            model.arun_function_call(
+                FunctionCall(
+                    function=read_file,
+                    arguments={"file_name": "demo.txt"},
+                    call_id="call-1",
+                ),
+            ),
+        )
+
+        progress_event = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+        assert progress_event.tool_name == "file"
+        assert progress_event.function_name == "read_file"
+        assert progress_event.progress.phase == "cold_start"
+        assert call_task.done() is False
+
+        release_execute.set()
+        success, _timer, _function_call, result = await call_task
+
+    assert success is True
+    assert result.result == "proxied"
 
 
 class TestWorkerToolsOverride:

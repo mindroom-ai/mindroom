@@ -1505,7 +1505,74 @@ def test_kubernetes_backend_recreate_metadata_patch_failure_is_normalized(tmp_pa
     deployment = apps_api.deployments[worker_id]
     assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
     assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == "refresh metadata failed"
+    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "2"
+    assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "11.0"
     assert [event.phase for event in events] == ["failed"]
+
+
+def test_kubernetes_backend_ready_metadata_patch_failure_is_normalized(tmp_path: Path) -> None:
+    """A failed ready-status patch should emit failed progress and persist failed worker state."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    initial_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot["search"] = {
+        "config_fields": ["engine"],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=initial_snapshot,
+    )
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    updated_backend, _, _ = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=updated_snapshot,
+    )
+    updated_backend._resources.apps_api = apps_api
+    updated_backend._resources.core_api = core_api
+    updated_backend._resources.api_exception_cls = _FakeApiError
+    _install_real_elapsed_wait_for_ready(updated_backend, ready_after_seconds=1.6)
+
+    original_patch_deployment = updated_backend._resources.patch_deployment
+
+    def patch_deployment_with_ready_failure(
+        deployment_name: str,
+        *,
+        replicas: int | None = None,
+        annotations: dict[str, str] | None = None,
+    ) -> None:
+        if annotations is not None and annotations.get("mindroom.ai/worker-status") == "ready":
+            msg = "ready patch failed"
+            raise RuntimeError(msg)
+        original_patch_deployment(
+            deployment_name,
+            replicas=replicas,
+            annotations=annotations,
+        )
+
+    updated_backend._resources.patch_deployment = patch_deployment_with_ready_failure
+
+    events: list[WorkerReadyProgress] = []
+    with pytest.raises(WorkerBackendError, match="ready patch failed"):
+        updated_backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=11.0,
+            progress_sink=events.append,
+        )
+
+    worker_id = next(iter(apps_api.deployments))
+    deployment = apps_api.deployments[worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == "ready patch failed"
+    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "2"
+    assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "11.0"
+    assert [event.phase for event in events] == ["cold_start", "failed"]
 
 
 def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:

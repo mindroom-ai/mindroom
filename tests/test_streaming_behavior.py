@@ -1422,7 +1422,8 @@ class TestStreamingBehavior:
             )
 
         assert terminal_statuses[-1] == STREAM_STATUS_ERROR
-        assert edited_texts[-1].startswith("hello\n\n**[Response interrupted by an error:")
+        assert edited_texts[-1].startswith("**[Response interrupted by an error:")
+        assert "hello" not in edited_texts[-1]
 
     @pytest.mark.asyncio
     async def test_worker_progress_delivery_failure_stops_chunk_consumption_immediately(self) -> None:
@@ -1529,6 +1530,81 @@ class TestStreamingBehavior:
 
         assert event_id == "$event123"
         assert accumulated == "hello"
+
+    @pytest.mark.asyncio
+    async def test_worker_progress_delivery_failure_does_not_leak_undelivered_buffered_text(self) -> None:
+        """Terminal error text should not include chunks that were buffered but never delivered."""
+        mock_client = _make_matrix_client_mock()
+        warmup_edit_started = asyncio.Event()
+        edited_texts: list[str] = []
+
+        class ImmediateStreamingResponse(StreamingResponse):
+            def __init__(self, **kwargs: object) -> None:
+                super().__init__(**kwargs)
+                self.update_interval = 0.0
+                self.min_update_interval = 0.0
+                self.progress_update_interval = 0.0
+                self.min_char_update_interval = 0.0
+                self.update_char_threshold = 1
+                self.min_update_char_threshold = 1
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent:
+            edited_texts.append(new_text)
+            if "Preparing isolated worker" in new_text and "hello" not in new_text and "world" not in new_text:
+                warmup_edit_started.set()
+                await asyncio.sleep(0)
+                msg = "edit blew up"
+                raise RuntimeError(msg)
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
+
+        async def stream() -> AsyncIterator[str]:
+            pump = get_worker_progress_pump()
+            assert pump is not None
+            pump.queue.put_nowait(
+                WorkerProgressEvent(
+                    tool_name="shell",
+                    function_name="run",
+                    progress=WorkerReadyProgress(
+                        phase="cold_start",
+                        worker_key="worker-a",
+                        backend_name="kubernetes",
+                        elapsed_seconds=2.0,
+                    ),
+                ),
+            )
+            await warmup_edit_started.wait()
+            yield "hello"
+            yield " world"
+
+        with (
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(StreamingDeliveryError, match="edit blew up") as exc_info,
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                room_mode=True,
+                streaming_cls=ImmediateStreamingResponse,
+            )
+
+        assert exc_info.value.accumulated_text == edited_texts[-1]
+        assert exc_info.value.accumulated_text.startswith("**[Response interrupted by an error:")
+        assert "hello" not in exc_info.value.accumulated_text
+        assert "world" not in exc_info.value.accumulated_text
 
     @pytest.mark.asyncio
     async def test_worker_progress_and_content_updates_do_not_overlap_edits(self) -> None:

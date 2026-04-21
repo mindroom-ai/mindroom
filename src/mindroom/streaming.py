@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import dataclass, field
 from html import escape
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -73,6 +74,14 @@ class StreamingDeliveryError(Exception):
         self.event_id = event_id
         self.accumulated_text = accumulated_text
         self.tool_trace = tool_trace.copy()
+
+
+class _NonTerminalDeliveryError(Exception):
+    """Internal wrapper for non-terminal delivery failures."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        self.error = error
 
 
 def _format_stream_error_note(error: Exception) -> str:
@@ -245,6 +254,8 @@ class StreamingResponse:
     _active_warmups: dict[str, _ActiveWarmup] = field(default_factory=dict, init=False, repr=False)
     _last_send_had_warmup_suffix: bool = field(default=False, init=False, repr=False)
     _needs_warmup_clear_edit: bool = field(default=False, init=False, repr=False)
+    _last_delivered_text: str = field(default="", init=False, repr=False)
+    _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -433,10 +444,22 @@ class StreamingResponse:
             self._last_send_had_warmup_suffix = bool(warmup_suffix_lines)
             self._needs_warmup_clear_edit = False
             if not is_final:
+                self._mark_delivery_committed()
                 self.placeholder_progress_sent = not self.accumulated_text.strip()
             else:
                 self.placeholder_progress_sent = False
         return send_succeeded
+
+    def _mark_delivery_committed(self) -> None:
+        """Snapshot the last non-terminal text/tool-trace state that actually reached Matrix."""
+        self._last_delivered_text = self.accumulated_text
+        self._last_delivered_tool_trace = deepcopy(self.tool_trace)
+
+    def restore_last_delivered_state(self) -> None:
+        """Discard buffered state that never reached Matrix after a delivery failure."""
+        self.accumulated_text = self._last_delivered_text
+        self.tool_trace = deepcopy(self._last_delivered_tool_trace)
+        self.chars_since_last_update = 0
 
     def _clear_terminal_warmups(self) -> None:
         """Drop failed warmup notices once the stream resumes with normal content."""
@@ -842,6 +865,7 @@ async def _handle_auxiliary_task_completion(
     *,
     stream_task: asyncio.Task[None],
     monitored_tasks: set[asyncio.Task[None]],
+    delivery_task: asyncio.Task[None] | None,
 ) -> bool:
     """Surface one auxiliary-task failure through the normal streaming contract."""
     if task is None or task not in done_tasks:
@@ -856,6 +880,8 @@ async def _handle_auxiliary_task_completion(
         await _cancel_stream_consumer(stream_task)
         if not isinstance(task_error, Exception):
             raise task_error
+        if task is delivery_task:
+            raise _NonTerminalDeliveryError(task_error) from task_error
         _raise_progress_delivery_error(task_error)
 
     monitored_tasks.discard(task)
@@ -886,6 +912,7 @@ async def _consume_stream_with_progress_supervision(
                 progress_task,
                 stream_task=stream_task,
                 monitored_tasks=monitored_tasks,
+                delivery_task=delivery_task,
             ):
                 progress_task = None
 
@@ -894,6 +921,7 @@ async def _consume_stream_with_progress_supervision(
                 delivery_task,
                 stream_task=stream_task,
                 monitored_tasks=monitored_tasks,
+                delivery_task=delivery_task,
             ):
                 delivery_task = None
 
@@ -1024,30 +1052,33 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 await streaming.finalize(client, cancelled=True)
             raise
         except Exception as e:
-            logger.exception("Streaming response failed", error=str(e))
+            delivery_error = e.error if isinstance(e, _NonTerminalDeliveryError) else e
+            logger.exception("Streaming response failed", error=str(delivery_error))
             cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
             progress_task = None
             delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
             delivery_task = None
-            if cleanup_error is not None and cleanup_error is not e:
+            if cleanup_error is not None and cleanup_error is not delivery_error:
                 logger.warning(
                     "Worker progress drain raised during error cleanup",
                     error=str(cleanup_error),
                 )
-            if delivery_cleanup_error is not None and delivery_cleanup_error is not e:
+            if delivery_cleanup_error is not None and delivery_cleanup_error is not delivery_error:
                 logger.warning(
                     "Stream delivery controller raised during error cleanup",
                     error=str(delivery_cleanup_error),
                 )
-            await streaming.finalize(client, error=e)
+            if isinstance(e, _NonTerminalDeliveryError):
+                streaming.restore_last_delivered_state()
+            await streaming.finalize(client, error=delivery_error)
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
             raise StreamingDeliveryError(
-                e,
+                delivery_error,
                 event_id=streaming.event_id,
                 accumulated_text=streaming.accumulated_text,
                 tool_trace=streaming.tool_trace,
-            ) from e
+            ) from delivery_error
         else:
             await streaming.finalize(client)
         finally:
