@@ -389,20 +389,6 @@ class KubernetesWorkerBackend:
                     private_agent_names=spec.private_agent_names,
                 )
                 startup_triggered = should_restart or deployment_apply.recreated
-                if deployment_apply.recreated and not should_restart:
-                    startup_count = (current_handle.startup_count if current_handle is not None else 0) + 1
-                    annotations = resources.metadata_annotations(
-                        worker_key=worker_key,
-                        state_subpath=state_subpath,
-                        created_at=created_at,
-                        last_used_at=timestamp,
-                        last_started_at=timestamp,
-                        startup_count=startup_count,
-                        failure_count=current_handle.failure_count if current_handle is not None else 0,
-                        failure_reason=None,
-                        status="starting",
-                    )
-                    self._resources.patch_deployment(worker_id, annotations=annotations)
                 should_report_progress = startup_triggered or existing is None or not self._deployment_ready(existing)
                 poll_reporter: Callable[[float], None] | None = None
                 finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = _noop_finalize_progress
@@ -413,6 +399,20 @@ class KubernetesWorkerBackend:
                         progress_sink=self._emit_progress,
                     )
                 try:
+                    if deployment_apply.recreated and not should_restart:
+                        startup_count = (current_handle.startup_count if current_handle is not None else 0) + 1
+                        annotations = resources.metadata_annotations(
+                            worker_key=worker_key,
+                            state_subpath=state_subpath,
+                            created_at=created_at,
+                            last_used_at=timestamp,
+                            last_started_at=timestamp,
+                            startup_count=startup_count,
+                            failure_count=current_handle.failure_count if current_handle is not None else 0,
+                            failure_reason=None,
+                            status="starting",
+                        )
+                        self._resources.patch_deployment(worker_id, annotations=annotations)
                     deployment = self._resources.wait_for_ready(
                         worker_id,
                         timeout_seconds=self.config.ready_timeout_seconds,

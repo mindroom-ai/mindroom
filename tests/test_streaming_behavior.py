@@ -1425,6 +1425,112 @@ class TestStreamingBehavior:
         assert edited_texts[-1].startswith("hello\n\n**[Response interrupted by an error:")
 
     @pytest.mark.asyncio
+    async def test_worker_progress_delivery_failure_stops_chunk_consumption_immediately(self) -> None:
+        """A warmup delivery failure should cancel chunk consumption before later chunks are reached."""
+        mock_client = _make_matrix_client_mock()
+        later_chunk_reached = False
+        edited_texts: list[str] = []
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent:
+            edited_texts.append(new_text)
+            if "Preparing isolated worker" in new_text:
+                msg = "edit blew up"
+                raise RuntimeError(msg)
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
+
+        async def stream() -> AsyncIterator[str]:
+            nonlocal later_chunk_reached
+            pump = get_worker_progress_pump()
+            assert pump is not None
+            pump.queue.put_nowait(
+                WorkerProgressEvent(
+                    tool_name="shell",
+                    function_name="run",
+                    progress=WorkerReadyProgress(
+                        phase="cold_start",
+                        worker_key="worker-a",
+                        backend_name="kubernetes",
+                        elapsed_seconds=2.0,
+                    ),
+                ),
+            )
+            await asyncio.sleep(0.2)
+            later_chunk_reached = True
+            yield "hello"
+
+        with (
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(StreamingDeliveryError, match="edit blew up"),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                room_mode=True,
+            )
+
+        assert later_chunk_reached is False
+        assert all("hello" not in text for text in edited_texts)
+
+    @pytest.mark.asyncio
+    async def test_worker_progress_shutdown_timeout_does_not_fail_successful_stream(self) -> None:
+        """A timed-out progress-drain shutdown is cleanup-only and must not fail a successful stream."""
+        mock_client = _make_matrix_client_mock()
+
+        async def record_send(
+            _client: object,
+            _room_id: str,
+            content: dict[str, object],
+        ) -> DeliveredMatrixEvent:
+            return DeliveredMatrixEvent(event_id="$event123", content_sent=dict(content))
+
+        async def lingering_drain(
+            _client: object,
+            _streaming: object,
+            _queue: object,
+            _pump: object,
+        ) -> None:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.6)
+                raise
+
+        async def stream() -> AsyncIterator[str]:
+            yield "hello"
+
+        with (
+            patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
+            patch("mindroom.streaming._drain_worker_progress_events", new=lingering_drain),
+        ):
+            event_id, accumulated = await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+            )
+
+        assert event_id == "$event123"
+        assert accumulated == "hello"
+
+    @pytest.mark.asyncio
     async def test_worker_warmup_suffix_renders_and_clears_without_touching_accumulated_text(self) -> None:
         """Warmup notices should render as side-band text and disappear on ready."""
         mock_client = _make_matrix_client_mock()

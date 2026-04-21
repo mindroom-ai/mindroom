@@ -1443,6 +1443,71 @@ def test_kubernetes_backend_recreated_ready_deployment_refreshes_startup_metadat
     assert handle.startup_count == 2
 
 
+def test_kubernetes_backend_recreate_metadata_patch_failure_is_normalized(tmp_path: Path) -> None:
+    """Recreate metadata patch failures should still record failed startup state and raise WorkerBackendError."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    initial_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot["search"] = {
+        "config_fields": ["engine"],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=initial_snapshot,
+    )
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    updated_backend, _, _ = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=updated_snapshot,
+    )
+    updated_backend._resources.apps_api = apps_api
+    updated_backend._resources.core_api = core_api
+    updated_backend._resources.api_exception_cls = _FakeApiError
+
+    original_patch_deployment = updated_backend._resources.patch_deployment
+    first_patch_attempt = True
+
+    def patch_deployment_with_failure(
+        deployment_name: str,
+        *,
+        replicas: int | None = None,
+        annotations: dict[str, str] | None = None,
+    ) -> None:
+        nonlocal first_patch_attempt
+        if first_patch_attempt:
+            first_patch_attempt = False
+            msg = "refresh metadata failed"
+            raise RuntimeError(msg)
+        original_patch_deployment(
+            deployment_name,
+            replicas=replicas,
+            annotations=annotations,
+        )
+
+    updated_backend._resources.patch_deployment = patch_deployment_with_failure
+
+    events: list[WorkerReadyProgress] = []
+    with pytest.raises(WorkerBackendError, match="refresh metadata failed"):
+        updated_backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=11.0,
+            progress_sink=events.append,
+        )
+
+    worker_id = next(iter(apps_api.deployments))
+    deployment = apps_api.deployments[worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == "refresh metadata failed"
+    assert [event.phase for event in events] == ["failed"]
+
+
 def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:
     """Failed cold starts should surface a terminal failed progress event with the error."""
     backend, _apps_api, _core_api = _backend()

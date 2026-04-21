@@ -720,17 +720,65 @@ async def _shutdown_worker_progress_drain(
         return None
     if not progress_task.done():
         progress_task.cancel()
-    with suppress(asyncio.CancelledError, TimeoutError):
-        try:
-            await asyncio.wait_for(progress_task, timeout=0.5)
-        except Exception as exc:
-            return exc
+    try:
+        await asyncio.wait_for(progress_task, timeout=0.5)
+    except (asyncio.CancelledError, TimeoutError):
+        return None
+    except Exception as exc:
+        return exc
     return None
 
 
 def _raise_progress_delivery_error(error: Exception) -> NoReturn:
     """Raise a stored worker-progress delivery error from a helper."""
     raise error
+
+
+async def _cancel_stream_consumer(stream_task: asyncio.Task[None]) -> None:
+    """Cancel chunk consumption after a progress-delivery failure wins ownership."""
+    if stream_task.done():
+        with suppress(asyncio.CancelledError, Exception):
+            await stream_task
+        return
+    stream_task.cancel()
+    with suppress(asyncio.CancelledError, TimeoutError, Exception):
+        await asyncio.wait_for(stream_task, timeout=0.5)
+
+
+async def _consume_stream_with_progress_supervision(
+    client: nio.AsyncClient,
+    response_stream: AsyncIterator[_StreamInputChunk],
+    streaming: StreamingResponse,
+    progress_task: asyncio.Task[None] | None,
+) -> None:
+    """Abort chunk consumption as soon as the worker-progress drain fails."""
+    stream_task = asyncio.create_task(_consume_streaming_chunks(client, response_stream, streaming))
+    monitored_tasks: set[asyncio.Task[None]] = {stream_task}
+    if progress_task is not None:
+        monitored_tasks.add(progress_task)
+
+    try:
+        while True:
+            done, _pending = await asyncio.wait(monitored_tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            if progress_task is not None and progress_task in done:
+                if progress_task.cancelled():
+                    await _cancel_stream_consumer(stream_task)
+                    raise asyncio.CancelledError
+                progress_error = progress_task.exception()
+                if progress_error is not None:
+                    await _cancel_stream_consumer(stream_task)
+                    if not isinstance(progress_error, Exception):
+                        raise progress_error
+                    _raise_progress_delivery_error(progress_error)
+                monitored_tasks.discard(progress_task)
+                progress_task = None
+
+            if stream_task in done:
+                await stream_task
+                return
+    finally:
+        await _cancel_stream_consumer(stream_task)
 
 
 async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
@@ -808,7 +856,12 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             _drain_worker_progress_events(client, streaming, worker_progress_queue, pump),
         )
         try:
-            await _consume_streaming_chunks(client, response_stream, streaming)
+            await _consume_stream_with_progress_supervision(
+                client,
+                response_stream,
+                streaming,
+                progress_task,
+            )
             progress_error = await _shutdown_worker_progress_drain(pump, progress_task)
             progress_task = None
             if progress_error is not None:
