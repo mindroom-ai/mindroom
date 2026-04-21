@@ -1371,6 +1371,125 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_tool_approval_uses_transport_agent_for_detached_team_member_runs(tmp_path: Path) -> None:
+    """Detached team-member approvals should send from the ingress bot, not the child agent."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+    sender = AsyncMock(return_value="$approval")
+    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
+    dispatch_context = _dispatch_context(
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@user:localhost",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            resolved_thread_id="$resolved-thread",
+            session_id=_SESSION_ID,
+            transport_agent_name="general",
+        ),
+    )
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=dispatch_context,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    next_func = AsyncMock(return_value="ok")
+    with tool_execution_identity(dispatch_context.execution_identity if dispatch_context is not None else None):
+        task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
+        await asyncio.sleep(0)
+        store = get_approval_store()
+        assert store is not None
+        pending = store.list_pending()
+        assert len(pending) == 1
+        assert sender.await_args.args[:3] == ("!room:localhost", "$resolved-thread", "general")
+        assert sender.await_args.args[3]["agent_name"] == "code"
+        await store.approve(pending[0].id, resolved_by="@user:localhost")
+        result = await task
+
+    assert result == "ok"
+    assert next_func.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_uses_transport_agent_for_delegated_live_runs(tmp_path: Path) -> None:
+    """Delegated approvals should keep using the ingress bot from the live runtime context."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+    sender = AsyncMock(return_value="$approval")
+    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
+    delegated_runtime_context = replace(
+        _tool_runtime_context(tmp_path),
+        agent_name="code",
+        transport_agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    delegated_execution_identity = replace(
+        _execution_identity(),
+        agent_name="code",
+        transport_agent_name="general",
+    )
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(delegated_execution_identity),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    next_func = AsyncMock(return_value="ok")
+    with (
+        tool_runtime_context(delegated_runtime_context),
+        tool_execution_identity(delegated_execution_identity),
+    ):
+        task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
+        await asyncio.sleep(0)
+        store = get_approval_store()
+        assert store is not None
+        pending = store.list_pending()
+        assert len(pending) == 1
+        assert sender.await_args.args[:3] == ("!room:localhost", "$resolved-thread", "general")
+        assert sender.await_args.args[3]["agent_name"] == "code"
+        await store.approve(pending[0].id, resolved_by="@user:localhost")
+        result = await task
+
+    assert result == "ok"
+    assert next_func.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_context(tmp_path: Path) -> None:
     """Nested tool execution should stay attributed to the bridge agent, not the parent runtime context."""
     before_seen: list[str] = []

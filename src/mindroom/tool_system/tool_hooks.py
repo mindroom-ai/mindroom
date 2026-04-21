@@ -83,6 +83,7 @@ class _DeferredAsyncToolHookResult:
 @dataclass(frozen=True, slots=True)
 class _ResolvedToolContext:
     agent_name: str
+    transport_agent_name: str
     room_id: str | None
     thread_id: str | None
     requester_id: str | None
@@ -171,6 +172,9 @@ def _resolve_tool_context(
         bindings = resolve_tool_runtime_hook_bindings(runtime_context)
         return _ResolvedToolContext(
             agent_name=bridge_context.agent_name or dispatch_context.execution_identity.agent_name,
+            transport_agent_name=runtime_context.transport_agent_name
+            or dispatch_context.execution_identity.transport_agent_name
+            or dispatch_context.execution_identity.agent_name,
             room_id=dispatch_context.execution_identity.room_id,
             thread_id=dispatch_context.execution_identity.resolved_thread_id
             or dispatch_context.execution_identity.thread_id,
@@ -193,6 +197,8 @@ def _resolve_tool_context(
         resolved_runtime_paths = bridge_context.runtime_paths
         return _ResolvedToolContext(
             agent_name=bridge_context.agent_name or dispatch_context.execution_identity.agent_name,
+            transport_agent_name=dispatch_context.execution_identity.transport_agent_name
+            or dispatch_context.execution_identity.agent_name,
             room_id=dispatch_context.execution_identity.room_id,
             thread_id=dispatch_context.execution_identity.resolved_thread_id
             or dispatch_context.execution_identity.thread_id,
@@ -215,6 +221,7 @@ def _resolve_tool_context(
 
     return _ResolvedToolContext(
         agent_name=bridge_context.agent_name or "",
+        transport_agent_name=bridge_context.agent_name or "",
         room_id=None,
         thread_id=None,
         requester_id=None,
@@ -443,6 +450,7 @@ async def _maybe_block_for_tool_approval(
         tool_name=tool_name,
         arguments=approval_arguments,
         agent_name=resolved_context.agent_name,
+        transport_agent_name=resolved_context.transport_agent_name,
         room_id=resolved_context.room_id,
         thread_id=resolved_context.thread_id,
         requester_id=resolved_context.requester_id,

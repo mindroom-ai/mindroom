@@ -113,6 +113,7 @@ class PendingApproval:
     arguments_preview: object
     arguments_preview_truncated: bool
     agent_name: str
+    transport_agent_name: str
     room_id: str | None
     thread_id: str | None
     requester_id: str | None
@@ -137,6 +138,7 @@ class PendingApproval:
             "arguments_preview": self.arguments_preview,
             "arguments_preview_truncated": self.arguments_preview_truncated,
             "agent_name": self.agent_name,
+            "transport_agent_name": self.transport_agent_name,
             "room_id": self.room_id,
             "thread_id": self.thread_id,
             "requester_id": self.requester_id,
@@ -177,6 +179,7 @@ class PendingApproval:
             arguments_preview=arguments_preview_payload,
             arguments_preview_truncated=arguments_preview_truncated,
             agent_name=cast("str", payload["agent_name"]),
+            transport_agent_name=cast("str", payload.get("transport_agent_name") or payload["agent_name"]),
             room_id=cast("str | None", payload.get("room_id")),
             thread_id=cast("str | None", payload.get("thread_id")),
             requester_id=cast("str | None", payload.get("requester_id")),
@@ -379,6 +382,7 @@ class ApprovalManager:
         tool_name: str,
         arguments: dict[str, Any],
         agent_name: str,
+        transport_agent_name: str,
         room_id: str | None,
         thread_id: str | None,
         requester_id: str | None,
@@ -408,6 +412,7 @@ class ApprovalManager:
             arguments_preview=arguments_preview,
             arguments_preview_truncated=arguments_preview_truncated,
             agent_name=agent_name,
+            transport_agent_name=transport_agent_name,
             room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
@@ -426,7 +431,7 @@ class ApprovalManager:
             event_id = await self._send_event(
                 room_id,
                 thread_id,
-                agent_name,
+                transport_agent_name,
                 self._pending_event_content(pending),
             )
         except Exception:
@@ -435,7 +440,7 @@ class ApprovalManager:
                 approval_id=pending.id,
                 room_id=room_id,
                 thread_id=thread_id,
-                agent_name=agent_name,
+                agent_name=transport_agent_name,
                 exc_info=True,
             )
         if not event_id:
@@ -444,7 +449,7 @@ class ApprovalManager:
                 approval_id=pending.id,
                 room_id=room_id,
                 thread_id=thread_id,
-                agent_name=agent_name,
+                agent_name=transport_agent_name,
             )
             decision = await self._resolve_pending(
                 pending.id,
@@ -737,7 +742,7 @@ class ApprovalManager:
             await self._edit_event(
                 pending.room_id,
                 pending.event_id,
-                pending.agent_name,
+                pending.transport_agent_name,
                 self._resolved_event_content(pending),
             )
         except Exception:
@@ -746,7 +751,7 @@ class ApprovalManager:
                 approval_id=pending.id,
                 room_id=pending.room_id,
                 event_id=pending.event_id,
-                agent_name=pending.agent_name,
+                agent_name=pending.transport_agent_name,
                 exc_info=True,
             )
             return
