@@ -225,6 +225,7 @@ class _StreamingAttemptState:
     full_response: str = ""
     tool_count: int = 0
     observed_tool_calls: int = 0
+    observed_reasoning_content: bool = False
     pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     latest_model_id: str | None = None
@@ -233,6 +234,7 @@ class _StreamingAttemptState:
     cancelled_run_event: RunCancelledEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
     request_metric_totals: dict[str, int] = field(default_factory=_empty_request_metric_totals)
+    observed_request_metric_keys: set[str] = field(default_factory=set)
     first_token_latency: float | None = None
     first_token_logged: bool = False
     retry_requested: bool = False
@@ -381,6 +383,26 @@ def _get_model_config(
     return model_name, config.models.get(model_name)
 
 
+def _finalize_usage_payload(
+    payload: dict[str, Any],
+    *,
+    output_tokens_hint: int | None = None,
+    total_tokens_hint: int | None = None,
+    derive_total_tokens: bool = False,
+) -> dict[str, Any] | None:
+    if isinstance(output_tokens_hint, int) and "output_tokens" not in payload:
+        payload["output_tokens"] = output_tokens_hint
+    if "total_tokens" not in payload:
+        if isinstance(total_tokens_hint, int) and total_tokens_hint > 0:
+            payload["total_tokens"] = total_tokens_hint
+        elif derive_total_tokens:
+            input_tokens = payload.get("input_tokens")
+            output_tokens = payload.get("output_tokens")
+            if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+                payload["total_tokens"] = input_tokens + output_tokens
+    return payload or None
+
+
 def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
     def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         sanitized: dict[str, Any] = {}
@@ -397,7 +419,15 @@ def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, An
         metrics_dict = metrics.to_dict()
         if not isinstance(metrics_dict, dict):
             return None
-        return _sanitize_metrics_payload(metrics_dict)
+        sanitized = _sanitize_metrics_payload(metrics_dict)
+        if sanitized is None:
+            return None
+        return _finalize_usage_payload(
+            sanitized,
+            output_tokens_hint=metrics.output_tokens,
+            total_tokens_hint=metrics.total_tokens,
+            derive_total_tokens=True,
+        )
     if isinstance(metrics, dict):
         return _sanitize_metrics_payload(metrics)
     return None
@@ -406,16 +436,12 @@ def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, An
 def _build_model_request_metrics_fallback(
     totals: dict[str, int],
     first_token_latency: float | None,
+    observed_metric_keys: set[str],
 ) -> dict[str, Any] | None:
-    payload = {key: value for key, value in totals.items() if value > 0}
-    if payload.get("total_tokens") is None:
-        input_tokens = payload.get("input_tokens")
-        output_tokens = payload.get("output_tokens")
-        if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-            payload["total_tokens"] = input_tokens + output_tokens
+    payload = {key: value for key, value in totals.items() if value > 0 or key in observed_metric_keys}
     if first_token_latency is not None:
         payload["time_to_first_token"] = format(first_token_latency, ".12g")
-    return payload or None
+    return _finalize_usage_payload(payload, derive_total_tokens=True)
 
 
 def _build_context_payload(
@@ -638,16 +664,22 @@ def _track_model_request_metrics(
     if isinstance(event.input_tokens, int):
         state.latest_request_input_tokens = event.input_tokens
         state.request_metric_totals["input_tokens"] += event.input_tokens
+        state.observed_request_metric_keys.add("input_tokens")
     if isinstance(event.output_tokens, int):
         state.request_metric_totals["output_tokens"] += event.output_tokens
+        state.observed_request_metric_keys.add("output_tokens")
     if isinstance(event.total_tokens, int):
         state.request_metric_totals["total_tokens"] += event.total_tokens
+        state.observed_request_metric_keys.add("total_tokens")
     if isinstance(event.reasoning_tokens, int):
         state.request_metric_totals["reasoning_tokens"] += event.reasoning_tokens
+        state.observed_request_metric_keys.add("reasoning_tokens")
     if isinstance(event.cache_read_tokens, int):
         state.request_metric_totals["cache_read_tokens"] += event.cache_read_tokens
+        state.observed_request_metric_keys.add("cache_read_tokens")
     if isinstance(event.cache_write_tokens, int):
         state.request_metric_totals["cache_write_tokens"] += event.cache_write_tokens
+        state.observed_request_metric_keys.add("cache_write_tokens")
     if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
         state.first_token_latency = float(event.time_to_first_token)
 
@@ -1225,7 +1257,13 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     del timing_scope
     try:
         async for event in stream_generator:
-            if isinstance(event, RunContentEvent) and event.content:
+            if isinstance(event, RunContentEvent):
+                if event.reasoning_content:
+                    state.observed_reasoning_content = True
+                if not event.content:
+                    if event.reasoning_content:
+                        yield event
+                    continue
                 if not state.first_token_logged:
                     state.first_token_logged = True
                     if pipeline_timing is not None:
@@ -1267,6 +1305,9 @@ async def _process_stream_events(  # noqa: C901, PLR0912
 
             if isinstance(event, RunCompletedEvent):
                 state.completed_run_event = event
+                if event.reasoning_content:
+                    state.observed_reasoning_content = True
+                    yield event
                 continue
 
             if isinstance(event, RunCancelledEvent):
@@ -1568,6 +1609,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             fallback_metrics = _build_model_request_metrics_fallback(
                                 state.request_metric_totals,
                                 state.first_token_latency,
+                                state.observed_request_metric_keys,
                             )
                             cancelled_metadata = _build_ai_run_metadata_content(
                                 agent_name=agent_name,
@@ -1606,6 +1648,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     fallback_metrics = _build_model_request_metrics_fallback(
                         state.request_metric_totals,
                         state.first_token_latency,
+                        state.observed_request_metric_keys,
                     )
                     run_metadata = _build_ai_run_metadata_content(
                         agent_name=agent_name,

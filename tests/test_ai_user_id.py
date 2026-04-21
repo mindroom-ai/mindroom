@@ -37,6 +37,7 @@ from agno.session.team import TeamSession
 from mindroom.ai import (
     _prepare_agent_and_prompt,
     _PreparedAgentRun,
+    _serialize_metrics,
     ai_response,
     build_matrix_run_metadata,
     should_retry_without_inline_media,
@@ -151,6 +152,18 @@ def _prepared_prompt_result(
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(),
     )
+
+
+def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
+    """Metrics serialization should keep zero output usage and derived totals."""
+    payload = _serialize_metrics(Metrics(input_tokens=6, output_tokens=0, cache_read_tokens=46449))
+
+    assert payload == {
+        "input_tokens": 6,
+        "output_tokens": 0,
+        "total_tokens": 6,
+        "cache_read_tokens": 46449,
+    }
 
 
 class _SessionStorage:

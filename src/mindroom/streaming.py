@@ -8,10 +8,11 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import interactive
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -60,8 +61,11 @@ PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
 _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
+_NO_VISIBLE_TEXT_AFTER_THINKING_NOTE = "**[Model emitted no visible text content after thinking. Please retry.]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
-_StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+_StreamInputChunk = (
+    str | StructuredStreamChunk | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+)
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 
 
@@ -232,10 +236,8 @@ class StreamingResponse:
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
-    _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
-    _last_delivered_text: str = field(default="", init=False, repr=False)
-    _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
-    _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
+    observed_reasoning_content: bool = False
+    observed_tool_calls: int = 0
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -321,6 +323,46 @@ class StreamingResponse:
         self._update(new_chunk)
         await self._throttled_send(client)
 
+    def _prepare_terminal_text_and_status(
+        self,
+        *,
+        cancelled: bool,
+        restart_interrupted: bool,
+        error: Exception | None,
+    ) -> _TerminalStreamStatus:
+        """Apply terminal text adjustments and return the terminal stream status."""
+        ai_run_payload = self.extra_content.get(AI_RUN_METADATA_KEY) if self.extra_content is not None else None
+        no_visible_text_error = (
+            error is None
+            and not restart_interrupted
+            and not cancelled
+            and not self.accumulated_text.strip()
+            and self.observed_reasoning_content
+            and self.observed_tool_calls == 0
+        )
+        if no_visible_text_error:
+            self.accumulated_text = _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
+            if self.extra_content is not None:
+                self.extra_content[STREAM_STATUS_KEY] = STREAM_STATUS_ERROR
+                if isinstance(ai_run_payload, dict):
+                    ai_run_payload["status"] = STREAM_STATUS_ERROR
+            return STREAM_STATUS_ERROR
+        if error is not None:
+            stripped_text = self.accumulated_text.rstrip()
+            error_note = _format_stream_error_note(error)
+            self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
+            return STREAM_STATUS_ERROR
+        if restart_interrupted:
+            self.accumulated_text = build_restart_interrupted_body(self.accumulated_text)
+            return STREAM_STATUS_ERROR
+        if cancelled:
+            stripped_text = self.accumulated_text.rstrip()
+            self.accumulated_text = (
+                f"{stripped_text}\n\n{_CANCELLED_RESPONSE_NOTE}" if stripped_text else _CANCELLED_RESPONSE_NOTE
+            )
+            return STREAM_STATUS_CANCELLED
+        return STREAM_STATUS_COMPLETED
+
     async def finalize(
         self,
         client: nio.AsyncClient,
@@ -330,28 +372,16 @@ class StreamingResponse:
         error: Exception | None = None,
     ) -> StreamFinalizationOutcome:
         """Send the terminal update and report whether it became visible."""
-        if error is not None:
-            stripped_text = self.accumulated_text.rstrip()
-            error_note = _format_stream_error_note(error)
-            self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
-        elif restart_interrupted:
-            self.accumulated_text = build_restart_interrupted_body(self.accumulated_text)
-        elif cancelled:
-            stripped_text = self.accumulated_text.rstrip()
-            self.accumulated_text = (
-                f"{stripped_text}\n\n{_CANCELLED_RESPONSE_NOTE}" if stripped_text else _CANCELLED_RESPONSE_NOTE
-            )
-
+        final_stream_status = self._prepare_terminal_text_and_status(
+            cancelled=cancelled,
+            restart_interrupted=restart_interrupted,
+            error=error,
+        )
         # When a placeholder message exists but no real text arrived,
         # still edit the message to finalize the stream status.
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
-        final_stream_status: _TerminalStreamStatus = STREAM_STATUS_COMPLETED
-        if error is not None or restart_interrupted:
-            final_stream_status = STREAM_STATUS_ERROR
-        elif cancelled:
-            final_stream_status = STREAM_STATUS_CANCELLED
         try:
             send_succeeded = await self._send_or_edit_message(
                 client,
@@ -662,9 +692,21 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             text_chunk = chunk.content
             if chunk.tool_trace is not None:
                 streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
-        elif isinstance(chunk, RunContentEvent) and chunk.content:
-            text_chunk = str(chunk.content)
+        elif isinstance(chunk, RunContentEvent):
+            if chunk.reasoning_content:
+                streaming.observed_reasoning_content = True
+            if chunk.content:
+                text_chunk = str(chunk.content)
+            else:
+                await streaming._throttled_send(client, progress_hint=True)
+                continue
+        elif isinstance(chunk, RunCompletedEvent):
+            if chunk.reasoning_content:
+                streaming.observed_reasoning_content = True
+            continue
         elif isinstance(chunk, ToolCallStartedEvent):
+            if chunk.tool is not None:
+                streaming.observed_tool_calls += 1
             if not streaming.show_tool_calls:
                 if chunk.tool is not None:
                     streaming._ensure_hidden_tool_gap()
