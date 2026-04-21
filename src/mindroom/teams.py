@@ -35,13 +35,12 @@ from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
-    prepare_bound_team_execution_context,
+    prepare_bound_team_run_context,
     render_prepared_team_messages_text,
 )
 from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
 from mindroom.history.runtime import (
     ScopeSessionContext,
-    apply_replay_plan,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
@@ -1430,16 +1429,12 @@ async def _prepare_materialized_team_execution(
     system_enrichment_items: Sequence[EnrichmentItem] = (),
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
-    ai_runtime.scrub_queued_notice_session_context(
-        scope_context=scope_context,
-        entity_name=configured_team_name or str(team.name or "Team"),
-    )
     if system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(system_enrichment_items)
         team.additional_context = rendered_system_context
         for agent in agents:
             agent.additional_context = rendered_system_context
-    prepared_execution = await prepare_bound_team_execution_context(
+    prepared_execution = await prepare_bound_team_run_context(
         scope_context=scope_context,
         agents=agents,
         team=team,
@@ -1447,7 +1442,7 @@ async def _prepare_materialized_team_execution(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
-        team_name=configured_team_name,
+        entity_name=configured_team_name,
         active_model_name=active_model_name,
         active_context_window=config.resolve_runtime_model(
             entity_name=configured_team_name,
@@ -1460,8 +1455,6 @@ async def _prepare_materialized_team_execution(
         compaction_outcomes_collector=compaction_outcomes_collector,
         thread_history_render_limits=thread_history_render_limits,
     )
-    if prepared_execution.replay_plan is not None:
-        apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
     run_metadata = build_matrix_run_metadata(
         reply_to_event_id,
         prepared_execution.unseen_event_ids,

@@ -3534,7 +3534,7 @@ class TestTeamCompletion:
                 )
 
             with patch(
-                "mindroom.api.openai_compat.prepare_bound_team_execution_context",
+                "mindroom.execution_preparation.prepare_bound_team_execution_context",
                 new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
             ):
                 run_input = await openai_compat._prepare_openai_team_run_input(

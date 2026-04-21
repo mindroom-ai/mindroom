@@ -823,7 +823,7 @@ async def test_prepare_materialized_team_execution_scrubs_queued_notices_when_ca
             return _prepared_team_execution_context(final_prompt="Analyze this.")
 
         with patch(
-            "mindroom.teams.prepare_bound_team_execution_context",
+            "mindroom.execution_preparation.prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ):
             await _prepare_materialized_team_execution(
