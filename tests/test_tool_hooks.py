@@ -36,7 +36,6 @@ from mindroom.hooks import (
     emit_gate,
     hook,
 )
-from mindroom.hooks.execution import reset_hook_execution_state
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -248,13 +247,6 @@ def _first_function(toolkit: Toolkit) -> Function:
     assert functions
     return functions[0]
 
-@pytest.fixture(autouse=True)
-def reset_execution_state() -> Generator[None, None, None]:
-    """Keep global hook execution state isolated per test."""
-    reset_hook_execution_state()
-    yield
-    reset_hook_execution_state()
-
 
 @pytest.fixture(autouse=True)
 def reset_approval_store() -> Generator[None, None, None]:
@@ -262,6 +254,8 @@ def reset_approval_store() -> Generator[None, None, None]:
     asyncio.run(shutdown_approval_store())
     yield
     asyncio.run(shutdown_approval_store())
+
+
 def test_tool_events_are_registered_with_expected_timeouts() -> None:
     """Tool hook events should be valid built-ins with the expected defaults."""
     assert EVENT_TOOL_BEFORE_CALL in BUILTIN_EVENT_NAMES
