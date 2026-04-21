@@ -1881,6 +1881,7 @@ class ResponseRunner:
                         show_tool_calls=self._show_tool_calls(),
                         extra_content=response_extra_content,
                         tool_trace_collector=tool_trace,
+                        stream_state=stream_state,
                         streaming_cls=StreamingResponse,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=note_visible_response_event_id,
