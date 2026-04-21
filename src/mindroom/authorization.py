@@ -247,6 +247,32 @@ def get_available_agents_for_sender(
     )
 
 
+def _apply_authoritative_joined_members(
+    room: nio.MatrixRoom,
+    members: Sequence[nio.RoomMember],
+) -> None:
+    """Replace one room's cached joined-member snapshot with authoritative data."""
+    members_by_user_id = {member.user_id: member for member in members}
+
+    for user_id in tuple(room.users):
+        if user_id not in members_by_user_id:
+            room.remove_member(user_id)
+
+    for member in members:
+        cached_user = room.users.get(member.user_id)
+        if (
+            cached_user is not None
+            and cached_user.display_name == member.display_name
+            and cached_user.avatar_url == member.avatar_url
+        ):
+            continue
+        if cached_user is not None:
+            room.remove_member(member.user_id)
+        room.add_member(member.user_id, member.display_name, member.avatar_url)
+
+    room.members_synced = True
+
+
 async def get_available_agents_for_sender_authoritative(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
@@ -255,9 +281,15 @@ async def get_available_agents_for_sender_authoritative(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return sender-visible room agents, refreshing membership once when cache is empty."""
-    cached_agents = get_available_agents_for_sender(room, sender_id, config, runtime_paths)
-    if cached_agents:
-        return cached_agents
+    cached_room_agents = get_available_agents_in_room(room, config, runtime_paths)
+    cached_visible_agents = filter_agents_by_sender_permissions(
+        cached_room_agents,
+        sender_id,
+        config,
+        runtime_paths,
+    )
+    if cached_room_agents or room.members_synced:
+        return cached_visible_agents
 
     response = await client.joined_members(room.room_id)
     if not isinstance(response, nio.JoinedMembersResponse):
@@ -269,8 +301,14 @@ async def get_available_agents_for_sender_authoritative(
         )
         return []
 
+    _apply_authoritative_joined_members(room, response.members)
+    refreshed_room_agents = _available_agents_from_member_ids(
+        (member.user_id for member in response.members),
+        config,
+        runtime_paths,
+    )
     refreshed_agents = filter_agents_by_sender_permissions(
-        _available_agents_from_member_ids((member.user_id for member in response.members), config, runtime_paths),
+        refreshed_room_agents,
         sender_id,
         config,
         runtime_paths,
@@ -279,7 +317,7 @@ async def get_available_agents_for_sender_authoritative(
         "authoritative_room_membership_refreshed",
         room_id=room.room_id,
         sender_id=sender_id,
-        cached_agent_count=len(cached_agents),
+        cached_agent_count=len(cached_room_agents),
         refreshed_agent_count=len(refreshed_agents),
     )
     return refreshed_agents

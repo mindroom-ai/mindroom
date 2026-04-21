@@ -1465,6 +1465,7 @@ async def test_schedule_task_refreshes_room_membership_when_cached_room_has_no_a
     client = AsyncMock()
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
+    room.members_synced = False
     config = bind_runtime_paths(
         Config(
             agents={
