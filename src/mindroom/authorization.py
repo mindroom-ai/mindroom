@@ -280,7 +280,7 @@ async def get_available_agents_for_sender_authoritative(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
-    """Return sender-visible room agents, refreshing membership once when cache is empty."""
+    """Return sender-visible room agents, refreshing membership while the cache is unsynced."""
     cached_room_agents = get_available_agents_in_room(room, config, runtime_paths)
     cached_visible_agents = filter_agents_by_sender_permissions(
         cached_room_agents,
@@ -288,7 +288,7 @@ async def get_available_agents_for_sender_authoritative(
         config,
         runtime_paths,
     )
-    if cached_room_agents or room.members_synced:
+    if room.members_synced:
         return cached_visible_agents
 
     response = await client.joined_members(room.room_id)

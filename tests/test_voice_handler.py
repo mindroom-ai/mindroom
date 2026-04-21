@@ -165,6 +165,7 @@ class TestVoiceHandler:
             f"@mindroom_router:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
             "@alice:example.com": MagicMock(),
         }
+        room.members_synced = True
         event = MagicMock(spec=nio.RoomMessageAudio)
         event.sender = "@alice:example.com"
 
@@ -238,6 +239,7 @@ class TestVoiceHandler:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:server"
         room.users = {"@alice:example.com": MagicMock()}
+        room.members_synced = True
         event = MagicMock(spec=nio.RoomMessageAudio)
         event.event_id = "$voice123"
         event.sender = "@alice:example.com"
@@ -274,6 +276,7 @@ class TestVoiceHandler:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:server"
         room.users = {"@alice:example.com": MagicMock()}
+        room.members_synced = True
         event = MagicMock(spec=nio.RoomMessageAudio)
         event.event_id = "$voice123"
         event.sender = "@alice:example.com"

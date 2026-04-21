@@ -109,6 +109,7 @@ def _make_room(*user_ids: str) -> nio.MatrixRoom:
     room.room_id = "!test:example.com"
     room.canonical_alias = None
     room.users = {user_id: MagicMock() for user_id in user_ids}
+    room.members_synced = True
     return room
 
 

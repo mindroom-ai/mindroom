@@ -293,6 +293,7 @@ async def test_get_available_agents_for_sender_authoritative_skips_refresh_when_
     room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
     room.add_member("@mindroom_assistant:example.com", "Assistant", None)
     room.add_member("@mindroom_general:example.com", "General", None)
+    room.members_synced = True
 
     available = await get_available_agents_for_sender_authoritative(
         client,
@@ -303,6 +304,53 @@ async def test_get_available_agents_for_sender_authoritative_skips_refresh_when_
 
     assert available == []
     client.joined_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_available_agents_for_sender_authoritative_refreshes_partial_unsynced_cache() -> None:
+    """Authoritative lookup should refresh when cached membership is present but unsynced."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+            "general": {
+                "display_name": "General",
+                "role": "Test generalist",
+                "rooms": ["test_room"],
+            },
+        },
+    )
+    client = AsyncMock()
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_router:example.com", "Router", None)
+    room.add_member("@mindroom_general:example.com", "General", None)
+    room.members_synced = False
+    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {
+            "joined": {
+                "@mindroom_router:example.com": {"display_name": "Router"},
+                "@mindroom_general:example.com": {"display_name": "General"},
+                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
+            },
+        },
+        room_id="!test:server",
+    )
+
+    available = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        "@alice:example.com",
+        config,
+    )
+
+    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in available] == [
+        "assistant",
+        "general",
+    ]
+    client.joined_members.assert_awaited_once_with("!test:server")
 
 
 @pytest.mark.asyncio

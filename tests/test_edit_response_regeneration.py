@@ -3903,6 +3903,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         "@mindroom_test_agent:example.com": None,
         "@user:example.com": None,
     }
+    room.members_synced = True
 
     # Create a voice message event
     voice_event = nio.RoomMessageAudio.from_dict(
@@ -4016,6 +4017,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         "@mindroom_test_agent:example.com": None,
         "@user:example.com": None,
     }
+    room.members_synced = True
 
     # Create a voice message event
     voice_event = nio.RoomMessageAudio.from_dict(
