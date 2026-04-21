@@ -1479,6 +1479,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
+    attempt_run_id = run_id
 
     try:
         with open_bound_scope_session_context(
@@ -1554,7 +1555,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             response: object | None = None
             attempt_prompt = prepared_prompt
             attempt_media_inputs = media_inputs
-            attempt_run_id = run_id
             try:
                 for retried_without_inline_media in (False, True):
                     response = None
@@ -1703,7 +1703,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
-                run_id=run_id or str(uuid4()),
+                run_id=attempt_run_id or str(uuid4()),
                 user_message=replay_user_message,
                 partial_text="",
                 completed_tools=[],
@@ -1849,6 +1849,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     standalone_interrupted_replay_persisted = False
     replay_user_message = turn_recorder.user_message if turn_recorder is not None else message
     unseen_event_ids: list[str] = []
+    attempt_run_id = run_id
     canonical_per_member: dict[str, str] = {}
     canonical_consensus = ""
     completed_tools: list[ToolTraceEntry] = []
@@ -1911,7 +1912,6 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             media_inputs = media or MediaInputs()
             attempt_prompt = prepared_run_input
             attempt_media_inputs = media_inputs
-            attempt_run_id = run_id
 
             visible_per_member: dict[str, str] = {}
             visible_consensus: str = ""
@@ -2332,7 +2332,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
-                run_id=run_id or str(uuid4()),
+                run_id=attempt_run_id or str(uuid4()),
                 user_message=replay_user_message,
                 partial_text=render_canonical_partial_text(),
                 completed_tools=completed_tools,

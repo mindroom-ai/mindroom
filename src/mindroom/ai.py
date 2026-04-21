@@ -1452,6 +1452,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
+    attempt_run_id = run_id
     try:
         try:
             _assert_agent_target(agent_name, config)
@@ -1520,7 +1521,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             response: RunOutput | None = None
             attempt_prompt = _copy_run_input(run_input)
             attempt_media_inputs = media_inputs
-            attempt_run_id = run_id
 
             try:
                 for retried_without_inline_media in (False, True):
@@ -1676,7 +1676,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
-                run_id=run_id or str(uuid4()),
+                run_id=attempt_run_id or str(uuid4()),
                 user_message=prompt,
                 partial_text="",
                 completed_tools=[],
@@ -1872,6 +1872,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
+    attempt_run_id = run_id
     state = _StreamingAttemptState()
 
     try:
@@ -1943,7 +1944,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
             attempt_prompt = _copy_run_input(run_input)
             attempt_media_inputs = media_inputs
-            attempt_run_id = run_id
             state = _StreamingAttemptState()
 
             try:
@@ -2131,7 +2131,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
-                run_id=run_id or str(uuid4()),
+                run_id=attempt_run_id or str(uuid4()),
                 user_message=prompt,
                 partial_text=state.assistant_text,
                 completed_tools=state.completed_tools,

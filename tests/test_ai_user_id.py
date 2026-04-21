@@ -3621,6 +3621,55 @@ class TestUserIdPassthrough:
         assert callback_run_ids == [run_id for run_id in seen_run_ids if run_id is not None]
 
     @pytest.mark.asyncio
+    async def test_ai_response_persists_retry_run_id_after_hard_cancellation(self, tmp_path: Path) -> None:
+        """Standalone interrupted replay should use the last retry attempt id after hard cancellation."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        seen_run_ids: list[str | None] = []
+        callback_run_ids: list[str] = []
+
+        async def fake_run(*_args: object, **kwargs: object) -> RunOutput:
+            seen_run_ids.append(kwargs["run_id"])
+            run_id_callback = kwargs["run_id_callback"]
+            if run_id_callback is not None and kwargs["run_id"] is not None:
+                run_id_callback(kwargs["run_id"])
+            if len(seen_run_ids) == 1:
+                msg = "Error code: 500 - audio input is not supported"
+                raise RuntimeError(msg)
+            raise asyncio.CancelledError
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", side_effect=fake_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_id="run-123",
+                    run_id_callback=callback_run_ids.append,
+                    media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                )
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert seen_run_ids[0] == "run-123"
+        assert seen_run_ids[1] is not None
+        assert seen_run_ids[1] != "run-123"
+        assert callback_run_ids == [run_id for run_id in seen_run_ids if run_id is not None]
+        assert persisted_run.run_id == seen_run_ids[1]
+
+    @pytest.mark.asyncio
     async def test_stream_agent_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:
         """When inline media is rejected, streaming should retry once without media."""
         mock_agent = MagicMock()
@@ -3896,6 +3945,65 @@ class TestUserIdPassthrough:
         assert second_call.kwargs["run_id"] is not None
         assert second_call.kwargs["run_id"] != "run-456"
         assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_persists_retry_run_id_after_hard_cancellation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Standalone streaming replay should keep the final retry attempt id after hard cancellation."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content="Error code: 500 - audio input is not supported")
+
+        async def cancelled_stream() -> AsyncIterator[object]:
+            raise asyncio.CancelledError
+            yield ""  # pragma: no cover
+
+        callback_run_ids: list[str] = []
+        mock_agent.arun = MagicMock(side_effect=[failing_stream(), cancelled_stream()])
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                _chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        agent_name="general",
+                        prompt="test",
+                        session_id="session1",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=_config(),
+                        run_id="run-456",
+                        run_id_callback=callback_run_ids.append,
+                        media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                    )
+                ]
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        first_call = mock_agent.arun.call_args_list[0]
+        second_call = mock_agent.arun.call_args_list[1]
+        assert first_call.kwargs["run_id"] == "run-456"
+        assert second_call.kwargs["run_id"] is not None
+        assert second_call.kwargs["run_id"] != "run-456"
+        assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
+        assert persisted_run.run_id == second_call.kwargs["run_id"]
 
     @pytest.mark.parametrize(
         ("error_text", "expected"),

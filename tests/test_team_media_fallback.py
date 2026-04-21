@@ -47,8 +47,8 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
-from mindroom.history.types import PreparedHistoryState
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import PreparedHistoryState
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_runtime_resolution import (
@@ -1079,6 +1079,67 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
 
 
 @pytest.mark.asyncio
+async def test_team_response_persists_retry_run_id_after_hard_cancellation() -> None:
+    """Standalone interrupted team replay should use the last retry attempt id after hard cancellation."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    mock_team = _make_test_team()
+    callback_run_ids: list[str] = []
+    mock_team.arun = AsyncMock(
+        side_effect=[
+            TeamRunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error),
+            asyncio.CancelledError(),
+        ],
+    )
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            session_id="session-team",
+            media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+            run_id="run-123",
+            run_id_callback=callback_run_ids.append,
+        )
+
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-team",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert scope_context.session.runs is not None
+        persisted_run = scope_context.session.runs[0]
+
+    first_call = mock_team.arun.await_args_list[0]
+    second_call = mock_team.arun.await_args_list[1]
+    assert first_call.kwargs["run_id"] == "run-123"
+    assert second_call.kwargs["run_id"] is not None
+    assert second_call.kwargs["run_id"] != "run-123"
+    assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
+    assert isinstance(persisted_run, TeamRunOutput)
+    assert persisted_run.run_id == second_call.kwargs["run_id"]
+
+
+@pytest.mark.asyncio
 async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelled_event() -> None:
     """Streaming team cancellation should propagate as CancelledError."""
     config = _build_test_config()
@@ -1797,6 +1858,87 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
     assert call_run_ids[1] is not None
     assert call_run_ids[1] != "run-789"
     assert callback_run_ids == [run_id for run_id in call_run_ids if run_id is not None]
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_persists_retry_run_id_after_hard_cancellation() -> None:
+    """Standalone streaming team replay should keep the final retry attempt id after hard cancellation."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[fake_agent],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    call_run_ids: list[str | None] = []
+    callback_run_ids: list[str] = []
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        call_run_ids.append(_kwargs["run_id"])
+        if len(call_run_ids) == 1:
+            yield TeamRunErrorEvent(content="Error code: 500 - audio input is not supported")
+            return
+        raise asyncio.CancelledError
+        yield ""  # pragma: no cover
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        _chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team_agent_ids,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                mode=TeamMode.COORDINATE,
+                session_id="session-team-stream",
+                media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                run_id="run-789",
+                run_id_callback=callback_run_ids.append,
+            )
+        ]
+
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-team-stream",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert scope_context.session.runs is not None
+        persisted_run = scope_context.session.runs[0]
+
+    assert call_run_ids[0] == "run-789"
+    assert call_run_ids[1] is not None
+    assert call_run_ids[1] != "run-789"
+    assert callback_run_ids == [run_id for run_id in call_run_ids if run_id is not None]
+    assert isinstance(persisted_run, TeamRunOutput)
+    assert persisted_run.run_id == call_run_ids[1]
 
 
 @pytest.mark.asyncio
