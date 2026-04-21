@@ -1832,10 +1832,11 @@ class MultiAgentOrchestrator:
         for entity_name in list(self._sync_tasks.keys()):
             await cancel_sync_task(entity_name, self._sync_tasks)
 
+        await shutdown_approval_store()
+
         for bot in self.agent_bots.values():
             bot.running = False
 
-        await shutdown_approval_store()
         stop_tasks = [bot.stop(reason="shutdown") for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         await self._close_runtime_support_services()

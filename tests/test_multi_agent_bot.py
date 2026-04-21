@@ -11917,6 +11917,87 @@ class TestMultiAgentOrchestrator:
         mock_schedule_retry.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_stop_expires_pending_approvals_before_marking_bots_stopped(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shutdown should send one final approval edit before the sender bot is marked stopped."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+
+        edit_running_states: list[bool] = []
+
+        async def _room_send(
+            room_id: str,
+            message_type: str,
+            content: dict[str, object],
+        ) -> nio.RoomSendResponse:
+            assert room_id == "!room:localhost"
+            assert message_type == "io.mindroom.tool_approval"
+            if "m.new_content" in content:
+                edit_running_states.append(bot.running)
+                return nio.RoomSendResponse(event_id="$approval-edit", room_id=room_id)
+            return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
+
+        client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
+        client.room_send = AsyncMock(side_effect=_room_send)
+        bot = MagicMock()
+        bot.agent_name = "code"
+        bot.running = True
+        bot.client = client
+        bot.stop = AsyncMock()
+        orchestrator.agent_bots = {"code": bot}
+
+        store = initialize_approval_store(
+            runtime_paths,
+            sender=orchestrator._send_approval_event,
+            editor=orchestrator._edit_approval_event,
+        )
+        task = asyncio.create_task(
+            store.request_approval(
+                tool_name="run_shell_command",
+                arguments={"command": "echo hi"},
+                agent_name="code",
+                transport_agent_name="code",
+                room_id="!room:localhost",
+                thread_id=None,
+                requester_id="@user:localhost",
+                approver_user_id="@user:localhost",
+                matched_rule="run_shell_*",
+                script_path=None,
+                timeout_seconds=60,
+            ),
+        )
+
+        async with asyncio.timeout(1):
+            while True:
+                pending = store.list_pending()
+                if pending and pending[0].event_id is not None:
+                    break
+                await asyncio.sleep(0)
+
+        try:
+            with (
+                patch.object(orchestrator, "_cancel_config_reload_task", new=AsyncMock()),
+                patch.object(orchestrator, "_stop_memory_auto_flush_worker", new=AsyncMock()),
+                patch.object(orchestrator, "_cancel_knowledge_refresh_task", new=AsyncMock()),
+                patch.object(orchestrator, "_cancel_bot_start_tasks", new=AsyncMock()),
+                patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock()),
+                patch("mindroom.orchestrator.shutdown_shared_knowledge_managers", new=AsyncMock()),
+                patch.object(orchestrator, "_close_runtime_support_services", new=AsyncMock()),
+            ):
+                await orchestrator.stop()
+
+            decision = await task
+            assert decision.status == "expired"
+            assert edit_running_states == [True]
+            assert bot.running is False
+            bot.stop.assert_awaited_once_with(reason="shutdown")
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:
         """Auxiliary supervisors should restart tasks that crash."""
         started = asyncio.Event()
