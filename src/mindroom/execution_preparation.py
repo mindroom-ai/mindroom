@@ -340,6 +340,17 @@ def render_prepared_messages_text(messages: Sequence[Message]) -> str:
     return "\n\n".join(str(message.content) for message in messages if message.content)
 
 
+def render_prepared_team_messages_text(messages: Sequence[Message]) -> str:
+    """Render prepared team messages into the exact string form passed to Agno teams."""
+    rendered_chunks: list[str] = []
+    for message in messages:
+        if not message.content:
+            continue
+        content = str(message.content)
+        rendered_chunks.append(f"assistant: {content}" if message.role == "assistant" else content)
+    return "\n\n".join(rendered_chunks)
+
+
 def _build_unseen_context_messages(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage],
@@ -501,6 +512,7 @@ async def _prepare_execution_context_common(
     config: Config,
     prepare_scope_history_fn: Callable[[str, str | None], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str, str | None], int],
+    render_messages_text_fn: Callable[[Sequence[Message]], str],
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     timing_scope: str | None = None,
 ) -> PreparedExecutionContext:
@@ -538,8 +550,8 @@ async def _prepare_execution_context_common(
         )
 
     prepared_scope_history = await prepare_scope_history_fn(
-        render_prepared_messages_text(provisional_messages),
-        render_prepared_messages_text(replay_fallback_messages) if replay_fallback_messages is not None else None,
+        render_messages_text_fn(provisional_messages),
+        render_messages_text_fn(replay_fallback_messages) if replay_fallback_messages is not None else None,
     )
 
     final_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
@@ -560,8 +572,8 @@ async def _prepare_execution_context_common(
         prepared_scope_history=prepared_scope_history,
         config=config,
         static_prompt_tokens=estimate_static_tokens_fn(
-            render_prepared_messages_text(final_messages),
-            render_prepared_messages_text(replay_fallback_messages) if replay_fallback_messages is not None else None,
+            render_messages_text_fn(final_messages),
+            render_messages_text_fn(replay_fallback_messages) if replay_fallback_messages is not None else None,
         ),
     )
     if replay_fallback_messages is not None and not prepared_history.replays_persisted_history and thread_history:
@@ -639,6 +651,7 @@ async def prepare_agent_execution_context(
             full_prompt=prepared_prompt,
             fallback_full_prompt=replay_fallback_prompt,
         ),
+        render_messages_text_fn=render_prepared_messages_text,
         thread_history_render_limits=None,
         timing_scope=timing_scope,
     )
@@ -699,5 +712,6 @@ async def prepare_bound_team_execution_context(
             full_prompt=prepared_prompt,
             fallback_full_prompt=replay_fallback_prompt,
         ),
+        render_messages_text_fn=render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,
     )

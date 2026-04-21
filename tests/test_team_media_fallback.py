@@ -27,9 +27,15 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.execution_preparation import PreparedExecutionContext, ThreadHistoryRenderLimits
+from mindroom.execution_preparation import (
+    PreparedExecutionContext,
+    ThreadHistoryRenderLimits,
+    prepare_bound_team_execution_context,
+    render_prepared_team_messages_text,
+)
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
+from mindroom.history.types import PreparedHistoryState
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_runtime_resolution import (
@@ -1450,6 +1456,72 @@ async def test_prepare_materialized_team_execution_applies_explicit_thread_histo
     assert "recent message 29" in prepared.prepared_prompt
     assert long_body not in prepared.prepared_prompt
     assert prepared.prepared_prompt.endswith("Analyze this.")
+
+
+@pytest.mark.asyncio
+async def test_prepare_bound_team_execution_context_uses_team_renderer_for_history_planning() -> None:
+    """Team history planning and token estimation must use the same renderer as team execution."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    team = _make_test_team()
+    agents = [_make_test_agent("GeneralAgent")]
+    planner_fallback_full_prompt: str | None = None
+    estimator_fallback_full_prompt: str | None = None
+
+    async def fake_prepare_bound_scope_history(**kwargs: object) -> object:
+        nonlocal planner_fallback_full_prompt
+        planner_fallback_full_prompt = kwargs["fallback_full_prompt"]
+        return object()
+
+    def fake_estimate_preparation_static_tokens_for_team(
+        _team: object,
+        *,
+        full_prompt: str,
+        fallback_full_prompt: str | None = None,
+    ) -> int:
+        nonlocal estimator_fallback_full_prompt
+        assert full_prompt == "Analyze this."
+        estimator_fallback_full_prompt = fallback_full_prompt
+        return 0
+
+    with (
+        patch(
+            "mindroom.execution_preparation.prepare_bound_scope_history",
+            new=AsyncMock(side_effect=fake_prepare_bound_scope_history),
+        ),
+        patch(
+            "mindroom.execution_preparation.estimate_preparation_static_tokens_for_team",
+            new=fake_estimate_preparation_static_tokens_for_team,
+        ),
+        patch(
+            "mindroom.execution_preparation._finalize_prepared_history",
+            return_value=PreparedHistoryState(replay_plan=None, replays_persisted_history=False),
+        ),
+    ):
+        prepared = await prepare_bound_team_execution_context(
+            scope_context=None,
+            agents=agents,
+            team=team,
+            prompt="Analyze this.",
+            thread_history=[
+                make_visible_message(
+                    event_id="event-1",
+                    sender="@mindroom_team:example.org",
+                    body="Previous team reply",
+                ),
+            ],
+            runtime_paths=runtime_paths,
+            config=config,
+            team_name=None,
+            active_model_name="default",
+            active_context_window=8192,
+            response_sender_id="@mindroom_team:example.org",
+        )
+
+    expected = "assistant: Previous team reply\n\nAnalyze this."
+    assert planner_fallback_full_prompt == expected
+    assert estimator_fallback_full_prompt == expected
+    assert render_prepared_team_messages_text(prepared.messages) == expected
 
 
 def test_agno_team_message_normalization_drops_assistant_context() -> None:
