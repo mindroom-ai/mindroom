@@ -981,6 +981,59 @@ async def test_team_response_with_turn_recorder_defers_interrupted_persistence_t
 
 
 @pytest.mark.asyncio
+async def test_team_response_with_turn_recorder_preserves_unseen_event_ids_on_cancellation() -> None:
+    """Lifecycle-owned team cancellations must keep unseen-event metadata in the recorder snapshot."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        return_value=TeamRunOutput(
+            content="Run cancelled",
+            messages=[Message(role="assistant", content="Half done")],
+            status=RunStatus.cancelled,
+            session_id="session-team",
+            run_id="run-123",
+            member_responses=[RunOutput(content="Half done", agent_id="general")],
+        ),
+    )
+    recorder = TurnRecorder(user_message="Analyze this.")
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+    ):
+        mock_prepare.return_value = _prepared_team_execution_context(
+            final_prompt="Analyze this.",
+            unseen_event_ids=["e2"],
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                session_id="session-team",
+                run_id="run-123",
+                reply_to_event_id="e1",
+                turn_recorder=recorder,
+            )
+
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.user_message == "Analyze this."
+    assert snapshot.seen_event_ids == ("e1", "e2")
+
+
+@pytest.mark.asyncio
 async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> None:
     """Inline-media team retries must use a fresh Agno run_id after errored output."""
     config = _build_test_config()

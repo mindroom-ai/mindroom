@@ -624,25 +624,41 @@ def _stream_attempt_has_progress(state: _StreamingAttemptState) -> bool:
     return bool(state.assistant_text or state.observed_tool_calls)
 
 
+def _is_run_cancelled_boilerplate(content: str) -> bool:
+    """Return whether one string is just Agno cancellation boilerplate."""
+    normalized = content.strip().lower()
+    return normalized.startswith("run ") and "cancel" in normalized
+
+
 def _extract_interrupted_partial_text(
     content: object,
     *,
     messages: list[Message] | None = None,
 ) -> str:
     """Extract assistant partial text while dropping bare cancellation boilerplate."""
+    preferred_assistant_parts = [
+        str(message.content).strip()
+        for message in messages or []
+        if (
+            isinstance(message, Message)
+            and message.role == "assistant"
+            and isinstance(message.content, str)
+            and not message.from_history
+        )
+    ]
     assistant_parts = [
         str(message.content).strip()
         for message in messages or []
         if isinstance(message, Message) and message.role == "assistant" and isinstance(message.content, str)
     ]
-    assistant_text = "\n\n".join(part for part in assistant_parts if part)
-    if assistant_text:
-        return assistant_text
+    candidate_assistant_parts = preferred_assistant_parts or assistant_parts
+    for part in reversed(candidate_assistant_parts):
+        if part and not _is_run_cancelled_boilerplate(part):
+            return part
     if not isinstance(content, str):
         return ""
     stripped = content.strip()
-    normalized = stripped.lower()
-    if normalized.startswith("run ") and "cancel" in normalized:
+    if _is_run_cancelled_boilerplate(stripped):
         return ""
     return stripped
 

@@ -1524,6 +1524,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             )
             prepared_prompt = prepared_execution.prepared_prompt
+            unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
             if turn_recorder is not None:
                 turn_recorder.set_run_metadata(run_metadata)
@@ -1672,9 +1673,9 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                         run_metadata=run_metadata,
                         assistant_text=response_text,
                         completed_tools=(
-                        _extract_completed_team_tool_trace(response)
-                        if isinstance(response, (TeamRunOutput, RunOutput))
-                        else []
+                            _extract_completed_team_tool_trace(response)
+                            if isinstance(response, (TeamRunOutput, RunOutput))
+                            else []
                         ),
                     )
                 return response_text
