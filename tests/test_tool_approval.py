@@ -1641,6 +1641,46 @@ async def test_bot_reply_denies_pending_tool_call(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bot_reply_denial_strips_matrix_rich_reply_fallback(tmp_path: Path) -> None:
+    """Reply denials should persist only the user's text, not the quoted Matrix fallback."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    bot = _agent_bot(tmp_path, config=config)
+    bot._turn_controller.handle_text_event = AsyncMock()
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    _store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    event = _reply_event(
+        event_id="$reply",
+        body=(
+            "> <@mindroom_code:localhost> Approval required: run_shell_command\n"
+            '> {"command": "echo hi"}\n'
+            "\n"
+            "Do not run this"
+        ),
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await bot._on_message(room, event)
+
+    decision = await task
+    assert decision.status == "denied"
+    assert decision.reason == "Do not run this"
+    assert editor.await_args.args[3]["resolution_reason"] == "Do not run this"
+
+
+@pytest.mark.asyncio
 async def test_bot_reply_from_wrong_user_falls_through_to_normal_handling(tmp_path: Path) -> None:
     """Replies from other users should not be swallowed when they cannot resolve the approval."""
     runtime_paths = test_runtime_paths(tmp_path)

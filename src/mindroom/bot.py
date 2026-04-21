@@ -138,6 +138,18 @@ def _reply_to_event_id_from_event_source(event_source: dict[str, Any] | None) ->
     return reply_to_event_id if isinstance(reply_to_event_id, str) else None
 
 
+def _strip_matrix_rich_reply_fallback(body: str) -> str:
+    """Remove the quoted fallback prefix from one Matrix rich-reply body."""
+    lines = body.splitlines()
+    quoted_line_count = 0
+    while quoted_line_count < len(lines) and lines[quoted_line_count].startswith("> "):
+        quoted_line_count += 1
+    if quoted_line_count == 0 or quoted_line_count >= len(lines) or lines[quoted_line_count] != "":
+        return body
+    reply_body = "\n".join(lines[quoted_line_count + 1 :])
+    return reply_body or body
+
+
 def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
@@ -1461,7 +1473,7 @@ class AgentBot:
             action=lambda resolved_approval_manager: resolved_approval_manager.handle_reply(
                 approval_event_id=reply_to_event_id,
                 room_id=room.room_id,
-                reason=event.body,
+                reason=_strip_matrix_rich_reply_fallback(event.body),
                 resolved_by=event.sender,
                 transport_agent_name=self.agent_name,
             ),
