@@ -719,14 +719,17 @@ class DeliveryGateway:
             )
             if terminal_ai_run_snapshot is not None:
                 terminal_extra_content[constants.AI_RUN_METADATA_KEY] = terminal_ai_run_snapshot
-            terminal_display_text = interactive.parse_and_format_interactive(
+            terminal_interactive_response = interactive.parse_and_format_interactive(
                 draft.response_text,
-                extract_mapping=False,
-            ).formatted_text
+                extract_mapping=True,
+            )
+            terminal_display_text = terminal_interactive_response.formatted_text
             if request.stream_state is not None:
                 request.stream_state.repair_text = terminal_display_text
                 request.stream_state.repair_tool_trace = copy.deepcopy(draft.tool_trace)
                 request.stream_state.repair_extra_content = copy.deepcopy(terminal_extra_content)
+                request.stream_state.repair_option_map = copy.deepcopy(terminal_interactive_response.option_map)
+                request.stream_state.repair_options_list = copy.deepcopy(terminal_interactive_response.options_list)
             delivery = await self.deliver_final(
                 FinalDeliveryRequest(
                     target=request.target,

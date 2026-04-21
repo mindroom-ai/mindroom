@@ -297,22 +297,25 @@ async def apply_post_response_effects(
 
     if (
         outcome.response_run_id is not None
-        and outcome.resolved_event_id is not None
+        and delivered_event_id is not None
+        and delivery_result is not None
+        and not delivery_result.suppressed
         and deps.persist_response_event_id is not None
     ):
         try:
-            deps.persist_response_event_id(outcome.response_run_id, outcome.resolved_event_id)
+            deps.persist_response_event_id(outcome.response_run_id, delivered_event_id)
         except Exception:
             deps.logger.exception(
                 "Failed to persist response event linkage in run metadata",
                 session_id=outcome.session_id,
                 run_id=outcome.response_run_id,
-                response_event_id=outcome.resolved_event_id,
+                response_event_id=delivered_event_id,
             )
 
     if (
-        outcome.resolved_event_id is not None
-        and (delivery_result is None or not delivery_result.suppressed)
+        delivered_event_id is not None
+        and delivery_result is not None
+        and not delivery_result.suppressed
         and outcome.thread_summary_room_id is not None
         and outcome.thread_summary_thread_id is not None
         and (

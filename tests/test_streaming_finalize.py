@@ -12,7 +12,13 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from agno.db.base import SessionType
 from agno.metrics import RunMetrics
-from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunContentEvent, ToolCallStartedEvent
+from agno.run.agent import (
+    ModelRequestCompletedEvent,
+    RunCompletedEvent,
+    RunContentEvent,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
 
 from mindroom import interactive
 from mindroom.config.agent import AgentConfig
@@ -37,6 +43,7 @@ from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.message_target import MessageTarget
+from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_lifecycle import DeliveryOutcome, ResponseLifecycle, StreamingRepair
 from mindroom.response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps
 from mindroom.streaming import (
@@ -1278,6 +1285,135 @@ async def test_outer_repair_updates_post_response_delivery_result(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_cancelled_outer_repair_keeps_post_response_delivery_cancelled() -> None:
+    """Cancelled outer repairs must not look like delivered responses to post effects."""
+    target = MessageTarget.resolve("!room:localhost", None, "$reply")
+    lifecycle, _runner = _build_lifecycle(target)
+    post_response_outcomes: list[ResponseOutcome] = []
+
+    async def capture_post_response_effects(outcome: ResponseOutcome, _deps: object) -> None:
+        post_response_outcomes.append(outcome)
+
+    with patch(
+        "mindroom.response_lifecycle.apply_post_response_effects",
+        new=AsyncMock(side_effect=capture_post_response_effects),
+    ):
+        resolved_event_id = await lifecycle.finalize(
+            DeliveryOutcome(
+                delivery_result=None,
+                delivery_failure_reason="cancelled",
+                tracked_event_id="$placeholder",
+                stream_finalization=StreamFinalizationOutcome(
+                    terminal_landed=False,
+                    terminal_event_id="$placeholder",
+                    terminal_status=STREAM_STATUS_CANCELLED,
+                    reason="outer-cancelled-repair",
+                ),
+                streaming_repair=_repair_payload(
+                    target=target,
+                    response_text="partial answer\n\n**[Response cancelled by user]**",
+                ),
+            ),
+            build_post_response_outcome=lambda resolved_event_id, effective_delivery_result: ResponseOutcome(
+                resolved_event_id=resolved_event_id,
+                delivery_result=effective_delivery_result,
+                response_run_id="run-cancelled",
+                session_id="session-cancelled",
+                thread_summary_room_id="!room:localhost",
+                thread_summary_thread_id="$thread",
+            ),
+            post_response_deps=SimpleNamespace(),
+        )
+
+    assert resolved_event_id == "$placeholder"
+    assert len(post_response_outcomes) == 1
+    assert post_response_outcomes[0].resolved_event_id == "$placeholder"
+    assert post_response_outcomes[0].delivery_result is None
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_ignore_resolved_event_without_delivered_response() -> None:
+    """Resolved ids alone must not trigger linkage persistence or thread summaries."""
+    persist_response_event_id = Mock()
+    should_queue_thread_summary = Mock(return_value=True)
+    queue_thread_summary = Mock()
+
+    await apply_post_response_effects(
+        ResponseOutcome(
+            resolved_event_id="$placeholder",
+            delivery_result=None,
+            response_run_id="run-cancelled",
+            session_id="session-cancelled",
+            thread_summary_room_id="!room:localhost",
+            thread_summary_thread_id="$thread",
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            persist_response_event_id=persist_response_event_id,
+            should_queue_thread_summary=should_queue_thread_summary,
+            queue_thread_summary=queue_thread_summary,
+        ),
+    )
+
+    persist_response_event_id.assert_not_called()
+    should_queue_thread_summary.assert_not_called()
+    queue_thread_summary.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_interactive_outer_repair_preserves_option_metadata() -> None:
+    """Outer repair must keep interactive option metadata for later button registration."""
+    target = MessageTarget.resolve("!room:localhost", None, "$reply")
+    lifecycle, _runner = _build_lifecycle(target)
+    raw_interactive = """Please choose:
+```interactive
+{"question":"Pick one","options":[{"emoji":"1️⃣","label":"One","value":"one"}]}
+```"""
+    post_response_outcomes: list[ResponseOutcome] = []
+
+    async def capture_post_response_effects(outcome: ResponseOutcome, _deps: object) -> None:
+        post_response_outcomes.append(outcome)
+
+    with patch(
+        "mindroom.response_lifecycle.apply_post_response_effects",
+        new=AsyncMock(side_effect=capture_post_response_effects),
+    ):
+        await lifecycle.finalize(
+            DeliveryOutcome(
+                delivery_result=None,
+                delivery_failure_reason="terminal-edit-missed",
+                tracked_event_id="$placeholder",
+                stream_finalization=StreamFinalizationOutcome(
+                    terminal_landed=False,
+                    terminal_event_id="$placeholder",
+                    terminal_status=STREAM_STATUS_COMPLETED,
+                    reason="interactive-outer-repair",
+                ),
+                streaming_repair=ResponseRunner._build_streaming_repair(
+                    SimpleNamespace(),
+                    target=target,
+                    response_text=raw_interactive,
+                    tool_trace=None,
+                    extra_content=None,
+                ),
+            ),
+            build_post_response_outcome=lambda resolved_event_id, effective_delivery_result: ResponseOutcome(
+                resolved_event_id=resolved_event_id,
+                delivery_result=effective_delivery_result,
+                interactive_target=target,
+            ),
+            post_response_deps=SimpleNamespace(),
+        )
+
+    interactive_response = interactive.parse_and_format_interactive(raw_interactive, extract_mapping=True)
+    assert len(post_response_outcomes) == 1
+    delivery_result = post_response_outcomes[0].delivery_result
+    assert delivery_result is not None
+    assert delivery_result.option_map == interactive_response.option_map
+    assert delivery_result.options_list == interactive_response.options_list
+
+
+@pytest.mark.asyncio
 async def test_interactive_response_repair_preserves_formatting() -> None:
     """Repair edits should preserve interactive formatting instead of raw JSON blocks."""
     target = MessageTarget.resolve("!room:localhost", None, "$reply")
@@ -1317,6 +1453,45 @@ async def test_interactive_response_repair_preserves_formatting() -> None:
     repair_request = runner.deps.delivery_gateway.edit_text.await_args.args[0]
     assert repair_request.new_text == expected_formatted
     assert "```interactive" not in repair_request.new_text
+
+
+@pytest.mark.asyncio
+async def test_final_event_content_keeps_visible_tool_markers(tmp_path: Path) -> None:
+    """Final completion content must not erase visible tool markers already streamed."""
+    config = _config(tmp_path)
+    client = _client()
+    captured_edits: list[dict[str, Any]] = []
+
+    async def tool_then_final_content() -> AsyncIterator[object]:
+        tool = SimpleNamespace(tool_name="run_shell_command", tool_args={"cmd": "pwd"}, result="ok")
+        yield ToolCallStartedEvent(tool=tool)
+        yield ToolCallCompletedEvent(tool=tool)
+        yield RunCompletedEvent(content="Final answer")
+
+    async def record_edit(*_args: object) -> DeliveredMatrixEvent:
+        content = _args[3]
+        captured_edits.append(content)
+        return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(content))
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+        event_id, accumulated = await send_streaming_response(
+            client=client,
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            thread_id=None,
+            sender_domain="localhost",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            response_stream=tool_then_final_content(),
+            existing_event_id="$placeholder",
+            adopt_existing_placeholder=True,
+            room_mode=True,
+        )
+
+    assert event_id == "$placeholder"
+    assert "🔧 `run_shell_command` [1]" in accumulated
+    assert accumulated.endswith("Final answer")
+    assert captured_edits[-1]["body"] == accumulated
 
 
 @pytest.mark.asyncio

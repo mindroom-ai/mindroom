@@ -64,6 +64,8 @@ class StreamingRepair:
     response_text: str
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
+    option_map: dict[str, str] | None = None
+    options_list: list[dict[str, str]] | None = None
 
 
 class ResponseLifecycle:
@@ -138,10 +140,12 @@ class ResponseLifecycle:
         delivery_result = outcome.delivery_result
         repaired_delivery_result = await self._repair_stream_terminal_state(outcome)
         effective_delivery_result = repaired_delivery_result or delivery_result
+        post_response_delivery_result = effective_delivery_result
         if self.runner._is_cancelled_delivery_result(delivery_result) and (
             outcome.stream_finalization is None
             or outcome.stream_finalization.terminal_status == STREAM_STATUS_CANCELLED
         ):
+            post_response_delivery_result = delivery_result
             await self.runner.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
                 correlation_id=self.correlation_id,
                 envelope=self.response_envelope,
@@ -165,13 +169,13 @@ class ResponseLifecycle:
             resolved_event_id=resolved_event_id,
             post_response_outcome=lambda: build_post_response_outcome(
                 resolved_event_id,
-                effective_delivery_result,
+                post_response_delivery_result,
             ),
             post_response_deps=post_response_deps,
         )
         self.runner._emit_pipeline_timing_summary(
             self.request,
-            outcome=self.runner._response_outcome(effective_delivery_result),
+            outcome=self.runner._response_outcome(post_response_delivery_result),
         )
         return resolved_event_id
 
@@ -200,11 +204,15 @@ class ResponseLifecycle:
             repair_text = outcome.stream_state.repair_text
             repair_tool_trace = outcome.stream_state.repair_tool_trace
             repair_extra_content = outcome.stream_state.repair_extra_content
+            repair_option_map = outcome.stream_state.repair_option_map
+            repair_options_list = outcome.stream_state.repair_options_list
         else:
             assert repair is not None
             repair_text = repair.response_text
             repair_tool_trace = repair.tool_trace
             repair_extra_content = repair.extra_content
+            repair_option_map = repair.option_map
+            repair_options_list = repair.options_list
 
         extra_content = copy.deepcopy(repair_extra_content or {})
         extra_content[STREAM_STATUS_KEY] = stream_finalization.terminal_status
@@ -263,6 +271,8 @@ class ResponseLifecycle:
             response_text=repair_text,
             delivery_kind="edited",
             suppressed=False,
+            option_map=copy.deepcopy(repair_option_map),
+            options_list=copy.deepcopy(repair_options_list),
         )
 
     async def apply_effects_safely(

@@ -1318,7 +1318,11 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                 if event.reasoning_content:
                     state.observed_reasoning_content = True
                 if event.content:
-                    state.full_response = str(event.content)
+                    final_text = str(event.content)
+                    state.assistant_text = final_text
+                    state.full_response = final_text
+                    if state_updated is not None:
+                        state_updated()
                     yield event
                     continue
                 if event.reasoning_content:

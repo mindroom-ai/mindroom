@@ -467,15 +467,17 @@ class ResponseRunner:
     ) -> StreamingRepair:
         """Build one lifecycle repair payload for a missed terminal stream edit."""
         visible_text = response_text if response_text.strip() else PROGRESS_PLACEHOLDER
-        visible_text = interactive.parse_and_format_interactive(
+        interactive_response = interactive.parse_and_format_interactive(
             visible_text,
-            extract_mapping=False,
-        ).formatted_text
+            extract_mapping=True,
+        )
         return StreamingRepair(
             target=target,
-            response_text=visible_text,
+            response_text=interactive_response.formatted_text,
             tool_trace=tool_trace if tool_trace else None,
             extra_content=copy.deepcopy(extra_content) if extra_content is not None else None,
+            option_map=copy.deepcopy(interactive_response.option_map),
+            options_list=copy.deepcopy(interactive_response.options_list),
         )
 
     @property

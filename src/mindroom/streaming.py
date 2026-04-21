@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -63,6 +64,7 @@ CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE = "**[Model emitted no visible text content after thinking. Please retry.]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
+_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 _StreamInputChunk = (
     str | StructuredStreamChunk | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 )
@@ -90,6 +92,8 @@ class StreamDeliveryState:
     repair_text: str | None = None
     repair_tool_trace: list[ToolTraceEntry] | None = None
     repair_extra_content: dict[str, Any] | None = None
+    repair_option_map: dict[str, str] | None = None
+    repair_options_list: list[dict[str, str]] | None = None
 
 
 class StreamingDeliveryError(Exception):
@@ -142,6 +146,17 @@ def _format_stream_error_note(error: Exception) -> str:
     if len(normalized_error) > 220:
         normalized_error = f"{normalized_error[:219]}…"
     return f"{_STREAM_ERROR_RESPONSE_NOTE}: {normalized_error}]**"
+
+
+def _merge_final_completion_content(accumulated_text: str, final_text: str) -> str:
+    """Preserve visible tool markers when a provider emits canonical final content."""
+    tool_marker_lines = [
+        line for line in accumulated_text.splitlines() if _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)
+    ]
+    if not tool_marker_lines:
+        return final_text
+    tool_marker_block = "\n\n".join(tool_marker_lines)
+    return f"{tool_marker_block}\n\n{final_text}" if final_text else tool_marker_block
 
 
 def is_interrupted_partial_reply(text: object) -> bool:
@@ -708,7 +723,10 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             if chunk.reasoning_content:
                 streaming.observed_reasoning_content = True
             if chunk.content:
-                streaming.accumulated_text = str(chunk.content)
+                streaming.accumulated_text = _merge_final_completion_content(
+                    streaming.accumulated_text,
+                    str(chunk.content),
+                )
             continue
         elif isinstance(chunk, ToolCallStartedEvent):
             if chunk.tool is not None:
@@ -773,7 +791,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             await streaming.update_content(text_chunk, client)
 
 
-async def send_streaming_response(  # noqa: C901
+async def send_streaming_response(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     reply_to_event_id: str | None,
