@@ -1015,7 +1015,7 @@ async def test_sync_unsynced_approval_event_resolutions_replays_persisted_expire
     """Startup reconciliation should edit stale approval cards back to expired."""
     runtime_paths = test_runtime_paths(tmp_path)
     request_id = _create_persisted_resolved_request(runtime_paths.storage_root / "approvals")
-    editor = AsyncMock()
+    editor = AsyncMock(return_value=True)
     initialize_approval_store(runtime_paths, editor=editor)
 
     synced_requests = await sync_unsynced_approval_event_resolutions()
@@ -1027,6 +1027,22 @@ async def test_sync_unsynced_approval_event_resolutions_replays_persisted_expire
     assert editor.await_args.args[3]["thread_id"] == "$thread"
     payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request_id}.json").read_text(encoding="utf-8"))
     assert payload["resolution_synced_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_unsynced_approval_event_resolutions_retry_when_editor_sends_no_edit(tmp_path: Path) -> None:
+    """Resolved approvals should stay unsynced when the editor reports a no-op."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_resolved_request(runtime_paths.storage_root / "approvals")
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+    initialize_approval_store(runtime_paths, editor=orchestrator._edit_approval_event)
+
+    synced_requests = await sync_unsynced_approval_event_resolutions()
+
+    assert synced_requests == []
+    payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request_id}.json").read_text(encoding="utf-8"))
+    assert payload["resolution_synced_at"] is None
 
 
 @pytest.mark.asyncio
@@ -1171,7 +1187,7 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
     bot.client = client
     orchestrator.agent_bots = {"code": bot}
 
-    await orchestrator._edit_approval_event(
+    edited = await orchestrator._edit_approval_event(
         "!room:localhost",
         "$approval-event",
         "code",
@@ -1191,6 +1207,7 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
         },
     )
 
+    assert edited is True
     new_content = {
         "approval_id": "approval-1",
         "tool_name": "run_shell_command",
@@ -1235,7 +1252,7 @@ async def test_orchestrator_edit_approval_event_supports_room_mode_without_threa
     bot.client = client
     orchestrator.agent_bots = {"code": bot}
 
-    await orchestrator._edit_approval_event(
+    edited = await orchestrator._edit_approval_event(
         "!room:localhost",
         "$approval-event",
         "code",
@@ -1253,6 +1270,7 @@ async def test_orchestrator_edit_approval_event_supports_room_mode_without_threa
         },
     )
 
+    assert edited is True
     new_content = {
         "approval_id": "approval-1",
         "tool_name": "run_shell_command",
@@ -1273,6 +1291,34 @@ async def test_orchestrator_edit_approval_event_supports_room_mode_without_threa
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval-event"},
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_edit_approval_event_returns_false_without_transport_bot(tmp_path: Path) -> None:
+    """The orchestrator helper should report a no-op when the transport bot is unavailable."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+
+    edited = await orchestrator._edit_approval_event(
+        "!room:localhost",
+        "$approval-event",
+        "code",
+        {
+            "approval_id": "approval-1",
+            "tool_name": "run_shell_command",
+            "arguments": {"command": "echo hi"},
+            "agent_name": "code",
+            "status": "approved",
+            "msgtype": "io.mindroom.tool_approval",
+            "body": "Approved: run_shell_command",
+            "thread_id": "$thread",
+            "resolved_at": "2026-04-12T00:00:00+00:00",
+            "resolved_by": "@bas:localhost",
+        },
+    )
+
+    assert edited is False
 
 
 @pytest.mark.asyncio

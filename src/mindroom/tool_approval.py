@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 ApprovalStatus = Literal["approved", "denied", "expired"]
 PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 MatrixEventSender = Callable[[str, str | None, str, dict[str, Any]], Awaitable[str | None]]
-MatrixEventEditor = Callable[[str, str, str, dict[str, Any]], Awaitable[None]]
+MatrixEventEditor = Callable[[str, str, str, dict[str, Any]], Awaitable[bool]]
 
 _APPROVALS_DIRNAME = "approvals"
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
@@ -767,7 +767,7 @@ class ApprovalManager:
         if self._edit_event is None or pending.room_id is None or pending.event_id is None:
             return
         try:
-            await self._edit_event(
+            delivered = await self._edit_event(
                 pending.room_id,
                 pending.event_id,
                 pending.transport_agent_name,
@@ -782,6 +782,8 @@ class ApprovalManager:
                 agent_name=pending.transport_agent_name,
                 exc_info=True,
             )
+            return
+        if not delivered:
             return
         pending.resolution_synced_at = _utcnow()
         self._persist_request(pending)

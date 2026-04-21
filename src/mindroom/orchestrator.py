@@ -426,9 +426,9 @@ class MultiAgentOrchestrator:
         event_id: str,
         agent_name: str,
         new_content: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         """Edit one previously sent approval event."""
-        await self._run_on_runtime_loop(
+        return await self._run_on_runtime_loop(
             lambda: self._edit_approval_event_now(room_id, event_id, agent_name, new_content),
         )
 
@@ -438,11 +438,11 @@ class MultiAgentOrchestrator:
         event_id: str,
         agent_name: str,
         new_content: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         """Edit one previously sent approval event on the current loop."""
         bot = self._get_bot_by_agent_name(agent_name)
         if bot is None:
-            return
+            return False
         if bot.client is None:
             msg = f"Approval Matrix client is unavailable for agent '{agent_name}'"
             raise RuntimeError(msg)
@@ -472,6 +472,8 @@ class MultiAgentOrchestrator:
                 agent_name=agent_name,
                 response=str(response),
             )
+            return False
+        return True
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
