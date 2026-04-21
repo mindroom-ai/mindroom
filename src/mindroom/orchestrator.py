@@ -438,28 +438,41 @@ class MultiAgentOrchestrator:
         self,
         room_id: str,
         event_id: str,
-        agent_name: str,
         new_content: dict[str, Any],
     ) -> bool:
         """Edit one previously sent approval event."""
         return await self._run_on_runtime_loop(
-            lambda: self._edit_approval_event_now(room_id, event_id, agent_name, new_content),
+            lambda: self._edit_approval_event_now(room_id, event_id, new_content),
         )
+
+    def _pick_room_bot_for_approval(self, room_id: str) -> AgentBot | TeamBot | None:
+        """Return one live room bot that can send and later clean up approval traffic."""
+        for bot in self.agent_bots.values():
+            if not bot.running or bot.client is None:
+                continue
+            if room_id not in bot.client.rooms:
+                continue
+            user_id = bot.client.user_id
+            if not isinstance(user_id, str) or not user_id:
+                continue
+            room = bot.client.rooms[room_id]
+            if not room.power_levels.can_user_send_message(user_id, "m.room.message"):
+                continue
+            if not room.power_levels.can_user_redact(user_id):
+                continue
+            return bot
+        return None
 
     async def _edit_approval_event_now(
         self,
         room_id: str,
         event_id: str,
-        agent_name: str,
         new_content: dict[str, Any],
     ) -> bool:
         """Edit one previously sent approval event on the current loop."""
-        bot = self._get_bot_by_agent_name(agent_name)
-        if bot is None:
+        bot = self._pick_room_bot_for_approval(room_id)
+        if bot is None or bot.client is None:
             return False
-        if bot.client is None:
-            msg = f"Approval Matrix client is unavailable for agent '{agent_name}'"
-            raise RuntimeError(msg)
 
         thread_id = new_content.get("thread_id")
         if thread_id is not None and not isinstance(thread_id, str):
@@ -468,7 +481,11 @@ class MultiAgentOrchestrator:
 
         replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
         if isinstance(thread_id, str) and thread_id:
-            replacement_content["m.relates_to"] = await self._approval_thread_relation(room_id, thread_id, agent_name)
+            replacement_content["m.relates_to"] = await self._approval_thread_relation(
+                room_id,
+                thread_id,
+                bot.agent_name,
+            )
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
@@ -483,7 +500,7 @@ class MultiAgentOrchestrator:
                 "Failed to edit approval Matrix event",
                 room_id=room_id,
                 event_id=event_id,
-                agent_name=agent_name,
+                agent_name=bot.agent_name,
                 response=str(response),
             )
             return False
@@ -638,7 +655,6 @@ class MultiAgentOrchestrator:
                             partial(self._setup_rooms_and_memberships, bots_to_setup),
                             update_runtime_state=False,
                         )
-                    await self._sync_unsynced_approval_resolutions()
                     self._start_sync_task(entity_name, bot)
                     return
 
@@ -1228,6 +1244,12 @@ class MultiAgentOrchestrator:
         except Exception as exc:
             logger.warning("tool_approval_resolution_replay_failed", error=str(exc))
 
+    async def _handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
+        """Replay any unsynced approval edits once one bot is fully synced and room-ready."""
+        if not bot.running or bot.client is None:
+            return
+        await self._sync_unsynced_approval_resolutions()
+
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
@@ -1254,7 +1276,6 @@ class MultiAgentOrchestrator:
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
         )
-        await self._sync_unsynced_approval_resolutions()
         interrupted_threads = await self._cleanup_stale_streams_after_restart(started_bots, config)
         await self._auto_resume_after_restart(interrupted_threads, config)
 
