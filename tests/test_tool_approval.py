@@ -315,7 +315,12 @@ def _run_script_approval_wave(
     assert results == [expected_requires_approval] * 4
 
 
-def _create_persisted_pending_request(storage_dir: Path, *, event_id: str | None = "$approval-event") -> str:
+def _create_persisted_pending_request(
+    storage_dir: Path,
+    *,
+    event_id: str | None = "$approval-event",
+    original_event_sender_user_id: str | None = "@mindroom_code:localhost",
+) -> str:
     request_id = "persisted-pending"
     payload = {
         "id": request_id,
@@ -323,7 +328,7 @@ def _create_persisted_pending_request(storage_dir: Path, *, event_id: str | None
         "arguments_preview": {"command": "echo hi"},
         "arguments_preview_truncated": False,
         "agent_name": "code",
-        "original_event_sender_user_id": "@mindroom_code:localhost",
+        "original_event_sender_user_id": original_event_sender_user_id,
         "room_id": "!room:localhost",
         "thread_id": "$thread",
         "requester_id": "@user:localhost",
@@ -1471,15 +1476,22 @@ def test_initialize_approval_store_expires_persisted_pending_requests(tmp_path: 
 def test_initialize_approval_store_expires_undelivered_pending_requests(tmp_path: Path) -> None:
     """Startup should fail closed for persisted approvals that never recorded an event ID."""
     runtime_paths = test_runtime_paths(tmp_path)
-    request_id = _create_persisted_pending_request(runtime_paths.storage_root / "approvals", event_id=None)
+    request_id = _create_persisted_pending_request(
+        runtime_paths.storage_root / "approvals",
+        event_id=None,
+        original_event_sender_user_id=None,
+    )
+    request_path = runtime_paths.storage_root / "approvals" / f"{request_id}.json"
 
     store = initialize_approval_store(runtime_paths)
 
     assert store.list_pending() == []
-    payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request_id}.json").read_text(encoding="utf-8"))
-    assert payload["status"] == "expired"
-    assert payload["resolution_reason"] == "MindRoom restarted before approval request could be delivered to Matrix."
-    assert payload["event_id"] is None
+    assert request_path.exists() is False
+    assert request_id in store._requests_by_id
+    pending = store._requests_by_id[request_id]
+    assert pending.status == "expired"
+    assert pending.resolution_reason == "MindRoom restarted before approval request could be delivered to Matrix."
+    assert pending.event_id is None
 
 
 def test_initialize_approval_store_reindexes_persisted_approval_event_ids(tmp_path: Path) -> None:

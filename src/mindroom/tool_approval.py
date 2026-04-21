@@ -257,7 +257,11 @@ class PendingApproval:
             arguments_preview_truncated = bool(payload.get("arguments_preview_truncated"))
         event_id = cast("str | None", payload.get("event_id"))
         original_event_sender_user_id = cast("str | None", payload.get("original_event_sender_user_id"))
-        if not isinstance(original_event_sender_user_id, str) or not original_event_sender_user_id.strip():
+        if event_id is None and (
+            not isinstance(original_event_sender_user_id, str) or not original_event_sender_user_id.strip()
+        ):
+            original_event_sender_user_id = None
+        elif not isinstance(original_event_sender_user_id, str) or not original_event_sender_user_id.strip():
             msg = f"Persisted approval request '{payload.get('id')}' is missing original_event_sender_user_id."
             raise ValueError(msg)
         return cls(
@@ -426,7 +430,10 @@ class ApprovalManager:
                 pending.resolved_at = _utcnow()
                 pending.resolved_by = None
                 pending.resolution_synced_at = None
-                self._persist_request(pending)
+                if pending.event_id is None:
+                    self._delete_request_file(pending.id)
+                else:
+                    self._persist_request(pending)
 
         with self._state_lock:
             self._requests_by_id = loaded_requests
