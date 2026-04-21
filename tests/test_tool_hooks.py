@@ -18,8 +18,6 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import create_agent
 from mindroom.bot import AgentBot
-from mindroom.commands.handler import CommandHandlerContext, handle_command
-from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -42,7 +40,14 @@ from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_f
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import MultiAgentOrchestrator
-from mindroom.tool_approval import get_approval_store, initialize_approval_store, shutdown_approval_store
+from mindroom.tool_approval import (
+    TOOL_APPROVAL_EVENT_TYPE,
+    TOOL_APPROVAL_RESPONSE_EVENT_TYPE,
+    get_approval_store,
+    handle_tool_approval_response_event,
+    initialize_approval_store,
+    shutdown_approval_store,
+)
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -1279,10 +1284,15 @@ async def test_tool_approval_gate_runs_before_before_call_hooks(tmp_path: Path) 
     runtime_context = replace(
         _tool_runtime_context(
             tmp_path,
-            hook_message_sender=AsyncMock(return_value="$approval-prompt"),
         ),
         config=config,
         runtime_paths=runtime_paths,
+    )
+    runtime_context.client.room_send = AsyncMock(
+        side_effect=[
+            nio.RoomSendResponse(event_id="$approval-prompt", room_id="!room:localhost"),
+            nio.RoomSendResponse(event_id="$approval-edit", room_id="!room:localhost"),
+        ],
     )
 
     async def next_func(**kwargs: object) -> str:
@@ -1343,10 +1353,15 @@ async def test_tool_approval_deny_emits_after_call_as_blocked(tmp_path: Path) ->
     runtime_context = replace(
         _tool_runtime_context(
             tmp_path,
-            hook_message_sender=AsyncMock(return_value="$approval-prompt"),
         ),
         config=config,
         runtime_paths=runtime_paths,
+    )
+    runtime_context.client.room_send = AsyncMock(
+        side_effect=[
+            nio.RoomSendResponse(event_id="$approval-prompt", room_id="!room:localhost"),
+            nio.RoomSendResponse(event_id="$approval-edit", room_id="!room:localhost"),
+        ],
     )
 
     next_func = AsyncMock(return_value="should not run")
@@ -1410,10 +1425,15 @@ async def test_tool_approval_expiry_emits_after_call_as_blocked(tmp_path: Path) 
     runtime_context = replace(
         _tool_runtime_context(
             tmp_path,
-            hook_message_sender=AsyncMock(return_value="$approval-prompt"),
         ),
         config=config,
         runtime_paths=runtime_paths,
+    )
+    runtime_context.client.room_send = AsyncMock(
+        side_effect=[
+            nio.RoomSendResponse(event_id="$approval-prompt", room_id="!room:localhost"),
+            nio.RoomSendResponse(event_id="$approval-edit", room_id="!room:localhost"),
+        ],
     )
 
     next_func = AsyncMock(return_value="should not run")
@@ -1431,8 +1451,8 @@ async def test_tool_approval_expiry_emits_after_call_as_blocked(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_tool_approval_is_announced_in_matrix_and_resolved_via_command(tmp_path: Path) -> None:
-    """Matrix approval prompts should be actionable through the router command path."""
+async def test_tool_approval_is_emitted_as_matrix_event_and_resolved_via_response_event(tmp_path: Path) -> None:
+    """Matrix approvals should use the custom event contract expected by MindRoom Cinny."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -1454,14 +1474,16 @@ async def test_tool_approval_is_announced_in_matrix_and_resolved_via_command(tmp
     )
     initialize_approval_store(runtime_paths)
 
-    hook_message_sender = AsyncMock(return_value="$approval-prompt")
     runtime_context = replace(
-        _tool_runtime_context(
-            tmp_path,
-            hook_message_sender=hook_message_sender,
-        ),
+        _tool_runtime_context(tmp_path),
         config=config,
         runtime_paths=runtime_paths,
+    )
+    runtime_context.client.room_send = AsyncMock(
+        side_effect=[
+            nio.RoomSendResponse(event_id="$approval-prompt", room_id="!room:localhost"),
+            nio.RoomSendResponse(event_id="$approval-edit", room_id="!room:localhost"),
+        ],
     )
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),
@@ -1485,59 +1507,64 @@ async def test_tool_approval_is_announced_in_matrix_and_resolved_via_command(tmp
         pending = store.list_pending()
         assert len(pending) == 1
         request = pending[0]
+        assert request.approval_event_id == "$approval-prompt"
 
-        hook_message_sender.assert_awaited_once()
-        assert hook_message_sender.await_args.args[0] == "!room:localhost"
-        assert request.id in hook_message_sender.await_args.args[1]
-        assert hook_message_sender.await_args.args[2] == "$resolved-thread"
+        first_send = runtime_context.client.room_send.await_args_list[0].kwargs
+        assert first_send["room_id"] == "!room:localhost"
+        assert first_send["message_type"] == TOOL_APPROVAL_EVENT_TYPE
+        assert first_send["content"]["approval_id"] == request.id
+        assert first_send["content"]["tool_call_id"] == request.id
+        assert first_send["content"]["tool_name"] == "read_file"
+        assert first_send["content"]["agent_name"] == "code"
+        assert first_send["content"]["requester_id"] == "@user:localhost"
+        assert first_send["content"]["status"] == "pending"
+        assert first_send["content"]["msgtype"] == TOOL_APPROVAL_EVENT_TYPE
+        assert first_send["content"]["m.relates_to"] == {
+            "rel_type": "m.thread",
+            "event_id": "$resolved-thread",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$resolved-thread"},
+        }
 
-        context = CommandHandlerContext(
-            client=AsyncMock(),
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            logger=MagicMock(),
-            derive_conversation_context=AsyncMock(return_value=(True, "$resolved-thread", [])),
-            conversation_cache=MagicMock(),
-            event_cache=make_event_cache_mock(),
-            requester_user_id_for_event=MagicMock(return_value="@user:localhost"),
-            build_message_target=MagicMock(
-                return_value=MessageTarget.resolve("!room:localhost", "$resolved-thread", "$command-event"),
-            ),
-            record_handled_turn=MagicMock(),
-            send_response=AsyncMock(return_value="$approval-response"),
-            send_skill_command_response=AsyncMock(return_value=None),
-            run_skill_command_tool=AsyncMock(return_value=""),
+        response_event = nio.UnknownEvent.from_dict(
+            {
+                "type": TOOL_APPROVAL_RESPONSE_EVENT_TYPE,
+                "event_id": "$response-event",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "content": {
+                    "status": "approved",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$resolved-thread",
+                        "is_falling_back": True,
+                        "m.in_reply_to": {"event_id": "$approval-prompt"},
+                    },
+                },
+            },
         )
-        room = SimpleNamespace(room_id="!room:localhost")
-        event = SimpleNamespace(
-            sender="@user:localhost",
-            event_id="$command-event",
-            body=f"!approve {request.id}",
-            source={"content": {"body": f"!approve {request.id}"}},
-        )
-        command = Command(
-            type=CommandType.APPROVE_TOOL,
-            args={"request_id": request.id},
-            raw_text=f"!approve {request.id}",
-        )
-
-        await handle_command(
-            context=context,
-            room=room,
-            event=event,
-            command=command,
-            requester_user_id="@user:localhost",
+        resolved_request = await handle_tool_approval_response_event(
+            store=store,
+            room_id="!room:localhost",
+            sender_id="@user:localhost",
+            event=response_event,
         )
         result = await task
 
+    assert resolved_request is not None
     assert result == "ok"
     resolved_request = store.get_request(request.id)
     assert resolved_request is not None
     assert resolved_request.status == "approved"
     assert resolved_request.resolved_by == "@user:localhost"
-    context.send_response.assert_awaited_once()
-    assert context.send_response.await_args.args[2] == (f"✅ Approved tool request `{request.id}` for `read_file`.")
+    second_send = runtime_context.client.room_send.await_args_list[1].kwargs
+    assert second_send["room_id"] == "!room:localhost"
+    assert second_send["message_type"] == TOOL_APPROVAL_EVENT_TYPE
+    assert second_send["content"]["msgtype"] == TOOL_APPROVAL_EVENT_TYPE
+    assert second_send["content"]["m.new_content"]["status"] == "approved"
+    assert second_send["content"]["m.new_content"]["resolved_by"] == "@user:localhost"
+    assert second_send["content"]["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$approval-prompt"}
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import time
 from contextlib import suppress
 from contextvars import copy_context
@@ -16,6 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
+import nio
 from agno.tools.function import FunctionCall
 
 from mindroom.hooks import (
@@ -27,9 +27,12 @@ from mindroom.hooks import (
 from mindroom.hooks.types import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL
 from mindroom.logging_config import get_logger
 from mindroom.tool_approval import (
+    TOOL_APPROVAL_EVENT_TYPE,
     ApprovalRequest,
     ApprovalStore,
     ToolApprovalScriptError,
+    build_tool_approval_edit_content,
+    build_tool_approval_event_content,
     evaluate_tool_approval,
     get_approval_store,
 )
@@ -62,7 +65,6 @@ ToolHookResult = Any
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
 _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
 logger = get_logger(__name__)
-_APPROVAL_ARGUMENTS_CHAR_LIMIT = 4000
 
 
 @dataclass(slots=True)
@@ -98,6 +100,7 @@ class _ResolvedToolContext:
     account_id: str | None
     config: Config | None
     runtime_paths: RuntimePaths | None
+    client: nio.AsyncClient | None
     correlation_id: str
     message_sender: HookMessageSender | None
     room_state_querier: HookRoomStateQuerier | None
@@ -181,6 +184,7 @@ def _resolve_tool_context(
         ),
         config=runtime_context.config if runtime_context is not None else config,
         runtime_paths=resolved_runtime_paths,
+        client=runtime_context.client if runtime_context is not None else None,
         correlation_id=(
             runtime_context.correlation_id
             if runtime_context is not None and runtime_context.correlation_id
@@ -197,71 +201,77 @@ def _format_declined_result(tool_name: str, reason: str) -> str:
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
 
 
-def _format_tool_approval_arguments(arguments: dict[str, Any]) -> str:
-    try:
-        rendered = json.dumps(arguments, indent=2, sort_keys=True, default=str)
-    except TypeError:
-        rendered = repr(arguments)
-    if len(rendered) <= _APPROVAL_ARGUMENTS_CHAR_LIMIT:
-        return rendered
-    return rendered[: _APPROVAL_ARGUMENTS_CHAR_LIMIT - len("\n... (truncated)")] + "\n... (truncated)"
-
-
-def _format_tool_approval_prompt(approval_request: ApprovalRequest) -> str:
-    lines = [
-        "Approval required before this tool call can run.",
-        "",
-        f"Request ID: `{approval_request.id}`",
-        f"Agent: `{approval_request.agent_name}`",
-        f"Tool: `{approval_request.tool_name}`",
-    ]
-    if approval_request.requester_id:
-        lines.append(f"Requested by: `{approval_request.requester_id}`")
-    lines.extend(
-        [
-            f"Expires at: `{approval_request.expires_at.isoformat()}`",
-            "",
-            "Arguments:",
-            "```json",
-            _format_tool_approval_arguments(approval_request.arguments),
-            "```",
-            "",
-            f"Approve with `!approve {approval_request.id}`.",
-            f"Deny with `!deny {approval_request.id} <reason>`.",
-        ],
-    )
-    return "\n".join(lines)
-
-
 async def _announce_tool_approval_request(
     resolved_context: _ResolvedToolContext,
+    store: ApprovalStore,
     approval_request: ApprovalRequest,
 ) -> bool:
-    if resolved_context.message_sender is None or resolved_context.room_id is None:
+    if resolved_context.client is None or resolved_context.room_id is None:
         return False
 
     try:
-        event_id = await resolved_context.message_sender(
-            resolved_context.room_id,
-            _format_tool_approval_prompt(approval_request),
-            approval_request.thread_id,
-            "tool_approval",
-            {
-                "com.mindroom.tool_approval_id": approval_request.id,
-                "com.mindroom.tool_approval_status": approval_request.status,
-                "com.mindroom.tool_name": approval_request.tool_name,
-            },
+        response = await resolved_context.client.room_send(
+            room_id=resolved_context.room_id,
+            message_type=TOOL_APPROVAL_EVENT_TYPE,
+            content=build_tool_approval_event_content(approval_request),
         )
     except Exception:
         logger.exception(
-            "Failed to send tool approval prompt",
+            "Failed to send tool approval event",
             approval_request_id=approval_request.id,
             room_id=resolved_context.room_id,
             thread_id=approval_request.thread_id,
         )
         return False
 
-    return event_id is not None
+    if not isinstance(response, nio.RoomSendResponse):
+        logger.warning(
+            "Matrix rejected tool approval event",
+            approval_request_id=approval_request.id,
+            room_id=resolved_context.room_id,
+            thread_id=approval_request.thread_id,
+            response=str(response),
+        )
+        return False
+
+    await store.record_approval_event(approval_request.id, response.event_id)
+    return True
+
+
+async def _sync_tool_approval_event_resolution(
+    resolved_context: _ResolvedToolContext,
+    approval_request: ApprovalRequest,
+) -> None:
+    if (
+        resolved_context.client is None
+        or resolved_context.room_id is None
+        or approval_request.approval_event_id is None
+    ):
+        return
+
+    try:
+        response = await resolved_context.client.room_send(
+            room_id=resolved_context.room_id,
+            message_type=TOOL_APPROVAL_EVENT_TYPE,
+            content=build_tool_approval_edit_content(approval_request),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to update tool approval event",
+            approval_request_id=approval_request.id,
+            room_id=resolved_context.room_id,
+            thread_id=approval_request.thread_id,
+        )
+        return
+
+    if not isinstance(response, nio.RoomSendResponse):
+        logger.warning(
+            "Matrix rejected tool approval edit",
+            approval_request_id=approval_request.id,
+            room_id=resolved_context.room_id,
+            thread_id=approval_request.thread_id,
+            response=str(response),
+        )
 
 
 async def _maybe_block_for_unavailable_tool_approval_transport(
@@ -315,13 +325,13 @@ async def _maybe_block_for_undeliverable_tool_approval_prompt(
     store: ApprovalStore,
     approval_request: ApprovalRequest,
 ) -> str | None:
-    if await _announce_tool_approval_request(resolved_context, approval_request):
+    if await _announce_tool_approval_request(resolved_context, store, approval_request):
         return None
 
     with suppress(LookupError, ValueError):
         await store.expire(
             approval_request.id,
-            reason="Failed to deliver the Matrix tool approval prompt.",
+            reason="Failed to deliver the Matrix tool approval event.",
         )
     return await _blocked_tool_result(
         hook_registry=hook_registry,
@@ -572,6 +582,7 @@ async def _maybe_block_for_tool_approval(
         return blocked_result
 
     approval_request = await _wait_for_tool_approval(store, approval_request)
+    await _sync_tool_approval_event_resolution(resolved_context, approval_request)
     return (
         None
         if approval_request.status == "approved"

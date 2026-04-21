@@ -408,10 +408,9 @@ Return `True` to require approval for that call.
 Return `False` to allow the call without approval.
 Script paths are resolved relative to `config.yaml`.
 `timeout_days` can be set globally or per rule and must be greater than zero.
-When approval is required in Matrix, MindRoom posts an approval prompt in the same room and thread as the tool call.
-Approve the request with `!approve <request_id>`.
-Deny the request with `!deny <request_id> [reason]`.
-Approvals are surfaced through Matrix event flows rather than a dedicated dashboard approvals API.
+When approval is required in Matrix, MindRoom emits an `io.mindroom.tool_approval` event in the same room and thread as the tool call.
+Compatible Matrix clients resolve it by sending `io.mindroom.tool_approval_response` as a reply to that approval event.
+Approvals are surfaced through Matrix events rather than a dedicated dashboard approvals API.
 The OpenAI-compatible `/v1` surface does not expose tool functions that would require approval.
 
 ## Internal User Username

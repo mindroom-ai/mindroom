@@ -8,6 +8,7 @@ import inspect
 import json
 import tempfile
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
@@ -22,9 +23,13 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from types import ModuleType
 
+    import nio
+
     from mindroom.config.main import Config
 
 ApprovalStatus = Literal["pending", "approved", "denied", "expired"]
+TOOL_APPROVAL_EVENT_TYPE = "io.mindroom.tool_approval"
+TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 
 _APPROVALS_DIRNAME = "approvals"
 _DEFAULT_RESTART_REASON = "MindRoom restarted before approval completed."
@@ -84,6 +89,7 @@ class ApprovalRequest:
     script_path: str | None
     created_at: datetime
     expires_at: datetime
+    approval_event_id: str | None = None
     status: ApprovalStatus = "pending"
     resolution_reason: str | None = None
     resolved_at: datetime | None = None
@@ -110,6 +116,7 @@ class ApprovalRequest:
             "script_path": self.script_path,
             "created_at": self.created_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
+            "approval_event_id": self.approval_event_id,
             "resolution_reason": self.resolution_reason,
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at is not None else None,
             "resolved_by": self.resolved_by,
@@ -134,6 +141,7 @@ class ApprovalRequest:
             script_path=cast("str | None", payload.get("script_path")),
             created_at=cast("datetime", _parse_datetime(cast("str", payload["created_at"]))),
             expires_at=cast("datetime", _parse_datetime(cast("str", payload["expires_at"]))),
+            approval_event_id=cast("str | None", payload.get("approval_event_id")),
             status=cast("ApprovalStatus", payload["status"]),
             resolution_reason=cast("str | None", payload.get("resolution_reason")),
             resolved_at=_parse_datetime(cast("str | None", payload.get("resolved_at"))),
@@ -256,6 +264,26 @@ class ApprovalStore:
         with self._state_lock:
             pending_requests = [request for request in self._requests.values() if request.status == "pending"]
         return sorted(pending_requests, key=lambda request: request.created_at)
+
+    def find_request_by_approval_event_id(self, approval_event_id: str) -> ApprovalRequest | None:
+        """Return one request by its emitted Matrix approval event ID."""
+        with self._state_lock:
+            for request in self._requests.values():
+                if request.approval_event_id == approval_event_id:
+                    return request
+        return None
+
+    async def record_approval_event(self, request_id: str, approval_event_id: str) -> ApprovalRequest:
+        """Persist the Matrix event ID for one emitted approval event."""
+        async with self._resolve_lock:
+            with self._state_lock:
+                request = self._requests.get(request_id)
+                if request is None:
+                    msg = f"Unknown approval request '{request_id}'."
+                    raise LookupError(msg)
+                request.approval_event_id = approval_event_id
+            self._persist_request(request)
+            return request
 
     def expire_pending_requests(self, *, reason: str) -> None:
         """Expire every pending request and wake any live waiters."""
@@ -480,6 +508,146 @@ def tool_may_require_approval(
             return rule.action == "require_approval"
         return True
     return approval_config.default == "require_approval"
+
+
+def _tool_approval_thread_relation(thread_id: str | None) -> dict[str, Any] | None:
+    if thread_id is None:
+        return None
+    return {
+        "rel_type": "m.thread",
+        "event_id": thread_id,
+        "is_falling_back": True,
+        "m.in_reply_to": {"event_id": thread_id},
+    }
+
+
+def build_tool_approval_event_content(approval_request: ApprovalRequest) -> dict[str, Any]:
+    """Return the Matrix payload for one tool approval event."""
+    content: dict[str, Any] = {
+        "body": f"🔒 Approval required: {approval_request.tool_name}",
+        "msgtype": TOOL_APPROVAL_EVENT_TYPE,
+        "approval_id": approval_request.id,
+        "tool_name": approval_request.tool_name,
+        "tool_call_id": approval_request.id,
+        "arguments": approval_request.arguments,
+        "agent_name": approval_request.agent_name,
+        "requester_id": approval_request.requester_id,
+        "status": approval_request.status,
+        "requested_at": approval_request.created_at.isoformat(),
+        "expires_at": approval_request.expires_at.isoformat(),
+        "thread_id": approval_request.thread_id,
+        "resolved_at": approval_request.resolved_at.isoformat() if approval_request.resolved_at is not None else None,
+        "resolved_by": approval_request.resolved_by,
+        "resolution_reason": approval_request.resolution_reason,
+    }
+    relation = _tool_approval_thread_relation(approval_request.thread_id)
+    if relation is not None:
+        content["m.relates_to"] = relation
+    return content
+
+
+def build_tool_approval_edit_content(approval_request: ApprovalRequest) -> dict[str, Any]:
+    """Return the Matrix edit payload that updates one approval event in place."""
+    if approval_request.approval_event_id is None:
+        msg = "Approval event ID is required before building an edit payload."
+        raise ValueError(msg)
+    replacement_content = build_tool_approval_event_content(approval_request)
+    return {
+        "body": f"* {replacement_content['body']}",
+        "msgtype": TOOL_APPROVAL_EVENT_TYPE,
+        "m.new_content": replacement_content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": approval_request.approval_event_id},
+    }
+
+
+def _response_content(event: nio.UnknownEvent) -> Mapping[str, object] | None:
+    if not isinstance(event.source, Mapping):
+        return None
+    content = event.source.get("content")
+    return content if isinstance(content, Mapping) else None
+
+
+def _response_status_and_reason(
+    content: Mapping[str, object],
+) -> tuple[Literal["approved", "denied"], str | None] | None:
+    status = content.get("status")
+    if status not in {"approved", "denied"}:
+        return None
+    reason = content.get("reason")
+    normalized_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+    return cast("Literal['approved', 'denied']", status), normalized_reason
+
+
+def _response_relation_targets(
+    content: Mapping[str, object],
+) -> tuple[str, str | None] | None:
+    relates_to = content.get("m.relates_to")
+    if not isinstance(relates_to, Mapping):
+        return None
+    relation = cast("Mapping[str, object]", relates_to)
+    reply_to = relation.get("m.in_reply_to")
+    if not isinstance(reply_to, Mapping):
+        return None
+    reply = cast("Mapping[str, object]", reply_to)
+    approval_event_id = reply.get("event_id")
+    if not isinstance(approval_event_id, str) or not approval_event_id:
+        return None
+    thread_event_id = relation.get("event_id")
+    return approval_event_id, thread_event_id if isinstance(thread_event_id, str) else None
+
+
+def _matching_pending_request(
+    *,
+    store: ApprovalStore,
+    approval_event_id: str,
+    room_id: str,
+    sender_id: str,
+    thread_event_id: str | None,
+) -> ApprovalRequest | None:
+    request = store.find_request_by_approval_event_id(approval_event_id)
+    if request is None or request.room_id != room_id or request.status != "pending":
+        return None
+    if request.requester_id is not None and sender_id != request.requester_id:
+        return None
+    if request.thread_id is not None and thread_event_id != request.thread_id:
+        return None
+    return request
+
+
+async def handle_tool_approval_response_event(
+    *,
+    store: ApprovalStore,
+    room_id: str,
+    sender_id: str,
+    event: nio.UnknownEvent,
+) -> ApprovalRequest | None:
+    """Resolve one pending approval from a Matrix response event."""
+    content = _response_content(event) if event.type == TOOL_APPROVAL_RESPONSE_EVENT_TYPE else None
+    if content is None:
+        return None
+
+    status_and_reason = _response_status_and_reason(content)
+    relation_targets = _response_relation_targets(content)
+    if status_and_reason is None or relation_targets is None:
+        return None
+    status, normalized_reason = status_and_reason
+    approval_event_id, thread_event_id = relation_targets
+
+    request = _matching_pending_request(
+        store=store,
+        approval_event_id=approval_event_id,
+        room_id=room_id,
+        sender_id=sender_id,
+        thread_event_id=thread_event_id,
+    )
+    if request is None:
+        return None
+
+    return (
+        await store.approve(request.id, resolved_by=sender_id)
+        if status == "approved"
+        else await store.deny(request.id, reason=normalized_reason, resolved_by=sender_id)
+    )
 
 
 def get_approval_store() -> ApprovalStore | None:

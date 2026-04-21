@@ -54,6 +54,11 @@ from mindroom.post_response_effects import (
 )
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
+from mindroom.tool_approval import (
+    TOOL_APPROVAL_RESPONSE_EVENT_TYPE,
+    get_approval_store,
+    handle_tool_approval_response_event,
+)
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -1051,6 +1056,11 @@ class AgentBot:
                 _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
                 nio.ReactionEvent,
             )
+            if self.agent_name == ROUTER_AGENT_NAME:
+                client.add_event_callback(
+                    _create_task_wrapper(self._on_unknown_event, owner=self._runtime_view),
+                    nio.UnknownEvent,
+                )
 
             # Register media callbacks on all agents (each agent handles its own routing)
             media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
@@ -1308,6 +1318,10 @@ class AgentBot:
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._handle_reaction_inner(room, event)
 
+    async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Handle custom Matrix event types that are outside nio's built-in event surface."""
+        await self._handle_unknown_event_inner(room, event)
+
     async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle one reaction inside the per-turn thread-history cache scope."""
         assert self.client is not None
@@ -1362,6 +1376,47 @@ class AgentBot:
             room_id=room.room_id,
             event=event,
             correlation_id=event.event_id,
+        )
+
+    async def _handle_unknown_event_inner(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Resolve custom approval events on the router bot."""
+        if self.agent_name != ROUTER_AGENT_NAME or event.type != TOOL_APPROVAL_RESPONSE_EVENT_TYPE:
+            return
+        if not is_authorized_sender(
+            event.sender,
+            self.config,
+            room.room_id,
+            self.runtime_paths,
+            room_alias=room.canonical_alias,
+        ):
+            self.logger.debug("ignoring_unknown_event_from_unauthorized_sender", user_id=event.sender, type=event.type)
+            return
+        if not self._turn_policy.can_reply_to_sender(event.sender):
+            self.logger.debug("Ignoring unknown event due to reply permissions", sender=event.sender, type=event.type)
+            return
+
+        store = get_approval_store()
+        if store is None:
+            self.logger.debug("ignoring_tool_approval_response_without_store", room_id=room.room_id)
+            return
+
+        resolved_request = await handle_tool_approval_response_event(
+            store=store,
+            room_id=room.room_id,
+            sender_id=event.sender,
+            event=event,
+        )
+        if resolved_request is None:
+            return
+
+        self.logger.info(
+            "tool_approval_resolved_from_matrix_event",
+            approval_request_id=resolved_request.id,
+            tool_name=resolved_request.tool_name,
+            status=resolved_request.status,
+            resolved_by=resolved_request.resolved_by,
+            room_id=room.room_id,
+            thread_id=resolved_request.thread_id,
         )
 
     async def _on_media_message(

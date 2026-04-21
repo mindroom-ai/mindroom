@@ -16,9 +16,11 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.tool_approval import (
+    TOOL_APPROVAL_RESPONSE_EVENT_TYPE,
     ToolApprovalScriptError,
     evaluate_tool_approval,
     get_approval_store,
+    handle_tool_approval_response_event,
     initialize_approval_store,
     shutdown_approval_store,
 )
@@ -335,6 +337,115 @@ async def test_create_request_persists_one_json_file(tmp_path: Path) -> None:
     assert payload["status"] == "pending"
     assert payload["arguments"] == {"command": "echo hi"}
     assert payload["matched_rule"] == "run_shell_*"
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_response_event_resolves_pending_request_for_requester(tmp_path: Path) -> None:
+    """Matrix approval responses should resolve the matching pending request."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    store = initialize_approval_store(runtime_paths)
+    request = await store.create_request(
+        tool_name="run_shell_command",
+        arguments={"command": "echo hi"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        channel="matrix",
+        tenant_id=None,
+        account_id=None,
+        matched_rule="run_shell_*",
+        script_path=None,
+        timeout_seconds=60,
+    )
+    await store.record_approval_event(request.id, "$approval")
+
+    event = pytest.importorskip("nio").UnknownEvent.from_dict(
+        {
+            "type": TOOL_APPROVAL_RESPONSE_EVENT_TYPE,
+            "event_id": "$response",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "status": "approved",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread",
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": "$approval"},
+                },
+            },
+        },
+    )
+
+    resolved_request = await handle_tool_approval_response_event(
+        store=store,
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        event=event,
+    )
+
+    assert resolved_request is not None
+    assert resolved_request.id == request.id
+    assert resolved_request.status == "approved"
+    assert resolved_request.resolved_by == "@user:localhost"
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_response_event_ignores_non_requesters(tmp_path: Path) -> None:
+    """Only the original requester should be able to resolve a Matrix approval event."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    store = initialize_approval_store(runtime_paths)
+    request = await store.create_request(
+        tool_name="run_shell_command",
+        arguments={"command": "echo hi"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        channel="matrix",
+        tenant_id=None,
+        account_id=None,
+        matched_rule="run_shell_*",
+        script_path=None,
+        timeout_seconds=60,
+    )
+    await store.record_approval_event(request.id, "$approval")
+
+    event = pytest.importorskip("nio").UnknownEvent.from_dict(
+        {
+            "type": TOOL_APPROVAL_RESPONSE_EVENT_TYPE,
+            "event_id": "$response",
+            "sender": "@someone-else:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "status": "denied",
+                "reason": "nope",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread",
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": "$approval"},
+                },
+            },
+        },
+    )
+
+    resolved_request = await handle_tool_approval_response_event(
+        store=store,
+        room_id="!room:localhost",
+        sender_id="@someone-else:localhost",
+        event=event,
+    )
+
+    assert resolved_request is None
+    current_request = store.get_request(request.id)
+    assert current_request is not None
+    assert current_request.status == "pending"
 
 
 def test_initialize_approval_store_expires_persisted_pending_requests(tmp_path: Path) -> None:

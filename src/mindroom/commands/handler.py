@@ -24,7 +24,6 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
-from mindroom.tool_approval import ApprovalStore, get_approval_store
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.skills import resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
@@ -187,72 +186,6 @@ def _build_skill_command_prompt(skill_name: str, args_text: str) -> str:
 def _normalized_response_event_id(raw_response_event_id: str | None) -> str | None:
     """Normalize Matrix send helpers that may return empty strings or None."""
     return raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
-
-
-def _tool_approval_request_error(
-    *,
-    store: ApprovalStore,
-    room_id: str,
-    thread_id: str | None,
-    request_id: str,
-) -> str | None:
-    request = store.get_request(request_id)
-    if request is None:
-        return f"❌ Tool request `{request_id}` was not found."
-    if request.room_id != room_id:
-        return f"❌ Tool request `{request_id}` belongs to a different room."
-    if request.thread_id != thread_id:
-        return f"❌ Tool request `{request_id}` belongs to a different thread."
-    if request.status != "pending":
-        return f"❌ Tool request `{request_id}` is already `{request.status}`."
-    return None
-
-
-async def _handle_tool_approval_command(
-    *,
-    room_id: str,
-    thread_id: str | None,
-    request_id: str,
-    requester_user_id: str,
-    deny_reason: str | None = None,
-) -> str:
-    store = get_approval_store()
-    if store is None:
-        return "❌ Tool approvals are not initialized."
-
-    error = _tool_approval_request_error(
-        store=store,
-        room_id=room_id,
-        thread_id=thread_id,
-        request_id=request_id,
-    )
-    if error is not None:
-        return error
-
-    try:
-        if deny_reason is None:
-            resolved_request = await store.approve(
-                request_id,
-                resolved_by=requester_user_id,
-            )
-        else:
-            resolved_request = await store.deny(
-                request_id,
-                reason=deny_reason,
-                resolved_by=requester_user_id,
-            )
-    except (LookupError, ValueError):
-        refreshed_request = store.get_request(request_id)
-        if refreshed_request is None:
-            return f"❌ Tool request `{request_id}` was not found."
-        return f"❌ Tool request `{request_id}` is already `{refreshed_request.status}`."
-
-    if deny_reason is None:
-        return f"✅ Approved tool request `{request_id}` for `{resolved_request.tool_name}`."
-    return (
-        f"❌ Denied tool request `{request_id}` for `{resolved_request.tool_name}`. "
-        f"Reason: {resolved_request.resolution_reason}"
-    )
 
 
 def _resolve_skill_command_agent(  # noqa: C901
@@ -628,23 +561,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     if command.type == CommandType.HELP:
         topic = command.args.get("topic")
         response_text = get_command_help(topic)
-
-    elif command.type == CommandType.APPROVE_TOOL:
-        response_text = await _handle_tool_approval_command(
-            room_id=room.room_id,
-            thread_id=effective_thread_id,
-            request_id=command.args["request_id"],
-            requester_user_id=requester_user_id,
-        )
-
-    elif command.type == CommandType.DENY_TOOL:
-        response_text = await _handle_tool_approval_command(
-            room_id=room.room_id,
-            thread_id=effective_thread_id,
-            request_id=command.args["request_id"],
-            requester_user_id=requester_user_id,
-            deny_reason=command.args.get("reason") or "Denied in Matrix.",
-        )
 
     elif command.type == CommandType.HI:
         # Generate the welcome message for this room

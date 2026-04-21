@@ -97,6 +97,10 @@ from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_r
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.tool_approval import (
+    TOOL_APPROVAL_RESPONSE_EVENT_TYPE,
+    initialize_approval_store,
+)
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_controller import TurnController, _PrecheckedEvent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
@@ -2880,6 +2884,71 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
         assert bot._agent_has_matrix_messaging_tool("calculator") is True
+
+    @pytest.mark.asyncio
+    async def test_router_resolves_tool_approval_response_events(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router should resolve pending tool approvals from Matrix approval response events."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        store = initialize_approval_store(runtime_paths)
+        request = await store.create_request(
+            tool_name="run_shell_command",
+            arguments={"command": "echo hi"},
+            agent_name="calculator",
+            room_id="!test:localhost",
+            thread_id="$thread-root",
+            requester_id="@user:localhost",
+            session_id="session-1",
+            channel="matrix",
+            tenant_id=None,
+            account_id=None,
+            matched_rule="run_shell_*",
+            script_path=None,
+            timeout_seconds=60,
+        )
+        await store.record_approval_event(request.id, "$approval-event")
+
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = nio.UnknownEvent.from_dict(
+            {
+                "type": TOOL_APPROVAL_RESPONSE_EVENT_TYPE,
+                "event_id": "$response-event",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!test:localhost",
+                "content": {
+                    "status": "approved",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread-root",
+                        "is_falling_back": True,
+                        "m.in_reply_to": {"event_id": "$approval-event"},
+                    },
+                },
+            },
+        )
+
+        await bot._on_unknown_event(room, event)
+
+        resolved_request = store.get_request(request.id)
+        assert resolved_request is not None
+        assert resolved_request.status == "approved"
+        assert resolved_request.resolved_by == "@user:localhost"
 
     @pytest.mark.asyncio
     async def test_non_streaming_hidden_tool_calls_do_not_send_tool_trace(
