@@ -201,10 +201,15 @@ def _build_workspace_knowledge_links(
 def _remove_stale_workspace_knowledge_links(
     knowledge_root: Path,
     *,
+    workspace_root: Path,
     desired_links: Mapping[Path, Path],
 ) -> None:
     for existing_path in knowledge_root.iterdir():
-        if existing_path.is_symlink() and existing_path not in desired_links:
+        if (
+            existing_path.is_symlink()
+            and existing_path not in desired_links
+            and existing_path.resolve().is_relative_to(workspace_root)
+        ):
             existing_path.unlink()
 
 
@@ -253,6 +258,7 @@ def ensure_workspace_knowledge_links(
     )
     _remove_stale_workspace_knowledge_links(
         knowledge_root,
+        workspace_root=workspace_root,
         desired_links=desired_links,
     )
     _apply_workspace_knowledge_links(desired_links)

@@ -681,6 +681,16 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_knowledge_base_ids_are_path_safe(self) -> Config:
+        """Reject knowledge base IDs that would create nested or overlapping alias paths."""
+        invalid_ids = sorted(base_id for base_id in self.knowledge_bases if "/" in base_id or "\\" in base_id)
+        if invalid_ids:
+            formatted = ", ".join(invalid_ids)
+            msg = f"knowledge_bases keys must not contain path separators; invalid keys: {formatted}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_private_knowledge(self) -> Config:
         """Ensure enabled private knowledge declares an explicit path."""
         invalid_private_knowledge = [
