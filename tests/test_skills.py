@@ -1681,6 +1681,9 @@ async def test_skill_command_tool_dispatch_treats_loaded_and_failed_bare_functio
         ("github", "get_repository"),
         ("googlesearch", "web_search"),
         ("duckduckgo", "web_search"),
+        ("gmail", "search_emails"),
+        ("google_calendar", "create_event"),
+        ("google_sheets", "read_sheet"),
     ],
 )
 def test_resolve_tool_dispatch_target_uses_declared_function_names_when_factory_import_fails(
