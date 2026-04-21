@@ -396,12 +396,13 @@ async def _maybe_block_for_tool_approval(
         return None
 
     approval_arguments = deepcopy(args)
+    script_arguments = deepcopy(approval_arguments)
     try:
         requires_approval, matched_rule, script_path, timeout_seconds = await evaluate_tool_approval(
             resolved_context.config,
             resolved_context.runtime_paths,
             tool_name,
-            approval_arguments,
+            script_arguments,
             resolved_context.agent_name,
         )
     except ToolApprovalScriptError as exc:

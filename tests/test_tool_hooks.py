@@ -1352,7 +1352,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     async with asyncio.timeout(1):
         while True:
             pending = store.list_pending()
-            if pending:
+            if pending and pending[0].event_id is not None:
                 break
             await asyncio.sleep(0)
 
@@ -1371,6 +1371,98 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     assert result.result == "HI"
     client.room_send.assert_awaited_once()
     assert editor.await_args.args[3]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_scripts_cannot_mutate_rendered_approval_payload(tmp_path: Path) -> None:
+    """Approval scripts should not be able to rewrite the payload the human approves."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    script_path = tmp_path / "approval_scripts" / "redact.py"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text(
+        "def check(tool_name, arguments, agent_name):\n    arguments['payload'] = 'tampered'\n    return True\n",
+        encoding="utf-8",
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "rules": [{"match": "echo", "script": "approval_scripts/redact.py"}],
+            },
+        ),
+        runtime_paths,
+    )
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_code:localhost"))
+    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
+
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, payload: str) -> str:
+            return json.dumps({"payload": payload}, sort_keys=True)
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+    result: object | None = None
+    error: BaseException | None = None
+
+    def worker() -> None:
+        nonlocal result, error
+
+        async def run_execute() -> object:
+            return FunctionCall(function=function, arguments={"payload": "original"}, call_id="call-1").execute()
+
+        try:
+            result = asyncio.run(run_execute())
+        except BaseException as exc:  # pragma: no cover - asserted below
+            error = exc
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+
+    store = get_approval_store()
+    assert store is not None
+    async with asyncio.timeout(1):
+        while True:
+            pending = store.list_pending()
+            if pending and pending[0].event_id is not None:
+                break
+            await asyncio.sleep(0)
+
+    approval_payload = sender.await_args.args[3]
+    assert approval_payload["arguments"] == {"payload": "original"}
+
+    await store.handle_approval_resolution(
+        approval_id=pending[0].id,
+        status="approved",
+        reason=None,
+        resolved_by="@user:localhost",
+    )
+    await asyncio.to_thread(thread.join, 1)
+
+    assert error is None
+    assert not thread.is_alive()
+    assert result is not None
+    assert result.status == "success"
+    assert result.result == json.dumps({"payload": "original"}, sort_keys=True)
 
 
 @pytest.mark.asyncio
