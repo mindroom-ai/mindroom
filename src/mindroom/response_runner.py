@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -474,7 +475,7 @@ class ResponseRunner:
             target=target,
             response_text=visible_text,
             tool_trace=tool_trace if tool_trace else None,
-            extra_content=extra_content,
+            extra_content=copy.deepcopy(extra_content) if extra_content is not None else None,
         )
 
     @property

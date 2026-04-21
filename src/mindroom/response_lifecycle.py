@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import STREAM_STATUS_KEY
+from mindroom.constants import STREAM_STATUS_CANCELLED, STREAM_STATUS_KEY
 from mindroom.post_response_effects import apply_post_response_effects
 
-from .delivery_gateway import EditTextRequest
+from .delivery_gateway import DeliveryResult, EditTextRequest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-    from .delivery_gateway import DeliveryResult
     from .response_runner import ResponseRequest, ResponseRunner
     from .streaming import StreamDeliveryState, StreamFinalizationOutcome
 
@@ -136,19 +136,27 @@ class ResponseLifecycle:
     ) -> str | None:
         """Run outer lifecycle finalization and return the resolved visible event id."""
         delivery_result = outcome.delivery_result
-        await self._repair_stream_terminal_state(outcome)
-        if self.runner._is_cancelled_delivery_result(delivery_result):
+        repaired_delivery_result = await self._repair_stream_terminal_state(outcome)
+        effective_delivery_result = repaired_delivery_result or delivery_result
+        if self.runner._is_cancelled_delivery_result(delivery_result) and (
+            outcome.stream_finalization is None
+            or outcome.stream_finalization.terminal_status == STREAM_STATUS_CANCELLED
+        ):
             await self.runner.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
                 correlation_id=self.correlation_id,
                 envelope=self.response_envelope,
-                visible_response_event_id=outcome.tracked_event_id,
+                visible_response_event_id=(
+                    repaired_delivery_result.event_id
+                    if repaired_delivery_result is not None
+                    else outcome.tracked_event_id
+                ),
                 response_kind=self.response_kind,
                 failure_reason=outcome.delivery_failure_reason
                 or (delivery_result.failure_reason if delivery_result is not None else None),
             )
 
         resolved_event_id = self.runner.resolve_response_event_id(
-            delivery_result=delivery_result,
+            delivery_result=effective_delivery_result,
             tracked_event_id=outcome.tracked_event_id,
             existing_event_id=self.request.existing_event_id,
             existing_event_is_placeholder=self.request.existing_event_is_placeholder,
@@ -160,30 +168,50 @@ class ResponseLifecycle:
         )
         self.runner._emit_pipeline_timing_summary(
             self.request,
-            outcome=self.runner._response_outcome(delivery_result),
+            outcome=self.runner._response_outcome(effective_delivery_result),
         )
         return resolved_event_id
 
-    async def _repair_stream_terminal_state(self, outcome: DeliveryOutcome) -> None:
+    async def _repair_stream_terminal_state(  # noqa: PLR0911
+        self,
+        outcome: DeliveryOutcome,
+    ) -> DeliveryResult | None:
         """Repair one missed terminal stream edit from the outer lifecycle chokepoint."""
         stream_finalization = outcome.stream_finalization
         if stream_finalization is None or stream_finalization.terminal_landed:
-            return
+            return None
         if outcome.stream_state is not None and outcome.stream_state.suppressed_and_cleaned:
-            return
-        if outcome.tracked_event_id is None or outcome.streaming_repair is None:
-            return
+            return None
+        use_stream_state_repair = outcome.stream_state is not None and outcome.stream_state.repair_text is not None
+        if not use_stream_state_repair and outcome.streaming_repair is None:
+            return None
+        if outcome.tracked_event_id is None:
+            return None
 
         repair = outcome.streaming_repair
-        extra_content = dict(repair.extra_content or {})
+        if use_stream_state_repair:
+            assert outcome.stream_state is not None
+            assert outcome.stream_state.repair_text is not None
+            repair_text = outcome.stream_state.repair_text
+            repair_tool_trace = outcome.stream_state.repair_tool_trace
+            repair_extra_content = outcome.stream_state.repair_extra_content
+        else:
+            assert repair is not None
+            repair_text = repair.response_text
+            repair_tool_trace = repair.tool_trace
+            repair_extra_content = repair.extra_content
+
+        extra_content = copy.deepcopy(repair_extra_content or {})
         extra_content[STREAM_STATUS_KEY] = stream_finalization.terminal_status
         try:
             repaired = await self.runner.deps.delivery_gateway.edit_text(
                 EditTextRequest(
-                    target=repair.target,
+                    target=(
+                        repair.target if repair is not None else self.request.target or self.response_envelope.target
+                    ),
                     event_id=outcome.tracked_event_id,
-                    new_text=repair.response_text,
-                    tool_trace=repair.tool_trace,
+                    new_text=repair_text,
+                    tool_trace=repair_tool_trace,
                     extra_content=extra_content,
                 ),
             )
@@ -197,7 +225,7 @@ class ResponseLifecycle:
                 failure_reason=str(error),
                 error_type=error.__class__.__name__,
             )
-            return
+            return None
         except Exception as error:
             self.runner.deps.logger.warning(
                 "Outer stream repair edit failed; visible event remains stale",
@@ -208,16 +236,8 @@ class ResponseLifecycle:
                 failure_reason=str(error),
                 error_type=error.__class__.__name__,
             )
-            return
-        if repaired:
-            self.runner.deps.logger.info(
-                "Repaired missed terminal stream edit",
-                response_kind=self.response_kind,
-                event_id=outcome.tracked_event_id,
-                terminal_status=stream_finalization.terminal_status,
-                reason=stream_finalization.reason,
-            )
-        else:
+            return None
+        if not repaired:
             self.runner.deps.logger.error(
                 "Failed to repair missed terminal stream edit",
                 response_kind=self.response_kind,
@@ -225,6 +245,20 @@ class ResponseLifecycle:
                 terminal_status=stream_finalization.terminal_status,
                 reason=stream_finalization.reason,
             )
+            return None
+        self.runner.deps.logger.info(
+            "Repaired missed terminal stream edit",
+            response_kind=self.response_kind,
+            event_id=outcome.tracked_event_id,
+            terminal_status=stream_finalization.terminal_status,
+            reason=stream_finalization.reason,
+        )
+        return DeliveryResult(
+            event_id=outcome.tracked_event_id,
+            response_text=repair_text,
+            delivery_kind="edited",
+            suppressed=False,
+        )
 
     async def apply_effects_safely(
         self,

@@ -392,7 +392,17 @@ def _finalize_usage_payload(
 ) -> dict[str, Any] | None:
     if isinstance(output_tokens_hint, int) and "output_tokens" not in payload:
         payload["output_tokens"] = output_tokens_hint
-    if "total_tokens" not in payload:
+    existing_total_tokens = payload.get("total_tokens")
+    should_derive_total_tokens = (
+        derive_total_tokens
+        and isinstance(payload.get("input_tokens"), int)
+        and isinstance(payload.get("output_tokens"), int)
+        and (
+            "total_tokens" not in payload
+            or (existing_total_tokens == 0 and (payload["input_tokens"] > 0 or payload["output_tokens"] > 0))
+        )
+    )
+    if "total_tokens" not in payload or should_derive_total_tokens:
         if isinstance(total_tokens_hint, int) and total_tokens_hint > 0:
             payload["total_tokens"] = total_tokens_hint
         elif derive_total_tokens:
@@ -1241,7 +1251,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
 
 
 @timed("model_request_to_completion")
-async def _process_stream_events(  # noqa: C901, PLR0912
+async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     stream_generator: AsyncIterator[object],
     *,
     state: _StreamingAttemptState,
@@ -1307,6 +1317,11 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                 state.completed_run_event = event
                 if event.reasoning_content:
                     state.observed_reasoning_content = True
+                if event.content:
+                    state.full_response = str(event.content)
+                    yield event
+                    continue
+                if event.reasoning_content:
                     yield event
                 continue
 

@@ -87,6 +87,9 @@ class StreamDeliveryState:
     accumulated_text: str = ""
     finalization_outcome: StreamFinalizationOutcome | None = None
     suppressed_and_cleaned: bool = False
+    repair_text: str | None = None
+    repair_tool_trace: list[ToolTraceEntry] | None = None
+    repair_extra_content: dict[str, Any] | None = None
 
 
 class StreamingDeliveryError(Exception):
@@ -332,13 +335,14 @@ class StreamingResponse:
     ) -> _TerminalStreamStatus:
         """Apply terminal text adjustments and return the terminal stream status."""
         ai_run_payload = self.extra_content.get(AI_RUN_METADATA_KEY) if self.extra_content is not None else None
+        has_visible_tool_output = self.show_tool_calls and self.observed_tool_calls > 0
         no_visible_text_error = (
             error is None
             and not restart_interrupted
             and not cancelled
             and not self.accumulated_text.strip()
             and self.observed_reasoning_content
-            and self.observed_tool_calls == 0
+            and not has_visible_tool_output
         )
         if no_visible_text_error:
             self.accumulated_text = _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
@@ -703,6 +707,8 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
         elif isinstance(chunk, RunCompletedEvent):
             if chunk.reasoning_content:
                 streaming.observed_reasoning_content = True
+            if chunk.content:
+                streaming.accumulated_text = str(chunk.content)
             continue
         elif isinstance(chunk, ToolCallStartedEvent):
             if chunk.tool is not None:

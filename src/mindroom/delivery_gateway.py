@@ -29,7 +29,12 @@ from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_me
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
-from mindroom.streaming import StreamDeliveryState, StreamingResponse, send_streaming_response
+from mindroom.streaming import (
+    StreamDeliveryState,
+    StreamFinalizationOutcome,
+    StreamingResponse,
+    send_streaming_response,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -648,9 +653,12 @@ class DeliveryGateway:
         request: FinalizeStreamedResponseRequest,
     ) -> DeliveryResult:
         """Apply hooks and any final edit needed after streamed delivery completes."""
+        stream_finalization = request.stream_state.finalization_outcome if request.stream_state is not None else None
         terminal_stream_status_snapshot = (
             request.extra_content.get(constants.STREAM_STATUS_KEY) if request.extra_content is not None else None
         )
+        if terminal_stream_status_snapshot is None and stream_finalization is not None:
+            terminal_stream_status_snapshot = stream_finalization.terminal_status
         terminal_ai_run_snapshot = (
             copy.deepcopy(request.extra_content.get(constants.AI_RUN_METADATA_KEY))
             if request.extra_content is not None
@@ -672,9 +680,7 @@ class DeliveryGateway:
                 visible_response_event_id=request.streamed_event_id,
             )
             if request.cleanup_suppressed_streamed_event:
-                if request.stream_state is not None:
-                    request.stream_state.suppressed_and_cleaned = True
-                return await self.cleanup_suppressed_streamed_response(
+                cleanup_result = await self.cleanup_suppressed_streamed_response(
                     room_id=request.target.room_id,
                     event_id=request.streamed_event_id,
                     response_text=request.streamed_text,
@@ -682,6 +688,9 @@ class DeliveryGateway:
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id,
                 )
+                if request.stream_state is not None:
+                    request.stream_state.suppressed_and_cleaned = True
+                return cleanup_result
             self.deps.logger.warning(
                 "Streaming response was already delivered before a suppressing hook ran",
                 source_event_id=request.response_envelope.source_event_id,
@@ -709,7 +718,15 @@ class DeliveryGateway:
             )
             if terminal_ai_run_snapshot is not None:
                 terminal_extra_content[constants.AI_RUN_METADATA_KEY] = terminal_ai_run_snapshot
-            return await self.deliver_final(
+            terminal_display_text = interactive.parse_and_format_interactive(
+                draft.response_text,
+                extract_mapping=False,
+            ).formatted_text
+            if request.stream_state is not None:
+                request.stream_state.repair_text = terminal_display_text
+                request.stream_state.repair_tool_trace = copy.deepcopy(draft.tool_trace)
+                request.stream_state.repair_extra_content = copy.deepcopy(terminal_extra_content)
+            delivery = await self.deliver_final(
                 FinalDeliveryRequest(
                     target=request.target,
                     existing_event_id=request.streamed_event_id,
@@ -722,6 +739,19 @@ class DeliveryGateway:
                     apply_before_hooks=False,
                 ),
             )
+            if (
+                request.stream_state is not None
+                and delivery.event_id is not None
+                and delivery.delivery_kind is not None
+            ):
+                request.stream_state.event_id = delivery.event_id
+                request.stream_state.finalization_outcome = StreamFinalizationOutcome(
+                    terminal_landed=True,
+                    terminal_event_id=delivery.event_id,
+                    terminal_status=terminal_stream_status_snapshot or constants.STREAM_STATUS_COMPLETED,
+                    reason="hook_terminal_edit_applied",
+                )
+            return delivery
 
         interactive_response = interactive.parse_and_format_interactive(
             request.streamed_text,
