@@ -1238,6 +1238,7 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
     client.room_send = AsyncMock(side_effect=mock_room_send)
     bot = MagicMock()
     bot.client = client
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
     orchestrator.agent_bots = {"code": bot}
     initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=AsyncMock())
 
@@ -1304,6 +1305,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     )
     bot = MagicMock()
     bot.client = client
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
     orchestrator.agent_bots = {"code": bot}
     editor = AsyncMock()
     initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=editor)
@@ -1757,7 +1759,7 @@ async def test_tool_before_call_hooks_run_before_tool_approval_gate(tmp_path: Pa
         assert len(pending) == 1
         assert seen == ["before"]
 
-        await store.approve(pending[0].id, resolved_by="dashboard-user")
+        await store.approve(pending[0].id, resolved_by="@user:localhost")
         result = await task
 
     assert result == "ok"
@@ -1859,7 +1861,7 @@ async def test_tool_approval_deny_emits_after_call_as_blocked(tmp_path: Path) ->
         assert store is not None
         pending = store.list_pending()
         assert len(pending) == 1
-        await store.deny(pending[0].id, reason="Denied by dashboard user.", resolved_by="dashboard-user")
+        await store.deny(pending[0].id, reason="Denied by dashboard user.", resolved_by="@user:localhost")
         result = await task
 
     assert next_func.await_count == 0

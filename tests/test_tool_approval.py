@@ -456,12 +456,12 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
     assert sender.await_args.args[3]["msgtype"] == "io.mindroom.tool_approval"
     assert sender.await_args.args[3]["status"] == "pending"
 
-    resolved = await store.approve(pending.id, resolved_by="@bas:localhost")
+    resolved = await store.approve(pending.id, resolved_by="@user:localhost")
     decision = await task
 
     assert resolved.status == "approved"
     assert decision.status == "approved"
-    assert decision.resolved_by == "@bas:localhost"
+    assert decision.resolved_by == "@user:localhost"
     assert editor.await_args.args[:3] == ("!room:localhost", "$approval", "code")
     assert editor.await_args.args[3]["status"] == "approved"
     assert editor.await_args.args[3]["thread_id"] == "$thread"
@@ -517,7 +517,7 @@ async def test_request_approval_denies_with_reason(tmp_path: Path) -> None:
     resolved = await store.deny(
         pending.id,
         reason="Too dangerous",
-        resolved_by="@bas:localhost",
+        resolved_by="@user:localhost",
     )
     decision = await task
 
