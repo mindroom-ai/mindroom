@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-# ruff: noqa: D103
 import importlib.util
 import os
 import sys
@@ -30,6 +29,7 @@ def _load_prompt_cache_review_module() -> ModuleType:
 
 
 def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> None:
+    """Parse concatenated JSON documents from one JSONL line."""
     module = _load_prompt_cache_review_module()
     jsonl_path = tmp_path / "requests.jsonl"
     jsonl_path.write_text(
@@ -47,6 +47,7 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
 
 
 def test_build_session_reviews_detects_prefix_extension_with_two_appended_messages() -> None:
+    """Treat appended request messages as a reusable-prefix extension."""
     module = _load_prompt_cache_review_module()
     rows = [
         module.RequestRow(
@@ -87,6 +88,7 @@ def test_build_session_reviews_detects_prefix_extension_with_two_appended_messag
 
 
 def test_prefix_extension_ignores_moving_cache_control_marker() -> None:
+    """Ignore cache-control marker movement when comparing reusable prefixes."""
     module = _load_prompt_cache_review_module()
     rows = [
         module.RequestRow(
@@ -127,6 +129,7 @@ def test_prefix_extension_ignores_moving_cache_control_marker() -> None:
 
 
 def test_raw_prefix_extension_detects_moving_cache_control_marker() -> None:
+    """Show that raw provider blobs still change when cache markers move."""
     module = _load_prompt_cache_review_module()
     previous_row = module.RequestRow(
         timestamp=datetime.fromisoformat("2026-04-11T11:00:00-07:00"),
@@ -164,6 +167,7 @@ def test_raw_prefix_extension_detects_moving_cache_control_marker() -> None:
 
 
 def test_build_provider_message_blobs_from_messages_can_skip_vertex_breakpoint() -> None:
+    """Allow blob building without applying the Vertex cache breakpoint hook."""
     module = _load_prompt_cache_review_module()
     messages = [
         Message(role="system", content="System prompt"),
@@ -195,6 +199,7 @@ def test_bootstrap_probe_environment_resolves_relative_adc_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Resolve relative ADC paths from runtime configuration into env vars."""
     module = _load_prompt_cache_review_module()
     config_dir = tmp_path / "config"
     config_dir.mkdir()

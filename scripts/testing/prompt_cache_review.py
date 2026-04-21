@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-# ruff: noqa: C901, D102, D103, EM101, EM102, S112, S608, TRY003
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from collections import Counter, defaultdict
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import pairwise
@@ -19,6 +20,7 @@ import yaml
 from agno.models.message import Message
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
+from pydantic import ValidationError
 
 if TYPE_CHECKING:
     from agno.models.response import ModelResponse
@@ -35,6 +37,7 @@ from mindroom.vertex_claude_prompt_cache import (  # noqa: E402
 )
 
 DEFAULT_AGENT_DB = "mindroom_dev"
+SQLITE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 type JsonDict = dict[str, object]
 
 
@@ -81,6 +84,7 @@ class RunMetrics:
 
     @property
     def cache_read_fraction(self) -> float | None:
+        """Return cache-read tokens as a fraction of total prompt tokens."""
         denominator = self.input_tokens + self.cache_read_tokens
         if denominator <= 0:
             return None
@@ -102,6 +106,7 @@ class DbSessionSummary:
 
     @property
     def aggregate_cache_read_fraction(self) -> float | None:
+        """Return aggregate cache-read tokens as a fraction of total prompt tokens."""
         denominator = self.total_input_tokens + self.total_cache_read_tokens
         if denominator <= 0:
             return None
@@ -159,6 +164,7 @@ class LiveProbeTurn:
 
     @property
     def cache_read_fraction(self) -> float | None:
+        """Return cache-read tokens as a fraction of total prompt tokens."""
         denominator = self.input_tokens + self.cache_read_tokens
         if denominator <= 0:
             return None
@@ -166,6 +172,7 @@ class LiveProbeTurn:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the review tool."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
@@ -251,6 +258,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the review tool CLI."""
     args = parse_args()
     storage_root = resolve_storage_root(args.storage_root)
     if args.probe_live:
@@ -289,6 +297,7 @@ def main() -> None:
 
 
 def resolve_storage_root(explicit_root: Path | None) -> Path:
+    """Resolve the storage root used for JSONL and session DB discovery."""
     if explicit_root is not None:
         return explicit_root.expanduser()
 
@@ -308,6 +317,7 @@ def resolve_storage_root(explicit_root: Path | None) -> Path:
 
 
 def find_latest_jsonl(storage_root: Path) -> Path:
+    """Return the newest LLM request JSONL file under the storage root."""
     log_dir = storage_root / "logs" / "llm_requests"
     jsonl_paths = sorted(log_dir.glob("*.jsonl"))
     if not jsonl_paths:
@@ -317,6 +327,7 @@ def find_latest_jsonl(storage_root: Path) -> Path:
 
 
 def resolve_probe_config_path(explicit_config: Path | None, storage_root: Path) -> Path:
+    """Resolve the config path used for live Vertex probes."""
     if explicit_config is not None:
         return explicit_config.expanduser().resolve()
 
@@ -328,6 +339,7 @@ def resolve_probe_config_path(explicit_config: Path | None, storage_root: Path) 
 
 
 def default_db_path(storage_root: Path, agent_name: str) -> Path | None:
+    """Return the default session DB path for one agent when it exists."""
     db_path = storage_root / "agents" / agent_name / "sessions" / f"{agent_name}.db"
     return db_path if db_path.exists() else None
 
@@ -338,6 +350,7 @@ def resolve_db_path(
     agent_db: str,
     session_id: str | None,
 ) -> Path | None:
+    """Resolve the most relevant session DB path for the requested session."""
     if explicit_db_path is not None:
         return explicit_db_path.expanduser()
 
@@ -356,15 +369,17 @@ def resolve_db_path(
 
 
 def db_contains_session(db_path: Path, session_id: str) -> bool:
+    """Return whether the SQLite DB contains the requested session ID."""
     if not db_path.exists():
         return False
     connection = sqlite3.connect(db_path)
     try:
         table_name = detect_session_table_name(connection)
         cursor = connection.cursor()
-        cursor.execute(f"SELECT 1 FROM {table_name} WHERE session_id = ? LIMIT 1", (session_id,))
+        lookup_query = f"SELECT 1 FROM {validated_sqlite_identifier(table_name)} WHERE session_id = ? LIMIT 1"  # noqa: S608
+        cursor.execute(lookup_query, (session_id,))
         return cursor.fetchone() is not None
-    except (sqlite3.Error, SystemExit):
+    except (sqlite3.Error, SystemExit, ValueError):
         return False
     finally:
         connection.close()
@@ -375,6 +390,7 @@ def load_request_rows(
     *,
     session_id_filter: str | None = None,
 ) -> tuple[list[RequestRow], JsonlParseStats]:
+    """Load request rows plus JSONL parse diagnostics from one log file."""
     decoder = json.JSONDecoder()
     rows: list[RequestRow] = []
     line_count = 0
@@ -424,6 +440,7 @@ def load_request_rows(
 
 
 def parse_request_row(payload: object) -> RequestRow | None:
+    """Parse one logged request payload into a normalized request row."""
     payload_dict = object_dict(payload)
     if payload_dict is None:
         return None
@@ -470,6 +487,7 @@ def build_provider_message_blobs(
     model_id: str,
     model_params: object,
 ) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+    """Serialize logged messages into provider-specific cache comparison blobs."""
     prompt_messages = parse_logged_messages(messages_raw)
     return build_provider_message_blobs_from_messages(prompt_messages, model_id, model_params)
 
@@ -481,6 +499,7 @@ def build_provider_message_blobs_from_messages(
     *,
     apply_vertex_cache_breakpoint: bool = True,
 ) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+    """Build raw and normalized provider message blobs from parsed messages."""
     preview = ""
     for message in prompt_messages:
         if message.role not in ("system", "developer"):
@@ -512,6 +531,7 @@ def build_provider_message_blobs_from_messages(
 
 
 def parse_logged_messages(messages_raw: object) -> list[Message]:
+    """Parse logged message payloads into Agno messages suitable for comparison."""
     if not isinstance(messages_raw, list):
         return []
 
@@ -519,11 +539,9 @@ def parse_logged_messages(messages_raw: object) -> list[Message]:
     for message in messages_raw:
         if not isinstance(message, dict):
             continue
-        try:
+        with suppress(ValidationError):
             parsed_message = Message.model_validate(message)
-        except Exception:
-            continue
-        parsed_messages.append(parsed_message.model_copy(update={"audio": None, "videos": None}, deep=True))
+            parsed_messages.append(parsed_message.model_copy(update={"audio": None, "videos": None}, deep=True))
     return parsed_messages
 
 
@@ -532,6 +550,7 @@ def apply_vertex_cache_breakpoint_if_needed(
     model_id: str,
     model_params: object,
 ) -> list[Message]:
+    """Apply the MindRoom Vertex cache breakpoint when the model settings require it."""
     model_params_dict = object_dict(model_params)
     if model_params_dict is None or model_params_dict.get("cache_system_prompt") is not True:
         return [message.model_copy(deep=True) for message in messages]
@@ -544,45 +563,36 @@ def apply_vertex_cache_breakpoint_if_needed(
 
 
 def is_claude_request(model_id: str) -> bool:
+    """Return whether the request model is a Claude variant."""
     return "claude" in model_id.lower()
 
 
 def extract_text(content: object) -> str:
+    """Return a best-effort plain-text representation of message content."""
+    return " ".join(chunk for chunk in extract_text_chunks(content) if chunk)
+
+
+def extract_text_chunks(content: object) -> list[str]:
+    """Collect plain-text fragments from supported message content shapes."""
     if isinstance(content, str):
-        return content
+        return [content]
     if isinstance(content, list):
-        chunks: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                chunks.append(item)
-            else:
-                item_dict = object_dict(item)
-                if item_dict is None:
-                    continue
-                text_value = item_dict.get("text")
-                if isinstance(text_value, str):
-                    chunks.append(text_value)
-                    continue
-                content_value = item_dict.get("content")
-                if isinstance(content_value, str):
-                    chunks.append(content_value)
-        return " ".join(chunk for chunk in chunks if chunk)
+        return [chunk for item in content for chunk in extract_text_chunks(item) if chunk]
     content_dict = object_dict(content)
-    if content_dict is not None:
-        text_value = content_dict.get("text")
-        if isinstance(text_value, str):
-            return text_value
-        content_value = content_dict.get("content")
-        if isinstance(content_value, str):
-            return content_value
-    return ""
+    if content_dict is None:
+        return []
+    return [
+        value for value in (content_dict.get("text"), content_dict.get("content")) if isinstance(value, str) and value
+    ]
 
 
 def stable_json(value: object) -> str:
+    """Serialize a value into stable JSON for deterministic prompt comparisons."""
     return json.dumps(to_jsonable(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def strip_cache_control(value: object) -> object:
+    """Remove Claude cache-control markers from nested JSON-like values."""
     jsonable_value = to_jsonable(value)
     if isinstance(jsonable_value, dict):
         return {key: strip_cache_control(item) for key, item in jsonable_value.items() if key != "cache_control"}
@@ -592,6 +602,7 @@ def strip_cache_control(value: object) -> object:
 
 
 def to_jsonable(value: object) -> object:
+    """Convert nested values into JSON-serializable primitives."""
     if value is None or isinstance(value, str | int | float | bool):
         return value
     if isinstance(value, dict):
@@ -608,6 +619,7 @@ def to_jsonable(value: object) -> object:
 
 
 def build_session_reviews(rows: list[RequestRow]) -> list[SessionReview]:
+    """Group request rows into per-session prompt-cache review summaries."""
     grouped_rows: dict[tuple[str, str, str, str], list[RequestRow]] = defaultdict(list)
     for row in rows:
         if row.session_id is None:
@@ -656,6 +668,7 @@ def build_session_reviews(rows: list[RequestRow]) -> list[SessionReview]:
 
 
 def rows_match_exactly(first: RequestRow, second: RequestRow) -> bool:
+    """Return whether two rows have identical reusable prompt content."""
     return (
         first.system_prompt == second.system_prompt
         and first.normalized_message_blobs == second.normalized_message_blobs
@@ -663,6 +676,7 @@ def rows_match_exactly(first: RequestRow, second: RequestRow) -> bool:
 
 
 def rows_match_minus_last(first: RequestRow, second: RequestRow) -> bool:
+    """Return whether two rows match when the latest message is ignored."""
     return (
         first.system_prompt == second.system_prompt
         and first.normalized_message_blobs[:-1] == second.normalized_message_blobs[:-1]
@@ -670,6 +684,7 @@ def rows_match_minus_last(first: RequestRow, second: RequestRow) -> bool:
 
 
 def current_extends_previous(previous_row: RequestRow, current_row: RequestRow) -> bool:
+    """Return whether the current row extends the previous reusable prompt prefix."""
     if previous_row.system_prompt != current_row.system_prompt:
         return False
     if len(previous_row.normalized_message_blobs) > len(current_row.normalized_message_blobs):
@@ -681,6 +696,7 @@ def current_extends_previous(previous_row: RequestRow, current_row: RequestRow) 
 
 
 def current_extends_previous_raw(previous_row: RequestRow, current_row: RequestRow) -> bool:
+    """Return whether the raw provider payload extends the previous request prefix."""
     if previous_row.system_prompt != current_row.system_prompt:
         return False
     if len(previous_row.message_blobs) > len(current_row.message_blobs):
@@ -700,6 +716,7 @@ def run_live_probe(
     threshold: float,
     compare_plain: bool,
 ) -> None:
+    """Run a live direct-Agno Vertex Claude prompt-cache probe."""
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root)
     bootstrap_probe_environment(runtime_paths)
     spec = load_probe_model_spec(config_path, runtime_paths, model_name)
@@ -735,6 +752,7 @@ def run_live_probe(
 
 
 def bootstrap_probe_environment(runtime_paths: RuntimePaths) -> None:
+    """Populate probe-specific environment variables from the runtime config."""
     google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
     if google_application_credentials is not None and "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(google_application_credentials)
@@ -746,6 +764,7 @@ def bootstrap_probe_environment(runtime_paths: RuntimePaths) -> None:
 
 
 def load_probe_model_spec(config_path: Path, runtime_paths: RuntimePaths, model_name: str) -> ProbeModelSpec:
+    """Load and validate the Vertex Claude settings used for a live probe."""
     config_data = object_dict(yaml.safe_load(config_path.read_text(encoding="utf-8")) or {})
     if config_data is None:
         msg = f"Expected mapping config at {config_path}"
@@ -778,9 +797,11 @@ def load_probe_model_spec(config_path: Path, runtime_paths: RuntimePaths, model_
         extra_kwargs.get("base_url") or runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL") or "",
     ).strip()
     if not project_id:
-        raise SystemExit("Missing ANTHROPIC_VERTEX_PROJECT_ID for live Vertex probe")
+        msg = "Missing ANTHROPIC_VERTEX_PROJECT_ID for live Vertex probe"
+        raise SystemExit(msg)
     if not region:
-        raise SystemExit("Missing CLOUD_ML_REGION for live Vertex probe")
+        msg = "Missing CLOUD_ML_REGION for live Vertex probe"
+        raise SystemExit(msg)
 
     return ProbeModelSpec(
         config_path=config_path,
@@ -795,6 +816,7 @@ def load_probe_model_spec(config_path: Path, runtime_paths: RuntimePaths, model_
 
 
 def coerce_bool(value: object, *, default: bool) -> bool:
+    """Coerce a loose config value into a boolean."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -816,6 +838,7 @@ def run_live_probe_sequence(
     first_user_line_count: int,
     max_output_tokens: int,
 ) -> list[LiveProbeTurn]:
+    """Run the repeated live probe requests for one scenario label."""
     model = build_probe_model(spec, install_hook=install_hook, max_output_tokens=max_output_tokens)
     system_prompt = build_probe_system_prompt(system_line_count, scenario_label)
     conversation_messages: list[Message] = [Message(role="system", content=system_prompt)]
@@ -872,6 +895,7 @@ def build_probe_model(
     install_hook: bool,
     max_output_tokens: int,
 ) -> VertexAIClaude:
+    """Construct the Vertex Claude model used for a live probe sequence."""
     model = VertexAIClaude(
         id=spec.model_id,
         project_id=spec.project_id,
@@ -888,6 +912,7 @@ def build_probe_model(
 
 
 def build_probe_system_prompt(line_count: int, scenario_label: str) -> str:
+    """Build the long stable system prompt used for cache validation."""
     return "\n".join(
         f"Cache validation charter {index:03d} [{scenario_label}]: preserve every earlier clause verbatim because exact prefix reuse matters."
         for index in range(1, line_count + 1)
@@ -895,6 +920,7 @@ def build_probe_system_prompt(line_count: int, scenario_label: str) -> str:
 
 
 def build_probe_user_prompt(turn_index: int, first_user_line_count: int, scenario_label: str) -> str:
+    """Build the user prompt for one live probe turn."""
     if turn_index == 1:
         stable_body = "\n".join(
             f"Stable user block {index:03d} [{scenario_label}]: this line exists only to create one long reusable user prefix."
@@ -916,6 +942,7 @@ def build_probe_request_row(
     model_params: object,
     apply_vertex_cache_breakpoint: bool,
 ) -> RequestRow:
+    """Build a request row for a synthetic live probe turn."""
     message_blobs, normalized_message_blobs, preview = build_provider_message_blobs_from_messages(
         messages,
         model_id,
@@ -938,12 +965,14 @@ def build_probe_request_row(
 
 
 def extract_model_response_text(response: ModelResponse) -> str:
+    """Extract plain text from a model response for probe logging."""
     if isinstance(response.content, str) and response.content:
         return response.content
     return extract_text(response.content) or "<empty response>"
 
 
 def response_usage_int(response: ModelResponse, field_name: str) -> int:
+    """Return one integer usage field from a model response."""
     usage = response.response_usage
     if usage is None:
         return 0
@@ -955,10 +984,12 @@ def response_usage_int(response: ModelResponse, field_name: str) -> int:
         return coerce_int(usage.cache_read_tokens)
     if field_name == "cache_write_tokens":
         return coerce_int(usage.cache_write_tokens)
-    raise ValueError(f"Unsupported response usage field: {field_name}")
+    msg = f"Unsupported response usage field: {field_name}"
+    raise ValueError(msg)
 
 
 def print_live_probe_results(mode_label: str, turns: list[LiveProbeTurn], *, threshold: float) -> None:
+    """Print the live probe summary for one probe mode."""
     print(f"{mode_label.upper()} MODE")
     for turn in turns:
         normalized_prefix = format_probe_bool(turn.normalized_prefix_extension)
@@ -986,17 +1017,20 @@ def print_live_probe_results(mode_label: str, turns: list[LiveProbeTurn], *, thr
 
 
 def format_probe_bool(value: bool | None) -> str:
+    """Format a nullable boolean for probe output."""
     if value is None:
         return "n/a"
     return "yes" if value else "no"
 
 
 def load_db_summaries(db_path: Path) -> dict[str, DbSessionSummary]:
+    """Load session summaries and cache metrics from the SQLite session DB."""
     connection = sqlite3.connect(db_path)
     try:
         table_name = detect_session_table_name(connection)
         cursor = connection.cursor()
-        cursor.execute(f"SELECT session_id, updated_at, runs FROM {table_name}")
+        summary_query = f"SELECT session_id, updated_at, runs FROM {validated_sqlite_identifier(table_name)}"  # noqa: S608
+        cursor.execute(summary_query)
         summaries: dict[str, DbSessionSummary] = {}
         for session_id, updated_at_raw, runs_raw in cursor.fetchall():
             if not isinstance(session_id, str):
@@ -1020,6 +1054,7 @@ def load_db_summaries(db_path: Path) -> dict[str, DbSessionSummary]:
 
 
 def detect_session_table_name(connection: sqlite3.Connection) -> str:
+    """Return the single Agno session table name present in the SQLite DB."""
     cursor = connection.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_sessions'")
     table_names = [name for (name,) in cursor.fetchall() if isinstance(name, str)]
@@ -1030,6 +1065,7 @@ def detect_session_table_name(connection: sqlite3.Connection) -> str:
 
 
 def parse_nested_json(value: object) -> object:
+    """Repeatedly decode nested JSON strings until a non-string value remains."""
     parsed_value = value
     while isinstance(parsed_value, str):
         try:
@@ -1040,6 +1076,7 @@ def parse_nested_json(value: object) -> object:
 
 
 def parse_run_summaries(runs_value: object) -> list[RunMetrics]:
+    """Parse persisted run metrics from the nested Agno session payload."""
     if not isinstance(runs_value, list):
         return []
 
@@ -1075,6 +1112,7 @@ def print_overview(
     requested_session: str | None,
     top: int,
 ) -> None:
+    """Print the top-level review overview for JSONL and DB-backed sessions."""
     missing_session_rows = sum(1 for row in rows if row.session_id is None)
     print(f"JSONL: {jsonl_path}")
     print(
@@ -1125,6 +1163,7 @@ def print_session_review(
     *,
     show_run_history: bool,
 ) -> None:
+    """Print one session review row, plus DB metrics when available."""
     latest_run = db_summary.latest_run if db_summary is not None else None
     print(shorten_text(review.session_id, 88))
     print(
@@ -1178,18 +1217,21 @@ def print_session_review(
 
 
 def format_message_deltas(counter: Counter[int]) -> str:
+    """Format message-count deltas for human-readable output."""
     if not counter:
         return "none"
     return ", ".join(f"{delta:+d}x{count}" for delta, count in sorted(counter.items()))
 
 
 def format_percentage(value: float | None) -> str:
+    """Format a fraction as a percentage string."""
     if value is None:
         return "n/a"
     return f"{value * 100:.1f}%"
 
 
 def shorten_text(text: str, limit: int) -> str:
+    """Normalize whitespace and clamp text to a display width."""
     normalized = " ".join(text.split())
     if len(normalized) <= limit:
         return normalized
@@ -1197,6 +1239,7 @@ def shorten_text(text: str, limit: int) -> str:
 
 
 def prompt_family_label(system_prompt: str) -> str:
+    """Derive a short family label from the first non-empty system-prompt line."""
     for line in system_prompt.splitlines():
         normalized = " ".join(line.split())
         if normalized:
@@ -1205,10 +1248,12 @@ def prompt_family_label(system_prompt: str) -> str:
 
 
 def coerce_int(value: object) -> int:
+    """Coerce a loose numeric value into an integer or zero."""
     return value if isinstance(value, int) else 0
 
 
 def extract_run_input_content(value: object) -> str | None:
+    """Extract the persisted run input content string when present."""
     value_dict = object_dict(value)
     if value_dict is None:
         return None
@@ -1217,6 +1262,7 @@ def extract_run_input_content(value: object) -> str | None:
 
 
 def common_prefix_length(first: str | None, second: str | None) -> int:
+    """Return the shared prefix length between two strings."""
     if not isinstance(first, str) or not isinstance(second, str):
         return 0
     prefix_length = 0
@@ -1228,9 +1274,18 @@ def common_prefix_length(first: str | None, second: str | None) -> int:
 
 
 def from_unix_timestamp(value: object) -> datetime | None:
+    """Convert a Unix timestamp into a timezone-aware datetime."""
     if not isinstance(value, int):
         return None
     return datetime.fromtimestamp(value).astimezone()
+
+
+def validated_sqlite_identifier(identifier: str) -> str:
+    """Return a validated SQLite identifier wrapped for direct SQL interpolation."""
+    if not SQLITE_IDENTIFIER_PATTERN.fullmatch(identifier):
+        msg = f"Unsafe SQLite identifier: {identifier!r}"
+        raise ValueError(msg)
+    return f'"{identifier}"'
 
 
 if __name__ == "__main__":
