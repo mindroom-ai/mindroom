@@ -1558,10 +1558,6 @@ class AgentBot:
             self.logger.debug("ignoring_tool_approval_action_from_unauthorized_sender", user_id=sender_id)
             return False
 
-        if not self._turn_policy.can_reply_to_sender(sender_id):
-            self.logger.debug("Ignoring tool approval action due to reply permissions", sender=sender_id)
-            return False
-
         return True
 
     async def _handle_tool_approval_action(

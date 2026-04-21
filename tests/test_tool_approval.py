@@ -1709,8 +1709,8 @@ async def test_other_bot_skips_tool_approval_reply_instead_of_treating_it_as_cha
 
 
 @pytest.mark.asyncio
-async def test_other_bot_rejects_requester_approval_when_local_reply_policy_denies(tmp_path: Path) -> None:
-    """Approval resolution should fail when current reply permissions deny the sender."""
+async def test_requester_can_resolve_approval_when_local_reply_policy_denies(tmp_path: Path) -> None:
+    """Approval resolution should still work for the stored requester despite reply-policy changes."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = _runtime_bound_config(
         runtime_paths,
@@ -1718,7 +1718,7 @@ async def test_other_bot_rejects_requester_approval_when_local_reply_policy_deni
             rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
         ),
     )
-    bot = _agent_bot(tmp_path, config=config, agent_name="general")
+    bot = _agent_bot(tmp_path, config=config, agent_name="code")
     sender = AsyncMock(return_value="$approval")
     editor = AsyncMock()
     _store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
@@ -1748,8 +1748,6 @@ async def test_other_bot_rejects_requester_approval_when_local_reply_policy_deni
     ):
         await bot._handle_reaction_inner(room, reaction)
 
-    assert task.done() is False
-    await _store.approve(pending.id, resolved_by="@user:localhost")
     decision = await task
     assert decision.status == "approved"
     assert editor.await_args.args[3]["resolved_by"] == "@user:localhost"
