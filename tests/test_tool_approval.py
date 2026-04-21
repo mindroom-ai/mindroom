@@ -84,7 +84,11 @@ def _runtime_bound_config(
     return bind_runtime_paths(config, runtime_paths)
 
 
-def _cinny_accepts_tool_approval_payload(payload: dict[str, object]) -> bool:
+def _cinny_accepts_tool_approval_payload(
+    payload: dict[str, object],
+    *,
+    expected_arguments: dict[str, object] | None = None,
+) -> bool:
     """Mirror Cinny's required approval-card field checks."""
     candidates = []
     new_content = payload.get("m.new_content")
@@ -104,8 +108,18 @@ def _cinny_accepts_tool_approval_payload(payload: dict[str, object]) -> bool:
         return False
     if _pick("status") not in {"pending", "approved", "denied", "expired"}:
         return False
-    arguments = _pick("arguments")
-    return isinstance(arguments, dict)
+
+    def _matches_expected(arguments: object) -> bool:
+        return isinstance(arguments, dict) and (expected_arguments is None or arguments == expected_arguments)
+
+    if not _matches_expected(_pick("arguments")):
+        return False
+    if not isinstance(new_content, dict):
+        return True
+    new_content_arguments = new_content.get("arguments")
+    outer_arguments = payload.get("arguments")
+    outer_matches = not isinstance(outer_arguments, dict) or outer_arguments == new_content_arguments
+    return _matches_expected(new_content_arguments) and outer_matches
 
 
 def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> AgentBot:
@@ -729,7 +743,7 @@ async def test_request_approval_sanitizes_arguments_in_matrix_event_and_persiste
     assert "***redacted***" in event_payload_text
     assert "***redacted***" in persisted_text
     assert isinstance(event_payload["arguments"], dict)
-    assert _cinny_accepts_tool_approval_payload(event_payload)
+    assert _cinny_accepts_tool_approval_payload(event_payload, expected_arguments=event_payload["arguments"])
     assert len(json.dumps(event_payload["arguments"], sort_keys=True)) <= 1200
     assert event_payload["arguments_truncated"] is True
 
@@ -1570,7 +1584,7 @@ async def test_sync_unsynced_approval_event_resolutions_keep_original_argument_s
     assert edited_payload["status"] == "expired"
     assert edited_payload["requested_at"] == "2026-04-09T12:00:00+00:00"
     assert edited_payload["expires_at"] == "2026-04-10T12:00:00+00:00"
-    assert _cinny_accepts_tool_approval_payload(edited_payload)
+    assert _cinny_accepts_tool_approval_payload(edited_payload, expected_arguments=original_event_arguments)
     edited_event = {
         **edited_payload,
         "m.new_content": edited_payload,
@@ -1578,7 +1592,7 @@ async def test_sync_unsynced_approval_event_resolutions_keep_original_argument_s
     }
     cinny_content = edited_event["m.new_content"]
     assert isinstance(cinny_content, dict)
-    assert _cinny_accepts_tool_approval_payload(cinny_content)
+    assert _cinny_accepts_tool_approval_payload(cinny_content, expected_arguments=original_event_arguments)
 
 
 @pytest.mark.asyncio
@@ -1997,7 +2011,7 @@ async def test_orchestrator_edit_approval_event_keeps_full_payload_in_new_conten
     assert cinny_content["tool_name"] == "run_shell_command"
     assert cinny_content["agent_name"] == "code"
     assert cinny_content["status"] == "approved"
-    assert _cinny_accepts_tool_approval_payload(cinny_content)
+    assert _cinny_accepts_tool_approval_payload(cinny_content, expected_arguments={"command": "echo hi"})
 
 
 @pytest.mark.asyncio
@@ -2391,7 +2405,7 @@ async def test_other_bot_can_resolve_tool_approval_reply_instead_of_treating_it_
     other_bot._turn_controller.handle_text_event = AsyncMock()
     sender = AsyncMock(return_value=_sent_approval_event())
     editor = AsyncMock()
-    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+    _store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
 
     assert pending is not None
     room = _approval_room()
