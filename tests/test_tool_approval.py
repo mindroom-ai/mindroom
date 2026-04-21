@@ -1074,6 +1074,53 @@ async def test_bot_reaction_approves_pending_tool_call(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bot_reaction_rejects_resolution_after_sender_loses_access(tmp_path: Path) -> None:
+    """Approval resolution should fail when the original requester is no longer authorized."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    bot = _agent_bot(tmp_path, config=config)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    reaction = nio.ReactionEvent.from_dict(
+        {
+            "type": "m.reaction",
+            "event_id": "$reaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$approval",
+                    "key": "✅",
+                },
+            },
+        },
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=False),
+        patch.object(type(bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await bot._handle_reaction_inner(room, reaction)
+
+    assert task.done() is False
+
+    await store.approve(pending.id, resolved_by="@user:localhost")
+    decision = await task
+    assert decision.status == "approved"
+
+
+@pytest.mark.asyncio
 async def test_bot_reply_denies_pending_tool_call(tmp_path: Path) -> None:
     """Replies to approval cards should deny the tool call and not reach the turn controller."""
     runtime_paths = test_runtime_paths(tmp_path)

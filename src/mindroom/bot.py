@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
+    from mindroom.tool_approval import ApprovalManager
     from mindroom.tool_system.events import ToolTraceEntry
 
 type MatrixEventId = str
@@ -1398,16 +1399,16 @@ class AgentBot:
         if approval_event_id is None or status is None:
             return
 
-        approval_manager = get_approval_store()
-        if approval_manager is None:
-            return
-
-        await approval_manager.handle_custom_response(
-            approval_event_id=approval_event_id,
-            room_id=room.room_id,
-            status=status,
-            reason=reason,
-            resolved_by=event.sender,
+        await self._handle_tool_approval_action(
+            room=room,
+            sender_id=event.sender,
+            action=lambda approval_manager: approval_manager.handle_custom_response(
+                approval_event_id=approval_event_id,
+                room_id=room.room_id,
+                status=status,
+                reason=reason,
+                resolved_by=event.sender,
+            ),
         )
 
     @staticmethod
@@ -1445,23 +1446,30 @@ class AgentBot:
         if reply_to_event_id is None:
             return False
 
-        return await approval_manager.handle_reply(
-            approval_event_id=reply_to_event_id,
-            room_id=room.room_id,
-            reason=event.body,
-            resolved_by=event.sender,
+        return await self._handle_tool_approval_action(
+            room=room,
+            sender_id=event.sender,
+            action=lambda resolved_approval_manager: resolved_approval_manager.handle_reply(
+                approval_event_id=reply_to_event_id,
+                room_id=room.room_id,
+                reason=event.body,
+                resolved_by=event.sender,
+            ),
         )
 
     async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle one reaction inside the per-turn thread-history cache scope."""
         assert self.client is not None
 
-        approval_manager = get_approval_store()
-        if approval_manager is not None and await approval_manager.handle_reaction(
-            approval_event_id=event.reacts_to,
-            room_id=room.room_id,
-            reaction_key=event.key,
-            resolved_by=event.sender,
+        if await self._handle_tool_approval_action(
+            room=room,
+            sender_id=event.sender,
+            action=lambda approval_manager: approval_manager.handle_reaction(
+                approval_event_id=event.reacts_to,
+                room_id=room.room_id,
+                reaction_key=event.key,
+                resolved_by=event.sender,
+            ),
         ):
             return
 
@@ -1526,6 +1534,39 @@ class AgentBot:
             event=event,
             correlation_id=event.event_id,
         )
+
+    def _sender_can_resolve_tool_approval(self, room: nio.MatrixRoom, sender_id: str) -> bool:
+        """Return whether the sender is currently allowed to act on a tool approval."""
+        if not is_authorized_sender(
+            sender_id,
+            self.config,
+            room.room_id,
+            self.runtime_paths,
+            room_alias=room.canonical_alias,
+        ):
+            self.logger.debug("ignoring_tool_approval_action_from_unauthorized_sender", user_id=sender_id)
+            return False
+
+        if not self._turn_policy.can_reply_to_sender(sender_id):
+            self.logger.debug("Ignoring tool approval action due to reply permissions", sender=sender_id)
+            return False
+
+        return True
+
+    async def _handle_tool_approval_action(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        sender_id: str,
+        action: Callable[[ApprovalManager], Awaitable[bool]],
+    ) -> bool:
+        """Resolve one approval action only when the sender still has access."""
+        approval_manager = get_approval_store()
+        if approval_manager is None:
+            return False
+        if not self._sender_can_resolve_tool_approval(room, sender_id):
+            return False
+        return await action(approval_manager)
 
     async def _on_media_message(
         self,
