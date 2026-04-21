@@ -2242,18 +2242,19 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello from canonical workspace", "note.txt"],
-            "kwargs": {},
-            "worker_key": worker_key,
-            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
-        },
-    )
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello from canonical workspace", "note.txt"],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
@@ -2282,18 +2283,19 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
     _refresh_runner_app_from_env()
 
     canonical_base_dir = agent_workspace_root_path(storage_root, "general") / "mind_data"
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello from default storage root fallback", "note.txt"],
-            "kwargs": {},
-            "worker_key": "v1:tenant-123:shared:general",
-            "tool_init_overrides": {"base_dir": str(canonical_base_dir)},
-        },
-    )
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello from default storage root fallback", "note.txt"],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": str(canonical_base_dir)},
+            },
+        )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True

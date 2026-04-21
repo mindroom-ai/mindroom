@@ -1381,7 +1381,7 @@ class TestGenerateSummary:
 
         assert mock_run.await_args is not None
         conversation = _build_conversation_text(history)
-        prompt = mock_run.await_args.kwargs["full_prompt"]
+        prompt = mock_run.await_args.kwargs["run_input"]
         assert prompt == f"<thread_messages>\n{conversation}\n</thread_messages>\n\nSummarize the above thread."
 
     async def test_generate_summary_forces_low_temperature(self) -> None:

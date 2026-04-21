@@ -6,12 +6,18 @@ from pathlib import Path
 
 import pytest
 import yaml
+from agno.models.message import Message
 from agno.models.vertexai.claude import Claude as VertexAIClaude
+from agno.utils.models.claude import format_messages
 
 from mindroom.ai import get_model_instance
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.vertex_claude_prompt_cache import (
+    copy_messages_with_vertex_prompt_cache_breakpoint,
+    install_vertex_claude_prompt_cache_hook,
+)
 
 
 def _config_with_runtime_paths(config_data: dict[str, object]) -> tuple[Config, RuntimePaths]:
@@ -107,7 +113,6 @@ def test_config_yaml_with_extra_kwargs() -> None:
 
 def test_get_model_instance_with_extra_kwargs() -> None:
     """Test that get_model_instance passes extra_kwargs to the model."""
-    # Set a dummy API key
     os.environ["OPENROUTER_API_KEY"] = "test-key"
 
     config_data = {
@@ -212,6 +217,8 @@ def test_different_providers_with_extra_kwargs() -> None:
     anthropic_model = get_model_instance(config, runtime_paths, "anthropic_model")
     assert anthropic_model.temperature == 0.2
     assert anthropic_model.max_tokens == 2048
+    assert anthropic_model.cache_system_prompt is True
+    assert anthropic_model.extended_cache_time is True
 
 
 def test_model_without_extra_kwargs() -> None:
@@ -287,6 +294,145 @@ def test_vertexai_claude_provider() -> None:
     assert isinstance(model, VertexAIClaude)
     assert model.id == "claude-sonnet-4@20250514"
     assert model.provider == "VertexAI"
+    assert model.cache_system_prompt is True
+    assert model.extended_cache_time is True
+
+
+def test_vertexai_prompt_cache_breakpoint_marks_last_user_block() -> None:
+    """Vertex Claude requests should cache through the latest user text block."""
+    model = VertexAIClaude(
+        id="claude-sonnet-4-6",
+        project_id="demo-project",
+        region="us-central1",
+        cache_system_prompt=True,
+        extended_cache_time=True,
+    )
+    messages = [
+        Message(role="system", content="System prompt"),
+        Message(role="assistant", content="Earlier reply"),
+        Message(role="user", content=[{"type": "text", "text": "Current turn"}, {"type": "image", "source": "x"}]),
+    ]
+
+    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+
+    assert messages[-1].content == [{"type": "text", "text": "Current turn"}, {"type": "image", "source": "x"}]
+    assert prepared[-1].content == [
+        {"type": "text", "text": "Current turn"},
+        {"type": "image", "source": "x", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+    ]
+
+
+def _vertex_claude_model(*, extended_cache_time: bool = True) -> VertexAIClaude:
+    return VertexAIClaude(
+        id="claude-sonnet-4-6",
+        project_id="demo-project",
+        region="us-central1",
+        cache_system_prompt=True,
+        extended_cache_time=extended_cache_time,
+    )
+
+
+def _tool_turn_messages(tool_content: str | list[dict[str, object]]) -> list[Message]:
+    return [
+        Message(role="system", content="System prompt"),
+        Message(role="user", content="Use the tool"),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "id": "toolu_1",
+                    "function": {"name": "demo_tool", "arguments": "{}"},
+                },
+            ],
+        ),
+        Message(role="tool", tool_call_id="toolu_1", content=tool_content),
+    ]
+
+
+def test_vertex_prompt_cache_does_not_poison_plain_string_tool_content() -> None:
+    """The hook must leave plain-string tool payloads untouched."""
+    model = _vertex_claude_model()
+    messages = _tool_turn_messages("ok")
+
+    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+
+    assert prepared[-1].content == "ok"
+    assert messages[-1].content == "ok"
+    assert "cache_control" not in str(prepared[-1].content)
+
+
+def test_vertex_prompt_cache_does_not_mark_list_shaped_tool_content() -> None:
+    """The hook must not add cache markers inside tool-result blocks."""
+    model = _vertex_claude_model()
+    messages = _tool_turn_messages([{"type": "tool_result", "content": "ok"}])
+
+    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+
+    assert isinstance(prepared[-1].content, list)
+    for block in prepared[-1].content:
+        assert "cache_control" not in block
+
+
+def test_vertex_prompt_cache_wire_format_has_no_cache_control_in_tool_results() -> None:
+    """Agno wire tool_result payloads must not contain cache-control text."""
+    model = _vertex_claude_model()
+    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(_tool_turn_messages("ok"), model)
+
+    chat_messages, _system_message = format_messages(prepared, compress_tool_results=True)
+
+    for message in chat_messages:
+        for block in message.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                assert "cache_control" not in str(block.get("content") or "")
+
+
+def test_vertex_prompt_cache_marks_prior_user_when_tail_is_tool() -> None:
+    """A trailing tool message should move the cache marker to the prior user turn."""
+    model = _vertex_claude_model()
+    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(_tool_turn_messages("ok"), model)
+
+    user_message = prepared[1]
+    assert isinstance(user_message.content, list)
+    assert user_message.content[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    count = sum(
+        1
+        for message in prepared
+        for block in (message.content if isinstance(message.content, list) else [])
+        if isinstance(block, dict) and "cache_control" in block
+    )
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_vertexai_prompt_cache_hook_rewrites_messages_before_invoke() -> None:
+    """The Vertex Claude hook should pass cache-marked messages to Agno."""
+    model = VertexAIClaude(
+        id="claude-sonnet-4-6",
+        project_id="demo-project",
+        region="us-central1",
+        cache_system_prompt=True,
+    )
+    captured_messages: list[Message] = []
+
+    async def fake_ainvoke(*args: object, **kwargs: object) -> object:
+        del args
+        captured_messages.extend(kwargs["messages"])
+        return object()
+
+    vars(model)["ainvoke"] = fake_ainvoke
+    install_vertex_claude_prompt_cache_hook(model)
+
+    await model.ainvoke(
+        messages=[
+            Message(role="system", content="System prompt"),
+            Message(role="user", content="Current turn"),
+        ],
+        assistant_message=Message(role="assistant"),
+    )
+
+    assert captured_messages[-1].content == [
+        {"type": "text", "text": "Current turn", "cache_control": {"type": "ephemeral"}},
+    ]
 
 
 def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatch: pytest.MonkeyPatch) -> None:

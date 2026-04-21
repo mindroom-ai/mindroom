@@ -20,7 +20,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.execution_preparation import (
-    _build_prompt_with_unseen,
+    _build_unseen_context_messages,
     _classify_partial_reply,
     _clean_partial_reply_body,
     _get_unseen_event_ids_for_metadata,
@@ -292,22 +292,8 @@ class TestCleanPartialReplyBody:
 class TestUnseenMessagesPartialReplies:
     """Test unseen-context extraction for self-authored partial replies."""
 
-    def test_mixed_partial_reply_header_warns_about_live_and_interrupted_content(self) -> None:
-        """Mixed partial states should use the combined warning header."""
-        prompt = _build_prompt_with_unseen(
-            "Continue.",
-            [
-                _make_visible_message(sender="You (reply still streaming)", body="Live draft"),
-                _make_visible_message(sender="You (interrupted reply draft)", body="Interrupted draft"),
-            ],
-            partial_reply_kinds={_PartialReplyKind.IN_PROGRESS, _PartialReplyKind.INTERRUPTED},
-        )
-
-        assert "Some partial content from your previous response is still being delivered" in prompt
-        assert "Other partial content was interrupted before completion" in prompt
-
-    def test_includes_streaming_self_reply_with_cleaned_body_and_header(self) -> None:
-        """Inject still-streaming self replies with the non-duplication warning header."""
+    def test_includes_streaming_self_reply_with_non_duplication_guidance(self) -> None:
+        """Still-streaming self replies must stay in user-context with an explicit no-repeat warning."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
@@ -323,27 +309,24 @@ class TestUnseenMessagesPartialReplies:
             _make_visible_message(event_id="e3", sender="@user:localhost", body="New question"),
         ]
 
-        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
+        context_messages, unseen_event_ids = _build_unseen_context_messages(
+            "Answer the new question.",
             thread_history,
-            "helper",
-            config,
-            runtime_paths,
             seen_event_ids={"e1"},
             current_event_id="e3",
             active_event_ids={"e2"},
+            response_sender_id=agent_id,
         )
 
-        assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
-        assert in_progress_event_ids == {"e2"}
-        assert len(unseen) == 1
-        assert unseen[0].body == "Partial reply"
+        assert unseen_event_ids == []
+        assert [message.role for message in context_messages] == ["user", "user", "user"]
+        assert "Your previous response is still being delivered." in str(context_messages[0].content)
+        assert "Do NOT repeat or redo that work." in str(context_messages[0].content)
+        assert context_messages[1].content == "You (reply still streaming): Partial reply"
+        assert context_messages[2].content == "Answer the new question."
 
-        prompt = _build_prompt_with_unseen("Answer the new question.", unseen, partial_reply_kinds=partial_reply_kinds)
-        assert "Your previous response is still being delivered." in prompt
-        assert "Do NOT repeat or redo that work." in prompt
-
-    def test_includes_interrupted_self_reply_with_interrupted_header(self) -> None:
-        """Inject interrupted self replies with the continuation-oriented warning header."""
+    def test_includes_interrupted_self_reply_with_continue_guidance(self) -> None:
+        """Interrupted self replies must stay in user-context with an explicit continuation warning."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
@@ -358,24 +341,21 @@ class TestUnseenMessagesPartialReplies:
             _make_visible_message(event_id="e2", sender="@user:localhost", body="Continue"),
         ]
 
-        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
+        context_messages, unseen_event_ids = _build_unseen_context_messages(
+            "Continue.",
             thread_history,
-            "helper",
-            config,
-            runtime_paths,
             seen_event_ids=set(),
             current_event_id="e2",
             active_event_ids=set(),
+            response_sender_id=agent_id,
         )
 
-        assert partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}
-        assert in_progress_event_ids == set()
-        assert len(unseen) == 1
-        assert unseen[0].body == "Partial answer"
-
-        prompt = _build_prompt_with_unseen("Continue.", unseen, partial_reply_kinds=partial_reply_kinds)
-        assert "Your previous response was interrupted before completion." in prompt
-        assert "Continue from where you left off if appropriate." in prompt
+        assert unseen_event_ids == ["e1"]
+        assert [message.role for message in context_messages] == ["user", "user", "user"]
+        assert "Your previous response was interrupted before completion." in str(context_messages[0].content)
+        assert "Continue from where you left off if appropriate." in str(context_messages[0].content)
+        assert context_messages[1].content == "You (interrupted reply draft): Partial answer"
+        assert context_messages[2].content == "Continue."
 
     def test_in_progress_partial_reply_event_ids_are_excluded_from_seen_metadata(self) -> None:
         """Keep live self partial replies out of seen metadata until they become terminal."""

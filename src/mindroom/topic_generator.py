@@ -98,7 +98,7 @@ Generate the topic:"""
     try:
         response = await cached_agent_run(
             agent=agent,
-            full_prompt=prompt,
+            run_input=prompt,
             session_id=session_id,
         )
     except Exception:

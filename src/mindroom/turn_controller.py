@@ -1070,7 +1070,6 @@ class TurnController:
                     prepared_payload = type(prepared_payload)(
                         payload=prepared_payload.payload,
                         envelope=prepared_payload.envelope,
-                        strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
                         system_enrichment_items=tuple(system_enrichment_items),
                     )
                 payload_ready_monotonic = time.monotonic()
@@ -1102,7 +1101,6 @@ class TurnController:
                     target=request.target,
                     matrix_run_metadata=request.matrix_run_metadata,
                     system_enrichment_items=prepared_payload.system_enrichment_items,
-                    strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
                     requires_full_thread_history=False,
                     on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
                     pipeline_timing=request.pipeline_timing,

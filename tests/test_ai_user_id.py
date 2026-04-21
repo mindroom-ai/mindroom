@@ -31,6 +31,7 @@ from agno.session.team import TeamSession
 
 from mindroom.agents import create_session_storage
 from mindroom.ai import (
+    PreparedAgentRun,
     _prepare_agent_and_prompt,
     ai_response,
     append_inline_media_fallback_prompt,
@@ -59,6 +60,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_SESSION_STARTED,
+    EnrichmentItem,
     HookContextSupport,
     HookRegistry,
     SessionHookContext,
@@ -70,9 +72,15 @@ from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_f
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
+from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
-from mindroom.response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps
+from mindroom.response_runner import (
+    ResponseRequest,
+    ResponseRunner,
+    ResponseRunnerDeps,
+    prepare_memory_and_model_context,
+)
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -130,8 +138,13 @@ def _prepared_prompt_result(
     agent: object,
     *,
     prompt: str = "test prompt",
-) -> tuple[object, str, list[str], PreparedHistoryState]:
-    return agent, prompt, [], PreparedHistoryState()
+) -> PreparedAgentRun:
+    return PreparedAgentRun(
+        agent=agent,
+        messages=(Message(role="user", content=prompt),),
+        unseen_event_ids=[],
+        prepared_history=PreparedHistoryState(),
+    )
 
 
 class _SessionStorage:
@@ -2001,6 +2014,29 @@ async def test_send_skill_command_response_locked_emits_session_started_after_pe
 class TestUserIdPassthrough:
     """Test that user_id reaches agent.arun() in both streaming and non-streaming paths."""
 
+    def test_prepare_memory_and_model_context_keeps_raw_prompt_when_model_prompt_only_contains_substring(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Short prompts must not disappear when they happen to occur inside attachment IDs."""
+        config = _config()
+        runtime_paths = _runtime_paths(tmp_path)
+
+        memory_prompt, memory_thread_history, model_prompt, model_thread_history = prepare_memory_and_model_context(
+            "report",
+            [],
+            config=config,
+            runtime_paths=runtime_paths,
+            model_prompt="Available attachment IDs: att_report. Use tool calls to inspect or process them.",
+        )
+
+        assert memory_prompt == "report"
+        assert memory_thread_history == []
+        assert model_thread_history == []
+        assert model_prompt.endswith(
+            "report\n\nAvailable attachment IDs: att_report. Use tool calls to inspect or process them.",
+        )
+
     @pytest.mark.asyncio
     async def test_non_streaming_passes_user_id(self, tmp_path: Path) -> None:
         """Test that _process_and_respond passes user_id through to ai_response."""
@@ -2306,25 +2342,88 @@ class TestUserIdPassthrough:
         mock_agent = MagicMock()
 
         with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
-            patch("mindroom.ai.build_prompt_with_thread_history", return_value="enhanced"),
+            patch(
+                "mindroom.ai.build_memory_prompt_parts",
+                new_callable=AsyncMock,
+                return_value=MemoryPromptParts(),
+            ),
             patch("mindroom.ai.create_agent", return_value=mock_agent) as mock_create_agent,
         ):
-            agent, full_prompt, unseen_event_ids, prepared_history = await _prepare_agent_and_prompt(
+            prepared_run = await _prepare_agent_and_prompt(
                 agent_name="general",
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
                 config=config,
             )
 
+        agent = prepared_run.agent
+        full_prompt = prepared_run.prompt_text
+        unseen_event_ids = prepared_run.unseen_event_ids
+        prepared_history = prepared_run.prepared_history
         assert agent is mock_agent
-        assert full_prompt == "enhanced"
+        assert full_prompt == "test"
         assert unseen_event_ids == []
         assert prepared_history.compaction_outcomes == []
         assert prepared_history.replays_persisted_history is False
         assert prepared_history.replay_plan is not None
         assert prepared_history.replay_plan.mode == "configured"
         assert "runtime_paths" not in mock_create_agent.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_prepare_agent_and_prompt_uses_raw_prompt_for_memory_and_appends_additional_context(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Raw prompt should drive memory lookup while session context appends to the system prompt."""
+        config = _config()
+        mock_agent = MagicMock()
+        mock_agent.additional_context = "existing context"
+        prepared_execution = SimpleNamespace(
+            messages=(Message(role="user", content="prepared prompt"),),
+            replay_plan=None,
+            unseen_event_ids=[],
+            replays_persisted_history=False,
+            compaction_outcomes=[],
+        )
+
+        with (
+            patch(
+                "mindroom.ai.build_memory_prompt_parts",
+                new_callable=AsyncMock,
+                return_value=MemoryPromptParts(
+                    session_preamble="session preamble",
+                    turn_context="turn context",
+                ),
+            ) as mock_build_prompt_parts,
+            patch("mindroom.ai.create_agent", return_value=mock_agent),
+            patch("mindroom.ai._render_system_enrichment_context", return_value="system enrichment"),
+            patch(
+                "mindroom.ai.prepare_agent_execution_context",
+                new=AsyncMock(return_value=prepared_execution),
+            ) as mock_prepare_execution,
+        ):
+            prepared_run = await _prepare_agent_and_prompt(
+                agent_name="general",
+                prompt="raw prompt",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=config,
+                model_prompt="model metadata",
+                system_enrichment_items=(EnrichmentItem(key="k", text="v", cache_policy="stable"),),
+            )
+
+        agent = prepared_run.agent
+        full_prompt = prepared_run.prompt_text
+        unseen_event_ids = prepared_run.unseen_event_ids
+        prepared_history = prepared_run.prepared_history
+        assert agent is mock_agent
+        assert full_prompt == "prepared prompt"
+        assert unseen_event_ids == []
+        assert prepared_history.compaction_outcomes == []
+        assert mock_build_prompt_parts.await_args is not None
+        assert mock_build_prompt_parts.await_args.args[0] == "raw prompt"
+        assert mock_prepare_execution.await_args is not None
+        assert mock_prepare_execution.await_args.kwargs["prompt"] == "raw prompt\n\nturn context\n\nmodel metadata"
+        assert mock_agent.additional_context == "existing context\n\nsystem enrichment\n\nsession preamble"
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -2379,6 +2478,32 @@ class TestUserIdPassthrough:
 
         assert mock_prepare.await_args.kwargs["current_sender_id"] is None
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
+
+    @pytest.mark.asyncio
+    async def test_ai_response_passes_raw_prompt_separately_from_model_prompt(self, tmp_path: Path) -> None:
+        """The AI entrypoint should preserve the raw user prompt when model_prompt is provided."""
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = None
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            await ai_response(
+                agent_name="general",
+                prompt="raw prompt",
+                model_prompt="model metadata",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+            )
+
+        assert mock_prepare.await_args.args[1] == "raw prompt"
+        assert mock_prepare.await_args.kwargs["model_prompt"] == "model metadata"
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -2441,6 +2566,38 @@ class TestUserIdPassthrough:
 
         assert mock_prepare.await_args.kwargs["current_sender_id"] is None
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_passes_raw_prompt_separately_from_model_prompt(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming should preserve the raw prompt when model_prompt is present."""
+        mock_agent = MagicMock()
+
+        async def _empty_stream() -> AsyncIterator[str]:
+            if False:
+                yield ""
+
+        mock_agent.arun = MagicMock(return_value=_empty_stream())
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            _ = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="raw prompt",
+                    model_prompt="model metadata",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+            ]
+
+        assert mock_prepare.await_args.args[1] == "raw prompt"
+        assert mock_prepare.await_args.kwargs["model_prompt"] == "model metadata"
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
@@ -2636,8 +2793,9 @@ class TestUserIdPassthrough:
             )
 
         mock_agent.arun.assert_called_once()
-        sent_files = list(mock_agent.arun.call_args.kwargs["files"])
-        assert sent_files == [pdf_file, zip_file]
+        run_input = mock_agent.arun.call_args.args[0]
+        assert isinstance(run_input, list)
+        assert run_input[-1].files == [pdf_file, zip_file]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
@@ -2672,8 +2830,9 @@ class TestUserIdPassthrough:
             ]
 
         mock_agent.arun.assert_called_once()
-        sent_files = list(mock_agent.arun.call_args.kwargs["files"])
-        assert sent_files == [pdf_file, zip_file]
+        run_input = mock_agent.arun.call_args.args[0]
+        assert isinstance(run_input, list)
+        assert run_input[-1].files == [pdf_file, zip_file]
 
     @pytest.mark.asyncio
     async def test_ai_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:
@@ -2721,9 +2880,13 @@ class TestUserIdPassthrough:
         assert mock_agent.arun.await_count == 2
         first_call = mock_agent.arun.await_args_list[0]
         second_call = mock_agent.arun.await_args_list[1]
-        assert list(first_call.kwargs["files"]) == [document_file]
-        assert list(second_call.kwargs["files"]) == []
-        assert "Inline media unavailable for this model" in second_call.args[0]
+        first_prompt = first_call.args[0]
+        second_prompt = second_call.args[0]
+        assert isinstance(first_prompt, list)
+        assert isinstance(second_prompt, list)
+        assert first_prompt[-1].files == [document_file]
+        assert not second_prompt[-1].files
+        assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
     @pytest.mark.asyncio
     async def test_ai_response_rebuilds_request_log_context_for_retry(self, tmp_path: Path) -> None:
@@ -2777,7 +2940,8 @@ class TestUserIdPassthrough:
 
         assert response == "Recovered response"
         mock_prepare.assert_awaited_once()
-        assert mock_prepare.await_args.args[1] == "expanded prompt"
+        assert mock_prepare.await_args.args[1] == "raw prompt"
+        assert mock_prepare.await_args.kwargs["model_prompt"] == "expanded prompt"
         assert logged_contexts == [
             {
                 "session_id": "session1",
@@ -2896,9 +3060,13 @@ class TestUserIdPassthrough:
         assert mock_agent.arun.call_count == 2
         first_call = mock_agent.arun.call_args_list[0]
         second_call = mock_agent.arun.call_args_list[1]
-        assert list(first_call.kwargs["files"]) == [document_file]
-        assert list(second_call.kwargs["files"]) == []
-        assert "Inline media unavailable for this model" in second_call.args[0]
+        first_prompt = first_call.args[0]
+        second_prompt = second_call.args[0]
+        assert isinstance(first_prompt, list)
+        assert isinstance(second_prompt, list)
+        assert first_prompt[-1].files == [document_file]
+        assert not second_prompt[-1].files
+        assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
 
     @pytest.mark.asyncio
@@ -2956,7 +3124,8 @@ class TestUserIdPassthrough:
 
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
         mock_prepare.assert_awaited_once()
-        assert mock_prepare.await_args.args[1] == "expanded prompt"
+        assert mock_prepare.await_args.args[1] == "raw prompt"
+        assert mock_prepare.await_args.kwargs["model_prompt"] == "expanded prompt"
         assert logged_contexts == [
             {
                 "session_id": "session1",
@@ -3013,9 +3182,14 @@ class TestUserIdPassthrough:
                 self.db = None
                 self.learning = None
 
-            async def arun(self, prompt: str, **_kwargs: object) -> AsyncIterator[object]:
+            async def arun(self, run_input: object, **_kwargs: object) -> AsyncIterator[object]:
+                messages = (
+                    [message.model_copy(deep=True) for message in run_input]
+                    if isinstance(run_input, list) and all(isinstance(message, Message) for message in run_input)
+                    else [Message(role="user", content=cast("str", run_input))]
+                )
                 async for _chunk in self.model.ainvoke_stream(
-                    messages=[Message(role="user", content=prompt)],
+                    messages=messages,
                     assistant_message=Message(role="assistant"),
                     tools=[],
                 ):
@@ -3228,9 +3402,13 @@ class TestUserIdPassthrough:
         assert mock_agent.arun.call_count == 2
         first_call = mock_agent.arun.call_args_list[0]
         second_call = mock_agent.arun.call_args_list[1]
-        assert list(first_call.kwargs["files"]) == [document_file]
-        assert list(second_call.kwargs["files"]) == []
-        assert second_call.args[0].count("Inline media unavailable for this model") == 1
+        first_prompt = first_call.args[0]
+        second_prompt = second_call.args[0]
+        assert isinstance(first_prompt, list)
+        assert isinstance(second_prompt, list)
+        assert first_prompt[-1].files == [document_file]
+        assert not second_prompt[-1].files
+        assert str(second_prompt[-1].content).count("Inline media unavailable for this model") == 1
         assert chunks == ["friendly-error"]
         mock_friendly_error.assert_called_once()
 

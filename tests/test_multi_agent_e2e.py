@@ -170,12 +170,13 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
             mock_send_streaming_response.return_value = ("$response", "15% of 200 is 30")
             await bot._on_message(room, message_event)
 
-        # Verify AI was called with correct parameters (full message body as prompt)
+        # Verify AI was called with separate raw and model-facing prompts.
         mock_ai.assert_called_once()
         ai_kwargs = mock_ai.call_args.kwargs
         assert ai_kwargs["agent_name"] == "calculator"
-        assert ai_kwargs["prompt"] == (
-            f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
+        assert (
+            ai_kwargs["prompt"]
+            == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
         assert ai_kwargs["model_prompt"].startswith("[")
         assert ai_kwargs["model_prompt"].endswith(
@@ -523,7 +524,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             assert ai_kwargs["agent_name"] == "calculator"
             assert ai_kwargs["prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
             assert ai_kwargs["model_prompt"].startswith("[")
-            assert ai_kwargs["model_prompt"].endswith(f"@mindroom_calculator:{domain} What about 20% of 300?")
+            assert ai_kwargs["model_prompt"].endswith(
+                f"@mindroom_calculator:{domain} What about 20% of 300?",
+            )
             assert ai_kwargs["session_id"] == f"{test_room_id}:{thread_root_id}"
             assert ai_kwargs["thread_history"][0].body.startswith("[")
             assert ai_kwargs["thread_history"][0].body.endswith("What's 10% of 100?")

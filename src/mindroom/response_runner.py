@@ -30,7 +30,6 @@ from mindroom.hooks import (
     MessageEnvelope,
     SessionHookContext,
     emit,
-    strip_enrichment_from_session_storage,
 )
 from mindroom.hooks.ingress import is_automation_source_kind
 from mindroom.hooks.types import EVENT_SESSION_STARTED
@@ -215,8 +214,14 @@ def prepare_memory_and_model_context(
     model_prompt: str | None = None,
 ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
     """Return raw memory inputs alongside timestamped model-facing context."""
+    model_prompt_content = model_prompt or prompt
+    if model_prompt is not None and prompt:
+        if model_prompt == prompt or model_prompt.startswith(f"{prompt}\n\n"):
+            model_prompt_content = model_prompt
+        else:
+            model_prompt_content = f"{prompt}\n\n{model_prompt}"
     model_prompt_text = _prefix_user_turn_time(
-        model_prompt or prompt,
+        model_prompt_content,
         timezone=config.timezone,
     )
     model_thread_history = _timestamp_thread_history_user_turns(
@@ -295,7 +300,6 @@ class ResponseRequest:
     target: MessageTarget | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-    strip_transient_enrichment_after_run: bool = False
     requires_full_thread_history: bool = False
     prepare_after_lock: Callable[[ResponseRequest], Awaitable[ResponseRequest]] | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
@@ -549,25 +553,14 @@ class ResponseRunner:
                 queued_signal.consume_waiting_human_message()
             queued_signal.finish_response_turn()
 
-    def _build_session_storage_effects(
+    def _build_persist_response_event_id_effect(
         self,
         *,
         session_id: str,
         session_type: SessionType,
         create_storage: Callable[[], SqliteDb],
-    ) -> tuple[Callable[[], None], Callable[[str, str], None]]:
-        """Build the shared strip/persist callbacks for one session-backed response."""
-
-        def strip_transient_enrichment() -> None:
-            storage = create_storage()
-            try:
-                strip_enrichment_from_session_storage(
-                    storage,
-                    session_id,
-                    session_type=session_type,
-                )
-            finally:
-                storage.close()
+    ) -> Callable[[str, str], None]:
+        """Build the response-event persistence callback for one session-backed response."""
 
         def persist_response_event_id(run_id: str, response_event_id: str) -> None:
             storage = create_storage()
@@ -582,7 +575,7 @@ class ResponseRunner:
             finally:
                 storage.close()
 
-        return strip_transient_enrichment, persist_response_event_id
+        return persist_response_event_id
 
     def _session_exists(
         self,
@@ -1018,7 +1011,7 @@ class ResponseRunner:
         delivery_failure_reason: str | None = None
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
 
-        strip_transient_enrichment, persist_response_event_id = self._build_session_storage_effects(
+        persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
             session_type=session_type,
             create_storage=team_storage_factory,
@@ -1259,8 +1252,6 @@ class ResponseRunner:
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
                 thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
-                strip_transient_enrichment_after_run=request.strip_transient_enrichment_after_run,
-                strip_transient_enrichment_before_effects=True,
                 dispatch_compaction_when_suppressed=True,
             ),
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
@@ -1268,7 +1259,6 @@ class ResponseRunner:
                 reply_to_event_id=request.reply_to_event_id,
                 thread_id=resolved_target.resolved_thread_id,
                 interactive_agent_name=self.deps.agent_name,
-                strip_transient_enrichment=strip_transient_enrichment,
                 persist_response_event_id=persist_response_event_id,
             ),
         )
@@ -2217,7 +2207,7 @@ class ResponseRunner:
                     owner=self.deps.runtime,
                 )
 
-        strip_transient_enrichment, persist_response_event_id = self._build_session_storage_effects(
+        persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
             create_storage=lambda: self.deps.state_writer.create_storage(execution_identity),
@@ -2293,14 +2283,12 @@ class ResponseRunner:
                 thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
                 memory_prompt=memory_prompt,
                 memory_thread_history=memory_thread_history,
-                strip_transient_enrichment_after_run=request.strip_transient_enrichment_after_run,
             ),
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
                 reply_to_event_id=request.reply_to_event_id,
                 thread_id=resolved_target.resolved_thread_id,
                 interactive_agent_name=self.deps.agent_name,
-                strip_transient_enrichment=strip_transient_enrichment,
                 queue_memory_persistence=queue_memory_persistence,
                 persist_response_event_id=persist_response_event_id,
             ),

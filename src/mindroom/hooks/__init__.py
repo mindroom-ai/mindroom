@@ -31,9 +31,6 @@ from .decorators import hook
 from .enrichment import (
     render_enrichment_block,
     render_system_enrichment_block,
-    strip_enrichment_block,
-    strip_enrichment_from_session_storage,
-    strip_system_enrichment_block,
 )
 from .execution import emit, emit_collect, emit_gate, emit_transform
 from .registry import HookRegistry
@@ -127,9 +124,6 @@ __all__ = [
     "hook",
     "render_enrichment_block",
     "render_system_enrichment_block",
-    "strip_enrichment_block",
-    "strip_enrichment_from_session_storage",
-    "strip_system_enrichment_block",
 ]
 
 

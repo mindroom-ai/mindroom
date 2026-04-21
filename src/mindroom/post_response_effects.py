@@ -48,8 +48,6 @@ class ResponseOutcome:
     thread_summary_message_count_hint: int | None = None
     memory_prompt: str | None = None
     memory_thread_history: Sequence[ResolvedVisibleMessage] | None = None
-    strip_transient_enrichment_after_run: bool = False
-    strip_transient_enrichment_before_effects: bool = False
     dispatch_compaction_when_suppressed: bool = False
 
 
@@ -72,7 +70,6 @@ class PostResponseEffectsDeps:
         ]
         | None
     ) = None
-    strip_transient_enrichment: Callable[[], None] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
@@ -203,7 +200,6 @@ class PostResponseEffectsSupport:
         reply_to_event_id: str,
         thread_id: str | None,
         interactive_agent_name: str,
-        strip_transient_enrichment: Callable[[], None] | None = None,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
     ) -> PostResponseEffectsDeps:
@@ -240,7 +236,6 @@ class PostResponseEffectsSupport:
             logger=self.logger,
             register_interactive=register_interactive,
             dispatch_compaction_notices=dispatch_compaction_notices,
-            strip_transient_enrichment=strip_transient_enrichment,
             queue_memory_persistence=queue_memory_persistence,
             persist_response_event_id=persist_response_event_id,
             should_queue_thread_summary=self.should_queue_thread_summary,
@@ -248,7 +243,7 @@ class PostResponseEffectsSupport:
         )
 
 
-async def apply_post_response_effects(  # noqa: C901
+async def apply_post_response_effects(
     outcome: ResponseOutcome,
     deps: PostResponseEffectsDeps,
 ) -> None:
@@ -263,21 +258,6 @@ async def apply_post_response_effects(  # noqa: C901
         and delivery_result is not None
         and (not delivery_result.suppressed or outcome.dispatch_compaction_when_suppressed),
     )
-
-    def strip_transient_enrichment() -> None:
-        if not outcome.strip_transient_enrichment_after_run or deps.strip_transient_enrichment is None:
-            return
-        try:
-            deps.strip_transient_enrichment()
-        except Exception:
-            deps.logger.exception(
-                "Failed to strip hook enrichment from session history",
-                session_id=outcome.session_id,
-                session_type=str(outcome.session_type) if outcome.session_type is not None else None,
-            )
-
-    if outcome.strip_transient_enrichment_before_effects:
-        strip_transient_enrichment()
 
     if (
         delivered_interactive_target
@@ -301,9 +281,6 @@ async def apply_post_response_effects(  # noqa: C901
             delivered_event_id,
             outcome.compaction_outcomes,
         )
-
-    if not outcome.strip_transient_enrichment_before_effects:
-        strip_transient_enrichment()
 
     if deps.queue_memory_persistence is not None:
         try:

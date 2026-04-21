@@ -11,11 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
-from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.models.ollama import Ollama
 from agno.run import RunContext
-from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from agno.team import Team
@@ -38,12 +36,11 @@ from mindroom.hooks import (
     emit_collect,
     hook,
     render_system_enrichment_block,
-    strip_enrichment_from_session_storage,
-    strip_system_enrichment_block,
 )
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.team_runtime_resolution import ResolvedExactTeamMembers
@@ -63,25 +60,19 @@ if TYPE_CHECKING:
 
 @dataclass
 class _FakePreparedExecution:
-    final_prompt: str
+    messages: tuple[Message, ...]
     unseen_event_ids: list[str]
     compaction_outcomes: list[object]
     replay_plan: object | None = None
     replays_persisted_history: bool = False
 
+    @property
+    def final_prompt(self) -> str:
+        return "\n\n".join(str(message.content) for message in self.messages if message.content)
 
-@dataclass
-class _FakeStorage:
-    session: AgentSession | TeamSession | None
-    upserted_session: AgentSession | TeamSession | None = None
-
-    def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
-        if self.session is None or self.session.session_id != session_id:
-            return None
-        return self.session
-
-    def upsert_session(self, session: AgentSession | TeamSession) -> None:
-        self.upserted_session = session
+    @property
+    def context_messages(self) -> tuple[Message, ...]:
+        return self.messages[:-1]
 
 
 def _config(tmp_path: Path) -> Config:
@@ -256,69 +247,6 @@ def test_render_system_enrichment_block_empty() -> None:
     assert render_system_enrichment_block([]) == ""
 
 
-def test_strip_system_enrichment_block_removes_only_system_context() -> None:
-    """System stripping should not touch message-enrichment blocks."""
-    text = (
-        "Prompt\n\n"
-        "<mindroom_message_context>\n"
-        '<item key="message" cache_policy="volatile">\n'
-        "message context\n"
-        "</item>\n"
-        "</mindroom_message_context>\n\n"
-        "<mindroom_system_context>\n"
-        '<item key="system" cache_policy="stable">\n'
-        "system context\n"
-        "</item>\n"
-        "</mindroom_system_context>\n\n"
-        "Actual prompt"
-    )
-
-    assert strip_system_enrichment_block(text) == (
-        "Prompt\n\n"
-        "<mindroom_message_context>\n"
-        '<item key="message" cache_policy="volatile">\n'
-        "message context\n"
-        "</item>\n"
-        "</mindroom_message_context>\n"
-        "Actual prompt"
-    )
-
-
-def test_strip_enrichment_from_session_storage_removes_message_and_system_blocks() -> None:
-    """Persisted session cleanup should scrub both message and system blocks."""
-    enriched = (
-        "Question\n\n"
-        "<mindroom_message_context>\n"
-        '<item key="message" cache_policy="volatile">\n'
-        "message context\n"
-        "</item>\n"
-        "</mindroom_message_context>\n\n"
-        "<mindroom_system_context>\n"
-        '<item key="system" cache_policy="stable">\n'
-        "system context\n"
-        "</item>\n"
-        "</mindroom_system_context>"
-    )
-    session = AgentSession(
-        session_id="session-1",
-        agent_id="agent-1",
-        runs=[
-            RunOutput(
-                session_id="session-1",
-                messages=[Message(role="user", content=enriched, compressed_content=enriched)],
-            ),
-        ],
-    )
-    storage = _FakeStorage(session)
-
-    changed = strip_enrichment_from_session_storage(storage, "session-1", session_type=SessionType.AGENT)
-
-    assert changed is True
-    assert storage.upserted_session is session
-    assert session.runs[0].messages[0].content == "Question"
-    assert session.runs[0].messages[0].compressed_content == "Question"
-
-
 @pytest.mark.asyncio
 async def test_emit_collect_system_enrich_merges_in_order_and_respects_scope(tmp_path: Path) -> None:
     """System enrich collectors should stay concurrent, deterministic, and scope-aware."""
@@ -411,20 +339,20 @@ async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_addit
         assert isinstance(agent, Agent)
         assert agent.additional_context == rendered
         return _FakePreparedExecution(
-            final_prompt="prepared prompt",
+            messages=(Message(role="user", content="prepared prompt"),),
             unseen_event_ids=[],
             compaction_outcomes=[],
         )
 
     with (
-        patch("mindroom.ai.build_memory_enhanced_prompt", new=AsyncMock(return_value="prompt")),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch("mindroom.ai.create_agent", return_value=prepared_agent),
         patch(
             "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(side_effect=fake_prepare_agent_execution_context),
         ),
     ):
-        agent, full_prompt, unseen_event_ids, prepared_history = await _prepare_agent_and_prompt(
+        prepared_run = await _prepare_agent_and_prompt(
             agent_name="code",
             prompt="prompt",
             runtime_paths=runtime_paths_for(config),
@@ -432,6 +360,10 @@ async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_addit
             system_enrichment_items=system_items,
         )
 
+    agent = prepared_run.agent
+    full_prompt = prepared_run.prompt_text
+    unseen_event_ids = prepared_run.unseen_event_ids
+    prepared_history = prepared_run.prepared_history
     assert agent is prepared_agent
     assert full_prompt == "prepared prompt"
     assert unseen_event_ids == []
@@ -474,7 +406,7 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
         assert team.additional_context == rendered
         assert all(agent.additional_context == rendered for agent in agents)
         return _FakePreparedExecution(
-            final_prompt="prepared team prompt",
+            messages=(Message(role="user", content="prepared team prompt"),),
             unseen_event_ids=[],
             compaction_outcomes=[],
         )
@@ -501,7 +433,6 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
             agents=team_members.agents,
             team=team,
             message="Coordinate",
-            fallback_prompt="Coordinate",
             thread_history=[],
             config=config,
             runtime_paths=runtime_paths,

@@ -1392,7 +1392,6 @@ class AgentBot:
         target: MessageTarget | None = None,
         payload: DispatchPayload,
         response_envelope: MessageEnvelope | None = None,
-        strip_transient_enrichment_after_run: bool = False,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
@@ -1418,7 +1417,6 @@ class AgentBot:
                 target=target,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
-                strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
             team_agents=team_agents,
@@ -1439,7 +1437,6 @@ class AgentBot:
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        strip_transient_enrichment_after_run: bool = False,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
@@ -1462,11 +1459,9 @@ class AgentBot:
             user_id: User ID of the sender for identifying user messages in history
             media: Optional multimodal inputs (audio/images/files/videos)
             attachment_ids: Attachment IDs available for tool-side file processing
-            model_prompt: Optional model-facing prompt that may include transient enrichment.
-            strip_transient_enrichment_after_run: Whether hook-provided transient enrichment
-                must be scrubbed from persisted session history after this turn.
+            model_prompt: Optional model-facing prompt for the live request and persisted history.
             system_enrichment_items: Hook-provided transient system prompt fragments to
-                apply for this response before optional post-run scrubbing.
+                apply for this response.
             response_envelope: Optional normalized inbound envelope for response hooks.
             correlation_id: Optional request correlation ID propagated to hook logging.
             target: Optional canonical response target used for lifecycle locking and delivery.
@@ -1497,7 +1492,6 @@ class AgentBot:
                 target=target,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
-                strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
         )
@@ -1668,7 +1662,6 @@ class TeamBot(AgentBot):
         media: MediaInputs | None = None,
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
-        strip_transient_enrichment_after_run: bool = False,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
@@ -1777,7 +1770,6 @@ class TeamBot(AgentBot):
                 agent_name=self.agent_name,
                 source_kind="message",
             ),
-            strip_transient_enrichment_after_run=strip_transient_enrichment_after_run,
             system_enrichment_items=system_enrichment_items,
             correlation_id=correlation_id or reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
