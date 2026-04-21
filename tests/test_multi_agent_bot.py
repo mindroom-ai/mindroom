@@ -83,6 +83,7 @@ from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
+from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes
 from mindroom.orchestration.runtime import (
     _matrix_homeserver_startup_timeout_seconds_from_env,
     run_with_retry,
@@ -90,7 +91,6 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.orchestrator import (
     MultiAgentOrchestrator,
-    _collect_plugin_root_changes,
     _run_auxiliary_task_forever,
     _SignalAwareUvicornServer,
     main,
