@@ -110,6 +110,7 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
         "@mindroom_home:localhost": MagicMock(),
         "@user:example.com": MagicMock(),
     }
+    room.members_synced = True
 
     voice_event = _make_voice_event(event_id="$voice123", source={"content": {}})
 
@@ -153,6 +154,7 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
         "@mindroom_home:localhost": MagicMock(),
         "@user:example.com": MagicMock(),
     }
+    room.members_synced = True
 
     voice_event = _make_voice_event(
         event_id="$voice456",
@@ -195,6 +197,7 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
         "@mindroom_home:localhost": MagicMock(),
         "@user:example.com": MagicMock(),
     }
+    room.members_synced = True
 
     voice_event = _make_voice_event(
         event_id="$voice789",

@@ -31,7 +31,9 @@ depends_on = [
     "mindroom.execution_preparation",
     "mindroom.history",
     "mindroom.history.compaction",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
+    "mindroom.history.turn_recorder",
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
@@ -74,35 +76,6 @@ depends_on = []
 visibility = ["mindroom.agents"]
 
 [[modules]]
-path = "mindroom.teams"
-depends_on = [
-    "mindroom.agents",
-    "mindroom.ai",
-    "mindroom.authorization",
-    "mindroom.constants",
-    "mindroom.error_handling",
-    "mindroom.execution_preparation",
-    "mindroom.history.runtime",
-    "mindroom.history.storage",
-    "mindroom.hooks",
-    "mindroom.knowledge",
-    "mindroom.logging_config",
-    "mindroom.matrix.rooms",
-    "mindroom.media_fallback",
-    "mindroom.media_inputs",
-    "mindroom.team_exact_members",
-    "mindroom.tool_system.events",
-]
-
-[[modules]]
-path = "mindroom.team_exact_members"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.logging_config",
-]
-visibility = ["mindroom.teams"]
-
-[[modules]]
 path = "mindroom.agent_policy"
 depends_on = ["mindroom.config.agent"]
 
@@ -114,6 +87,14 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]
+
+[[modules]]
+path = "mindroom.team_exact_members"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+]
+visibility = ["mindroom.teams"]
 
 [[modules]]
 path = "mindroom.custom_tools.memory"
@@ -269,6 +250,29 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.history.interrupted_replay"
+depends_on = [
+    "mindroom.agents",
+    "mindroom.constants",
+    "mindroom.tool_system.events",
+]
+visibility = [
+    "mindroom.ai",
+    "mindroom.history.turn_recorder",
+    "mindroom.response_runner",
+    "mindroom.teams",
+]
+
+[[modules]]
+path = "mindroom.history.turn_recorder"
+depends_on = ["mindroom.history.interrupted_replay"]
+visibility = [
+    "mindroom.ai",
+    "mindroom.response_runner",
+    "mindroom.teams",
+]
+
+[[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
     "mindroom.agents",
@@ -347,6 +351,8 @@ depends_on = [
     "mindroom.ai",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.history.interrupted_replay",
+    "mindroom.history.turn_recorder",
     "mindroom.knowledge",
     "mindroom.matrix.client_visible_messages",
     "mindroom.memory",
@@ -366,6 +372,34 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
+]
+
+[[modules]]
+path = "mindroom.teams"
+depends_on = [
+    "mindroom.agents",
+    "mindroom.ai",
+    "mindroom.authorization",
+    "mindroom.constants",
+    "mindroom.execution_preparation",
+    "mindroom.history.interrupted_replay",
+    "mindroom.history.runtime",
+    "mindroom.history.storage",
+    "mindroom.history.turn_recorder",
+    "mindroom.hooks",
+    "mindroom.knowledge",
+    "mindroom.logging_config",
+    "mindroom.matrix.rooms",
+    "mindroom.media_fallback",
+    "mindroom.media_inputs",
+    "mindroom.team_exact_members",
+    "mindroom.tool_system.events",
+]
+visibility = [
+    "mindroom.api.openai_compat",
+    "mindroom.bot",
+    "mindroom.response_runner",
+    "mindroom.turn_policy",
 ]
 
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
@@ -1655,6 +1689,21 @@ from = ["mindroom.tool_system.worker_routing"]
 
 [[interfaces]]
 expose = [
+    "InterruptedReplaySnapshot",
+    "build_interrupted_replay_snapshot",
+    "persist_interrupted_replay",
+    "persist_interrupted_replay_snapshot",
+    "split_interrupted_tool_trace",
+    "tool_execution_call_id",
+]
+from = ["mindroom.history.interrupted_replay"]
+
+[[interfaces]]
+expose = ["TurnRecorder"]
+from = ["mindroom.history.turn_recorder"]
+
+[[interfaces]]
+expose = [
     "StructuredStreamChunk",
     "ToolTraceEntry",
     "build_tool_trace_content",
@@ -1663,6 +1712,7 @@ expose = [
     "format_tool_combined",
     "format_tool_completed_event",
     "format_tool_started_event",
+    "render_tool_trace_for_context",
 ]
 from = ["mindroom.tool_system.events"]
 

@@ -45,6 +45,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_execution_context,
     render_prepared_messages_text,
 )
+from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
 from mindroom.history.runtime import (
     ScopeSessionContext,
     apply_replay_plan,
@@ -69,6 +70,7 @@ from mindroom.tool_system.events import (
     ToolTraceEntry,
     complete_pending_tool_block,
     extract_tool_completed_info,
+    format_tool_completed_event,
     format_tool_started_event,
 )
 
@@ -82,6 +84,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history import CompactionOutcome
+    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
@@ -95,6 +98,15 @@ _MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in t
 _MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
 _TeamStreamChunk = str | StructuredStreamChunk
 _NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
+
+
+@dataclass
+class _PendingTeamTool:
+    scope_key: str
+    tool_name: str
+    trace_entry: ToolTraceEntry
+    tool_call_id: str | None = None
+    visible_tool_index: int | None = None
 
 
 class TeamMode(str, Enum):
@@ -1035,6 +1047,56 @@ def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[st
     return [event_id for event_id in raw_event_ids if isinstance(event_id, str) and event_id]
 
 
+def _extract_interrupted_team_partial_text(response: TeamRunOutput | RunOutput) -> str:
+    """Extract persisted interrupted text for a top-level team run."""
+    if isinstance(response, TeamRunOutput):
+        team_response = response
+        if isinstance(response.content, str) and _is_cancellation_boilerplate(response.content):
+            team_response = replace(response, content=None)
+        parts = format_team_response(team_response)
+        if parts:
+            return "\n\n".join(parts).strip()
+    content = _get_response_content(response).strip()
+    normalized = content.lower()
+    if normalized.startswith("run ") and "cancel" in normalized:
+        return ""
+    return content
+
+
+def _extract_completed_team_tool_trace(response: TeamRunOutput | RunOutput) -> list[ToolTraceEntry]:
+    """Extract completed tool calls from a possibly nested team response."""
+    trace: list[ToolTraceEntry] = []
+    for tool in response.tools or []:
+        _, trace_entry = format_tool_completed_event(tool)
+        if trace_entry is not None:
+            trace.append(trace_entry)
+    if isinstance(response, TeamRunOutput):
+        for member_response in response.member_responses:
+            if isinstance(member_response, TeamRunOutput | RunOutput):
+                trace.extend(_extract_completed_team_tool_trace(member_response))
+    return trace
+
+
+def _extract_cancelled_team_tool_trace(
+    response: TeamRunOutput | RunOutput,
+) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
+    """Extract completed and interrupted tool calls from a cancelled team response."""
+    completed_trace, interrupted_trace = split_interrupted_tool_trace(response.tools)
+    if isinstance(response, TeamRunOutput):
+        for member_response in response.member_responses:
+            if isinstance(member_response, TeamRunOutput | RunOutput):
+                member_completed, member_interrupted = _extract_cancelled_team_tool_trace(member_response)
+                completed_trace.extend(member_completed)
+                interrupted_trace.extend(member_interrupted)
+    return completed_trace, interrupted_trace
+
+
+def _is_cancellation_boilerplate(content: str) -> bool:
+    """Return whether one string is just Agno cancellation boilerplate."""
+    normalized = content.strip().lower()
+    return normalized.startswith("run ") and "cancel" in normalized
+
+
 def _raise_team_run_cancelled(reason: str | None) -> NoReturn:
     """Raise the canonical team cancellation error."""
     raise asyncio.CancelledError(reason or "Run cancelled")
@@ -1378,6 +1440,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     *,
+    turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
 ) -> str:
     """Create a team and execute response."""
@@ -1407,6 +1470,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
+    unseen_event_ids: list[str] = []
+    attempt_run_id = run_id
 
     try:
         with open_bound_scope_session_context(
@@ -1420,7 +1485,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             scope_context = opened_scope_context
             scrub_queued_notice_session_context(
                 scope_context=scope_context,
-                entity_name=team_name,
+                entity_name=configured_team_name or team_name,
             )
             team = build_materialized_team_instance(
                 requested_agent_names=team_members.requested_agent_names,
@@ -1451,7 +1516,9 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             )
             prompt = prepared_execution.prepared_prompt
             run_input = prepared_execution.messages
+            unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
+            turn_recorder.set_run_metadata(run_metadata)
             logger.info("executing_team_response", agent_count=len(agents), mode=mode.value)
             logger.info("team_prompt_preview", agents=agent_list, prompt_preview=prompt[:500])
 
@@ -1475,8 +1542,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             cleaned_response: RunOutput | TeamRunOutput | None = None
             attempt_prompt = copy_run_input(run_input)
             attempt_media_inputs = media_inputs
-            attempt_run_id = run_id
-
             try:
                 for retried_without_inline_media in (False, True):
                     response = None
@@ -1520,64 +1585,93 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                     break
 
                 assert response is not None
-                if isinstance(response, (TeamRunOutput, RunOutput)):
+                if isinstance(response, TeamRunOutput | RunOutput):
                     cleaned_response = response
+                if isinstance(response, (TeamRunOutput, RunOutput)) and is_cancelled_run_output(response):
+                    partial_text = _extract_interrupted_team_partial_text(response)
+                    completed_tools, interrupted_tools = _extract_cancelled_team_tool_trace(response)
+                    turn_recorder.record_interrupted(
+                        run_metadata=run_metadata,
+                        assistant_text=partial_text,
+                        completed_tools=completed_tools,
+                        interrupted_tools=interrupted_tools,
+                    )
+                    _raise_team_run_cancelled(response.content)
+                if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
+                    return get_user_friendly_error_message(
+                        Exception(str(response.content or "Unknown team error")),
+                        team_name,
+                    )
+                if reply_to_event_id:
+                    _persist_bound_seen_event_ids(
+                        scope_context=scope_context,
+                        session_id=session_id,
+                        event_ids=_run_metadata_seen_event_ids(run_metadata),
+                    )
+
+                if isinstance(response, (TeamRunOutput, RunOutput)):
+                    if isinstance(response, TeamRunOutput) and response.member_responses:
+                        logger.debug("team_member_response_count", response_count=len(response.member_responses))
+
+                    if isinstance(response, TeamRunOutput):
+                        logger.info(
+                            "team_consensus_preview",
+                            content_preview=response.content[:200] if response.content else None,
+                        )
+                    parts = format_team_response(response)
+                    team_response_text = (
+                        "\n\n".join(parts)
+                        if parts
+                        else (_get_response_content(response) or "No team response generated.")
+                    )
+                else:
+                    logger.warning(
+                        "team_response_unexpected_type",
+                        response_type=type(response).__name__,
+                        response=response,
+                    )
+                    team_response_text = str(response)
+
+                logger.info(
+                    "team_response_preview",
+                    agents=agent_list,
+                    response_preview=team_response_text[:_MAX_LOG_MESSAGE_LENGTH],
+                )
+                if len(team_response_text) > _MAX_LOG_MESSAGE_LENGTH:
+                    logger.debug("team_response_full", agents=agent_list, response=team_response_text)
+
+                team_header = _format_team_header(team_members.display_names)
+                response_text = team_header + team_response_text
+                turn_recorder.record_completed(
+                    run_metadata=run_metadata,
+                    assistant_text=response_text,
+                    completed_tools=(
+                        _extract_completed_team_tool_trace(response)
+                        if isinstance(response, (TeamRunOutput, RunOutput))
+                        else []
+                    ),
+                )
+                return response_text
             finally:
                 cleanup_queued_notice_state(
                     run_output=cleaned_response,
                     storage=scope_context.storage if scope_context is not None else None,
                     session_id=session_id,
                     session_type=SessionType.TEAM,
-                    entity_name=team_name,
+                    entity_name=configured_team_name or team_name,
                 )
-            if isinstance(response, TeamRunOutput) and response.status == RunStatus.cancelled:
-                _raise_team_run_cancelled(response.content)
-            if isinstance(response, TeamRunOutput) and response.status == RunStatus.error:
-                return get_user_friendly_error_message(
-                    Exception(str(response.content or "Unknown team error")),
-                    team_name,
-                )
-            if isinstance(response, RunOutput) and response.status == RunStatus.error:
-                return get_user_friendly_error_message(
-                    Exception(str(response.content or "Unknown team error")),
-                    team_name,
-                )
-            if reply_to_event_id:
-                _persist_bound_seen_event_ids(
-                    scope_context=scope_context,
-                    session_id=session_id,
-                    event_ids=_run_metadata_seen_event_ids(run_metadata),
-                )
-
-            if isinstance(response, (TeamRunOutput, RunOutput)):
-                if isinstance(response, TeamRunOutput):
-                    if response.member_responses:
-                        logger.debug("team_member_response_count", response_count=len(response.member_responses))
-                    logger.info(
-                        "team_consensus_preview",
-                        content_preview=response.content[:200] if response.content else None,
-                    )
-
-                parts = format_team_response(response)
-                team_response_text = "\n\n".join(parts) if parts else "No team response generated."
-            else:
-                logger.warning(
-                    "team_response_unexpected_type",
-                    response_type=type(response).__name__,
-                    response=response,
-                )
-                team_response_text = str(response)
-
-            logger.info(
-                "team_response_preview",
-                agents=agent_list,
-                response_preview=team_response_text[:_MAX_LOG_MESSAGE_LENGTH],
-            )
-            if len(team_response_text) > _MAX_LOG_MESSAGE_LENGTH:
-                logger.debug("team_response_full", agents=agent_list, response=team_response_text)
-
-            team_header = _format_team_header(team_members.display_names)
-            return team_header + team_response_text
+    except asyncio.CancelledError:
+        turn_recorder.record_interrupted(
+            run_metadata=build_matrix_run_metadata(
+                reply_to_event_id,
+                unseen_event_ids,
+                extra_metadata=matrix_run_metadata,
+            ),
+            assistant_text=turn_recorder.assistant_text,
+            completed_tools=turn_recorder.completed_tools,
+            interrupted_tools=turn_recorder.interrupted_tools,
+        )
+        raise
     except Exception as e:
         logger.exception("Error preparing team members", agents=agent_list)
         return get_user_friendly_error_message(e, team_name)
@@ -1668,6 +1762,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     *,
+    turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
 ) -> AsyncIterator[_TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
@@ -1703,6 +1798,17 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     team_label = f"Team ({', '.join(agent_names)})"
+    unseen_event_ids: list[str] = []
+    attempt_run_id = run_id
+    canonical_per_member: dict[str, str] = {}
+    canonical_consensus = ""
+    completed_tools: list[ToolTraceEntry] = []
+    pending_tools: list[_PendingTeamTool] = []
+
+    def _empty_canonical_partial_text() -> str:
+        return ""
+
+    render_canonical_partial_text: Callable[[], str] = _empty_canonical_partial_text
 
     try:
         with open_bound_scope_session_context(
@@ -1748,77 +1854,142 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
             prepared_run_input = prepared_execution.messages
             unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
+            turn_recorder.set_run_metadata(run_metadata)
             logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
             media_inputs = media or MediaInputs()
             attempt_prompt = copy_run_input(prepared_run_input)
             attempt_media_inputs = media_inputs
-            attempt_run_id = run_id
 
-            per_member: dict[str, str] = {}
-            consensus: str = ""
+            visible_per_member: dict[str, str] = {}
+            visible_consensus: str = ""
             tool_trace: list[ToolTraceEntry] = []
             next_tool_index = 1
-            pending_tools: list[tuple[str, int, str]] = []
 
             def _scope_key_for_agent(agent_name: str) -> str:
                 return f"agent:{agent_name}"
 
-            def _get_consensus() -> str:
-                return consensus
+            def _get_visible_consensus() -> str:
+                return visible_consensus
 
-            def _append_to_consensus(text: str) -> None:
-                nonlocal consensus
-                consensus += text
+            def _append_to_visible_consensus(text: str) -> None:
+                nonlocal visible_consensus
+                visible_consensus += text
 
-            def _set_consensus(value: str) -> None:
-                nonlocal consensus
-                consensus = value
+            def _set_visible_consensus(value: str) -> None:
+                nonlocal visible_consensus
+                visible_consensus = value
 
-            def _ensure_hidden_tool_gap(*, get_text: Callable[[], str], apply_text: Callable[[str], None]) -> None:
-                if not get_text().endswith("\n\n"):
-                    apply_text("\n\n")
+            def _render_team_parts(
+                *,
+                per_member: dict[str, str],
+                consensus: str,
+            ) -> list[str]:
+                parts: list[str] = []
+                for display in display_names:
+                    body = per_member.get(display, "").strip()
+                    if body:
+                        parts.append(_format_member_contribution(display, body))
+                for display, body in per_member.items():
+                    if display not in display_names and body.strip():
+                        parts.append(_format_member_contribution(display, body.strip()))
+
+                if consensus.strip():
+                    parts.extend(_format_team_consensus(consensus.strip()))
+                elif parts:
+                    parts.append(_format_no_consensus_note())
+                return parts
+
+            def _current_canonical_partial_text() -> str:
+                return "\n\n".join(
+                    _render_team_parts(
+                        per_member=canonical_per_member,
+                        consensus=canonical_consensus,
+                    ),
+                )
+
+            render_canonical_partial_text = _current_canonical_partial_text
+
+            def _sync_live_turn_recorder() -> None:
+                turn_recorder.sync_partial_state(
+                    run_metadata=run_metadata,
+                    assistant_text=render_canonical_partial_text(),
+                    completed_tools=completed_tools,
+                    interrupted_tools=[pending.trace_entry for pending in pending_tools],
+                )
+
+            def _find_pending_tool_index(
+                *,
+                scope_key: str,
+                tool: ToolExecution | None,
+            ) -> int | None:
+                call_id = tool_execution_call_id(tool)
+                if call_id is not None:
+                    for pos in range(len(pending_tools) - 1, -1, -1):
+                        pending_tool = pending_tools[pos]
+                        if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call_id:
+                            return pos
+                info = extract_tool_completed_info(tool)
+                if not info:
+                    return None
+                tool_name, _ = info
+                for pos in range(len(pending_tools) - 1, -1, -1):
+                    pending_tool = pending_tools[pos]
+                    if (
+                        pending_tool.scope_key == scope_key
+                        and pending_tool.tool_call_id is None
+                        and pending_tool.tool_name == tool_name
+                    ):
+                        return pos
+                return None
 
             def _start_tool(
                 *,
                 scope_key: str,
-                get_text: Callable[[], str],
-                apply_text: Callable[[str], None],
+                apply_visible_text: Callable[[str], None],
                 tool: ToolExecution | None,
             ) -> None:
                 nonlocal next_tool_index
-                if not show_tool_calls:
-                    _ensure_hidden_tool_gap(get_text=get_text, apply_text=apply_text)
+                tool_index = next_tool_index if show_tool_calls else None
+                tool_msg, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
+                if trace_entry is not None:
+                    pending_tools.append(
+                        _PendingTeamTool(
+                            scope_key=scope_key,
+                            tool_name=trace_entry.tool_name,
+                            trace_entry=trace_entry,
+                            tool_call_id=tool_execution_call_id(tool),
+                            visible_tool_index=tool_index,
+                        ),
+                    )
+                if not show_tool_calls or tool_index is None:
                     return
-
-                tool_msg, trace_entry = format_tool_started_event(tool, tool_index=next_tool_index)
                 if tool_msg:
-                    apply_text(tool_msg)
+                    apply_visible_text(tool_msg)
                 if trace_entry is not None:
                     tool_trace.append(trace_entry)
-                    pending_tools.append((trace_entry.tool_name, next_tool_index, scope_key))
-                    next_tool_index += 1
+                next_tool_index += 1
 
             def _complete_tool(
                 *,
                 scope_key: str,
-                get_text: Callable[[], str],
-                set_text: Callable[[str], None],
+                get_visible_text: Callable[[], str],
+                set_visible_text: Callable[[str], None],
                 tool: ToolExecution | None,
             ) -> None:
                 info = extract_tool_completed_info(tool)
-                if not info or not show_tool_calls:
+                if not info:
                     return
 
                 tool_name, result = info
-                match_pos = next(
-                    (
-                        pos
-                        for pos in range(len(pending_tools) - 1, -1, -1)
-                        if pending_tools[pos][0] == tool_name and pending_tools[pos][2] == scope_key
-                    ),
-                    None,
-                )
-                if match_pos is None:
+                pending_trace_pos = _find_pending_tool_index(scope_key=scope_key, tool=tool)
+                pending_tool = pending_tools.pop(pending_trace_pos) if pending_trace_pos is not None else None
+                _, completed_trace = format_tool_completed_event(tool)
+                if completed_trace is not None:
+                    completed_tools.append(completed_trace)
+                if not show_tool_calls:
+                    return
+
+                if pending_tool is None or pending_tool.visible_tool_index is None:
                     logger.warning(
                         "Missing pending tool start in team stream; skipping completion marker",
                         tool_name=tool_name,
@@ -1826,17 +1997,16 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     )
                     return
 
-                _, tool_index, _ = pending_tools.pop(match_pos)
                 updated_text, trace_entry = complete_pending_tool_block(
-                    get_text(),
+                    get_visible_text(),
                     tool_name,
                     result,
-                    tool_index=tool_index,
+                    tool_index=pending_tool.visible_tool_index,
                 )
-                set_text(updated_text)
+                set_visible_text(updated_text)
 
-                if 0 < tool_index <= len(tool_trace):
-                    existing_entry = tool_trace[tool_index - 1]
+                if 0 < pending_tool.visible_tool_index <= len(tool_trace):
+                    existing_entry = tool_trace[pending_tool.visible_tool_index - 1]
                     existing_entry.type = "tool_call_completed"
                     existing_entry.result_preview = trace_entry.result_preview
                     existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
@@ -1844,49 +2014,48 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     logger.warning(
                         "Missing tool trace slot in team stream for completion",
                         tool_name=tool_name,
-                        tool_index=tool_index,
+                        tool_index=pending_tool.visible_tool_index,
                         trace_len=len(tool_trace),
                     )
 
             def _start_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
-                if agent_name not in per_member:
-                    per_member[agent_name] = ""
+                if agent_name not in visible_per_member:
+                    visible_per_member[agent_name] = ""
 
-                def _get_text() -> str:
-                    return per_member[agent_name]
-
-                def _apply_text(text: str) -> None:
-                    per_member[agent_name] += text
+                def _apply_visible_text(text: str) -> None:
+                    visible_per_member[agent_name] += text
 
                 _start_tool(
                     scope_key=_scope_key_for_agent(agent_name),
-                    get_text=_get_text,
-                    apply_text=_apply_text,
+                    apply_visible_text=_apply_visible_text,
                     tool=tool,
                 )
 
             def _complete_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
-                if agent_name not in per_member:
-                    per_member[agent_name] = ""
+                if agent_name not in visible_per_member:
+                    visible_per_member[agent_name] = ""
 
-                def _get_text() -> str:
-                    return per_member[agent_name]
+                def _get_visible_text() -> str:
+                    return visible_per_member[agent_name]
 
-                def _set_text(value: str) -> None:
-                    per_member[agent_name] = value
+                def _set_visible_text(value: str) -> None:
+                    visible_per_member[agent_name] = value
 
                 _complete_tool(
                     scope_key=_scope_key_for_agent(agent_name),
-                    get_text=_get_text,
-                    set_text=_set_text,
+                    get_visible_text=_get_visible_text,
+                    set_visible_text=_set_visible_text,
                     tool=tool,
                 )
 
             try:
                 for retried_without_inline_media in (False, True):
-                    per_member = dict.fromkeys(display_names, "")
-                    consensus = ""
+                    canonical_per_member = dict.fromkeys(display_names, "")
+                    visible_per_member = dict.fromkeys(display_names, "")
+                    canonical_consensus = ""
+                    visible_consensus = ""
                     tool_trace = []
+                    completed_tools = []
                     next_tool_index = 1
                     pending_tools = []
                     emitted_output = False
@@ -1906,6 +2075,35 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         user_id=user_id,
                     )
                     async for event in raw_stream:
+                        if isinstance(event, (TeamRunOutput, RunOutput)) and is_cancelled_run_output(event):
+                            partial_text = _extract_interrupted_team_partial_text(event)
+                            completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
+                            turn_recorder.record_interrupted(
+                                run_metadata=run_metadata,
+                                assistant_text=partial_text,
+                                completed_tools=completed_tool_trace,
+                                interrupted_tools=interrupted_tool_trace,
+                            )
+                            _raise_team_run_cancelled(event.content)
+                        if isinstance(event, (TeamRunOutput, RunOutput)) and is_errored_run_output(event):
+                            error_text = str(event.content or "Unknown team error")
+                            if (
+                                not retried_without_inline_media
+                                and not (emitted_output or pending_tools or completed_tools)
+                                and should_retry_without_inline_media(error_text, attempt_media_inputs)
+                            ):
+                                logger.warning(
+                                    "Retrying team streaming without inline media after errored run output",
+                                    agents=", ".join(agent_names),
+                                    error=error_text,
+                                )
+                                attempt_prompt = append_inline_media_fallback_to_run_input(prepared_run_input)
+                                attempt_media_inputs = MediaInputs()
+                                attempt_run_id = _next_retry_run_id(run_id)
+                                retry_requested = True
+                                break
+                            yield get_user_friendly_error_message(Exception(error_text), team_label)
+                            return
                         if isinstance(event, RunOutput):
                             cleanup_queued_notice_state(
                                 run_output=event,
@@ -1926,6 +2124,11 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     session_id=session_id,
                                     event_ids=[reply_to_event_id, *unseen_event_ids],
                                 )
+                            turn_recorder.record_completed(
+                                run_metadata=run_metadata,
+                                assistant_text=_get_response_content(event),
+                                completed_tools=_extract_completed_team_tool_trace(event),
+                            )
                             yield _get_response_content(event)
                             return
 
@@ -1968,6 +2171,11 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             team_response_text = (
                                 "\n\n".join(parts) if parts else str(event.content or "No team response generated.")
                             )
+                            turn_recorder.record_completed(
+                                run_metadata=run_metadata,
+                                assistant_text=_format_team_header(team_members.display_names) + team_response_text,
+                                completed_tools=_extract_completed_team_tool_trace(event),
+                            )
                             yield _format_team_header(team_members.display_names) + team_response_text
                             return
 
@@ -1975,7 +2183,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             error_text = event.content or "Unknown team error"
                             if (
                                 not retried_without_inline_media
-                                and not emitted_output
+                                and not (emitted_output or pending_tools or completed_tools)
                                 and should_retry_without_inline_media(error_text, attempt_media_inputs)
                             ):
                                 logger.warning(
@@ -1992,14 +2200,25 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             return
 
                         if isinstance(event, TeamRunCancelledEvent):
+                            interrupted_tool_trace = [pending.trace_entry for pending in pending_tools]
+                            partial_text = render_canonical_partial_text()
+                            turn_recorder.record_interrupted(
+                                run_metadata=run_metadata,
+                                assistant_text=partial_text,
+                                completed_tools=completed_tools,
+                                interrupted_tools=interrupted_tool_trace,
+                            )
                             _raise_team_run_cancelled(event.reason)
 
                         if isinstance(event, AgentRunContentEvent):
                             member_name = event.agent_name
                             if member_name:
-                                if member_name not in per_member:
-                                    per_member[member_name] = ""
-                                per_member[member_name] += str(event.content or "")
+                                if member_name not in canonical_per_member:
+                                    canonical_per_member[member_name] = ""
+                                    visible_per_member[member_name] = ""
+                                content = str(event.content or "")
+                                canonical_per_member[member_name] += content
+                                visible_per_member[member_name] += content
                         elif isinstance(event, AgentToolCallStartedEvent):
                             member_name = event.agent_name
                             if member_name:
@@ -2010,41 +2229,33 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 _complete_tool_for_member(member_name, event.tool)
                         elif isinstance(event, TeamRunContentEvent):
                             if event.content:
-                                consensus += str(event.content)
+                                content = str(event.content)
+                                canonical_consensus += content
+                                visible_consensus += content
                             else:
                                 logger.debug("Empty team consensus event received")
                         elif isinstance(event, TeamToolCallStartedEvent):
                             _start_tool(
                                 scope_key="team",
-                                get_text=_get_consensus,
-                                apply_text=_append_to_consensus,
+                                apply_visible_text=_append_to_visible_consensus,
                                 tool=event.tool,
                             )
                         elif isinstance(event, TeamToolCallCompletedEvent):
                             _complete_tool(
                                 scope_key="team",
-                                get_text=_get_consensus,
-                                set_text=_set_consensus,
+                                get_visible_text=_get_visible_consensus,
+                                set_visible_text=_set_visible_consensus,
                                 tool=event.tool,
                             )
                         else:
                             logger.debug("ignoring_team_stream_event_type", event_type=type(event).__name__)
                             continue
 
-                        parts: list[str] = []
-                        for display in display_names:
-                            body = per_member.get(display, "").strip()
-                            if body:
-                                parts.append(_format_member_contribution(display, body))
-                        for display, body in per_member.items():
-                            if display not in display_names and body.strip():
-                                parts.append(_format_member_contribution(display, body.strip()))
-
-                        if consensus.strip():
-                            parts.extend(_format_team_consensus(consensus.strip()))
-                        elif parts:
-                            parts.append(_format_no_consensus_note())
-
+                        _sync_live_turn_recorder()
+                        parts = _render_team_parts(
+                            per_member=visible_per_member,
+                            consensus=visible_consensus,
+                        )
                         if parts:
                             emitted_output = True
                             header = _format_team_header(team_members.display_names)
@@ -2069,6 +2280,18 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     session_type=SessionType.TEAM,
                     entity_name=team_label,
                 )
+    except asyncio.CancelledError:
+        turn_recorder.record_interrupted(
+            run_metadata=build_matrix_run_metadata(
+                reply_to_event_id,
+                unseen_event_ids,
+                extra_metadata=matrix_run_metadata,
+            ),
+            assistant_text=render_canonical_partial_text(),
+            completed_tools=completed_tools,
+            interrupted_tools=[pending.trace_entry for pending in pending_tools],
+        )
+        raise
     except Exception as e:
         logger.exception("Error preparing team members for streaming", agents=agent_names)
         yield get_user_friendly_error_message(e, team_label)

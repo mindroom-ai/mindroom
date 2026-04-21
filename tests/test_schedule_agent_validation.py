@@ -32,6 +32,7 @@ def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.Mat
                 display_name=user_id,
                 avatar_url=None,
             )
+    room.members_synced = True
     return room
 
 

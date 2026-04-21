@@ -17,6 +17,7 @@ from mindroom.tool_system.events import (
     extract_tool_completed_info,
     format_tool_combined,
     format_tool_completed_event,
+    render_tool_trace_for_context,
 )
 
 TEST_CURSOR = "cursor_1234567890"
@@ -327,6 +328,45 @@ def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None
     assert trace["version"] == 2
     assert len(trace["events"]) == _MAX_TOOL_TRACE_EVENTS + 5
     assert "events_truncated" not in trace
+
+
+def test_render_tool_trace_for_context_pins_started_and_completed_format() -> None:
+    """Renderer should emit the planned context marker format."""
+    rendered = render_tool_trace_for_context(
+        [
+            ToolTraceEntry(
+                type="tool_call_completed",
+                tool_name="run_shell_command",
+                args_preview="cmd=pwd",
+                result_preview="/app",
+            ),
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="save_file",
+                args_preview="file_name=a.py",
+                truncated=True,
+            ),
+        ],
+    )
+
+    assert rendered == (
+        "[tool:run_shell_command completed]\n"
+        "  args: cmd=pwd\n"
+        "  result: /app\n"
+        "[tool:save_file started]\n"
+        "  args: file_name=a.py\n"
+        "  result: <not yet returned>\n"
+        "  (truncated)"
+    )
+
+
+def test_render_tool_trace_for_context_omits_missing_optional_fields() -> None:
+    """Renderer should avoid empty args/result lines for completed events without previews."""
+    rendered = render_tool_trace_for_context(
+        [ToolTraceEntry(type="tool_call_completed", tool_name="save_file")],
+    )
+
+    assert rendered == "[tool:save_file completed]"
 
 
 def test_format_tool_started_with_empty_args() -> None:

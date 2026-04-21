@@ -292,8 +292,38 @@ class TestCleanPartialReplyBody:
 class TestUnseenMessagesPartialReplies:
     """Test unseen-context extraction for self-authored partial replies."""
 
-    def test_includes_streaming_self_reply_with_non_duplication_guidance(self) -> None:
-        """Still-streaming self replies must stay in user-context with an explicit no-repeat warning."""
+    def test_skips_interrupted_self_reply_when_it_should_come_from_persisted_history(self) -> None:
+        """Interrupted self replies should no longer be reconstructed through unseen Matrix context."""
+        config = _make_config()
+        runtime_paths = runtime_paths_for(config)
+        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+
+        thread_history = [
+            _make_visible_message(
+                event_id="e1",
+                sender=agent_id,
+                body=f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}",
+                stream_status=STREAM_STATUS_CANCELLED,
+            ),
+            _make_visible_message(event_id="e2", sender="@user:localhost", body="Continue"),
+        ]
+
+        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
+            thread_history,
+            "helper",
+            config,
+            runtime_paths,
+            seen_event_ids=set(),
+            current_event_id="e2",
+            active_event_ids=set(),
+        )
+
+        assert unseen == []
+        assert partial_reply_kinds == set()
+        assert in_progress_event_ids == set()
+
+    def test_includes_streaming_self_reply_with_cleaned_body_and_header(self) -> None:
+        """Inject still-streaming self replies with the non-duplication warning header."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
@@ -325,8 +355,8 @@ class TestUnseenMessagesPartialReplies:
         assert context_messages[1].content == "You (reply still streaming): Partial reply"
         assert context_messages[2].content == "Answer the new question."
 
-    def test_includes_interrupted_self_reply_with_continue_guidance(self) -> None:
-        """Interrupted self replies must stay in user-context with an explicit continuation warning."""
+    def test_interrupted_self_reply_leaves_only_newer_external_messages_in_unseen_prompt(self) -> None:
+        """Interrupted self replies should not trigger unseen-context continuation headers anymore."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
@@ -350,12 +380,9 @@ class TestUnseenMessagesPartialReplies:
             response_sender_id=agent_id,
         )
 
-        assert unseen_event_ids == ["e1"]
-        assert [message.role for message in context_messages] == ["user", "user", "user"]
-        assert "Your previous response was interrupted before completion." in str(context_messages[0].content)
-        assert "Continue from where you left off if appropriate." in str(context_messages[0].content)
-        assert context_messages[1].content == "You (interrupted reply draft): Partial answer"
-        assert context_messages[2].content == "Continue."
+        assert unseen_event_ids == []
+        assert [message.role for message in context_messages] == ["user"]
+        assert context_messages[0].content == "Continue."
 
     def test_in_progress_partial_reply_event_ids_are_excluded_from_seen_metadata(self) -> None:
         """Keep live self partial replies out of seen metadata until they become terminal."""
@@ -385,8 +412,8 @@ class TestUnseenMessagesPartialReplies:
         assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
         assert _get_unseen_event_ids_for_metadata(unseen, in_progress_event_ids=in_progress_event_ids) == ["e2"]
 
-    def test_recent_streaming_reply_without_live_event_id_is_treated_as_interrupted(self) -> None:
-        """After restart, recent streaming metadata should not be mistaken for still-active output."""
+    def test_recent_streaming_reply_without_live_event_id_is_skipped_from_unseen_context(self) -> None:
+        """After restart, stale self-streaming output should not be reconstructed from Matrix history."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
@@ -410,9 +437,9 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids=set(),
         )
 
-        assert partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}
+        assert partial_reply_kinds == set()
         assert in_progress_event_ids == set()
-        assert unseen[0].body == "Partial reply"
+        assert unseen == []
 
     def test_placeholder_only_self_reply_is_not_injected(self) -> None:
         """Do not inject placeholder-only self replies as meaningful unseen context."""
@@ -441,8 +468,8 @@ class TestUnseenMessagesPartialReplies:
         assert unseen == []
         assert partial_reply_kinds == set()
 
-    def test_interrupted_partial_reply_event_id_is_marked_seen_after_consumption(self) -> None:
-        """Mark interrupted self partial replies as seen so they do not reappear forever."""
+    def test_interrupted_partial_reply_event_id_is_not_added_to_unseen_metadata(self) -> None:
+        """Interrupted self replies should not participate in unseen-context seen-ID bookkeeping."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
@@ -489,17 +516,20 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids=set(),
         )
 
-        assert [msg.event_id for msg in initial_unseen] == ["e1"]
-        assert initial_kinds == {_PartialReplyKind.INTERRUPTED}
-        assert _get_unseen_event_ids_for_metadata(
-            initial_unseen,
-            in_progress_event_ids=initial_in_progress_event_ids,
-        ) == ["e1"]
+        assert initial_unseen == []
+        assert initial_kinds == set()
+        assert (
+            _get_unseen_event_ids_for_metadata(
+                initial_unseen,
+                in_progress_event_ids=initial_in_progress_event_ids,
+            )
+            == []
+        )
         assert repeated_unseen == []
         assert repeated_kinds == set()
 
-    def test_same_partial_event_can_be_reclassified_after_status_change(self) -> None:
-        """Keep self partial replies eligible for later interrupted reclassification."""
+    def test_same_partial_event_is_not_reintroduced_after_status_change(self) -> None:
+        """Self partial replies should stay out of unseen context once interrupted replay is persisted elsewhere."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
         agent_id = config.get_ids(runtime_paths)["helper"].full_id
@@ -546,10 +576,9 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids=set(),
         )
 
-        assert updated_kinds == {_PartialReplyKind.INTERRUPTED}
+        assert updated_kinds == set()
         assert updated_in_progress_event_ids == set()
-        assert [msg.event_id for msg in updated_unseen] == ["e1"]
-        assert updated_unseen[0].body == "Partial reply"
+        assert updated_unseen == []
 
 
 class TestThreadHistoryStreamStatus:

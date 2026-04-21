@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from contextvars import Context
 from copy import deepcopy
 from dataclasses import replace
@@ -17,6 +17,7 @@ from agno.db.base import SessionType
 from agno.media import File
 from agno.models.message import Message
 from agno.models.metrics import Metrics
+from agno.models.response import ToolExecution
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
     ModelRequestCompletedEvent,
@@ -24,8 +25,12 @@ from agno.run.agent import (
     RunCompletedEvent,
     RunContentEvent,
     RunErrorEvent,
+    RunOutput,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
@@ -56,6 +61,8 @@ from mindroom.constants import (
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.delivery_gateway import DeliveryResult
 from mindroom.history import PreparedHistoryState
+from mindroom.history.runtime import ScopeSessionContext
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -63,6 +70,7 @@ from mindroom.hooks import (
     EnrichmentItem,
     HookContextSupport,
     HookRegistry,
+    MessageEnvelope,
     SessionHookContext,
     hook,
 )
@@ -81,6 +89,7 @@ from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
 from mindroom.streaming import StreamingDeliveryError
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeSupport,
@@ -100,7 +109,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Generator
     from pathlib import Path
 
 
@@ -185,6 +194,32 @@ def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
         discovered_hooks=tuple(callbacks),
         entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
         plugin_order=0,
+    )
+
+
+@contextmanager
+def _open_agent_scope_context(
+    storage: _SessionStorage,
+    *,
+    scope_id: str = "general",
+) -> Generator[ScopeSessionContext, None, None]:
+    yield ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id=scope_id),
+        storage=storage.open(),
+        session=storage.session,
+    )
+
+
+@contextmanager
+def _open_team_scope_context(
+    storage: _SessionStorage,
+    *,
+    scope_id: str = "ultimate",
+) -> Generator[ScopeSessionContext, None, None]:
+    yield ScopeSessionContext(
+        scope=HistoryScope(kind="team", scope_id=scope_id),
+        storage=storage.open(),
+        session=storage.session,
     )
 
 
@@ -354,6 +389,73 @@ def _build_response_runner(
             state_writer=bot._conversation_state_writer,
         ),
     )
+
+
+def test_persist_interrupted_turn_closes_storage_after_write(tmp_path: Path) -> None:
+    """Runner-owned interrupted replay should always close the opened storage handle."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    storage = MagicMock()
+    coordinator.deps.state_writer.create_storage = MagicMock(return_value=storage)
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.mark_interrupted()
+
+    with patch("mindroom.response_runner.persist_interrupted_replay_snapshot") as mock_persist:
+        coordinator._persist_interrupted_turn(
+            recorder=recorder,
+            session_scope=HistoryScope(kind="agent", scope_id="general"),
+            session_id="session1",
+            execution_identity=None,
+            run_id="run-1",
+            is_team=False,
+        )
+
+    mock_persist.assert_called_once()
+    storage.close.assert_called_once_with()
+
+
+def test_persist_interrupted_turn_closes_storage_when_write_fails(tmp_path: Path) -> None:
+    """Runner-owned interrupted replay should close storage even if persistence raises."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    storage = MagicMock()
+    coordinator.deps.state_writer.create_storage = MagicMock(return_value=storage)
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.mark_interrupted()
+
+    with (
+        patch(
+            "mindroom.response_runner.persist_interrupted_replay_snapshot",
+            side_effect=RuntimeError("boom"),
+        ),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        coordinator._persist_interrupted_turn(
+            recorder=recorder,
+            session_scope=HistoryScope(kind="agent", scope_id="general"),
+            session_id="session1",
+            execution_identity=None,
+            run_id="run-1",
+            is_team=False,
+        )
+
+    storage.close.assert_called_once_with()
 
 
 def _response_request(
@@ -1161,6 +1263,135 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
 
 
 @pytest.mark.asyncio
+async def test_process_and_respond_streaming_persists_interrupted_history_when_delivery_fails(
+    tmp_path: Path,
+) -> None:
+    """Stream delivery errors should persist canonical interrupted replay from the partial text."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response") as mock_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
+            accumulated = ""
+            async for chunk in request.response_stream:
+                accumulated += str(chunk)
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$terminal",
+                accumulated_text="Partial answer\n\n**[Response interrupted by an error: boom]**",
+                tool_trace=[],
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Partial answer"
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        delivery = await coordinator.process_and_respond_streaming(
+            _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+        )
+
+    assert delivery.event_id == "$terminal"
+    assert delivery.failure_reason == "boom"
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "Partial answer\n\n[interrupted]"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_streaming_delivery_failure_with_visible_tools_replays_tool_trace_once(
+    tmp_path: Path,
+) -> None:
+    """Visible streamed tool markers should be normalized out before interrupted replay persistence."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response") as mock_stream,
+        patch.object(ResponseRunner, "_show_tool_calls", return_value=True),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def consume_delivery_and_fail(_request: object) -> tuple[str, str]:
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$terminal",
+                accumulated_text="Partial answer\n\n🔧 `run_shell_command` [1]\n\n**[Response interrupted by an error: boom]**",
+                tool_trace=[
+                    ToolTraceEntry(
+                        type="tool_call_completed",
+                        tool_name="run_shell_command",
+                        args_preview="cmd=pwd",
+                        result_preview="/app",
+                    ),
+                ],
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Partial answer"
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        delivery = await coordinator.process_and_respond_streaming(
+            _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+        )
+
+    assert delivery.event_id == "$terminal"
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assistant_text = cast("str", persisted_run.messages[1].content)
+    assert "🔧 `run_shell_command` [1]" not in assistant_text
+    assert assistant_text.count("[tool:run_shell_command completed]") == 1
+    assert assistant_text == (
+        "Partial answer\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]"
+    )
+
+
+@pytest.mark.asyncio
 async def test_process_and_respond_emits_session_started_after_persisted_cancellation(
     tmp_path: Path,
 ) -> None:
@@ -1319,6 +1550,355 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
         "stream",
         "deliver:Hello!",
         "started:!test:localhost:$thread-root:$thread-root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_response_locked_persists_minimal_interrupted_history_after_task_cancel(
+    tmp_path: Path,
+) -> None:
+    """Lifecycle-owned agent cancellation should persist one minimal interrupted turn."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    started = asyncio.Event()
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        task = asyncio.create_task(response_function("$thinking"))
+        await started.wait()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        return "$thinking"
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+            run_id_callback("run-retry")
+            started.set()
+            await asyncio.sleep(60)
+            return "unreachable"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.generate_response_locked(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+    assert event_id is None
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "run-retry"
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata["matrix_response_event_id"] == "$thinking"
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].role == "user"
+    assert "Hello" in cast("str", persisted_run.messages[0].content)
+    assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
+        ("assistant", "[interrupted]"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_active_response_events(
+    tmp_path: Path,
+) -> None:
+    """Lifecycle-owned minimal interruption must not treat active bot replies as consumed user events."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    started = asyncio.Event()
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        task = asyncio.create_task(response_function("$thinking"))
+        await started.wait()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        return "$thinking"
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch.object(ResponseRunner, "_active_response_event_ids", return_value={"$other-response"}),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+            run_id_callback("run-retry")
+            started.set()
+            await asyncio.sleep(60)
+            return "unreachable"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.generate_response_locked(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+    assert event_id is None
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata["matrix_seen_event_ids"] == ["$user_msg"]
+    assert "$other-response" not in persisted_run.metadata["matrix_seen_event_ids"]
+
+
+@pytest.mark.asyncio
+async def test_generate_response_locked_persists_interrupted_history_when_final_delivery_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Delivery-stage cancellation after a completed non-streaming run should still persist replay."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_generate_non_streaming(
+            *_args: object,
+            **kwargs: object,
+        ) -> str:
+            turn_recorder = cast("TurnRecorder", kwargs["turn_recorder"])
+            turn_recorder.set_run_id("run-delivery-cancel")
+            turn_recorder.record_completed(
+                run_metadata={},
+                assistant_text="Hello!",
+                completed_tools=[],
+            )
+            return "Hello!"
+
+        coordinator.deps.delivery_gateway.deliver_final = AsyncMock(
+            side_effect=asyncio.CancelledError("delivery cancel"),
+        )
+
+        with patch.object(
+            ResponseRunner,
+            "generate_non_streaming_ai_response",
+            new=AsyncMock(side_effect=fake_generate_non_streaming),
+        ):
+            event_id = await coordinator.generate_response_locked(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            )
+
+    assert event_id is None
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "run-delivery-cancel"
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "Hello!\n\n[interrupted]"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_response_locked_delivery_cancel_with_visible_tools_replays_tool_trace_once(
+    tmp_path: Path,
+) -> None:
+    """Delivery-interrupted replay must not duplicate inline tool blocks from the finished run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    history_storage = _SessionStorage()
+    ai_scope_storage = _SessionStorage()
+    completed_run = RunOutput(
+        run_id="run-visible-tools",
+        agent_id="general",
+        session_id="session1",
+        content="Half done",
+        messages=[Message(role="assistant", content="Half done")],
+        tools=[
+            ToolExecution(
+                tool_name="run_shell_command",
+                tool_args={"cmd": "pwd"},
+                result="/app",
+            ),
+        ],
+        status=RunStatus.completed,
+    )
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch.object(ResponseRunner, "_show_tool_calls", return_value=True),
+        patch(
+            "mindroom.ai.open_resolved_scope_session_context",
+            new=lambda **_: _open_agent_scope_context(ai_scope_storage),
+        ),
+        patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=completed_run),
+    ):
+        mock_prepare.return_value = _prepared_prompt_result(MagicMock(), prompt="Hello")
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=history_storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.deliver_final = AsyncMock(
+            side_effect=asyncio.CancelledError("delivery cancel"),
+        )
+
+        event_id = await coordinator.generate_response_locked(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+    assert event_id is None
+    persisted_session = cast("AgentSession", history_storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assistant_content = cast("str", persisted_run.messages[1].content)
+    assert assistant_content.count("[tool:run_shell_command completed]") == 1
+    assert assistant_content == (
+        "Half done\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_response_locked_persists_interrupted_history_when_stream_finalize_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Delivery-stage cancellation after streaming completes should still persist replay."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    request = replace(
+        _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        response_envelope=MessageEnvelope(
+            source_event_id="$user_msg",
+            room_id="!test:localhost",
+            target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            requester_id="@alice:localhost",
+            sender_id="@alice:localhost",
+            body="Hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="general",
+            source_kind="message",
+        ),
+        correlation_id="corr-stream-cancel",
+    )
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_generate_streaming(
+            *_args: object,
+            **kwargs: object,
+        ) -> tuple[str | None, str]:
+            turn_recorder = cast("TurnRecorder", kwargs["turn_recorder"])
+            turn_recorder.set_run_id("run-stream-delivery-cancel")
+            turn_recorder.record_completed(
+                run_metadata={},
+                assistant_text="Hello!",
+                completed_tools=[],
+            )
+            return "$stream-msg", "Hello!"
+
+        coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
+            side_effect=asyncio.CancelledError("delivery cancel"),
+        )
+
+        with patch.object(
+            ResponseRunner,
+            "generate_streaming_ai_response",
+            new=AsyncMock(side_effect=fake_generate_streaming),
+        ):
+            event_id = await coordinator.generate_response_locked(
+                request,
+                resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            )
+
+    assert event_id is None
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "run-stream-delivery-cancel"
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "Hello!\n\n[interrupted]"),
     ]
 
 
@@ -1612,6 +2192,482 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         "stream",
         "deliver:Team hello",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_persists_interrupted_history_when_stream_delivery_fails(
+    tmp_path: Path,
+) -> None:
+    """Team stream delivery errors should persist canonical interrupted replay from the partial text."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
+            accumulated = ""
+            async for chunk in request.response_stream:
+                accumulated += str(chunk)
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$team-terminal",
+                accumulated_text="Team hello\n\n**[Response interrupted by an error: boom]**",
+                tool_trace=[],
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Team hello"
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id == "$team-terminal"
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "Team hello\n\n[interrupted]"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_stream_delivery_failure_with_visible_tools_replays_tool_trace_once(
+    tmp_path: Path,
+) -> None:
+    """Team stream delivery failures should not persist visible tool markers alongside replay traces."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch.object(ResponseRunner, "_show_tool_calls", return_value=True),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        async def consume_delivery_and_fail(_request: object) -> tuple[str, str]:
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$team-terminal",
+                accumulated_text=(
+                    "🤝 **Team Response** (General):\n\nTeam hello\n\n"
+                    "🔧 `run_shell_command` [1]\n\n"
+                    "**[Response interrupted by an error: boom]**"
+                ),
+                tool_trace=[
+                    ToolTraceEntry(
+                        type="tool_call_completed",
+                        tool_name="run_shell_command",
+                        args_preview="cmd=pwd",
+                        result_preview="/app",
+                    ),
+                ],
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "🤝 **Team Response** (General):\n\nTeam hello"
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id == "$team-terminal"
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assistant_text = cast("str", persisted_run.messages[1].content)
+    assert "🔧 `run_shell_command` [1]" not in assistant_text
+    assert assistant_text.count("[tool:run_shell_command completed]") == 1
+    assert assistant_text == (
+        "🤝 **Team Response** (General):\n\nTeam hello\n\n"
+        "[tool:run_shell_command completed]\n"
+        "  args: cmd=pwd\n"
+        "  result: /app\n\n"
+        "[interrupted]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_persists_minimal_interrupted_history_after_task_cancel(
+    tmp_path: Path,
+) -> None:
+    """Lifecycle-owned team cancellation should persist one minimal interrupted turn."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "ultimate"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+
+    storage = _SessionStorage()
+    started = asyncio.Event()
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        task = asyncio.create_task(response_function("$thinking"))
+        await started.wait()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        return "$thinking"
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new_callable=AsyncMock) as mock_team_response,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+
+        async def fake_team_response(*_args: object, **_kwargs: object) -> str:
+            started.set()
+            await asyncio.sleep(60)
+            return "unreachable"
+
+        mock_team_response.side_effect = fake_team_response
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id is None
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].role == "user"
+    assert "Hello" in cast("str", persisted_run.messages[0].content)
+    assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
+        ("assistant", "[interrupted]"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_persists_interrupted_history_when_final_delivery_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Delivery-stage cancellation after a completed team run should still persist replay."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_runner.team_response", new_callable=AsyncMock) as mock_team_response,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        coordinator.deps.delivery_gateway.deliver_final = AsyncMock(
+            side_effect=asyncio.CancelledError("delivery cancel"),
+        )
+
+        async def fake_team_response(*_args: object, **kwargs: object) -> str:
+            turn_recorder = cast("TurnRecorder", kwargs["turn_recorder"])
+            turn_recorder.set_run_id("team-run-delivery-cancel")
+            turn_recorder.record_completed(
+                run_metadata={},
+                assistant_text="🤝 Team Response:\n\nTeam hello",
+                completed_tools=[],
+            )
+            return "🤝 Team Response:\n\nTeam hello"
+
+        mock_team_response.side_effect = fake_team_response
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id is None
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "team-run-delivery-cancel"
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "🤝 Team Response:\n\nTeam hello\n\n[interrupted]"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_persists_interrupted_history_when_stream_finalize_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Delivery-stage cancellation after team streaming completes should still persist replay."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
+            side_effect=asyncio.CancelledError("delivery cancel"),
+        )
+
+        async def consume_stream(request: object) -> tuple[str, str]:
+            accumulated = ""
+            async for chunk in request.response_stream:
+                accumulated += str(chunk)
+            return "$team-msg", accumulated
+
+        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(side_effect=consume_stream)
+
+        def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Team hello"
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id is None
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert isinstance(persisted_run.run_id, str)
+    assert persisted_run.run_id
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "Team hello\n\n[interrupted]"),
+    ]
+
+
+def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_trace_is_empty(
+    tmp_path: Path,
+) -> None:
+    """Delivery failures must keep hidden tool progress already recorded by the stream generator."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.set_run_metadata({"matrix_seen_event_ids": ["$user_msg"]})
+    recorder.set_assistant_text("Partial answer")
+    recorder.set_completed_tools(
+        [
+            ToolTraceEntry(
+                type="tool_call_completed",
+                tool_name="run_shell_command",
+                args_preview="cmd=pwd",
+                result_preview="/app",
+            ),
+        ],
+    )
+    recorder.set_interrupted_tools(
+        [
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="save_file",
+                args_preview="file_name=main.py",
+            ),
+        ],
+    )
+
+    assert coordinator._record_stream_delivery_error(
+        recorder=recorder,
+        accumulated_text="Partial answer\n\n**[Response interrupted by an error: boom]**",
+        tool_trace=[],
+    )
+
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.partial_text == "Partial answer"
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
+    assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_persists_original_user_message_for_cancelled_team_run(
+    tmp_path: Path,
+) -> None:
+    """Cancelled team replay should store the raw user turn, not the shaped model prompt."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+    model_prompts: list[str] = []
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        with suppress(asyncio.CancelledError):
+            await response_function("$thinking")
+        return "$thinking"
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.teams.Team.arun", new_callable=AsyncMock) as mock_team_arun,
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            side_effect=lambda **_kwargs: _open_team_scope_context(storage),
+        ),
+    ):
+        orchestrator = _team_orchestrator(config, runtime_paths)
+        orchestrator.agent_bots = {"general": SimpleNamespace(running=True)}
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=orchestrator,
+        )
+
+        async def fake_team_arun(prompt: str, **kwargs: object) -> TeamRunOutput:
+            model_prompts.append(prompt)
+            return TeamRunOutput(
+                run_id=cast("str | None", kwargs.get("run_id")),
+                team_id="ultimate",
+                session_id=cast("str | None", kwargs.get("session_id")),
+                content="Run cancelled",
+                messages=[Message(role="assistant", content="Run cancelled")],
+                status=RunStatus.cancelled,
+            )
+
+        mock_team_arun.side_effect = fake_team_arun
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id is None
+    assert model_prompts
+    assert model_prompts[0] != "Hello"
+    assert 'Current message:\n<msg from="@alice:localhost">' in model_prompts[0]
+    assert "Hello" in model_prompts[0]
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "[interrupted]"),
     ]
 
 
@@ -2752,6 +3808,234 @@ class TestUserIdPassthrough:
                 )
 
     @pytest.mark.asyncio
+    async def test_ai_response_persists_interrupted_replay_for_cancelled_runs(self, tmp_path: Path) -> None:
+        """Cancelled runs should be rewritten into canonical completed replay history."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        cancelled_run = RunOutput(
+            run_id="run-123",
+            agent_id="general",
+            session_id="session1",
+            content="Half done",
+            messages=[Message(role="assistant", content="Half done")],
+            tools=[
+                ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            ],
+            status=RunStatus.cancelled,
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=cancelled_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                )
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.status is RunStatus.completed
+        assert persisted_run.metadata == {
+            "matrix_event_id": "e1",
+            "matrix_seen_event_ids": ["e1"],
+            "mindroom_original_status": "cancelled",
+            "mindroom_replay_state": "interrupted",
+        }
+        assert persisted_run.messages is not None
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            (
+                "assistant",
+                "Half done\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]",
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ai_response_cancelled_run_uses_only_latest_assistant_partial_text(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Cancelled replay should ignore earlier assistant history carried in RunOutput.messages."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        cancelled_run = RunOutput(
+            run_id="run-123",
+            agent_id="general",
+            session_id="session1",
+            content="Half done",
+            messages=[
+                Message(role="user", content="Earlier question"),
+                Message(role="assistant", content="Earlier answer"),
+                Message(role="user", content="test"),
+                Message(role="assistant", content="Half done"),
+            ],
+            tools=None,
+            status=RunStatus.cancelled,
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=cancelled_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                )
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.messages is not None
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            ("assistant", "Half done\n\n[interrupted]"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ai_response_persists_incomplete_cancelled_tools_as_interrupted(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Cancelled non-streaming runs must not serialize unfinished tools as completed."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        cancelled_run = RunOutput(
+            run_id="run-123",
+            agent_id="general",
+            session_id="session1",
+            content="Half done",
+            messages=[Message(role="assistant", content="Half done")],
+            tools=[
+                ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result=None,
+                ),
+            ],
+            status=RunStatus.cancelled,
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=cancelled_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                )
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.messages is not None
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            (
+                "assistant",
+                "Half done\n\n[tool:run_shell_command interrupted]\n"
+                "  args: cmd=pwd\n"
+                "  result: <interrupted before completion>\n\n"
+                "[interrupted]",
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ai_response_with_turn_recorder_defers_interrupted_persistence_to_runner(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Lifecycle-owned calls should record interrupted state without persisting directly."""
+        storage = _SessionStorage()
+        recorder = TurnRecorder(user_message="test")
+        mock_agent = MagicMock()
+        cancelled_run = RunOutput(
+            run_id="run-123",
+            agent_id="general",
+            session_id="session1",
+            content="Half done",
+            messages=[Message(role="assistant", content="Half done")],
+            tools=[
+                ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            ],
+            status=RunStatus.cancelled,
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=cancelled_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                    turn_recorder=recorder,
+                )
+
+        assert storage.session is None
+        snapshot = recorder.interrupted_snapshot()
+        assert snapshot.user_message == "test"
+        assert snapshot.partial_text == "Half done"
+        assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
+        assert snapshot.seen_event_ids == ("e1",)
+
+    @pytest.mark.asyncio
     async def test_ai_response_returns_friendly_error_for_error_status(self, tmp_path: Path) -> None:
         """Errored Agno RunOutput values must not be surfaced as successful replies."""
         mock_agent = MagicMock()
@@ -3076,6 +4360,55 @@ class TestUserIdPassthrough:
         assert callback_run_ids == [run_id for run_id in seen_run_ids if run_id is not None]
 
     @pytest.mark.asyncio
+    async def test_ai_response_persists_retry_run_id_after_hard_cancellation(self, tmp_path: Path) -> None:
+        """Standalone interrupted replay should use the last retry attempt id after hard cancellation."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        seen_run_ids: list[str | None] = []
+        callback_run_ids: list[str] = []
+
+        async def fake_run(*_args: object, **kwargs: object) -> RunOutput:
+            seen_run_ids.append(kwargs["run_id"])
+            run_id_callback = kwargs["run_id_callback"]
+            if run_id_callback is not None and kwargs["run_id"] is not None:
+                run_id_callback(kwargs["run_id"])
+            if len(seen_run_ids) == 1:
+                msg = "Error code: 500 - audio input is not supported"
+                raise RuntimeError(msg)
+            raise asyncio.CancelledError
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", side_effect=fake_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    run_id="run-123",
+                    run_id_callback=callback_run_ids.append,
+                    media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                )
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert seen_run_ids[0] == "run-123"
+        assert seen_run_ids[1] is not None
+        assert seen_run_ids[1] != "run-123"
+        assert callback_run_ids == [run_id for run_id in seen_run_ids if run_id is not None]
+        assert persisted_run.run_id == seen_run_ids[1]
+
+    @pytest.mark.asyncio
     async def test_stream_agent_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:
         """When inline media is rejected, streaming should retry once without media."""
         mock_agent = MagicMock()
@@ -3351,6 +4684,65 @@ class TestUserIdPassthrough:
         assert second_call.kwargs["run_id"] is not None
         assert second_call.kwargs["run_id"] != "run-456"
         assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_persists_retry_run_id_after_hard_cancellation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Standalone streaming replay should keep the final retry attempt id after hard cancellation."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content="Error code: 500 - audio input is not supported")
+
+        async def cancelled_stream() -> AsyncIterator[object]:
+            raise asyncio.CancelledError
+            yield ""  # pragma: no cover
+
+        callback_run_ids: list[str] = []
+        mock_agent.arun = MagicMock(side_effect=[failing_stream(), cancelled_stream()])
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                _chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        agent_name="general",
+                        prompt="test",
+                        session_id="session1",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=_config(),
+                        run_id="run-456",
+                        run_id_callback=callback_run_ids.append,
+                        media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                    )
+                ]
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        first_call = mock_agent.arun.call_args_list[0]
+        second_call = mock_agent.arun.call_args_list[1]
+        assert first_call.kwargs["run_id"] == "run-456"
+        assert second_call.kwargs["run_id"] is not None
+        assert second_call.kwargs["run_id"] != "run-456"
+        assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
+        assert persisted_run.run_id == second_call.kwargs["run_id"]
 
     @pytest.mark.parametrize(
         ("error_text", "expected"),
@@ -3851,6 +5243,229 @@ class TestUserIdPassthrough:
         assert payload["usage"]["input_tokens"] == 100
         assert payload["usage"]["output_tokens"] == 25
         assert payload["usage"]["total_tokens"] == 125
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_persists_hidden_interrupted_tool_state(self, tmp_path: Path) -> None:
+        """Streaming cancellation should persist completed and interrupted tools even when hidden in output."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Half done")
+            yield ToolCallStartedEvent(
+                tool=ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                ),
+            )
+            yield ToolCallCompletedEvent(
+                tool=ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            )
+            yield ToolCallStartedEvent(
+                tool=ToolExecution(
+                    tool_name="save_file",
+                    tool_args={"file_name": "main.py"},
+                ),
+            )
+            yield RunCancelledEvent(
+                run_id="run-3",
+                session_id="session1",
+                reason="Run run-3 was cancelled",
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            with pytest.raises(asyncio.CancelledError):
+                async for _chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                ):
+                    pass
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.status is RunStatus.completed
+        assert persisted_run.messages is not None
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            (
+                "assistant",
+                "Half done\n\n"
+                "[tool:run_shell_command completed]\n"
+                "  args: cmd=pwd\n"
+                "  result: /app\n"
+                "[tool:save_file interrupted]\n"
+                "  args: file_name=main.py\n"
+                "  result: <interrupted before completion>\n\n"
+                "[interrupted]",
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_preserves_pending_tool_identity_for_same_named_tools(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming cancellation must not confuse concurrent same-named tools in one agent scope."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Half done")
+            yield ToolCallStartedEvent(
+                tool=ToolExecution(
+                    tool_call_id="call-1",
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                ),
+            )
+            yield ToolCallStartedEvent(
+                tool=ToolExecution(
+                    tool_call_id="call-2",
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "ls"},
+                ),
+            )
+            yield ToolCallCompletedEvent(
+                tool=ToolExecution(
+                    tool_call_id="call-1",
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            )
+            yield RunCancelledEvent(
+                run_id="run-3",
+                session_id="session1",
+                reason="Run run-3 was cancelled",
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            with pytest.raises(asyncio.CancelledError):
+                async for _chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                ):
+                    pass
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.messages is not None
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            (
+                "assistant",
+                "Half done\n\n"
+                "[tool:run_shell_command completed]\n"
+                "  args: cmd=pwd\n"
+                "  result: /app\n"
+                "[tool:run_shell_command interrupted]\n"
+                "  args: cmd=ls\n"
+                "  result: <interrupted before completion>\n\n"
+                "[interrupted]",
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_persists_interrupted_replay_after_external_task_cancel(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """External task cancellation should still persist interrupted replay state."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        first_chunk_seen = asyncio.Event()
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Half done")
+            await asyncio.sleep(60)
+
+        async def consume_stream() -> None:
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                reply_to_event_id="e1",
+                show_tool_calls=False,
+            ):
+                first_chunk_seen.set()
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            task = asyncio.create_task(consume_stream())
+            await first_chunk_seen.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        persisted_session = cast("AgentSession", storage.session)
+        assert persisted_session.runs is not None
+        persisted_run = cast("RunOutput", persisted_session.runs[0])
+        assert persisted_run.status is RunStatus.completed
+        assert persisted_run.messages is not None
+        assert [(message.role, message.content) for message in persisted_run.messages] == [
+            ("user", "test"),
+            ("assistant", "Half done\n\n[interrupted]"),
+        ]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_uses_request_metrics_fallback(self, tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
@@ -13,7 +14,12 @@ from agno.db.base import SessionType
 
 from mindroom import interactive
 from mindroom.agents import get_agent_session, get_team_session, show_tool_calls_for_agent
-from mindroom.ai import ai_response, queued_message_signal_context, stream_agent_response
+from mindroom.ai import (
+    ai_response,
+    build_matrix_run_metadata,
+    queued_message_signal_context,
+    stream_agent_response,
+)
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -24,6 +30,8 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
+from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -55,6 +63,7 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingResponse,
     build_restart_interrupted_body,
+    clean_partial_reply_text,
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
@@ -99,6 +108,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import (
         ToolRuntimeContext,
         ToolRuntimeSupport,
@@ -108,6 +118,7 @@ if TYPE_CHECKING:
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
+_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 
 
 def _merge_response_extra_content(
@@ -119,6 +130,26 @@ def _merge_response_extra_content(
     if attachment_ids:
         merged_extra_content[ATTACHMENT_IDS_KEY] = list(attachment_ids)
     return merged_extra_content if extra_content is not None or attachment_ids else None
+
+
+def _split_delivery_tool_trace(
+    tool_trace: Sequence[ToolTraceEntry],
+) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
+    """Split visible stream trace state into completed and still-interrupted tools."""
+    completed: list[ToolTraceEntry] = []
+    interrupted: list[ToolTraceEntry] = []
+    for trace_entry in tool_trace:
+        if trace_entry.type == "tool_call_completed":
+            completed.append(trace_entry)
+        else:
+            interrupted.append(trace_entry)
+    return completed, interrupted
+
+
+def _strip_visible_tool_markers(text: str) -> str:
+    """Remove Matrix-visible tool marker lines from streamed text before replay persistence."""
+    filtered_lines = [line for line in text.splitlines() if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)]
+    return "\n".join(filtered_lines).rstrip()
 
 
 def _materialize_matrix_run_metadata(
@@ -430,6 +461,108 @@ class ResponseRunner:
             self.deps.runtime.config,
             agent_name or self.deps.agent_name,
         )
+
+    def _build_turn_recorder(
+        self,
+        *,
+        user_message: str,
+        reply_to_event_id: str,
+        matrix_run_metadata: dict[str, Any] | None,
+    ) -> TurnRecorder:
+        """Create one lifecycle-owned recorder seeded with canonical Matrix metadata."""
+        recorder = TurnRecorder(user_message=user_message)
+        recorder.set_run_metadata(
+            build_matrix_run_metadata(
+                reply_to_event_id,
+                [],
+                extra_metadata=matrix_run_metadata,
+            ),
+        )
+        return recorder
+
+    def _persist_interrupted_turn(
+        self,
+        *,
+        recorder: TurnRecorder,
+        session_scope: HistoryScope,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+        run_id: str | None,
+        is_team: bool,
+        response_event_id: str | None = None,
+    ) -> None:
+        """Persist one interrupted recorder snapshot exactly once."""
+        if not recorder.claim_interrupted_persistence():
+            return
+        if response_event_id is not None:
+            recorder.set_response_event_id(response_event_id)
+        storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
+        try:
+            persist_interrupted_replay_snapshot(
+                storage=storage,
+                session=None,
+                session_id=session_id,
+                scope_id=session_scope.scope_id,
+                run_id=recorder.run_id or run_id or str(uuid4()),
+                snapshot=recorder.interrupted_snapshot(),
+                is_team=is_team,
+            )
+        finally:
+            storage.close()
+
+    def _ensure_recorder_interrupted(self, recorder: TurnRecorder) -> None:
+        """Mark one recorder interrupted unless lower layers already captured richer state."""
+        if recorder.outcome != "interrupted":
+            recorder.mark_interrupted()
+
+    def _persist_interrupted_recorder(
+        self,
+        *,
+        recorder: TurnRecorder,
+        session_scope: HistoryScope,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+        run_id: str | None,
+        is_team: bool,
+        response_event_id: str | None = None,
+    ) -> None:
+        """Persist one interrupted recorder snapshot after marking it interrupted."""
+        self._ensure_recorder_interrupted(recorder)
+        self._persist_interrupted_turn(
+            recorder=recorder,
+            session_scope=session_scope,
+            session_id=session_id,
+            execution_identity=execution_identity,
+            run_id=run_id,
+            is_team=is_team,
+            response_event_id=response_event_id,
+        )
+
+    def _record_stream_delivery_error(
+        self,
+        *,
+        recorder: TurnRecorder,
+        accumulated_text: str,
+        tool_trace: Sequence[ToolTraceEntry],
+    ) -> bool:
+        """Capture canonical interrupted replay state from one failed stream delivery."""
+        partial_text = clean_partial_reply_text(_strip_visible_tool_markers(accumulated_text))
+        completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
+        if not partial_text:
+            partial_text = recorder.assistant_text
+        if not completed_tools:
+            completed_tools = list(recorder.completed_tools)
+        if not interrupted_tools:
+            interrupted_tools = list(recorder.interrupted_tools)
+        if not partial_text and not completed_tools and not interrupted_tools:
+            return False
+        recorder.record_interrupted(
+            run_metadata=recorder.run_metadata,
+            assistant_text=partial_text,
+            completed_tools=completed_tools,
+            interrupted_tools=interrupted_tools,
+        )
+        return True
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
@@ -1018,6 +1151,12 @@ class ResponseRunner:
         delivery_stage_started = False
         delivery_failure_reason: str | None = None
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
+        active_event_ids = self._active_response_event_ids(request.room_id)
+        team_turn_recorder = self._build_turn_recorder(
+            user_message=request.prompt,
+            reply_to_event_id=request.reply_to_event_id,
+            matrix_run_metadata=matrix_run_metadata,
+        )
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
@@ -1034,9 +1173,16 @@ class ResponseRunner:
                 raise RuntimeError(msg)
             if message_id is not None:
                 tracked_event_id = message_id
+                team_turn_recorder.set_response_event_id(message_id)
 
             def _note_attempt_run_id(current_run_id: str) -> None:
                 self.deps.stop_manager.update_run_id(message_id, current_run_id)
+                team_turn_recorder.set_run_id(current_run_id)
+
+            def _note_visible_response_event_id(response_event_id: str) -> None:
+                nonlocal tracked_event_id
+                tracked_event_id = response_event_id
+                team_turn_recorder.set_response_event_id(response_event_id)
 
             if use_streaming and (
                 delivery_request.existing_event_id is None or delivery_request.existing_event_is_placeholder
@@ -1059,7 +1205,7 @@ class ResponseRunner:
                             run_id_callback=_note_attempt_run_id,
                             user_id=requester_user_id,
                             reply_to_event_id=request.reply_to_event_id,
-                            active_event_ids=self._active_response_event_ids(request.room_id),
+                            active_event_ids=active_event_ids,
                             response_sender_id=self.deps.matrix_full_id,
                             compaction_outcomes_collector=compaction_outcomes,
                             configured_team_name=self.deps.agent_name
@@ -1068,6 +1214,7 @@ class ResponseRunner:
                             system_enrichment_items=request.system_enrichment_items,
                             reason_prefix=team_request.reason_prefix,
                             matrix_run_metadata=matrix_run_metadata,
+                            turn_recorder=team_turn_recorder,
                         )
 
                     response_stream = self._stream_in_tool_context(
@@ -1088,10 +1235,22 @@ class ResponseRunner:
                                 show_tool_calls=show_tool_calls,
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
+                                visible_event_id_callback=_note_visible_response_event_id,
                             ),
                         )
                         if event_id is not None:
                             tracked_event_id = event_id
+                    except asyncio.CancelledError:
+                        self._persist_interrupted_recorder(
+                            recorder=team_turn_recorder,
+                            session_scope=session_scope,
+                            session_id=session_id,
+                            execution_identity=tool_dispatch.execution_identity,
+                            run_id=response_run_id,
+                            is_team=True,
+                            response_event_id=tracked_event_id,
+                        )
+                        raise
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
                 if request.pipeline_timing is not None:
@@ -1105,22 +1264,40 @@ class ResponseRunner:
                     return
 
                 delivery_kind: Literal["sent", "edited"] = "edited" if message_id else "sent"
-                delivery_result = await self.deps.delivery_gateway.finalize_streamed_response(
-                    FinalizeStreamedResponseRequest(
-                        target=delivery_target,
-                        streamed_event_id=event_id,
-                        streamed_text=accumulated,
-                        delivery_kind=delivery_kind,
-                        response_kind="team",
-                        response_envelope=resolved_response_envelope,
-                        correlation_id=resolved_correlation_id,
-                        tool_trace=None,
-                        extra_content=None,
-                        cleanup_suppressed_streamed_event=(
-                            delivery_request.existing_event_is_placeholder or delivery_request.existing_event_id is None
+                try:
+                    delivery_result = await self.deps.delivery_gateway.finalize_streamed_response(
+                        FinalizeStreamedResponseRequest(
+                            target=delivery_target,
+                            streamed_event_id=event_id,
+                            streamed_text=accumulated,
+                            delivery_kind=delivery_kind,
+                            response_kind="team",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                            cleanup_suppressed_streamed_event=(
+                                delivery_request.existing_event_is_placeholder
+                                or delivery_request.existing_event_id is None
+                            ),
                         ),
-                    ),
-                )
+                    )
+                except asyncio.CancelledError:
+                    self._record_stream_delivery_error(
+                        recorder=team_turn_recorder,
+                        accumulated_text=accumulated,
+                        tool_trace=[],
+                    )
+                    self._persist_interrupted_recorder(
+                        recorder=team_turn_recorder,
+                        session_scope=session_scope,
+                        session_id=session_id,
+                        execution_identity=tool_dispatch.execution_identity,
+                        run_id=response_run_id,
+                        is_team=True,
+                        response_event_id=event_id or tracked_event_id,
+                    )
+                    raise
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply("final")
                     request.pipeline_timing.mark("response_complete")
@@ -1144,7 +1321,7 @@ class ResponseRunner:
                                     run_id_callback=_note_attempt_run_id,
                                     user_id=requester_user_id,
                                     reply_to_event_id=request.reply_to_event_id,
-                                    active_event_ids=self._active_response_event_ids(request.room_id),
+                                    active_event_ids=active_event_ids,
                                     response_sender_id=self.deps.matrix_full_id,
                                     compaction_outcomes_collector=compaction_outcomes,
                                     configured_team_name=self.deps.agent_name
@@ -1153,12 +1330,25 @@ class ResponseRunner:
                                     system_enrichment_items=request.system_enrichment_items,
                                     reason_prefix=team_request.reason_prefix,
                                     matrix_run_metadata=matrix_run_metadata,
+                                    turn_recorder=team_turn_recorder,
                                 )
 
-                            response_text = await self._run_in_tool_context(
-                                tool_dispatch=tool_dispatch,
-                                operation=build_response_text,
-                            )
+                            try:
+                                response_text = await self._run_in_tool_context(
+                                    tool_dispatch=tool_dispatch,
+                                    operation=build_response_text,
+                                )
+                            except asyncio.CancelledError:
+                                self._persist_interrupted_recorder(
+                                    recorder=team_turn_recorder,
+                                    session_scope=session_scope,
+                                    session_id=session_id,
+                                    execution_identity=tool_dispatch.execution_identity,
+                                    run_id=response_run_id,
+                                    is_team=True,
+                                    response_event_id=tracked_event_id,
+                                )
+                                raise
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
                 except asyncio.CancelledError as exc:
@@ -1187,19 +1377,31 @@ class ResponseRunner:
                     raise
 
                 delivery_stage_started = True
-                delivery_result = await self.deps.delivery_gateway.deliver_final(
-                    FinalDeliveryRequest(
-                        target=delivery_target,
-                        existing_event_id=message_id,
-                        existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
-                        response_text=response_text,
-                        response_kind="team",
-                        response_envelope=resolved_response_envelope,
-                        correlation_id=resolved_correlation_id,
-                        tool_trace=None,
-                        extra_content=None,
-                    ),
-                )
+                try:
+                    delivery_result = await self.deps.delivery_gateway.deliver_final(
+                        FinalDeliveryRequest(
+                            target=delivery_target,
+                            existing_event_id=message_id,
+                            existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
+                            response_text=response_text,
+                            response_kind="team",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                        ),
+                    )
+                except asyncio.CancelledError:
+                    self._persist_interrupted_recorder(
+                        recorder=team_turn_recorder,
+                        session_scope=session_scope,
+                        session_id=session_id,
+                        execution_identity=tool_dispatch.execution_identity,
+                        run_id=response_run_id,
+                        is_team=True,
+                        response_event_id=tracked_event_id,
+                    )
+                    raise
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply("final")
                     request.pipeline_timing.mark("response_complete")
@@ -1228,6 +1430,20 @@ class ResponseRunner:
             delivery_failure_reason = str(error.error)
             if error.event_id is not None:
                 tracked_event_id = error.event_id
+            if self._record_stream_delivery_error(
+                recorder=team_turn_recorder,
+                accumulated_text=error.accumulated_text,
+                tool_trace=error.tool_trace,
+            ):
+                self._persist_interrupted_recorder(
+                    recorder=team_turn_recorder,
+                    session_scope=session_scope,
+                    session_id=session_id,
+                    execution_identity=tool_dispatch.execution_identity,
+                    run_id=response_run_id,
+                    is_team=True,
+                    response_event_id=tracked_event_id,
+                )
             delivery_kind: Literal["sent", "edited"] | None = None
             if error.event_id is not None:
                 delivery_kind = "edited" if request.existing_event_id else "sent"
@@ -1476,6 +1692,7 @@ class ResponseRunner:
         run_id: str | None,
         runtime: _PreparedResponseRuntime,
         active_event_ids: set[str],
+        turn_recorder: TurnRecorder,
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
@@ -1485,6 +1702,7 @@ class ResponseRunner:
 
         def note_attempt_run_id(current_run_id: str) -> None:
             self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
+            turn_recorder.set_run_id(current_run_id)
 
         async def build_response_text() -> str:
             knowledge = self.deps.knowledge_access.for_agent(
@@ -1516,14 +1734,27 @@ class ResponseRunner:
                 compaction_outcomes_collector=compaction_outcomes,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=request.system_enrichment_items,
+                turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
             )
 
-        async with typing_indicator(self._client(), request.room_id):
-            return await self._run_in_tool_context(
-                tool_dispatch=runtime.tool_dispatch,
-                operation=build_response_text,
+        try:
+            async with typing_indicator(self._client(), request.room_id):
+                return await self._run_in_tool_context(
+                    tool_dispatch=runtime.tool_dispatch,
+                    operation=build_response_text,
+                )
+        except asyncio.CancelledError:
+            self._persist_interrupted_recorder(
+                recorder=turn_recorder,
+                session_scope=self.deps.state_writer.history_scope(),
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
+                response_event_id=request.existing_event_id,
             )
+            raise
 
     @timed("streaming_response_generation")
     async def generate_streaming_ai_response(
@@ -1533,6 +1764,7 @@ class ResponseRunner:
         run_id: str | None,
         runtime: _PreparedResponseRuntime,
         active_event_ids: set[str],
+        turn_recorder: TurnRecorder,
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
@@ -1542,6 +1774,10 @@ class ResponseRunner:
 
         def note_attempt_run_id(current_run_id: str) -> None:
             self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
+            turn_recorder.set_run_id(current_run_id)
+
+        def note_visible_response_event_id(response_event_id: str) -> None:
+            turn_recorder.set_response_event_id(response_event_id)
 
         knowledge = self.deps.knowledge_access.for_agent(
             self.deps.agent_name,
@@ -1571,37 +1807,51 @@ class ResponseRunner:
             compaction_outcomes_collector=compaction_outcomes,
             matrix_run_metadata=matrix_run_metadata,
             system_enrichment_items=request.system_enrichment_items,
+            turn_recorder=turn_recorder,
             pipeline_timing=pipeline_timing,
         )
 
-        async with typing_indicator(self._client(), request.room_id):
-            wrapped_response_stream = self._stream_in_tool_context(
-                tool_dispatch=runtime.tool_dispatch,
-                stream_factory=lambda: response_stream,
+        try:
+            async with typing_indicator(self._client(), request.room_id):
+                wrapped_response_stream = self._stream_in_tool_context(
+                    tool_dispatch=runtime.tool_dispatch,
+                    stream_factory=lambda: response_stream,
+                )
+                response_extra_content = _merge_response_extra_content(
+                    run_metadata_content,
+                    request.attachment_ids,
+                )
+                event_id, accumulated = await self.deps.delivery_gateway.deliver_stream(
+                    StreamingDeliveryRequest(
+                        target=runtime.resolved_target,
+                        response_stream=wrapped_response_stream,
+                        existing_event_id=request.existing_event_id,
+                        adopt_existing_placeholder=request.existing_event_id is not None
+                        and request.existing_event_is_placeholder,
+                        show_tool_calls=self._show_tool_calls(),
+                        extra_content=response_extra_content,
+                        tool_trace_collector=tool_trace,
+                        streaming_cls=StreamingResponse,
+                        pipeline_timing=request.pipeline_timing,
+                        visible_event_id_callback=note_visible_response_event_id,
+                    ),
+                )
+                if request.pipeline_timing is not None:
+                    request.pipeline_timing.mark("streaming_complete")
+                return event_id, accumulated
+        except asyncio.CancelledError:
+            self._persist_interrupted_recorder(
+                recorder=turn_recorder,
+                session_scope=self.deps.state_writer.history_scope(),
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
+                response_event_id=request.existing_event_id,
             )
-            response_extra_content = _merge_response_extra_content(
-                run_metadata_content,
-                request.attachment_ids,
-            )
-            event_id, accumulated = await self.deps.delivery_gateway.deliver_stream(
-                StreamingDeliveryRequest(
-                    target=runtime.resolved_target,
-                    response_stream=wrapped_response_stream,
-                    existing_event_id=request.existing_event_id,
-                    adopt_existing_placeholder=request.existing_event_id is not None
-                    and request.existing_event_is_placeholder,
-                    show_tool_calls=self._show_tool_calls(),
-                    extra_content=response_extra_content,
-                    tool_trace_collector=tool_trace,
-                    streaming_cls=StreamingResponse,
-                    pipeline_timing=request.pipeline_timing,
-                ),
-            )
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("streaming_complete")
-            return event_id, accumulated
+            raise
 
-    async def process_and_respond(  # noqa: C901
+    async def process_and_respond(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -1647,6 +1897,11 @@ class ResponseRunner:
         compaction_outcomes: list[CompactionOutcome] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(request.room_id)
+        turn_recorder = self._build_turn_recorder(
+            user_message=request.prompt,
+            reply_to_event_id=request.reply_to_event_id,
+            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+        )
 
         try:
             try:
@@ -1655,6 +1910,7 @@ class ResponseRunner:
                     run_id=run_id,
                     runtime=runtime,
                     active_event_ids=active_event_ids,
+                    turn_recorder=turn_recorder,
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
                     compaction_outcomes=compaction_outcomes,
@@ -1696,22 +1952,34 @@ class ResponseRunner:
         )
         if on_delivery_started is not None:
             on_delivery_started(request.existing_event_id)
-        delivery = await self.deps.delivery_gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=runtime.resolved_target,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-                response_text=response_text,
-                response_kind=response_kind,
-                response_envelope=self._response_envelope_for_request(
-                    request,
-                    resolved_target=runtime.resolved_target,
+        try:
+            delivery = await self.deps.delivery_gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=runtime.resolved_target,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    response_text=response_text,
+                    response_kind=response_kind,
+                    response_envelope=self._response_envelope_for_request(
+                        request,
+                        resolved_target=runtime.resolved_target,
+                    ),
+                    correlation_id=self._correlation_id_for_request(request),
+                    tool_trace=tool_trace if self._show_tool_calls() else None,
+                    extra_content=response_extra_content or None,
                 ),
-                correlation_id=self._correlation_id_for_request(request),
-                tool_trace=tool_trace if self._show_tool_calls() else None,
-                extra_content=response_extra_content or None,
-            ),
-        )
+            )
+        except asyncio.CancelledError:
+            self._persist_interrupted_recorder(
+                recorder=turn_recorder,
+                session_scope=session_scope,
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
+                response_event_id=request.existing_event_id,
+            )
+            raise
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
@@ -1765,6 +2033,11 @@ class ResponseRunner:
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(request.room_id)
         tool_trace: list[Any] = []
+        turn_recorder = self._build_turn_recorder(
+            user_message=request.prompt,
+            reply_to_event_id=request.reply_to_event_id,
+            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+        )
 
         try:
             try:
@@ -1773,6 +2046,7 @@ class ResponseRunner:
                     run_id=run_id,
                     runtime=runtime,
                     active_event_ids=active_event_ids,
+                    turn_recorder=turn_recorder,
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
                     compaction_outcomes=compaction_outcomes,
@@ -1783,6 +2057,20 @@ class ResponseRunner:
         except StreamingDeliveryError as error:
             self.deps.logger.exception("Error in streaming response", error=str(error.error))
             tool_trace[:] = error.tool_trace
+            if self._record_stream_delivery_error(
+                recorder=turn_recorder,
+                accumulated_text=error.accumulated_text,
+                tool_trace=error.tool_trace,
+            ):
+                self._persist_interrupted_recorder(
+                    recorder=turn_recorder,
+                    session_scope=session_scope,
+                    session_id=runtime.session_id,
+                    execution_identity=runtime.tool_dispatch.execution_identity,
+                    run_id=run_id,
+                    is_team=False,
+                    response_event_id=error.event_id,
+                )
             if compaction_outcomes_collector is not None:
                 compaction_outcomes_collector.extend(compaction_outcomes)
             delivery_kind: Literal["sent", "edited"] | None = None
@@ -1846,22 +2134,39 @@ class ResponseRunner:
 
         if on_delivery_started is not None:
             on_delivery_started(event_id)
-        delivery = await self.deps.delivery_gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=runtime.resolved_target,
-                streamed_event_id=event_id,
-                streamed_text=accumulated,
-                delivery_kind=delivery_kind,
-                response_kind=response_kind,
-                response_envelope=request.response_envelope,
-                correlation_id=request.correlation_id,
-                tool_trace=tool_trace if self._show_tool_calls() else None,
-                extra_content=response_extra_content,
-                cleanup_suppressed_streamed_event=(
-                    request.existing_event_is_placeholder or request.existing_event_id is None
+        try:
+            delivery = await self.deps.delivery_gateway.finalize_streamed_response(
+                FinalizeStreamedResponseRequest(
+                    target=runtime.resolved_target,
+                    streamed_event_id=event_id,
+                    streamed_text=accumulated,
+                    delivery_kind=delivery_kind,
+                    response_kind=response_kind,
+                    response_envelope=request.response_envelope,
+                    correlation_id=request.correlation_id,
+                    tool_trace=tool_trace if self._show_tool_calls() else None,
+                    extra_content=response_extra_content,
+                    cleanup_suppressed_streamed_event=(
+                        request.existing_event_is_placeholder or request.existing_event_id is None
+                    ),
                 ),
-            ),
-        )
+            )
+        except asyncio.CancelledError:
+            self._record_stream_delivery_error(
+                recorder=turn_recorder,
+                accumulated_text=accumulated,
+                tool_trace=tool_trace,
+            )
+            self._persist_interrupted_recorder(
+                recorder=turn_recorder,
+                session_scope=session_scope,
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
+                response_event_id=event_id,
+            )
+            raise
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")

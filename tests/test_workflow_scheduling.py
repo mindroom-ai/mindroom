@@ -731,6 +731,7 @@ class TestIntegrationWithScheduling:
             display_name="Research",
             avatar_url=None,
         )
+        room.members_synced = True
 
         with patch("mindroom.scheduling._run_cron_task", new=AsyncMock()):
             task_id, message = await schedule_task(

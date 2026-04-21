@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
+import nio
+
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     MatrixID,
     extract_agent_name,
@@ -18,10 +21,11 @@ from mindroom.matrix.state import MatrixState
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    import nio
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+
+
+logger = get_logger(__name__)
 
 
 def _room_permission_lookup_keys(
@@ -201,6 +205,21 @@ def filter_agents_by_sender_permissions(
     return result
 
 
+def _available_agents_from_member_ids(
+    member_ids: Iterable[str],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
+    """Return non-router agent IDs present in one membership snapshot."""
+    agents: list[MatrixID] = []
+    for member_id in member_ids:
+        mid = MatrixID.parse(member_id)
+        agent_name = mid.agent_name(config, runtime_paths)
+        if agent_name and agent_name != ROUTER_AGENT_NAME:
+            agents.append(mid)
+    return sorted(agents, key=lambda x: x.full_id)
+
+
 def get_available_agents_in_room(
     room: nio.MatrixRoom,
     config: Config,
@@ -210,16 +229,7 @@ def get_available_agents_in_room(
 
     Note: Router agent is excluded as it's not a regular conversation participant.
     """
-    agents: list[MatrixID] = []
-
-    for member_id in room.users:
-        mid = MatrixID.parse(member_id)
-        agent_name = mid.agent_name(config, runtime_paths)
-        # Exclude router agent
-        if agent_name and agent_name != ROUTER_AGENT_NAME:
-            agents.append(mid)
-
-    return sorted(agents, key=lambda x: x.full_id)
+    return _available_agents_from_member_ids(room.users, config, runtime_paths)
 
 
 def get_available_agents_for_sender(
@@ -235,3 +245,79 @@ def get_available_agents_for_sender(
         config,
         runtime_paths,
     )
+
+
+def _apply_authoritative_joined_members(
+    room: nio.MatrixRoom,
+    members: Sequence[nio.RoomMember],
+) -> None:
+    """Replace one room's cached joined-member snapshot with authoritative data."""
+    members_by_user_id = {member.user_id: member for member in members}
+
+    for user_id in tuple(room.users):
+        if user_id not in members_by_user_id:
+            room.remove_member(user_id)
+
+    for member in members:
+        cached_user = room.users.get(member.user_id)
+        if (
+            cached_user is not None
+            and cached_user.display_name == member.display_name
+            and cached_user.avatar_url == member.avatar_url
+        ):
+            continue
+        if cached_user is not None:
+            room.remove_member(member.user_id)
+        room.add_member(member.user_id, member.display_name, member.avatar_url)
+
+    room.members_synced = True
+
+
+async def get_available_agents_for_sender_authoritative(
+    client: nio.AsyncClient,
+    room: nio.MatrixRoom,
+    sender_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
+    """Return sender-visible room agents, refreshing membership while the cache is unsynced."""
+    cached_room_agents = get_available_agents_in_room(room, config, runtime_paths)
+    cached_visible_agents = filter_agents_by_sender_permissions(
+        cached_room_agents,
+        sender_id,
+        config,
+        runtime_paths,
+    )
+    if room.members_synced:
+        return cached_visible_agents
+
+    response = await client.joined_members(room.room_id)
+    if not isinstance(response, nio.JoinedMembersResponse):
+        logger.warning(
+            "authoritative_room_membership_fetch_failed",
+            room_id=room.room_id,
+            sender_id=sender_id,
+            error=str(response),
+        )
+        return cached_visible_agents
+
+    _apply_authoritative_joined_members(room, response.members)
+    refreshed_room_agents = _available_agents_from_member_ids(
+        (member.user_id for member in response.members),
+        config,
+        runtime_paths,
+    )
+    refreshed_agents = filter_agents_by_sender_permissions(
+        refreshed_room_agents,
+        sender_id,
+        config,
+        runtime_paths,
+    )
+    logger.info(
+        "authoritative_room_membership_refreshed",
+        room_id=room.room_id,
+        sender_id=sender_id,
+        cached_agent_count=len(cached_room_agents),
+        refreshed_agent_count=len(refreshed_agents),
+    )
+    return refreshed_agents

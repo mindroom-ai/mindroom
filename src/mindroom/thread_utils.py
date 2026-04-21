@@ -278,6 +278,7 @@ def should_agent_respond(  # noqa: PLR0911
     has_non_agent_mentions: bool = False,
     *,
     sender_id: str,
+    available_agents_in_room: list[MatrixID] | None = None,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
 
@@ -294,6 +295,7 @@ def should_agent_respond(  # noqa: PLR0911
         mentioned_agents: List of all agent MatrixIDs mentioned in the message
         has_non_agent_mentions: True when the message explicitly tags a non-agent user
         sender_id: Sender Matrix ID used for per-agent reply permissions
+        available_agents_in_room: Optional precomputed sender-visible agents for the room
 
     """
     if not authorization.is_sender_allowed_for_agent_reply(sender_id, agent_name, config, runtime_paths):
@@ -307,7 +309,9 @@ def should_agent_respond(  # noqa: PLR0911
     if mentioned_agents or has_non_agent_mentions:
         return False
 
-    available_agents = authorization.get_available_agents_for_sender(room, sender_id, config, runtime_paths)
+    available_agents = available_agents_in_room
+    if available_agents is None:
+        available_agents = authorization.get_available_agents_for_sender(room, sender_id, config, runtime_paths)
     agent_matrix_id = config.get_ids(runtime_paths)[agent_name]
 
     # Non-thread messages: auto-respond if we're the only visible agent in the room.

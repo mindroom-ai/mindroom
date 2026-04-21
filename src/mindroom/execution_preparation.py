@@ -113,6 +113,15 @@ def _wrap_msg_body(sender: str, body: str) -> str:
     return f"<msg from={xml_quoteattr(sender)}><![CDATA[{safe_body}]]></msg>"
 
 
+def _truncate_message_body(body: str, limit: int) -> str:
+    """Cap one rendered history body to the requested character limit."""
+    if len(body) <= limit:
+        return body
+    if limit <= 1:
+        return "…"
+    return f"{body[: limit - 1]}…"
+
+
 def _collect_history_messages(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -126,8 +135,8 @@ def _collect_history_messages(
         body = msg.body
         if not body:
             continue
-        if max_message_length is not None and len(body) >= max_message_length:
-            continue
+        if max_message_length is not None:
+            body = _truncate_message_body(body, max_message_length)
         sender = msg.sender
         if not sender:
             if missing_sender_label is None:
@@ -459,6 +468,8 @@ def _get_unseen_messages_for_sender(
                 msg,
                 active_event_ids=active_event_ids,
             )
+            if partial_kind is _PartialReplyKind.INTERRUPTED:
+                continue
             if partial_kind is None:
                 continue
             cleaned_body = _clean_partial_reply_body(msg.body)

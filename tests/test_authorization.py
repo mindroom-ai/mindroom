@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
+import nio
 import pytest
 
 import mindroom.authorization
@@ -81,6 +83,22 @@ def get_effective_sender_id_for_reply_permissions(
 
 def _config(**kwargs: object) -> Config:
     return _bind_runtime_paths(Config(**kwargs))
+
+
+async def get_available_agents_for_sender_authoritative(
+    client: nio.AsyncClient,
+    room: nio.MatrixRoom,
+    sender_id: str,
+    config: Config,
+) -> list[mindroom.authorization.MatrixID]:
+    """Run authoritative room-agent resolution with the test config's bound runtime context."""
+    return await mindroom.authorization.get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        sender_id,
+        config,
+        _runtime_paths_for(config),
+    )
 
 
 @pytest.fixture
@@ -208,6 +226,212 @@ def test_teams_always_allowed(mock_config_with_restrictions: Config) -> None:
 
     # Non-configured team should be blocked
     assert not is_authorized_sender("@mindroom_unknown_team:example.com", mock_config_with_restrictions, "!test:server")
+
+
+@pytest.mark.asyncio
+async def test_get_available_agents_for_sender_authoritative_refreshes_empty_cached_room() -> None:
+    """Authoritative agent lookup should recover from empty cached room membership."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+    )
+    client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.users = {"@mindroom_router:example.com": MagicMock()}
+    room.members_synced = False
+    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {
+            "joined": {
+                "@mindroom_router:example.com": {"display_name": "Router"},
+                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
+            },
+        },
+        room_id="!test:server",
+    )
+
+    available = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        "@alice:example.com",
+        config,
+    )
+
+    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in available] == ["assistant"]
+    client.joined_members.assert_awaited_once_with("!test:server")
+
+
+@pytest.mark.asyncio
+async def test_get_available_agents_for_sender_authoritative_skips_refresh_when_cache_has_hidden_agents() -> None:
+    """Authoritative lookup should not refetch when room membership is present but sender visibility is empty."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+            "general": {
+                "display_name": "General",
+                "role": "Test generalist",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": ["@alice:example.com"],
+                "general": ["@alice:example.com"],
+            },
+        },
+    )
+    client = AsyncMock()
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_assistant:example.com", "Assistant", None)
+    room.add_member("@mindroom_general:example.com", "General", None)
+    room.members_synced = True
+
+    available = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        "@bob:example.com",
+        config,
+    )
+
+    assert available == []
+    client.joined_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_available_agents_for_sender_authoritative_refreshes_partial_unsynced_cache() -> None:
+    """Authoritative lookup should refresh when cached membership is present but unsynced."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+            "general": {
+                "display_name": "General",
+                "role": "Test generalist",
+                "rooms": ["test_room"],
+            },
+        },
+    )
+    client = AsyncMock()
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_router:example.com", "Router", None)
+    room.add_member("@mindroom_general:example.com", "General", None)
+    room.members_synced = False
+    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {
+            "joined": {
+                "@mindroom_router:example.com": {"display_name": "Router"},
+                "@mindroom_general:example.com": {"display_name": "General"},
+                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
+            },
+        },
+        room_id="!test:server",
+    )
+
+    available = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        "@alice:example.com",
+        config,
+    )
+
+    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in available] == [
+        "assistant",
+        "general",
+    ]
+    client.joined_members.assert_awaited_once_with("!test:server")
+
+
+@pytest.mark.asyncio
+async def test_get_available_agents_for_sender_authoritative_falls_back_to_cached_visible_agents_on_refresh_error() -> (
+    None
+):
+    """Authoritative lookup should keep usable cached agents when joined_members fails."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+    )
+    client = AsyncMock()
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_router:example.com", "Router", None)
+    room.add_member("@mindroom_assistant:example.com", "Assistant", None)
+    room.members_synced = False
+    client.joined_members.return_value = nio.JoinedMembersError(
+        "M_FORBIDDEN",
+        "forbidden",
+        room_id="!test:server",
+    )
+
+    available = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        "@alice:example.com",
+        config,
+    )
+
+    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in available] == ["assistant"]
+    assert room.members_synced is False
+    client.joined_members.assert_awaited_once_with("!test:server")
+
+
+@pytest.mark.asyncio
+async def test_get_available_agents_for_sender_authoritative_updates_room_cache_after_refresh() -> None:
+    """Authoritative refresh should hydrate room membership so repeated calls stay local."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+    )
+    client = AsyncMock()
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_router:example.com", "Router", None)
+    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {
+            "joined": {
+                "@mindroom_router:example.com": {"display_name": "Router"},
+                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
+            },
+        },
+        room_id="!test:server",
+    )
+
+    first = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        "@alice:example.com",
+        config,
+    )
+    second = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        "@alice:example.com",
+        config,
+    )
+
+    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in first] == ["assistant"]
+    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in second] == ["assistant"]
+    assert "@mindroom_assistant:example.com" in room.users
+    client.joined_members.assert_awaited_once_with("!test:server")
 
 
 def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:

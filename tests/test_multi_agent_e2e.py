@@ -339,6 +339,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             mock_calculator_agent.user_id: MagicMock(),
             f"@mindroom_general:{domain}": MagicMock(),
         }
+        room.members_synced = True
 
         with (
             patch.object(bot._conversation_cache, "get_thread_snapshot") as mock_fetch_snapshot,
