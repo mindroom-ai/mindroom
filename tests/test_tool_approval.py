@@ -671,6 +671,52 @@ async def test_request_approval_cancellation_marks_request_expired(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_request_approval_cancellation_during_send_expires_persisted_pending_request(tmp_path: Path) -> None:
+    """Cancelling while the approval card is still sending should clean up the persisted pending request."""
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    async def _blocked_send(*_args: object) -> str:
+        await asyncio.sleep(60)
+        return "$approval"
+
+    sender = AsyncMock(side_effect=_blocked_send)
+    editor = AsyncMock()
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="run_shell_command",
+            arguments={"command": "echo hi"},
+            agent_name="code",
+            transport_agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            matched_rule="run_shell_*",
+            script_path=None,
+            timeout_seconds=60,
+        ),
+    )
+    await asyncio.sleep(0)
+
+    pending = store.list_pending()
+    assert len(pending) == 1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert store._pending_by_id == {}
+    payload = json.loads(
+        (runtime_paths.storage_root / "approvals" / f"{pending[0].id}.json").read_text(encoding="utf-8"),
+    )
+    assert payload["status"] == "expired"
+    assert payload["resolution_reason"] == "Tool approval request was cancelled."
+    assert payload["event_id"] is None
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_request_approval_requires_matrix_context(tmp_path: Path) -> None:
     """Requests without a Matrix room should fail closed."""
     runtime_paths = test_runtime_paths(tmp_path)

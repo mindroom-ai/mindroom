@@ -446,12 +446,24 @@ class ApprovalManager:
 
         event_id: str | None = None
         try:
-            event_id = await self._send_event(
-                room_id,
-                thread_id,
-                transport_agent_name,
-                self._pending_event_content(pending),
-            )
+            try:
+                event_id = await self._send_event(
+                    room_id,
+                    thread_id,
+                    transport_agent_name,
+                    self._pending_event_content(pending),
+                )
+            except asyncio.CancelledError:
+                applied_decision = self._apply_decision(
+                    pending.id,
+                    status="expired",
+                    reason=_DEFAULT_CANCELLED_REASON,
+                    resolved_by=None,
+                )
+                if applied_decision is not None:
+                    self._persist_request(applied_decision[0])
+                self._discard(pending.id)
+                raise
         except Exception:
             logger.warning(
                 "Failed to send approval Matrix event",
