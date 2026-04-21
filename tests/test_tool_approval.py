@@ -1154,6 +1154,7 @@ async def test_orchestrator_send_approval_event_uses_expected_room_send_payload(
     )
     bot = MagicMock()
     bot.client = client
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest-thread-event")
     orchestrator.agent_bots = {"code": bot}
 
     event_id = await orchestrator._send_approval_event(
@@ -1187,7 +1188,7 @@ async def test_orchestrator_send_approval_event_uses_expected_room_send_payload(
                 "rel_type": "m.thread",
                 "event_id": "$thread",
                 "is_falling_back": True,
-                "m.in_reply_to": {"event_id": "$thread"},
+                "m.in_reply_to": {"event_id": "$latest-thread-event"},
             },
         },
     )
@@ -1252,6 +1253,7 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
     )
     bot = MagicMock()
     bot.client = client
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest-thread-event")
     orchestrator.agent_bots = {"code": bot}
 
     edited = await orchestrator._edit_approval_event(
@@ -1291,7 +1293,7 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
             "rel_type": "m.thread",
             "event_id": "$thread",
             "is_falling_back": True,
-            "m.in_reply_to": {"event_id": "$thread"},
+            "m.in_reply_to": {"event_id": "$latest-thread-event"},
         },
     }
     client.room_send.assert_awaited_once_with(

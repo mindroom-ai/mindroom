@@ -34,6 +34,7 @@ from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -368,15 +369,28 @@ class MultiAgentOrchestrator:
             future.cancel()
             raise
 
-    @staticmethod
-    def _approval_thread_relation(thread_id: str) -> dict[str, object]:
+    async def _approval_thread_relation(
+        self,
+        room_id: str,
+        thread_id: str,
+        agent_name: str,
+    ) -> dict[str, object]:
         """Return a threaded relation payload for approval events."""
-        return {
-            "rel_type": "m.thread",
-            "event_id": thread_id,
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": thread_id},
-        }
+        bot = self._get_bot_by_agent_name(agent_name)
+        latest_thread_event_id = thread_id
+        if bot is not None:
+            resolved_latest_event_id = await bot._conversation_cache.get_latest_thread_event_id_if_needed(
+                room_id,
+                thread_id,
+            )
+            if resolved_latest_event_id is not None:
+                latest_thread_event_id = resolved_latest_event_id
+        relation = build_message_content(
+            "",
+            thread_event_id=thread_id,
+            latest_thread_event_id=latest_thread_event_id,
+        )["m.relates_to"]
+        return cast("dict[str, object]", relation)
 
     async def _send_approval_event(
         self,
@@ -403,7 +417,7 @@ class MultiAgentOrchestrator:
             return None
         send_content = dict(content)
         if thread_id is not None:
-            send_content["m.relates_to"] = self._approval_thread_relation(thread_id)
+            send_content["m.relates_to"] = await self._approval_thread_relation(room_id, thread_id, agent_name)
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
@@ -454,7 +468,7 @@ class MultiAgentOrchestrator:
 
         replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
         if isinstance(thread_id, str) and thread_id:
-            replacement_content["m.relates_to"] = self._approval_thread_relation(thread_id)
+            replacement_content["m.relates_to"] = await self._approval_thread_relation(room_id, thread_id, agent_name)
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
