@@ -757,8 +757,8 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_notify_outbound_event_threaded_edit_waits_for_room_barrier(self) -> None:
-        """Outbound threaded edits must still wait on the room barrier before mutating thread cache."""
+    async def test_notify_outbound_event_threaded_edit_uses_claimed_thread_barrier(self) -> None:
+        """Outbound threaded edits should use the claimed thread barrier instead of the room barrier."""
         coordinator = _runtime_write_coordinator()
         event_cache = _runtime_event_cache()
         client = _make_client_mock(user_id="@agent:localhost")
@@ -812,14 +812,12 @@ class TestMatrixConversationCacheThreadReads:
             },
         )
         try:
-            await asyncio.sleep(0.05)
-            assert thread_invalidation_started.is_set() is False
-            assert event_cache.mark_thread_stale.await_count == 0
-            assert event_cache.append_event.await_count == 0
-
-            release_sibling_thread_update.set()
-            await asyncio.wait_for(sibling_thread_task, timeout=1.0)
-            await coordinator.wait_for_room_idle("!room:localhost")
+            await asyncio.wait_for(thread_invalidation_started.wait(), timeout=1.0)
+            await asyncio.wait_for(
+                coordinator.wait_for_thread_idle("!room:localhost", "$claimed-thread:localhost"),
+                timeout=1.0,
+            )
+            assert sibling_thread_task.done() is False
 
             event_cache.mark_thread_stale.assert_awaited_once_with(
                 "!room:localhost",
@@ -837,6 +835,7 @@ class TestMatrixConversationCacheThreadReads:
                 asyncio.gather(sibling_thread_task, return_exceptions=True),
                 timeout=1.0,
             )
+            await coordinator.wait_for_room_idle("!room:localhost")
 
     @pytest.mark.asyncio
     async def test_notify_outbound_redaction_lookup_miss_without_cached_target_does_not_invalidate_room_threads(
@@ -5520,6 +5519,101 @@ class TestThreadingBehavior:
             await asyncio.wait_for(second_thread_task, timeout=1.0)
             await asyncio.wait_for(follow_up_thread_started.wait(), timeout=1.0)
             assert follow_up_thread_task.done() is False
+
+            release_follow_up_thread.set()
+            await asyncio.wait_for(follow_up_thread_task, timeout=1.0)
+        finally:
+            release_first_thread.set()
+            release_second_thread.set()
+            release_follow_up_thread.set()
+            if not cancelled_room_task.done():
+                cancelled_room_task.cancel()
+            pending_tasks = [first_thread_task, second_thread_task, cancelled_room_task]
+            if follow_up_thread_task is not None:
+                pending_tasks.append(follow_up_thread_task)
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *pending_tasks,
+                    return_exceptions=True,
+                ),
+                timeout=1.0,
+            )
+
+    @pytest.mark.asyncio
+    async def test_cancelled_room_cache_update_still_blocks_later_thread_updates_queued_after_cancel(  # noqa: PLR0915
+        self,
+    ) -> None:
+        """Cancelling a queued room update must not let later thread work overtake the earlier room segment."""
+        first_thread_started = asyncio.Event()
+        release_first_thread = asyncio.Event()
+        second_thread_started = asyncio.Event()
+        release_second_thread = asyncio.Event()
+        follow_up_thread_started = asyncio.Event()
+        release_follow_up_thread = asyncio.Event()
+        coordinator = _runtime_write_coordinator()
+
+        async def first_thread_update() -> None:
+            first_thread_started.set()
+            await release_first_thread.wait()
+
+        async def second_thread_update() -> None:
+            second_thread_started.set()
+            await release_second_thread.wait()
+
+        async def cancelled_room_update() -> None:
+            msg = "Cancelled room cache update should not start"
+            raise AssertionError(msg)
+
+        async def follow_up_thread_update() -> None:
+            follow_up_thread_started.set()
+            await release_follow_up_thread.wait()
+
+        first_thread_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-a:localhost",
+            first_thread_update,
+            name="matrix_cache_first_thread_update",
+        )
+        second_thread_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-b:localhost",
+            second_thread_update,
+            name="matrix_cache_second_thread_update",
+        )
+        await asyncio.wait_for(first_thread_started.wait(), timeout=1.0)
+        await asyncio.wait_for(second_thread_started.wait(), timeout=1.0)
+
+        cancelled_room_task = coordinator.queue_room_update(
+            "!test:localhost",
+            cancelled_room_update,
+            name="matrix_cache_cancelled_room_update",
+        )
+        follow_up_thread_task: asyncio.Task[object] | None = None
+        try:
+            cancelled_room_task.cancel()
+            await asyncio.gather(cancelled_room_task, return_exceptions=True)
+
+            follow_up_thread_task = coordinator.queue_thread_update(
+                "!test:localhost",
+                "$thread-c:localhost",
+                follow_up_thread_update,
+                name="matrix_cache_follow_up_thread_update",
+            )
+
+            await asyncio.sleep(0.05)
+            assert follow_up_thread_started.is_set() is False
+            assert follow_up_thread_task.done() is False
+
+            release_first_thread.set()
+            await asyncio.wait_for(first_thread_task, timeout=1.0)
+
+            await asyncio.sleep(0.05)
+            assert follow_up_thread_started.is_set() is False
+            assert follow_up_thread_task.done() is False
+
+            release_second_thread.set()
+            await asyncio.wait_for(second_thread_task, timeout=1.0)
+            await asyncio.wait_for(follow_up_thread_started.wait(), timeout=1.0)
 
             release_follow_up_thread.set()
             await asyncio.wait_for(follow_up_thread_task, timeout=1.0)

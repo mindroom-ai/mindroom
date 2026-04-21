@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 import typing
-import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -17,8 +16,34 @@ if TYPE_CHECKING:
 
 
 _UpdateTask = asyncio.Task[Any]
-_TaskPredecessorMap = weakref.WeakKeyDictionary[_UpdateTask, tuple[_UpdateTask, ...]]
-_TaskTailPredecessorMap = weakref.WeakKeyDictionary[_UpdateTask, _UpdateTask | None]
+
+
+@dataclass(eq=False)
+class _QueuedRoomFence:
+    """Preserve one cancelled room barrier until the earlier room segment drains."""
+
+    sequence: int
+
+
+@dataclass(eq=False)
+class _QueuedUpdate:
+    sequence: int
+    kind: typing.Literal["room", "thread"]
+    task: _UpdateTask
+    start_signal: asyncio.Future[None]
+    thread_id: str | None = None
+    started: bool = False
+
+
+_RoomQueueEntry = _QueuedRoomFence | _QueuedUpdate
+
+
+@dataclass
+class _RoomSchedulerState:
+    entries: list[_RoomQueueEntry] = field(default_factory=list)
+    active_room: _QueuedUpdate | None = None
+    active_threads: dict[str, _QueuedUpdate] = field(default_factory=dict)
+    waiters: list[asyncio.Future[None]] = field(default_factory=list)
 
 
 class EventCacheWriteCoordinator(Protocol):
@@ -80,45 +105,40 @@ class _EventCacheWriteCoordinator:
 
     logger: structlog.stdlib.BoundLogger
     background_task_owner: object = field(default_factory=object)
+    _room_states: dict[str, _RoomSchedulerState] = field(default_factory=dict, init=False)
     _room_update_tasks: dict[str, _UpdateTask] = field(default_factory=dict, init=False)
     _thread_update_tasks: dict[tuple[str, str], _UpdateTask] = field(default_factory=dict, init=False)
     _thread_update_tasks_by_room: dict[str, dict[str, _UpdateTask]] = field(
         default_factory=dict,
         init=False,
     )
-    _room_update_predecessors: _TaskPredecessorMap = field(
-        default_factory=weakref.WeakKeyDictionary,
-        init=False,
-    )
-    _room_tail_predecessors: _TaskTailPredecessorMap = field(
-        default_factory=weakref.WeakKeyDictionary,
-        init=False,
-    )
-    _thread_update_predecessors: _TaskPredecessorMap = field(
-        default_factory=weakref.WeakKeyDictionary,
-        init=False,
-    )
-    _thread_tail_predecessors: _TaskTailPredecessorMap = field(
-        default_factory=weakref.WeakKeyDictionary,
-        init=False,
-    )
+    _next_sequence: int = field(default=0, init=False)
+
+    def _next_entry_sequence(self) -> int:
+        sequence = self._next_sequence
+        self._next_sequence += 1
+        return sequence
+
+    def _pending_tasks(self, tasks: tuple[_UpdateTask, ...]) -> set[_UpdateTask]:
+        return {task for task in tasks if not task.done()}
 
     def _pending_chain_length(self, tasks: tuple[_UpdateTask, ...]) -> int:
         return len(self._pending_tasks(tasks))
 
-    def _pending_tasks(self, tasks: tuple[_UpdateTask, ...]) -> set[_UpdateTask]:
-        pending_tasks: set[_UpdateTask] = set()
-        for task in tasks:
-            pending_tasks.update(self._pending_chain_tasks(task))
-        return pending_tasks
+    def _pending_entry_tasks(self, entries: list[_RoomQueueEntry]) -> tuple[_UpdateTask, ...]:
+        tasks = [
+            entry.task
+            for entry in entries
+            if isinstance(entry, _QueuedUpdate) and not entry.task.done()
+        ]
+        return tuple(dict.fromkeys(tasks))
 
-    def _pending_chain_tasks(self, task: _UpdateTask | None) -> set[_UpdateTask]:
-        if task is None:
-            return set()
-        pending_tasks = set(self._pending_predecessors(task))
-        if not task.done():
-            pending_tasks.add(task)
-        return pending_tasks
+    def _room_pending_tasks(self, room_id: str) -> tuple[_UpdateTask, ...]:
+        tasks = list(self._fallback_room_tasks(room_id))
+        state = self._room_states.get(room_id)
+        if state is not None:
+            tasks.extend(self._pending_entry_tasks(state.entries))
+        return tuple(dict.fromkeys(tasks))
 
     def _emit_idle_wait_timing(
         self,
@@ -139,172 +159,219 @@ class _EventCacheWriteCoordinator:
             pending_task_count=pending_task_count,
         )
 
-    def _task_predecessors(self, task: _UpdateTask) -> tuple[_UpdateTask, ...]:
-        if task in self._thread_update_predecessors:
-            return self._thread_update_predecessors.get(task, ())
-        return self._room_update_predecessors.get(task, ())
+    def _room_state(self, room_id: str) -> _RoomSchedulerState:
+        return self._room_states.setdefault(room_id, _RoomSchedulerState())
 
-    def _pending_tail_predecessor_from_map(
+    def _find_entry_index(
         self,
-        predecessor_map: _TaskTailPredecessorMap,
-        task: _UpdateTask,
-    ) -> _UpdateTask | None:
-        predecessor = predecessor_map.get(task)
-        while predecessor is not None and predecessor.done():
-            if not predecessor.cancelled():
-                return None
-            predecessor = predecessor_map.get(predecessor)
-        return predecessor
+        entries: list[_RoomQueueEntry],
+        target: _RoomQueueEntry,
+    ) -> int | None:
+        for index, entry in enumerate(entries):
+            if entry is target:
+                return index
+        return None
 
-    def _pending_predecessors(self, task: _UpdateTask) -> tuple[_UpdateTask, ...]:
-        pending_predecessors: list[_UpdateTask] = []
-        queued_predecessors = list(self._task_predecessors(task))
-        seen_predecessors: set[_UpdateTask] = set()
-        while queued_predecessors:
-            predecessor = queued_predecessors.pop(0)
-            if predecessor in seen_predecessors:
-                continue
-            seen_predecessors.add(predecessor)
-            if not predecessor.done():
-                pending_predecessors.append(predecessor)
-                continue
-            if predecessor.cancelled():
-                queued_predecessors.extend(self._task_predecessors(predecessor))
-        return tuple(pending_predecessors)
+    def _prune_done_task_maps(self, room_id: str) -> None:
+        room_task = self._room_update_tasks.get(room_id)
+        if room_task is not None and room_task.done():
+            self._room_update_tasks.pop(room_id, None)
 
-    async def _await_predecessors(
-        self,
-        room_id: str,
-        operation: str,
-        previous_tasks: tuple[_UpdateTask, ...],
-    ) -> None:
-        pending_predecessors = list(previous_tasks)
-        seen_predecessors: set[asyncio.Task[Any]] = set()
-        while pending_predecessors:
-            predecessor = pending_predecessors.pop(0)
-            if predecessor in seen_predecessors:
-                continue
-            seen_predecessors.add(predecessor)
-            try:
-                await predecessor
-            except asyncio.CancelledError:
-                current_task = asyncio.current_task()
-                if current_task is not None and current_task.cancelling():
-                    raise
-                pending_predecessors.extend(self._pending_predecessors(predecessor))
-            except Exception as exc:
-                self.logger.debug(
-                    "Previous room cache update failed before follow-up update",
-                    room_id=room_id,
-                    operation=operation,
-                    error=str(exc),
-                )
-
-    def _set_room_tail(self, room_id: str, task: asyncio.Task[object]) -> None:
-        self._room_update_tasks[room_id] = task
-
-    def _set_thread_tail(
-        self,
-        room_id: str,
-        thread_id: str,
-        task: asyncio.Task[object],
-    ) -> None:
-        self._thread_update_tasks[(room_id, thread_id)] = task
-        self._thread_update_tasks_by_room.setdefault(room_id, {})[thread_id] = task
-
-    def _clear_room_tail(self, room_id: str, done_task: asyncio.Task[object]) -> None:
-        if self._room_update_tasks.get(room_id) is not done_task:
-            return
-        predecessor = self._pending_tail_predecessor_from_map(self._room_tail_predecessors, done_task)
-        if done_task.cancelled() and predecessor is not None:
-            self._set_room_tail(room_id, predecessor)
-            return
-        self._room_update_tasks.pop(room_id, None)
-
-    def _clear_thread_tail(
-        self,
-        room_id: str,
-        thread_id: str,
-        done_task: asyncio.Task[object],
-    ) -> None:
-        key = (room_id, thread_id)
-        if self._thread_update_tasks.get(key) is not done_task:
-            return
-        predecessor = self._pending_tail_predecessor_from_map(self._thread_tail_predecessors, done_task)
-        if done_task.cancelled() and predecessor is not None:
-            self._set_thread_tail(room_id, thread_id, predecessor)
-            return
-        self._thread_update_tasks.pop(key, None)
         room_threads = self._thread_update_tasks_by_room.get(room_id)
         if room_threads is None:
             return
-        room_threads.pop(thread_id, None)
+
+        for thread_id, task in list(room_threads.items()):
+            if not task.done():
+                continue
+            room_threads.pop(thread_id, None)
+            self._thread_update_tasks.pop((room_id, thread_id), None)
+
         if not room_threads:
             self._thread_update_tasks_by_room.pop(room_id, None)
 
-    def _clear_room_thread_tail_if_current(
+    def _wake_waiters(self, room_id: str) -> None:
+        state = self._room_states.get(room_id)
+        if state is None:
+            return
+        waiters, state.waiters = state.waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    def _discard_waiter(self, room_id: str, waiter: asyncio.Future[None]) -> None:
+        state = self._room_states.get(room_id)
+        if state is None:
+            return
+        state.waiters = [existing for existing in state.waiters if existing is not waiter]
+
+    def _cleanup_room_state(self, room_id: str) -> None:
+        self._prune_done_task_maps(room_id)
+        state = self._room_states.get(room_id)
+        if state is None:
+            return
+        if state.entries or state.active_room is not None or state.active_threads or state.waiters:
+            return
+        self._room_states.pop(room_id, None)
+
+    def _start_entry(
         self,
         room_id: str,
-        done_task: asyncio.Task[object],
+        state: _RoomSchedulerState,
+        entry: _QueuedUpdate,
     ) -> None:
-        room_threads = self._thread_update_tasks_by_room.get(room_id)
-        if room_threads is None:
+        if entry.started or entry.task.done():
             return
-        for thread_id, current_task in list(room_threads.items()):
-            if current_task is done_task and done_task.done():
-                self._clear_thread_tail(room_id, thread_id, done_task)
 
-    def _room_predecessors(self, room_id: str) -> tuple[asyncio.Task[Any], ...]:
-        predecessors: list[asyncio.Task[Any]] = []
-        room_task = self._room_update_tasks.get(room_id)
-        if room_task is not None:
-            predecessors.append(room_task)
-        thread_tasks = self._thread_update_tasks_by_room.get(room_id, {})
-        predecessors.extend(thread_tasks.values())
-        return tuple(dict.fromkeys(predecessors))
+        entry.started = True
+        if entry.kind == "room":
+            state.active_room = entry
+            self._room_update_tasks[room_id] = entry.task
+        else:
+            assert entry.thread_id is not None
+            state.active_threads[entry.thread_id] = entry
+            self._thread_update_tasks[(room_id, entry.thread_id)] = entry.task
+            self._thread_update_tasks_by_room.setdefault(room_id, {})[entry.thread_id] = entry.task
 
-    def _thread_predecessors(self, room_id: str, thread_id: str) -> tuple[asyncio.Task[Any], ...]:
-        predecessors: list[asyncio.Task[Any]] = []
-        room_task = self._room_update_tasks.get(room_id)
-        if room_task is not None:
-            predecessors.append(room_task)
-        thread_task = self._thread_update_tasks.get((room_id, thread_id))
-        if thread_task is not None:
-            predecessors.append(thread_task)
-        return tuple(dict.fromkeys(predecessors))
+        if not entry.start_signal.done():
+            entry.start_signal.set_result(None)
+
+    def _drop_leading_room_fences(self, state: _RoomSchedulerState) -> None:
+        while state.entries and isinstance(state.entries[0], _QueuedRoomFence):
+            state.entries.pop(0)
+
+    def _reevaluate_entry(
+        self,
+        room_id: str,
+        state: _RoomSchedulerState,
+        entry: _RoomQueueEntry,
+        *,
+        room_barrier_pending: bool,
+    ) -> bool:
+        if isinstance(entry, _QueuedRoomFence):
+            return True
+
+        if entry.started:
+            return room_barrier_pending or entry.kind == "room"
+
+        if entry.kind == "room":
+            if state.active_room is None and not state.active_threads:
+                self._start_entry(room_id, state, entry)
+            return True
+
+        assert entry.thread_id is not None
+        if room_barrier_pending or state.active_room is not None:
+            return False
+        if entry.thread_id in state.active_threads:
+            return False
+        self._start_entry(room_id, state, entry)
+        return False
+
+    def _reevaluate_room(self, room_id: str) -> None:
+        state = self._room_states.get(room_id)
+        if state is None:
+            self._prune_done_task_maps(room_id)
+            return
+
+        self._drop_leading_room_fences(state)
+
+        room_barrier_pending = False
+        for entry in state.entries:
+            room_barrier_pending = self._reevaluate_entry(
+                room_id,
+                state,
+                entry,
+                room_barrier_pending=room_barrier_pending,
+            )
+
+        self._cleanup_room_state(room_id)
+
+    def _release_active_entry(
+        self,
+        room_id: str,
+        state: _RoomSchedulerState | None,
+        entry: _QueuedUpdate,
+    ) -> None:
+        if entry.kind == "room":
+            if state is not None and state.active_room is entry:
+                state.active_room = None
+            if self._room_update_tasks.get(room_id) is entry.task:
+                self._room_update_tasks.pop(room_id, None)
+            return
+
+        assert entry.thread_id is not None
+        if state is not None and state.active_threads.get(entry.thread_id) is entry:
+            state.active_threads.pop(entry.thread_id, None)
+        key = (room_id, entry.thread_id)
+        if self._thread_update_tasks.get(key) is entry.task:
+            self._thread_update_tasks.pop(key, None)
+        room_threads = self._thread_update_tasks_by_room.get(room_id)
+        if room_threads is not None and room_threads.get(entry.thread_id) is entry.task:
+            room_threads.pop(entry.thread_id, None)
+            if not room_threads:
+                self._thread_update_tasks_by_room.pop(room_id, None)
+
+    def _remove_finished_entry(
+        self,
+        state: _RoomSchedulerState,
+        entry: _QueuedUpdate,
+    ) -> None:
+        index = self._find_entry_index(state.entries, entry)
+        if index is None:
+            return
+        if entry.kind == "room" and not entry.started and entry.task.cancelled():
+            state.entries[index] = _QueuedRoomFence(sequence=entry.sequence)
+            return
+        state.entries.pop(index)
+
+    def _finish_entry(
+        self,
+        room_id: str,
+        entry: _QueuedUpdate,
+    ) -> None:
+        state = self._room_states.get(room_id)
+        self._release_active_entry(room_id, state, entry)
+
+        if state is None:
+            self._cleanup_room_state(room_id)
+            return
+
+        self._remove_finished_entry(state, entry)
+        self._reevaluate_room(room_id)
+        self._wake_waiters(room_id)
+        self._cleanup_room_state(room_id)
 
     def _queue_update(
         self,
         *,
         room_id: str,
-        previous_tasks: tuple[_UpdateTask, ...],
-        predecessor_map: _TaskPredecessorMap,
-        tail_predecessor: _UpdateTask | None,
-        tail_predecessor_map: _TaskTailPredecessorMap,
-        register_task: typing.Callable[[asyncio.Task[object]], None],
-        clear_task: typing.Callable[[asyncio.Task[object]], None],
+        thread_id: str | None,
+        kind: typing.Literal["room", "thread"],
         update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
         name: str,
         log_exceptions: bool,
         emit_room_timing: bool = False,
     ) -> asyncio.Task[object]:
+        room_state = self._room_state(room_id)
         instrument_timing = emit_room_timing and timing_enabled()
+        predecessor_count = self._pending_chain_length(self._pending_entry_tasks(room_state.entries))
+        loop = asyncio.get_running_loop()
+        start_signal: asyncio.Future[None] = loop.create_future()
 
         if not instrument_timing:
 
-            async def run_after_previous() -> object:
-                await self._await_predecessors(room_id, name, previous_tasks)
+            async def run_when_scheduled() -> object:
+                await start_signal
                 return await update_coro_factory()
 
         else:
-            predecessor_count = self._pending_chain_length(previous_tasks)
+            queued_at = time.perf_counter()
 
-            async def run_after_previous() -> object:
-                started = time.perf_counter()
+            async def run_when_scheduled() -> object:
                 outcome = "ok"
                 update_started: float | None = None
                 try:
-                    await self._await_predecessors(room_id, name, previous_tasks)
+                    await start_signal
                     update_started = time.perf_counter()
                     return await update_coro_factory()
                 except asyncio.CancelledError:
@@ -315,12 +382,12 @@ class _EventCacheWriteCoordinator:
                     raise
                 finally:
                     finished = time.perf_counter()
-                    total_ms = round((finished - started) * 1000, 1)
+                    total_ms = round((finished - queued_at) * 1000, 1)
                     if update_started is None:
                         predecessor_wait_ms = total_ms
                         update_run_ms = 0.0
                     else:
-                        predecessor_wait_ms = round((update_started - started) * 1000, 1)
+                        predecessor_wait_ms = round((update_started - queued_at) * 1000, 1)
                         update_run_ms = round((finished - update_started) * 1000, 1)
                     emit_timing_event(
                         "Event cache update timing",
@@ -336,15 +403,22 @@ class _EventCacheWriteCoordinator:
                     )
 
         task = create_background_task(
-            run_after_previous(),
+            run_when_scheduled(),
             name=name,
             owner=self.background_task_owner,
             log_exceptions=log_exceptions,
         )
-        predecessor_map[task] = previous_tasks
-        tail_predecessor_map[task] = tail_predecessor
-        register_task(task)
-        task.add_done_callback(clear_task)
+        entry = _QueuedUpdate(
+            sequence=self._next_entry_sequence(),
+            kind=kind,
+            task=task,
+            start_signal=start_signal,
+            thread_id=thread_id,
+        )
+
+        room_state.entries.append(entry)
+        task.add_done_callback(lambda _done_task, queued_entry=entry: self._finish_entry(room_id, queued_entry))
+        self._reevaluate_room(room_id)
         return task
 
     async def _await_idle_task(
@@ -367,6 +441,50 @@ class _EventCacheWriteCoordinator:
                 log_context["thread_id"] = thread_id
             self.logger.debug(log_message, **log_context)
 
+    def _room_is_idle(self, room_id: str) -> bool:
+        self._prune_done_task_maps(room_id)
+        state = self._room_states.get(room_id)
+        if state is not None and state.entries:
+            return False
+        if self._room_update_tasks.get(room_id) is not None:
+            return False
+        room_threads = self._thread_update_tasks_by_room.get(room_id)
+        return not room_threads
+
+    def _thread_is_idle(self, room_id: str, thread_id: str) -> bool:
+        self._prune_done_task_maps(room_id)
+        state = self._room_states.get(room_id)
+        if state is not None:
+            for entry in state.entries:
+                if isinstance(entry, _QueuedRoomFence):
+                    return False
+                if entry.kind == "room":
+                    return False
+                if entry.thread_id == thread_id:
+                    return False
+        if self._room_update_tasks.get(room_id) is not None:
+            return False
+        return self._thread_update_tasks.get((room_id, thread_id)) is None
+
+    def _fallback_room_tasks(self, room_id: str) -> tuple[_UpdateTask, ...]:
+        pending_tasks: list[_UpdateTask] = []
+        room_task = self._room_update_tasks.get(room_id)
+        if room_task is not None and not room_task.done():
+            pending_tasks.append(room_task)
+        room_threads = self._thread_update_tasks_by_room.get(room_id, {})
+        pending_tasks.extend(task for task in room_threads.values() if not task.done())
+        return tuple(dict.fromkeys(pending_tasks))
+
+    def _fallback_thread_tasks(self, room_id: str, thread_id: str) -> tuple[_UpdateTask, ...]:
+        pending_tasks: list[_UpdateTask] = []
+        room_task = self._room_update_tasks.get(room_id)
+        if room_task is not None and not room_task.done():
+            pending_tasks.append(room_task)
+        thread_task = self._thread_update_tasks.get((room_id, thread_id))
+        if thread_task is not None and not thread_task.done():
+            pending_tasks.append(thread_task)
+        return tuple(dict.fromkeys(pending_tasks))
+
     def queue_room_update(
         self,
         room_id: str,
@@ -376,15 +494,10 @@ class _EventCacheWriteCoordinator:
         log_exceptions: bool = True,
     ) -> asyncio.Task[object]:
         """Schedule one room-scoped cache update behind any active predecessor."""
-        previous_room_task = self._room_update_tasks.get(room_id)
         return self._queue_update(
             room_id=room_id,
-            previous_tasks=self._room_predecessors(room_id),
-            predecessor_map=self._room_update_predecessors,
-            tail_predecessor=previous_room_task,
-            tail_predecessor_map=self._room_tail_predecessors,
-            register_task=lambda task: self._set_room_tail(room_id, task),
-            clear_task=lambda done_task: self._clear_room_tail(room_id, done_task),
+            thread_id=None,
+            kind="room",
             update_coro_factory=update_coro_factory,
             name=name,
             log_exceptions=log_exceptions,
@@ -416,16 +529,10 @@ class _EventCacheWriteCoordinator:
         log_exceptions: bool = True,
     ) -> asyncio.Task[object]:
         """Schedule one thread-scoped cache update behind room-wide and same-thread predecessors."""
-        key = (room_id, thread_id)
-        previous_thread_task = self._thread_update_tasks.get(key)
         return self._queue_update(
             room_id=room_id,
-            previous_tasks=self._thread_predecessors(room_id, thread_id),
-            predecessor_map=self._thread_update_predecessors,
-            tail_predecessor=previous_thread_task,
-            tail_predecessor_map=self._thread_tail_predecessors,
-            register_task=lambda task: self._set_thread_tail(room_id, thread_id, task),
-            clear_task=lambda done_task: self._clear_thread_tail(room_id, thread_id, done_task),
+            thread_id=thread_id,
+            kind="thread",
             update_coro_factory=update_coro_factory,
             name=name,
             log_exceptions=log_exceptions,
@@ -450,26 +557,39 @@ class _EventCacheWriteCoordinator:
 
     async def _wait_for_room_idle_without_timing(self, room_id: str) -> None:
         while True:
-            pending_tasks = self._room_predecessors(room_id)
-            if not pending_tasks:
+            self._reevaluate_room(room_id)
+            if self._room_is_idle(room_id):
                 return
-            for pending_task in pending_tasks:
-                await self._await_idle_task(
-                    pending_task,
-                    room_id=room_id,
-                    log_message="Room cache update failed before room became idle",
-                )
-                self._clear_room_thread_tail_if_current(room_id, pending_task)
-                if self._room_update_tasks.get(room_id) is pending_task and pending_task.done():
-                    self._clear_room_tail(room_id, pending_task)
+
+            state = self._room_states.get(room_id)
+            if state is None or not state.entries:
+                for pending_task in self._fallback_room_tasks(room_id):
+                    await self._await_idle_task(
+                        pending_task,
+                        room_id=room_id,
+                        log_message="Room cache update failed before room became idle",
+                    )
+                continue
+
+            waiter = asyncio.get_running_loop().create_future()
+            state.waiters.append(waiter)
+            self._reevaluate_room(room_id)
+            if self._room_is_idle(room_id):
+                self._discard_waiter(room_id, waiter)
+                return
+            try:
+                await waiter
+            except asyncio.CancelledError:
+                self._discard_waiter(room_id, waiter)
+                raise
 
     async def _wait_for_room_idle_with_timing(self, room_id: str) -> None:
         wait_started: float | None = None
         wait_iterations = 0
         pending_tasks_seen: set[_UpdateTask] = set()
         while True:
-            pending_tasks = self._room_predecessors(room_id)
-            if not pending_tasks:
+            self._reevaluate_room(room_id)
+            if self._room_is_idle(room_id):
                 self._emit_idle_wait_timing(
                     room_id=room_id,
                     wait_started=wait_started,
@@ -477,18 +597,39 @@ class _EventCacheWriteCoordinator:
                     pending_task_count=len(pending_tasks_seen),
                 )
                 return
+
             if wait_started is None:
                 wait_started = time.perf_counter()
-            pending_tasks_seen.update(self._pending_tasks(pending_tasks))
-            for pending_task in pending_tasks:
-                await self._await_idle_task(
-                    pending_task,
+            pending_tasks_seen.update(self._room_pending_tasks(room_id))
+
+            state = self._room_states.get(room_id)
+            if state is None or not state.entries:
+                for pending_task in self._fallback_room_tasks(room_id):
+                    await self._await_idle_task(
+                        pending_task,
+                        room_id=room_id,
+                        log_message="Room cache update failed before room became idle",
+                    )
+                wait_iterations += 1
+                continue
+
+            waiter = asyncio.get_running_loop().create_future()
+            state.waiters.append(waiter)
+            self._reevaluate_room(room_id)
+            if self._room_is_idle(room_id):
+                self._discard_waiter(room_id, waiter)
+                self._emit_idle_wait_timing(
                     room_id=room_id,
-                    log_message="Room cache update failed before room became idle",
+                    wait_started=wait_started,
+                    wait_iterations=wait_iterations,
+                    pending_task_count=len(pending_tasks_seen),
                 )
-                self._clear_room_thread_tail_if_current(room_id, pending_task)
-                if self._room_update_tasks.get(room_id) is pending_task and pending_task.done():
-                    self._clear_room_tail(room_id, pending_task)
+                return
+            try:
+                await waiter
+            except asyncio.CancelledError:
+                self._discard_waiter(room_id, waiter)
+                raise
             wait_iterations += 1
 
     async def wait_for_room_idle(self, room_id: str) -> None:
@@ -500,30 +641,38 @@ class _EventCacheWriteCoordinator:
 
     async def wait_for_thread_idle(self, room_id: str, thread_id: str) -> None:
         """Wait for room-wide and same-thread queued updates to drain."""
-        key = (room_id, thread_id)
         while True:
-            pending_tasks = self._thread_predecessors(room_id, thread_id)
-            if not pending_tasks:
+            self._reevaluate_room(room_id)
+            if self._thread_is_idle(room_id, thread_id):
                 return
-            for pending_task in pending_tasks:
-                await self._await_idle_task(
-                    pending_task,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    log_message="Thread cache update failed before thread became idle",
-                )
-                if self._thread_update_tasks.get(key) is pending_task and pending_task.done():
-                    self._clear_thread_tail(room_id, thread_id, pending_task)
-                if self._room_update_tasks.get(room_id) is pending_task and pending_task.done():
-                    self._clear_room_tail(room_id, pending_task)
+
+            state = self._room_states.get(room_id)
+            if state is None or not state.entries:
+                for pending_task in self._fallback_thread_tasks(room_id, thread_id):
+                    await self._await_idle_task(
+                        pending_task,
+                        room_id=room_id,
+                        thread_id=thread_id,
+                        log_message="Thread cache update failed before thread became idle",
+                    )
+                continue
+
+            waiter = asyncio.get_running_loop().create_future()
+            state.waiters.append(waiter)
+            self._reevaluate_room(room_id)
+            if self._thread_is_idle(room_id, thread_id):
+                self._discard_waiter(room_id, waiter)
+                return
+            try:
+                await waiter
+            except asyncio.CancelledError:
+                self._discard_waiter(room_id, waiter)
+                raise
 
     async def close(self) -> None:
         """Drain any queued cache writes for this coordinator."""
         await wait_for_background_tasks(timeout=5.0, owner=self.background_task_owner)
+        self._room_states.clear()
         self._room_update_tasks.clear()
         self._thread_update_tasks.clear()
         self._thread_update_tasks_by_room.clear()
-        self._room_update_predecessors.clear()
-        self._room_tail_predecessors.clear()
-        self._thread_update_predecessors.clear()
-        self._thread_tail_predecessors.clear()
