@@ -308,6 +308,7 @@ class ApprovalManager:
         self._requests_by_id: dict[str, PendingApproval] = {}
         self._pending_by_id: dict[str, PendingApproval] = {}
         self._approval_id_by_event_id: dict[str, str] = {}
+        self._replay_in_progress: set[str] = set()
         self._load_existing()
 
     @property
@@ -468,6 +469,24 @@ class ApprovalManager:
                 )
             ]
         return sorted(requests, key=lambda approval: approval.resolved_at or approval.requested_at)
+
+    def _claim_unsynced_resolved_replay(self, approval_id: str) -> PendingApproval | None:
+        with self._state_lock:
+            pending = self._requests_by_id.get(approval_id)
+            if (
+                pending is None
+                or pending.status == "pending"
+                or pending.event_id is None
+                or pending.resolution_synced_at is not None
+                or approval_id in self._replay_in_progress
+            ):
+                return None
+            self._replay_in_progress.add(approval_id)
+            return pending
+
+    def _finish_unsynced_resolved_replay(self, approval_id: str) -> None:
+        with self._state_lock:
+            self._replay_in_progress.discard(approval_id)
 
     def _preflight_request_decision(
         self,
@@ -961,10 +980,16 @@ class ApprovalManager:
         """Replay any resolved approval cards that were never edited in Matrix."""
         synced_requests: list[PendingApproval] = []
         for pending in self.list_unsynced_resolved():
-            previous_synced_at = pending.resolution_synced_at
-            await self._edit_resolved_event(pending)
-            if pending.resolution_synced_at != previous_synced_at:
-                synced_requests.append(pending)
+            claimed_pending = self._claim_unsynced_resolved_replay(pending.id)
+            if claimed_pending is None:
+                continue
+            try:
+                previous_synced_at = claimed_pending.resolution_synced_at
+                await self._edit_resolved_event(claimed_pending)
+                if claimed_pending.resolution_synced_at != previous_synced_at:
+                    synced_requests.append(claimed_pending)
+            finally:
+                self._finish_unsynced_resolved_replay(pending.id)
         return synced_requests
 
     @staticmethod

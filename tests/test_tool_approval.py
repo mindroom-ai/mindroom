@@ -1583,6 +1583,33 @@ async def test_sync_unsynced_approval_event_resolutions_retry_when_editor_sends_
 
 
 @pytest.mark.asyncio
+async def test_sync_unsynced_approval_event_resolutions_claim_one_replay_under_concurrency(tmp_path: Path) -> None:
+    """Concurrent replay workers should claim each approval once before editing."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_resolved_request(runtime_paths.storage_root / "approvals")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_editor(*_args: object) -> bool:
+        started.set()
+        await release.wait()
+        return True
+
+    editor = AsyncMock(side_effect=delayed_editor)
+    initialize_approval_store(runtime_paths, editor=editor)
+
+    tasks = [asyncio.create_task(sync_unsynced_approval_event_resolutions()) for _ in range(3)]
+    await started.wait()
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(*tasks)
+
+    assert editor.await_count == 1
+    assert sum(len(result) for result in results) == 1
+    assert (runtime_paths.storage_root / "approvals" / f"{request_id}.json").exists() is False
+
+
+@pytest.mark.asyncio
 async def test_sync_unsynced_approval_event_resolutions_wait_for_original_sender_bot(tmp_path: Path) -> None:
     """Replay should not fall back to another live bot when the original sender is unavailable."""
     runtime_paths = test_runtime_paths(tmp_path)
