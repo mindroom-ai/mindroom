@@ -121,7 +121,32 @@ def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> A
         rooms=["!room:localhost"],
     )
     bot.client = make_matrix_client_mock(user_id=f"@mindroom_{agent_name}:localhost")
+    _grant_approval_room_access(bot)
     return bot
+
+
+def _grant_approval_room_access(bot: AgentBot, *, room_id: str = "!room:localhost") -> nio.MatrixRoom:
+    assert bot.client is not None
+    return _grant_approval_room_access_for_client(
+        bot.client,
+        room_id=room_id,
+        display_name=bot.agent_user.display_name,
+    )
+
+
+def _grant_approval_room_access_for_client(
+    client: nio.AsyncClient,
+    *,
+    room_id: str = "!room:localhost",
+    display_name: str | None = None,
+) -> nio.MatrixRoom:
+    room = client.rooms[room_id]
+    room.power_levels.defaults.events_default = 0
+    room.power_levels.defaults.users_default = 0
+    room.power_levels.defaults.redact = 50
+    room.power_levels.users[client.user_id] = 100
+    room.add_member(client.user_id, display_name, None)
+    return room
 
 
 async def _request_tool_approval(
@@ -149,8 +174,12 @@ async def _request_tool_approval(
             timeout_seconds=timeout_seconds,
         ),
     )
-    await asyncio.sleep(0)
-    pending = store.list_pending()
+    pending: list[PendingApproval] = []
+    for _ in range(5):
+        await asyncio.sleep(0)
+        pending = store.list_pending()
+        if pending and pending[0].event_id is not None:
+            break
     return store, task, pending[0] if pending else None
 
 
@@ -617,7 +646,7 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
     runtime_paths = test_runtime_paths(tmp_path)
     sender = AsyncMock(return_value="$approval")
     editor = AsyncMock()
-    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+    approval_store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
 
     assert pending is not None
     assert pending.event_id == "$approval"
@@ -625,16 +654,16 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
     assert sender.await_args.args[3]["msgtype"] == "io.mindroom.tool_approval"
     assert sender.await_args.args[3]["status"] == "pending"
 
-    resolved = await store.approve(pending.id, resolved_by="@user:localhost")
+    resolved = await approval_store.approve(pending.id, resolved_by="@user:localhost")
     decision = await task
 
     assert resolved.status == "approved"
     assert decision.status == "approved"
     assert decision.resolved_by == "@user:localhost"
-    assert editor.await_args.args[:3] == ("!room:localhost", "$approval", "code")
-    assert editor.await_args.args[3]["status"] == "approved"
-    assert editor.await_args.args[3]["thread_id"] == "$thread"
-    assert store.list_pending() == []
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+    assert editor.await_args.args[2]["status"] == "approved"
+    assert editor.await_args.args[2]["thread_id"] == "$thread"
+    assert approval_store.list_pending() == []
 
 
 @pytest.mark.asyncio
@@ -665,6 +694,7 @@ async def test_request_approval_sanitizes_arguments_in_matrix_event_and_persiste
     assert "sk-live-secret-token" not in event_payload_text
     assert "super-secret" not in persisted_text
     assert "sk-live-secret-token" not in persisted_text
+    assert "transport_agent_name" not in persisted_text
     assert "***redacted***" in event_payload_text
     assert "***redacted***" in persisted_text
     assert isinstance(event_payload["arguments"], dict)
@@ -719,7 +749,7 @@ async def test_request_approval_denies_with_reason(tmp_path: Path) -> None:
     assert resolved.resolution_reason == "Too dangerous"
     assert decision.status == "denied"
     assert decision.reason == "Too dangerous"
-    assert editor.await_args.args[3]["resolution_reason"] == "Too dangerous"
+    assert editor.await_args.args[2]["resolution_reason"] == "Too dangerous"
 
 
 @pytest.mark.asyncio
@@ -777,7 +807,7 @@ async def test_request_approval_resolves_from_different_event_loop(tmp_path: Pat
     assert result is not None
     assert result.status == "approved"
     assert result.resolved_by == "@user:localhost"
-    assert editor.await_args.args[3]["status"] == "approved"
+    assert editor.await_args.args[2]["status"] == "approved"
     assert store.list_pending() == []
 
 
@@ -822,7 +852,7 @@ async def test_request_approval_resolution_is_thread_safe_under_concurrent_resol
     decision = await task
     assert decision.status in {"approved", "denied"}
     assert decision.resolved_by == "@user:localhost"
-    assert editor.await_args.args[3]["status"] == decision.status
+    assert editor.await_args.args[2]["status"] == decision.status
 
 
 @pytest.mark.asyncio
@@ -843,7 +873,7 @@ async def test_request_approval_times_out_and_edits_card(tmp_path: Path) -> None
 
     assert decision.status == "expired"
     assert decision.reason == "Tool approval request timed out."
-    assert editor.await_args.args[3]["status"] == "expired"
+    assert editor.await_args.args[2]["status"] == "expired"
     assert store.list_pending() == []
 
 
@@ -885,7 +915,7 @@ async def test_request_approval_uses_absolute_expiry_after_delayed_send(tmp_path
 
     assert decision.status == "expired"
     assert decision.reason == "Tool approval request timed out."
-    assert editor.await_args.args[3]["status"] == "expired"
+    assert editor.await_args.args[2]["status"] == "expired"
     with pytest.raises(LookupError, match=pending[0].id):
         await store.approve(pending[0].id, resolved_by="@user:localhost")
 
@@ -903,8 +933,8 @@ async def test_request_approval_cancellation_marks_request_expired(tmp_path: Pat
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert editor.await_args.args[3]["status"] == "expired"
-    assert editor.await_args.args[3]["resolution_reason"] == "Tool approval request was cancelled."
+    assert editor.await_args.args[2]["status"] == "expired"
+    assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request was cancelled."
 
 
 @pytest.mark.asyncio
@@ -944,12 +974,7 @@ async def test_request_approval_cancellation_during_send_expires_persisted_pendi
         await task
 
     assert store._pending_by_id == {}
-    payload = json.loads(
-        (runtime_paths.storage_root / "approvals" / f"{pending[0].id}.json").read_text(encoding="utf-8"),
-    )
-    assert payload["status"] == "expired"
-    assert payload["resolution_reason"] == "Tool approval request was cancelled."
-    assert payload["event_id"] is None
+    assert (runtime_paths.storage_root / "approvals" / f"{pending[0].id}.json").exists() is False
     editor.assert_not_awaited()
 
 
@@ -1010,7 +1035,7 @@ async def test_request_approval_supports_room_mode_without_thread_id(tmp_path: P
     decision = await task
 
     assert decision.status == "approved"
-    assert editor.await_args.args[3]["thread_id"] is None
+    assert editor.await_args.args[2]["thread_id"] is None
 
 
 @pytest.mark.asyncio
@@ -1103,7 +1128,7 @@ async def test_request_approval_expires_when_matrix_send_fails(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_request_approval_discards_pending_request_when_matrix_send_returns_none(tmp_path: Path) -> None:
-    """Send failures that return no event ID should not leak pending requests in memory."""
+    """Send failures that return no event ID should not leak approval requests in memory or on disk."""
     runtime_paths = test_runtime_paths(tmp_path)
     store = initialize_approval_store(runtime_paths, sender=AsyncMock(return_value=None), editor=AsyncMock())
 
@@ -1123,11 +1148,12 @@ async def test_request_approval_discards_pending_request_when_matrix_send_return
 
     assert decision.status == "expired"
     assert store._pending_by_id == {}
+    assert list((runtime_paths.storage_root / "approvals").glob("*.json")) == []
 
 
 @pytest.mark.asyncio
 async def test_request_approval_discards_pending_request_when_matrix_send_raises(tmp_path: Path) -> None:
-    """Exceptions during send should not leak pending requests in memory."""
+    """Exceptions during send should not leak approval requests in memory or on disk."""
     runtime_paths = test_runtime_paths(tmp_path)
     store = initialize_approval_store(
         runtime_paths,
@@ -1151,6 +1177,7 @@ async def test_request_approval_discards_pending_request_when_matrix_send_raises
 
     assert decision.status == "expired"
     assert store._pending_by_id == {}
+    assert list((runtime_paths.storage_root / "approvals").glob("*.json")) == []
 
 
 @pytest.mark.asyncio
@@ -1187,10 +1214,7 @@ async def test_request_approval_persists_request_before_matrix_send(tmp_path: Pa
     assert decision.status == "expired"
     assert decision.reason == "Tool approval request could not be delivered to Matrix."
     persisted_requests = list((runtime_paths.storage_root / "approvals").glob("*.json"))
-    assert len(persisted_requests) == 1
-    persisted_payload = json.loads(persisted_requests[0].read_text(encoding="utf-8"))
-    assert persisted_payload["status"] == "expired"
-    assert persisted_payload["event_id"] is None
+    assert persisted_requests == []
 
 
 @pytest.mark.asyncio
@@ -1238,13 +1262,7 @@ async def test_synced_resolved_approval_is_evicted_from_live_indexes(tmp_path: P
     assert decision.status == "approved"
     assert pending.arguments == {}
     assert pending.id not in store._requests_by_id
-    assert (
-        store.pending_transport_agent_name_for_event(
-            approval_event_id="$approval",
-            room_id="!room:localhost",
-        )
-        is None
-    )
+    assert store.anchored_request_for_event(approval_event_id="$approval", room_id="!room:localhost") is None
 
 
 @pytest.mark.asyncio
@@ -1284,7 +1302,7 @@ async def test_programmatic_approve_requires_original_requester(tmp_path: Path) 
 
     assert resolved.status == "approved"
     assert decision.status == "approved"
-    assert editor.await_args.args[3]["resolved_by"] == "@user:localhost"
+    assert editor.await_args.args[2]["resolved_by"] == "@user:localhost"
 
 
 @pytest.mark.asyncio
@@ -1300,11 +1318,10 @@ async def test_handle_reaction_approves_by_event_id(tmp_path: Path) -> None:
         room_id="!room:localhost",
         reaction_key="✅",
         resolved_by="@user:localhost",
-        transport_agent_name="code",
     )
     decision = await task
 
-    assert handled is True
+    assert handled.handled is True
     assert decision.status == "approved"
 
 
@@ -1323,10 +1340,9 @@ async def test_handle_reaction_requires_original_requester(tmp_path: Path) -> No
         room_id="!room:localhost",
         reaction_key="✅",
         resolved_by="@other:localhost",
-        transport_agent_name="code",
     )
 
-    assert handled is False
+    assert handled.handled is False
     assert task.done() is False
 
     handled = await store.handle_reaction(
@@ -1334,12 +1350,46 @@ async def test_handle_reaction_requires_original_requester(tmp_path: Path) -> No
         room_id="!room:localhost",
         reaction_key="✅",
         resolved_by="@user:localhost",
-        transport_agent_name="code",
     )
     decision = await task
 
-    assert handled is True
+    assert handled.handled is True
     assert decision.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_handle_reaction_refuses_truncated_approval_preview(tmp_path: Path) -> None:
+    """Approve actions should fail closed when the approval card preview is truncated."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    long_arguments = {"command": "echo hi", "prompt": "x" * 5000}
+    store, task, pending = await _request_tool_approval(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        arguments=long_arguments,
+    )
+
+    assert pending is not None
+
+    handled = await store.handle_reaction(
+        approval_event_id="$approval",
+        room_id="!room:localhost",
+        reaction_key="✅",
+        resolved_by="@user:localhost",
+    )
+
+    assert handled.handled is True
+    assert handled.error_reason == (
+        "Cannot approve: the displayed arguments are truncated. "
+        "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    )
+    assert task.done() is False
+
+    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
+    decision = await task
+    assert decision.status == "denied"
 
 
 @pytest.mark.asyncio
@@ -1355,11 +1405,10 @@ async def test_handle_reply_denies_by_event_id(tmp_path: Path) -> None:
         room_id="!room:localhost",
         reason="No destructive commands",
         resolved_by="@user:localhost",
-        transport_agent_name="code",
     )
     decision = await task
 
-    assert handled is True
+    assert handled.handled is True
     assert decision.status == "denied"
     assert decision.reason == "No destructive commands"
 
@@ -1379,7 +1428,7 @@ async def test_shutdown_expires_pending_requests(tmp_path: Path) -> None:
     assert get_approval_store() is None
     assert decision.status == "expired"
     assert decision.reason == "MindRoom shut down before approval completed."
-    assert editor.await_args.args[3]["status"] == "expired"
+    assert editor.await_args.args[2]["status"] == "expired"
 
 
 def test_initialize_approval_store_expires_persisted_pending_requests(tmp_path: Path) -> None:
@@ -1422,9 +1471,9 @@ async def test_sync_unsynced_approval_event_resolutions_replays_persisted_expire
 
     assert [request.id for request in synced_requests] == [request_id]
     editor.assert_awaited_once()
-    assert editor.await_args.args[:3] == ("!room:localhost", "$approval-event", "code")
-    assert editor.await_args.args[3]["status"] == "expired"
-    assert editor.await_args.args[3]["thread_id"] == "$thread"
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval-event")
+    assert editor.await_args.args[2]["status"] == "expired"
+    assert editor.await_args.args[2]["thread_id"] == "$thread"
     assert (runtime_paths.storage_root / "approvals" / f"{request_id}.json").exists() is False
 
 
@@ -1445,7 +1494,7 @@ async def test_sync_unsynced_approval_event_resolutions_keep_original_argument_s
     synced_requests = await sync_unsynced_approval_event_resolutions()
 
     assert [request.id for request in synced_requests] == [request_id]
-    edited_payload = editor.await_args.args[3]
+    edited_payload = editor.await_args.args[2]
     assert "arguments" not in edited_payload
     render_payload = {
         "approval_id": request_id,
@@ -1614,19 +1663,21 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator._capture_runtime_loop()
-    client = MagicMock()
+    client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$edit-event", room_id="!room:localhost"),
     )
     bot = MagicMock()
+    bot.agent_name = "code"
+    bot.running = True
     bot.client = client
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest-thread-event")
     orchestrator.agent_bots = {"code": bot}
+    _grant_approval_room_access_for_client(client)
 
     edited = await orchestrator._edit_approval_event(
         "!room:localhost",
         "$approval-event",
-        "code",
         {
             "status": "denied",
             "msgtype": "io.mindroom.tool_approval",
@@ -1670,18 +1721,20 @@ async def test_orchestrator_edit_approval_event_supports_room_mode_without_threa
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator._capture_runtime_loop()
-    client = MagicMock()
+    client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$edit-event", room_id="!room:localhost"),
     )
     bot = MagicMock()
+    bot.agent_name = "code"
+    bot.running = True
     bot.client = client
     orchestrator.agent_bots = {"code": bot}
+    _grant_approval_room_access_for_client(client)
 
     edited = await orchestrator._edit_approval_event(
         "!room:localhost",
         "$approval-event",
-        "code",
         {
             "status": "approved",
             "msgtype": "io.mindroom.tool_approval",
@@ -1712,8 +1765,8 @@ async def test_orchestrator_edit_approval_event_supports_room_mode_without_threa
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_edit_approval_event_returns_false_without_transport_bot(tmp_path: Path) -> None:
-    """The orchestrator helper should report a no-op when the transport bot is unavailable."""
+async def test_orchestrator_edit_approval_event_returns_false_without_live_room_bot(tmp_path: Path) -> None:
+    """The orchestrator helper should report a no-op when no live room bot can service the card."""
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator._capture_runtime_loop()
@@ -1721,7 +1774,6 @@ async def test_orchestrator_edit_approval_event_returns_false_without_transport_
     edited = await orchestrator._edit_approval_event(
         "!room:localhost",
         "$approval-event",
-        "code",
         {
             "approval_id": "approval-1",
             "tool_name": "run_shell_command",
@@ -1781,7 +1833,7 @@ async def test_bot_reaction_approves_pending_tool_call(tmp_path: Path) -> None:
 
     decision = await task
     assert decision.status == "approved"
-    assert editor.await_args.args[3]["status"] == "approved"
+    assert editor.await_args.args[2]["status"] == "approved"
 
 
 @pytest.mark.asyncio
@@ -1900,7 +1952,7 @@ async def test_bot_reply_denial_strips_matrix_rich_reply_fallback(tmp_path: Path
     decision = await task
     assert decision.status == "denied"
     assert decision.reason == "Do not run this"
-    assert editor.await_args.args[3]["resolution_reason"] == "Do not run this"
+    assert editor.await_args.args[2]["resolution_reason"] == "Do not run this"
 
 
 @pytest.mark.asyncio
@@ -1932,13 +1984,7 @@ async def test_bot_reply_to_unsynced_resolved_approval_does_not_fall_through_to_
     decision = await task
 
     assert decision.status == "denied"
-    assert (
-        store.pending_transport_agent_name_for_event(
-            approval_event_id="$approval",
-            room_id="!room:localhost",
-        )
-        == "code"
-    )
+    assert store.anchored_request_for_event(approval_event_id="$approval", room_id="!room:localhost") is not None
 
     second_event = _reply_event(event_id="$reply-2", body="Still no")
     with (
@@ -1986,8 +2032,8 @@ async def test_bot_reply_from_wrong_user_falls_through_to_normal_handling(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_other_bot_skips_tool_approval_reply_instead_of_treating_it_as_chat(tmp_path: Path) -> None:
-    """Replies to approval cards should not reach non-transport bots as normal chat."""
+async def test_other_bot_can_resolve_tool_approval_reply_instead_of_treating_it_as_chat(tmp_path: Path) -> None:
+    """Replies to approval cards should be consumable by any live bot in the room."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = _runtime_bound_config(
         runtime_paths,
@@ -2011,17 +2057,16 @@ async def test_other_bot_skips_tool_approval_reply_instead_of_treating_it_as_cha
     ):
         await other_bot._on_message(room, event)
 
-    assert task.done() is False
     assert other_bot._turn_controller.handle_text_event.await_count == 0
 
-    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
     decision = await task
     assert decision.status == "denied"
+    assert decision.reason == "approve"
 
 
 @pytest.mark.asyncio
-async def test_other_bot_falls_through_when_approval_transport_bot_is_gone(tmp_path: Path) -> None:
-    """Replies should not be swallowed after hot reload removes the approval transport bot."""
+async def test_other_bot_resolves_tool_approval_reply_when_stale_bot_registry_entry_remains(tmp_path: Path) -> None:
+    """Replies should still resolve through a live room bot when the original bot is stale in the registry."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = _runtime_bound_config(
         runtime_paths,
@@ -2030,11 +2075,14 @@ async def test_other_bot_falls_through_when_approval_transport_bot_is_gone(tmp_p
         ),
     )
     other_bot = _agent_bot(tmp_path, config=config, agent_name="general")
-    other_bot.orchestrator = MagicMock(agent_bots={"general": other_bot})
+    stale_bot = MagicMock()
+    stale_bot.client = None
+    stale_bot.running = False
+    other_bot.orchestrator = MagicMock(agent_bots={"code": stale_bot, "general": other_bot})
     other_bot._turn_controller.handle_text_event = AsyncMock()
     sender = AsyncMock(return_value="$approval")
     editor = AsyncMock()
-    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+    _store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
 
     assert pending is not None
     room = _approval_room()
@@ -2046,12 +2094,10 @@ async def test_other_bot_falls_through_when_approval_transport_bot_is_gone(tmp_p
     ):
         await other_bot._on_message(room, event)
 
-    assert task.done() is False
-    assert other_bot._turn_controller.handle_text_event.await_count == 1
-
-    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
+    assert other_bot._turn_controller.handle_text_event.await_count == 0
     decision = await task
     assert decision.status == "denied"
+    assert decision.reason == "deny this"
 
 
 @pytest.mark.asyncio
@@ -2096,12 +2142,12 @@ async def test_requester_can_resolve_approval_when_local_reply_policy_denies(tmp
 
     decision = await task
     assert decision.status == "approved"
-    assert editor.await_args.args[3]["resolved_by"] == "@user:localhost"
+    assert editor.await_args.args[2]["resolved_by"] == "@user:localhost"
 
 
 @pytest.mark.asyncio
-async def test_only_transport_bot_can_resolve_pending_tool_call(tmp_path: Path) -> None:
-    """Only the transport bot that sent the card may resolve it in a multi-bot room."""
+async def test_any_live_room_bot_can_resolve_pending_tool_call(tmp_path: Path) -> None:
+    """Any live bot in the room may resolve the pending approval card."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = _runtime_bound_config(
         runtime_paths,
@@ -2109,7 +2155,7 @@ async def test_only_transport_bot_can_resolve_pending_tool_call(tmp_path: Path) 
             rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
         ),
     )
-    transport_bot = _agent_bot(tmp_path, config=config, agent_name="code")
+    _agent_bot(tmp_path, config=config, agent_name="code")
     other_bot = _agent_bot(tmp_path, config=config, agent_name="general")
     sender = AsyncMock(return_value="$approval")
     editor = AsyncMock()
@@ -2140,18 +2186,60 @@ async def test_only_transport_bot_can_resolve_pending_tool_call(tmp_path: Path) 
     ):
         await other_bot._handle_reaction_inner(room, reaction)
 
-    assert task.done() is False
+    decision = await task
+    assert decision.status == "approved"
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+    assert editor.await_args.args[2]["resolved_by"] == "@user:localhost"
+
+
+@pytest.mark.asyncio
+async def test_multiple_live_bots_racing_same_reaction_resolve_once(tmp_path: Path) -> None:
+    """Concurrent same-room bot handlers should race safely and produce one resolution edit."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    first_bot = _agent_bot(tmp_path, config=config, agent_name="code")
+    second_bot = _agent_bot(tmp_path, config=config, agent_name="general")
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    _store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    reaction = nio.ReactionEvent.from_dict(
+        {
+            "type": "m.reaction",
+            "event_id": "$reaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$approval",
+                    "key": "✅",
+                },
+            },
+        },
+    )
 
     with (
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch.object(type(transport_bot._turn_policy), "can_reply_to_sender", return_value=True),
+        patch.object(type(first_bot._turn_policy), "can_reply_to_sender", return_value=True),
+        patch.object(type(second_bot._turn_policy), "can_reply_to_sender", return_value=True),
     ):
-        await transport_bot._handle_reaction_inner(room, reaction)
+        await asyncio.gather(
+            first_bot._handle_reaction_inner(room, reaction),
+            second_bot._handle_reaction_inner(room, reaction),
+        )
 
     decision = await task
     assert decision.status == "approved"
-    assert editor.await_args.args[:3] == ("!room:localhost", "$approval", "code")
-    assert editor.await_args.args[3]["resolved_by"] == "@user:localhost"
+    assert editor.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -2189,6 +2277,66 @@ async def test_bot_custom_approval_response_event_resolves_pending_call(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_bot_custom_approval_response_event_refuses_truncated_approval(tmp_path: Path) -> None:
+    """Approve clicks on truncated approval cards should post an error response and leave the request pending."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    bot = _agent_bot(tmp_path, config=config)
+    assert bot.client is not None
+    bot.client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$error", room_id="!room:localhost"))
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        arguments={"command": "echo hi", "prompt": "x" * 5000},
+    )
+
+    assert pending is not None
+    room = _approval_room()
+    event = _custom_response_event(
+        approval_event_id="$approval",
+        status="approved",
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await bot._on_unknown_event(room, event)
+
+    assert task.done() is False
+    assert store.list_pending() == [pending]
+    bot.client.room_send.assert_awaited_once_with(
+        room_id="!room:localhost",
+        message_type="io.mindroom.tool_approval_response",
+        content={
+            "status": "error",
+            "reason": (
+                "Cannot approve: the displayed arguments are truncated. "
+                "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+            ),
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$thread",
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": "$approval"},
+            },
+        },
+    )
+
+    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
+    decision = await task
+    assert decision.status == "denied"
+
+
+@pytest.mark.asyncio
 async def test_handle_custom_response_requires_matching_room_and_event_id(tmp_path: Path) -> None:
     """Custom approval responses should anchor to the original approval card in the original room."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -2204,7 +2352,6 @@ async def test_handle_custom_response_requires_matching_room_and_event_id(tmp_pa
         status="denied",
         reason="Wrong room",
         resolved_by="@user:localhost",
-        transport_agent_name="code",
     )
     handled_wrong_event = await store.handle_custom_response(
         approval_event_id="$other-approval",
@@ -2212,11 +2359,10 @@ async def test_handle_custom_response_requires_matching_room_and_event_id(tmp_pa
         status="denied",
         reason="Wrong event",
         resolved_by="@user:localhost",
-        transport_agent_name="code",
     )
 
-    assert handled_wrong_room is False
-    assert handled_wrong_event is False
+    assert handled_wrong_room.handled is False
+    assert handled_wrong_event.handled is False
     assert task.done() is False
 
     await store.handle_approval_resolution(

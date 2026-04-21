@@ -1363,7 +1363,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     assert result.status == "success"
     assert result.result == "HI"
     client.room_send.assert_awaited_once()
-    assert editor.await_args.args[3]["status"] == "approved"
+    assert editor.await_args.args[2]["status"] == "approved"
 
 
 @pytest.mark.asyncio
