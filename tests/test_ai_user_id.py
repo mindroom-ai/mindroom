@@ -107,7 +107,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Generator
     from pathlib import Path
 
 
@@ -194,6 +194,7 @@ def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
         plugin_order=0,
     )
 
+
 @contextmanager
 def _open_agent_scope_context(
     storage: _SessionStorage,
@@ -220,11 +221,6 @@ def _open_team_scope_context(
     )
 
 
-@pytest.fixture(autouse=True)
-def _reset_execution_state() -> Generator[None, None, None]:
-    reset_hook_execution_state()
-    yield
-    reset_hook_execution_state()
 def _make_bot(
     tmp_path: Path,
     *,
