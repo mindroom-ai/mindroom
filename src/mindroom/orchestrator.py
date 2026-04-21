@@ -65,7 +65,6 @@ from mindroom.runtime_state import (
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
-    PreparedPluginReload,
     apply_prepared_plugin_reload,
     deactivate_plugins,
     get_configured_plugin_roots,
@@ -221,6 +220,7 @@ class MultiAgentOrchestrator:
     _config_reload_requested_at: float | None = field(default=None, init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _plugin_reload_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     _plugin_watch_last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict, init=False)
@@ -749,30 +749,65 @@ class MultiAgentOrchestrator:
         if not self.running:
             msg = "Plugin reload unavailable until startup finishes."
             raise RuntimeError(msg)
-        config = self._require_config()
-        logger.info(
-            "Reloading plugins",
-            source=source,
-            changed_paths=[str(path) for path in changed_paths],
-        )
-        try:
-            result = reload_plugins(config, self.runtime_paths)
-        except Exception:
-            recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
-                config,
-                self.runtime_paths,
+        async with self._plugin_reload_lock:
+            config = self._require_config()
+            logger.info(
+                "Reloading plugins",
+                source=source,
+                changed_paths=[str(path) for path in changed_paths],
             )
-            self._activate_hook_registry(recovery_result.hook_registry)
-            logger.warning(warning_message, source=source, **warning_kwargs)
-            raise
-        self._activate_hook_registry(result.hook_registry)
-        logger.info(
-            "Plugin reload complete",
-            source=source,
-            active_plugins=list(result.active_plugin_names),
-            cancelled_task_count=result.cancelled_task_count,
-        )
-        return result
+            try:
+                result = reload_plugins(config, self.runtime_paths)
+            except Exception:
+                recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
+                    config,
+                    self.runtime_paths,
+                )
+                self._activate_hook_registry(recovery_result.hook_registry)
+                logger.warning(warning_message, source=source, **warning_kwargs)
+                raise
+            self._activate_hook_registry(result.hook_registry)
+            logger.info(
+                "Plugin reload complete",
+                source=source,
+                active_plugins=list(result.active_plugin_names),
+                cancelled_task_count=result.cancelled_task_count,
+            )
+            return result
+
+    async def _apply_plugin_changes_for_config_update(
+        self,
+        *,
+        current_config: Config,
+        new_config: Config,
+        changed_server_ids: set[str],
+    ) -> set[str]:
+        """Stage and commit plugin changes without interleaving live reloads."""
+        async with self._plugin_reload_lock:
+            prepared_plugin_roots = get_configured_plugin_roots(new_config, self.runtime_paths)
+            prepared_plugin_root_snapshots = _capture_plugin_root_snapshots(prepared_plugin_roots)
+            prepared_plugin_reload = prepare_plugin_reload(
+                new_config,
+                self.runtime_paths,
+                skip_broken_plugins=True,
+            )
+            pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
+                current_config,
+                new_config,
+                changed_server_ids,
+            )
+            self.config = new_config
+            new_hook_registry = apply_prepared_plugin_reload(
+                prepared_plugin_reload,
+                cancel_existing_tasks=True,
+            ).hook_registry
+            _replace_plugin_root_snapshots(
+                prepared_plugin_roots,
+                prepared_plugin_root_snapshots,
+                self._plugin_watch_last_snapshot_by_root,
+            )
+            self._activate_hook_registry(new_hook_registry)
+            return pre_stopped_mcp_entities
 
     async def _start_entities_once(
         self,
@@ -1225,39 +1260,22 @@ class MultiAgentOrchestrator:
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
 
-        prepared_plugin_roots: tuple[Path, ...] = ()
-        prepared_plugin_root_snapshots: dict[Path, dict[Path, int]] = {}
-        prepared_plugin_reload: PreparedPluginReload | None = None
         if plugin_changes:
-            prepared_plugin_roots = get_configured_plugin_roots(new_config, self.runtime_paths)
-            prepared_plugin_root_snapshots = _capture_plugin_root_snapshots(prepared_plugin_roots)
-            prepared_plugin_reload = prepare_plugin_reload(
-                new_config,
-                self.runtime_paths,
-                skip_broken_plugins=True,
-            )
-        pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
-            current_config,
-            new_config,
-            plan.changed_mcp_servers,
-        )
-
-        # Only apply the new config after validation and account checks succeed.
-        self.config = new_config
-        new_hook_registry = self.hook_registry
-        if prepared_plugin_reload is not None:
-            new_hook_registry = apply_prepared_plugin_reload(
-                prepared_plugin_reload,
-                cancel_existing_tasks=True,
-            ).hook_registry
-            _replace_plugin_root_snapshots(
-                prepared_plugin_roots,
-                prepared_plugin_root_snapshots,
-                self._plugin_watch_last_snapshot_by_root,
+            pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
+                current_config=current_config,
+                new_config=new_config,
+                changed_server_ids=plan.changed_mcp_servers,
             )
         else:
+            pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
+                current_config,
+                new_config,
+                plan.changed_mcp_servers,
+            )
+            # Only apply the new config after validation and account checks succeed.
+            self.config = new_config
             self._sync_plugin_watch_roots(new_config)
-        self._activate_hook_registry(new_hook_registry)
+            self._activate_hook_registry(self.hook_registry)
         changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
         await self._sync_event_cache_service(new_config)
         logger.info(

@@ -8,7 +8,7 @@ import sys
 import tempfile
 from contextlib import suppress
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -22,7 +22,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STAT
 from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestration.config_updates import _get_changed_agents
+from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState, _watch_plugins_task
 from mindroom.tool_system.plugins import PluginReloadResult
@@ -844,6 +844,114 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_update_config_serializes_live_plugin_reload_against_staged_plugin_commit(
+    tmp_path: Path,
+) -> None:
+    """A concurrent live reload must wait until the staged config reload commit finishes."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    hooks_path = plugin_root / "hooks.py"
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name":"demo","hooks_module":"hooks.py","skills":[]}',
+        encoding="utf-8",
+    )
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    other_root = tmp_path / "plugins" / "other"
+    other_root.mkdir(parents=True)
+    (other_root / "mindroom.plugin.json").write_text(
+        '{"name":"other","hooks_module":"hooks.py","skills":[]}',
+        encoding="utf-8",
+    )
+    (other_root / "hooks.py").write_text("OTHER = 1\n", encoding="utf-8")
+
+    current_config = _runtime_bound_config(
+        Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            plugins=["./plugins/demo"],
+        ),
+        tmp_path,
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            plugins=["./plugins/demo", "./plugins/other"],
+        ),
+        tmp_path,
+    )
+
+    orchestrator = MultiAgentOrchestrator(runtime_paths_for(current_config))
+    orchestrator.config = current_config
+    orchestrator.running = True
+
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        all_new_entities=set(),
+        entities_to_restart=set(),
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    reload_task: asyncio.Task[PluginReloadResult] | None = None
+    try:
+        await orchestrator.reload_plugins_now(source="initial")
+        assert plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module.VALUE == 1
+
+        async def start_blocked_reload(*_args: object, **_kwargs: object) -> set[str]:
+            nonlocal reload_task
+            hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+            reload_task = asyncio.create_task(orchestrator.reload_plugins_now(source="interleaved"))
+            await asyncio.sleep(0)
+            assert reload_task is not None
+            assert not reload_task.done()
+            return set()
+
+        with (
+            patch("mindroom.orchestrator.load_config", return_value=new_config),
+            patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+            patch.object(
+                orchestrator,
+                "_stop_entities_before_mcp_sync",
+                new=AsyncMock(side_effect=start_blocked_reload),
+            ),
+            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+            patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is False
+        assert reload_task is not None
+        result = await reload_task
+
+        assert result.active_plugin_names == ("demo", "other")
+        assert plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module.VALUE == 2
+    finally:
+        if reload_task is not None:
+            await asyncio.gather(reload_task, return_exceptions=True)
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
