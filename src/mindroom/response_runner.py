@@ -1513,9 +1513,9 @@ class ResponseRunner:
                     extra_content=None,
                 ),
             ),
-            build_post_response_outcome=lambda resolved_event_id: ResponseOutcome(
+            build_post_response_outcome=lambda resolved_event_id, effective_delivery_result: ResponseOutcome(
                 resolved_event_id=resolved_event_id,
-                delivery_result=delivery_result,
+                delivery_result=effective_delivery_result,
                 response_run_id=response_run_id,
                 session_id=session_id,
                 session_type=SessionType.TEAM,
@@ -2444,9 +2444,9 @@ class ResponseRunner:
                     extra_content=_merge_response_extra_content(run_metadata_content, request.attachment_ids),
                 ),
             ),
-            build_post_response_outcome=lambda resolved_event_id: ResponseOutcome(
+            build_post_response_outcome=lambda resolved_event_id, effective_delivery_result: ResponseOutcome(
                 resolved_event_id=resolved_event_id,
-                delivery_result=delivery_result,
+                delivery_result=effective_delivery_result,
                 response_run_id=response_run_id,
                 session_id=session_id,
                 session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),

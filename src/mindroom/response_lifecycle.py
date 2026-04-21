@@ -131,7 +131,7 @@ class ResponseLifecycle:
         self,
         outcome: DeliveryOutcome,
         *,
-        build_post_response_outcome: Callable[[str | None], ResponseOutcome],
+        build_post_response_outcome: Callable[[str | None, DeliveryResult | None], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> str | None:
         """Run outer lifecycle finalization and return the resolved visible event id."""
@@ -163,7 +163,10 @@ class ResponseLifecycle:
         )
         resolved_event_id = await self.apply_effects_safely(
             resolved_event_id=resolved_event_id,
-            post_response_outcome=lambda: build_post_response_outcome(resolved_event_id),
+            post_response_outcome=lambda: build_post_response_outcome(
+                resolved_event_id,
+                effective_delivery_result,
+            ),
             post_response_deps=post_response_deps,
         )
         self.runner._emit_pipeline_timing_summary(
@@ -179,6 +182,8 @@ class ResponseLifecycle:
         """Repair one missed terminal stream edit from the outer lifecycle chokepoint."""
         stream_finalization = outcome.stream_finalization
         if stream_finalization is None or stream_finalization.terminal_landed:
+            return None
+        if outcome.delivery_result is not None and outcome.delivery_result.suppressed:
             return None
         if outcome.stream_state is not None and outcome.stream_state.suppressed_and_cleaned:
             return None

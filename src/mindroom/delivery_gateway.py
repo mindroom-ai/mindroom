@@ -654,6 +654,7 @@ class DeliveryGateway:
     ) -> DeliveryResult:
         """Apply hooks and any final edit needed after streamed delivery completes."""
         stream_finalization = request.stream_state.finalization_outcome if request.stream_state is not None else None
+        hook_extra_content = copy.deepcopy(request.extra_content)
         terminal_stream_status_snapshot = (
             request.extra_content.get(constants.STREAM_STATUS_KEY) if request.extra_content is not None else None
         )
@@ -670,7 +671,7 @@ class DeliveryGateway:
             response_text=request.streamed_text,
             response_kind=request.response_kind,
             tool_trace=request.tool_trace,
-            extra_content=request.extra_content,
+            extra_content=hook_extra_content,
         )
         if draft.suppress:
             await self.emit_suppressed_response(
@@ -709,7 +710,7 @@ class DeliveryGateway:
             or draft.extra_content != request.extra_content
         )
         if needs_final_edit:
-            terminal_extra_content = dict(draft.extra_content or {})
+            terminal_extra_content = copy.deepcopy(draft.extra_content) if draft.extra_content is not None else {}
             # Stream status and ai_run metadata are owned by the streaming layer; before_response hooks cannot override them.
             terminal_extra_content[constants.STREAM_STATUS_KEY] = (
                 terminal_stream_status_snapshot

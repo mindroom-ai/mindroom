@@ -221,7 +221,7 @@ async def _finalize_lifecycle(
     with patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()):
         await lifecycle.finalize(
             outcome,
-            build_post_response_outcome=lambda _resolved_event_id: SimpleNamespace(),
+            build_post_response_outcome=lambda _resolved_event_id, _delivery_result: SimpleNamespace(),
             post_response_deps=SimpleNamespace(),
         )
 
@@ -802,6 +802,37 @@ async def test_outer_repair_skipped_when_event_suppressed_and_cleaned() -> None:
 
 
 @pytest.mark.asyncio
+async def test_outer_repair_skipped_when_delivery_was_suppressed_without_cleanup() -> None:
+    """Suppressed streamed responses must not be resurrected by the outer repair edit."""
+    target = MessageTarget.resolve("!room:localhost", None, "$reply")
+    lifecycle, runner = _build_lifecycle(target)
+
+    await _finalize_lifecycle(
+        lifecycle=lifecycle,
+        outcome=DeliveryOutcome(
+            delivery_result=DeliveryResult(
+                event_id="$existing-response",
+                response_text="suppressed response",
+                delivery_kind="edited",
+                suppressed=True,
+            ),
+            delivery_failure_reason="cancelled",
+            tracked_event_id="$existing-response",
+            stream_finalization=StreamFinalizationOutcome(
+                terminal_landed=False,
+                terminal_event_id="$existing-response",
+                terminal_status=STREAM_STATUS_COMPLETED,
+                reason="suppressed-visible-existing-event",
+            ),
+            stream_state=StreamDeliveryState(suppressed_and_cleaned=False),
+            streaming_repair=_repair_payload(target=target, response_text="suppressed response"),
+        ),
+    )
+
+    runner.deps.delivery_gateway.edit_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_outer_repair_skipped_when_cancelled_after_cleanup_redaction(tmp_path: Path) -> None:
     """Cleanup cancellation must not mark streamed suppression as already completed."""
     gateway, target = _delivery_gateway(tmp_path, response_hooks=_response_hooks(suppress=True))
@@ -1088,6 +1119,162 @@ async def test_outer_repair_reuses_hook_mutated_terminal_payload(tmp_path: Path)
     assert final_edits[1][STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
     assert final_edits[1]["hook"] == "kept"
     runner.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_metadata_only_in_place_hook_mutation_triggers_terminal_reedit(tmp_path: Path) -> None:
+    """In-place metadata-only hook edits must still trigger a terminal re-edit with canonical metadata."""
+    gateway, target = _delivery_gateway(tmp_path)
+    request = _response_request(target)
+    final_edits: list[dict[str, Any]] = []
+    extra_content = {
+        STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+        AI_RUN_METADATA_KEY: {"status": "completed", "run_id": "run-metadata-only"},
+    }
+
+    async def mutate_before_response(
+        *,
+        correlation_id: str,
+        envelope: object,
+        response_text: str,
+        response_kind: str,
+        tool_trace: object,
+        extra_content: dict[str, object] | None,
+    ) -> ResponseDraft:
+        del correlation_id
+        assert extra_content is not None
+        ai_run = extra_content[AI_RUN_METADATA_KEY]
+        assert isinstance(ai_run, dict)
+        ai_run["status"] = "hook-corrupted"
+        return ResponseDraft(
+            response_text=response_text,
+            response_kind=response_kind,
+            tool_trace=tool_trace,
+            extra_content=extra_content,
+            envelope=envelope,
+        )
+
+    async def record_final_edit(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        content = _args[3]
+        final_edits.append(content)
+        return DeliveredMatrixEvent(event_id="$hook-final", content_sent=dict(content))
+
+    with patch("mindroom.delivery_gateway.edit_message_result", new=AsyncMock(side_effect=record_final_edit)):
+        gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=mutate_before_response)
+        delivery = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=target,
+                streamed_event_id="$placeholder",
+                streamed_text="answer",
+                delivery_kind="edited",
+                response_kind="ai",
+                response_envelope=request.response_envelope,
+                correlation_id="corr-metadata-only",
+                tool_trace=None,
+                extra_content=extra_content,
+                stream_state=StreamDeliveryState(
+                    finalization_outcome=StreamFinalizationOutcome(
+                        terminal_landed=False,
+                        terminal_event_id="$placeholder",
+                        terminal_status=STREAM_STATUS_COMPLETED,
+                        reason="metadata-only-hook-mutation",
+                    ),
+                ),
+            ),
+        )
+
+    assert delivery.event_id == "$placeholder"
+    assert delivery.delivery_kind == "edited"
+    assert len(final_edits) == 1
+    assert final_edits[0][AI_RUN_METADATA_KEY]["status"] == "completed"
+    assert final_edits[0][STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_outer_repair_updates_post_response_delivery_result(tmp_path: Path) -> None:
+    """Post-response effects must see the repaired visible delivery, not the pre-repair failure."""
+    runner, target = _build_real_response_runner(tmp_path)
+    request = replace(
+        _response_request(target),
+        thread_history=(),
+        prompt="hello",
+        user_id="@user:localhost",
+    )
+    post_response_outcomes: list[object] = []
+
+    async def send_placeholder(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        content = _args[2]
+        return DeliveredMatrixEvent(event_id="$placeholder", content_sent=dict(content))
+
+    async def record_streaming_edit(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent | None:
+        content = _args[3]
+        if content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED:
+            return None
+        return DeliveredMatrixEvent(event_id="$stream-edit", content_sent=dict(content))
+
+    async def mutate_before_response(
+        *,
+        correlation_id: str,
+        envelope: object,
+        response_text: str,
+        response_kind: str,
+        tool_trace: object,
+        extra_content: dict[str, object] | None,
+    ) -> ResponseDraft:
+        del correlation_id
+        return ResponseDraft(
+            response_text=f"{response_text}\n\nHook footer.",
+            response_kind=response_kind,
+            tool_trace=tool_trace,
+            extra_content=extra_content,
+            envelope=envelope,
+        )
+
+    final_edit_attempts = 0
+
+    async def record_final_edit(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent | None:
+        nonlocal final_edit_attempts
+        content = _args[3]
+        final_edit_attempts += 1
+        if final_edit_attempts == 1:
+            assert content["body"].endswith("Hook footer.")
+            return None
+        return DeliveredMatrixEvent(event_id="$outer-repair", content_sent=dict(content))
+
+    async def capture_post_response_effects(outcome: object, _deps: object) -> None:
+        post_response_outcomes.append(outcome)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response", side_effect=lambda **_kwargs: _stream_text("answer")),
+        patch("mindroom.response_runner.typing_indicator", _typing_indicator_stub),
+        patch(
+            "mindroom.response_lifecycle.apply_post_response_effects",
+            new=AsyncMock(side_effect=capture_post_response_effects),
+        ),
+        patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=send_placeholder)),
+        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_streaming_edit)),
+        patch("mindroom.streaming.asyncio.sleep", new=AsyncMock()),
+        patch("mindroom.delivery_gateway.edit_message_result", new=AsyncMock(side_effect=record_final_edit)),
+    ):
+        runner.deps.delivery_gateway.deps.response_hooks.apply_before_response = AsyncMock(
+            side_effect=mutate_before_response,
+        )
+        resolved_event_id = await runner.generate_response_locked(
+            request,
+            resolved_target=target,
+        )
+
+    assert resolved_event_id == "$placeholder"
+    assert len(post_response_outcomes) == 1
+    outcome = post_response_outcomes[0]
+    assert outcome.resolved_event_id == "$placeholder"
+    delivery_result = outcome.delivery_result
+    assert delivery_result is not None
+    assert delivery_result.event_id == "$placeholder"
+    assert delivery_result.delivery_kind == "edited"
+    assert delivery_result.suppressed is False
 
 
 @pytest.mark.asyncio
