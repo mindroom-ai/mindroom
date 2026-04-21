@@ -195,7 +195,7 @@ def _strip_queued_notice_from_session(session: AgentSession | TeamSession) -> bo
     return changed
 
 
-def strip_queued_notice_from_session_storage(
+def _strip_queued_notice_from_session_storage(
     storage: SqliteDb,
     session_id: str,
     *,
@@ -230,7 +230,7 @@ def cleanup_queued_notice_state(
     if storage is None or not session_id:
         return
     try:
-        strip_queued_notice_from_session_storage(
+        _strip_queued_notice_from_session_storage(
             storage,
             session_id,
             session_type=session_type,

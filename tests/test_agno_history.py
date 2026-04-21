@@ -538,7 +538,7 @@ def test_estimate_tool_definition_tokens_ignores_empty_toolkit() -> None:
 def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=2)
 
-    with patch("mindroom.agents.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+    with patch("mindroom.teams.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
         agent = create_agent(
             "test_agent",
             config,
@@ -567,7 +567,7 @@ def test_create_agent_uses_active_model_override(tmp_path: Path) -> None:
         runtime_paths,
     )
     with patch(
-        "mindroom.agents.get_model_instance",
+        "mindroom.model_loading.get_model_instance",
         return_value=FakeModel(id="fake-model", provider="fake"),
     ) as mock_get:
         create_agent(
@@ -2311,7 +2311,7 @@ def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None
     alpha = _agent(agent_id="alpha", name="Alpha")
     zeta = _agent(agent_id="zeta", name="Zeta")
 
-    with patch("mindroom.teams.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+    with patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
         team = _create_team_instance(
             agents=[alpha, zeta],
             mode=TeamMode.COORDINATE,

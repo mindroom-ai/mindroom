@@ -61,7 +61,11 @@ For Google image work, use the official product name from the docs even if older
 | `scheduling.py` | Cron and natural-language task scheduling |
 | `tools/` | 100+ tool integrations |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
-| `ai.py` | AI model instantiation, caching, and response generation |
+| `ai.py` | AI response generation, streaming, and Matrix run metadata |
+| `model_loading.py` | Model instantiation and provider-specific loader selection |
+| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |

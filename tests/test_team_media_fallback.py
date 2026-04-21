@@ -61,6 +61,7 @@ from mindroom.teams import (
     _ensure_request_team_knowledge_managers,
     _materialize_team_members,
     _team_response_stream_raw,
+    materialize_exact_team_members,
     prepare_materialized_team_execution,
     team_response,
     team_response_stream,
@@ -199,6 +200,40 @@ def test_materialize_exact_requested_team_members_short_circuits_missing_live_me
     assert team_members.materialized_agent_names == set()
     assert team_members.failed_agent_names == ["research"]
     build_member.assert_not_called()
+
+
+def test_materialize_exact_team_members_closes_partial_agents_on_failure() -> None:
+    """Partial exact-member materialization should close any runtime-owned DBs before raising."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="GeneralAgent", rooms=[]),
+                "research": AgentConfig(display_name="ResearchAgent", rooms=[]),
+            },
+        ),
+        runtime_paths,
+    )
+    built_agent = _make_test_agent("GeneralAgent")
+
+    with (
+        patch("mindroom.teams.create_agent", side_effect=[built_agent, RuntimeError("boom")]),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.close_team_runtime_sqlite_dbs") as mock_close,
+        pytest.raises(ValueError, match="research"),
+    ):
+        materialize_exact_team_members(
+            ["general", "research"],
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+        )
+
+    mock_close.assert_called_once_with(
+        agents=[built_agent],
+        team_db=None,
+        shared_scope_storage=None,
+    )
 
 
 @pytest.mark.asyncio

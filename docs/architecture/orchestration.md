@@ -100,6 +100,10 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 
 - **`src/mindroom/runtime_resolution.py`** — Resolves `ResolvedAgentRuntime` (the full set of runtime parameters for one agent instance) including `ResolvedKnowledgeBinding` for knowledge base attachment.
 - **`src/mindroom/team_exact_members.py`** — Resolves `ResolvedExactTeamMembers` for team materialization via `materialize_exact_requested_team_members()`.
+- **`src/mindroom/model_loading.py`** — Owns `get_model_instance()` and provider-specific model loader selection.
+- **`src/mindroom/ai_runtime.py`** — Owns agent-run input copying, queued-notice hooks, and inline-media fallback helpers used during execution.
+- **`src/mindroom/agent_storage.py`** — Owns agent session and learning SQLite storage construction helpers.
+- **`src/mindroom/agent_descriptions.py`** — Owns shared agent description rendering used by routing and delegation.
 - **`src/mindroom/runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.
 
 ## Message Handling

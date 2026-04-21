@@ -19,7 +19,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.ai import PreparedAgentRun, ai_response, stream_agent_response
+from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
     QUEUED_MESSAGE_NOTICE_TEXT,
     cleanup_queued_notice_state,
@@ -124,8 +124,8 @@ def _prepared_text_event(*, event_id: str = "$event") -> PreparedTextEvent:
     )
 
 
-def _prepared_run(agent: object, *, prompt: str = "prompt") -> PreparedAgentRun:
-    return PreparedAgentRun(
+def _prepared_run(agent: object, *, prompt: str = "prompt") -> _PreparedAgentRun:
+    return _PreparedAgentRun(
         agent=agent,
         messages=(Message(role="user", content=prompt),),
         unseen_event_ids=[],
@@ -1001,7 +1001,7 @@ async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path)
         scope_context: object | None = None,
         *_args: object,
         **_kwargs: object,
-    ) -> PreparedAgentRun:
+    ) -> _PreparedAgentRun:
         assert scope_context is not None
         session = scope_context.session
         assert session is not None

@@ -73,7 +73,7 @@ def test_agent_prompt_includes_datetime() -> None:
 
     with (
         patch("mindroom.agents.datetime") as mock_datetime,
-        patch("mindroom.agents.get_model_instance", return_value=model),
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
     ):
         mock_datetime.now.side_effect = lambda tz: datetime(2026, 3, 20, 8, 15, tzinfo=tz)
         agent = create_agent("general", config, runtime_paths, execution_identity=None)
@@ -99,7 +99,7 @@ def test_agent_prompt_datetime_changes_with_timezone() -> None:
 
     with (
         patch("mindroom.agents.datetime") as mock_datetime,
-        patch("mindroom.agents.get_model_instance", return_value=model),
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
     ):
         mock_datetime.now.side_effect = lambda tz: datetime(2026, 3, 20, 8, 15, tzinfo=tz)
         config.timezone = "America/New_York"
@@ -122,7 +122,7 @@ def test_agent_prompt_datetime_stable_within_same_day() -> None:
 
     with (
         patch("mindroom.agents.datetime") as mock_datetime,
-        patch("mindroom.agents.get_model_instance", return_value=model),
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
     ):
         mock_datetime.now.side_effect = [
             datetime(2026, 3, 20, 0, 1, tzinfo=ZoneInfo("UTC")),

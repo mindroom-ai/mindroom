@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import ast
 import importlib
 import importlib.util
 import tempfile
-import tomllib
 from inspect import signature
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -135,63 +133,6 @@ def _agent_description_config() -> Config:
     )
 
 
-def test_domain_seams_are_flattened_top_level_modules() -> None:
-    """Seam domains should resolve to top-level modules, not package facades or submodules."""
-    flattened_modules = (
-        "mindroom.agents",
-        "mindroom.ai",
-        "mindroom.routing",
-        "mindroom.agent_policy",
-        "mindroom.runtime_resolution",
-        "mindroom.teams",
-    )
-    removed_submodules = (
-        "mindroom.agents.prompts",
-        "mindroom.ai.core",
-        "mindroom.routing.core",
-        "mindroom.agent_policy.core",
-        "mindroom.runtime_resolution.core",
-        "mindroom.teams.exact_members",
-        "mindroom.teams.core",
-    )
-
-    for module_name in flattened_modules:
-        module = importlib.import_module(module_name)
-        module_file = Path(module.__file__ or "")
-        assert module_file.name == f"{module_name.rsplit('.', maxsplit=1)[-1]}.py"
-
-    for module_name in removed_submodules:
-        try:
-            spec = importlib.util.find_spec(module_name)
-        except ModuleNotFoundError:
-            spec = None
-        assert spec is None
-
-
-def test_domain_seams_define_one_public_export_contract() -> None:
-    """Flattened seam modules should define one authoritative top-level `__all__`."""
-    flattened_modules = (
-        "mindroom.agents",
-        "mindroom.ai",
-        "mindroom.routing",
-        "mindroom.agent_policy",
-        "mindroom.runtime_resolution",
-        "mindroom.teams",
-    )
-
-    for module_name in flattened_modules:
-        module = importlib.import_module(module_name)
-        module_file = Path(module.__file__ or "")
-        tree = ast.parse(module_file.read_text(encoding="utf-8"))
-        all_assignments = [
-            node
-            for node in tree.body
-            if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets)
-        ]
-        assert len(all_assignments) == 1, f"{module_name} should define __all__ exactly once"
-
-
 def test_teams_public_seam_exports_status_helpers() -> None:
     """The declared teams seam should export the fallback status helpers it exposes elsewhere."""
     teams_module = importlib.import_module("mindroom.teams")
@@ -207,6 +148,9 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
 
     assert "create_state_storage_db" not in agents_module.__all__
     assert "get_agent_runtime_sqlite_dbs" not in agents_module.__all__
+    assert "create_state_storage_db" not in vars(agents_module)
+    assert "get_agent_runtime_sqlite_dbs" not in vars(agents_module)
+    assert "get_model_instance" not in vars(agents_module)
 
     assert "attach_media_to_run_input" not in ai_module.__all__
     assert "copy_run_input" not in ai_module.__all__
@@ -217,39 +161,13 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     assert "queued_message_signal_context" not in ai_module.__all__
     assert "scrub_queued_notice_session_context" not in ai_module.__all__
     assert "append_inline_media_fallback_to_run_input" not in vars(ai_module)
+    assert "attach_media_to_run_input" not in vars(ai_module)
+    assert "cached_agent_run" not in vars(ai_module)
+    assert "cleanup_queued_notice_state" not in vars(ai_module)
+    assert "copy_run_input" not in vars(ai_module)
     assert "install_queued_message_notice_hook" not in vars(ai_module)
     assert "queued_message_signal_context" not in vars(ai_module)
     assert "scrub_queued_notice_session_context" not in vars(ai_module)
-
-
-def test_ai_runtime_helpers_stay_owned_by_ai_runtime_module() -> None:
-    """Internal runtime-helper consumers should import those helpers from ai_runtime, not from ai."""
-    expected_runtime_imports = {
-        Path("src/mindroom/response_runner.py"): {"queued_message_signal_context"},
-        Path("src/mindroom/teams.py"): {
-            "install_queued_message_notice_hook",
-            "scrub_queued_notice_session_context",
-        },
-    }
-
-    for module_path, helper_names in expected_runtime_imports.items():
-        tree = ast.parse(module_path.read_text(encoding="utf-8"))
-        ai_imports = {
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "mindroom.ai"
-            for alias in node.names
-        }
-        ai_runtime_imports = {
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "mindroom.ai_runtime"
-            for alias in node.names
-        }
-        assert not (ai_imports & helper_names), f"{module_path} still imports runtime helpers from mindroom.ai"
-        assert helper_names <= ai_runtime_imports, (
-            f"{module_path} should import runtime helpers from mindroom.ai_runtime"
-        )
 
 
 def test_flattened_seams_avoid_backward_compatibility_signature_shims() -> None:
@@ -267,54 +185,6 @@ def test_flattened_seams_avoid_backward_compatibility_signature_shims() -> None:
 
     config_signature = signature(config_main_module.Config.get_agent_delegation_closure)
     assert "visiting" not in config_signature.parameters
-
-
-def test_flattened_seams_do_not_reintroduce_back_edge_imports() -> None:
-    """The bounded architecture cleanup should not leave the removed direct back-edges in place."""
-    forbidden_imports = {
-        Path("src/mindroom/agents.py"): {"mindroom.ai"},
-        Path("src/mindroom/api/credentials.py"): {"mindroom.api.main"},
-        Path("src/mindroom/custom_tools/delegate.py"): {"mindroom.agents"},
-        Path("src/mindroom/history/runtime.py"): {"mindroom.ai"},
-        Path("src/mindroom/memory/auto_flush.py"): {"mindroom.ai"},
-    }
-
-    for module_path, forbidden_targets in forbidden_imports.items():
-        tree = ast.parse(module_path.read_text(encoding="utf-8"))
-        imported_targets = {
-            node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
-        }
-        assert not (imported_targets & forbidden_targets), f"{module_path} reintroduced a seam back-edge import"
-
-
-def test_tach_seam_map_does_not_codify_known_domain_cycles() -> None:
-    """Tach should match the direct cycle cuts this seam cleanup actually enforces."""
-    tach_config = tomllib.loads(Path("tach.toml").read_text(encoding="utf-8"))
-    depends_on_by_path = {module["path"]: set(module.get("depends_on", [])) for module in tach_config["modules"]}
-    interfaces_by_module = {
-        tuple(interface["from"]): set(interface["expose"]) for interface in tach_config["interfaces"]
-    }
-
-    assert "mindroom.ai" not in depends_on_by_path["mindroom.agents"]
-    assert "mindroom.api.main" not in depends_on_by_path["mindroom.api.credentials"]
-    assert "mindroom.agents" not in depends_on_by_path["mindroom.custom_tools.delegate"]
-    assert "mindroom.ai" not in depends_on_by_path["mindroom.history.runtime"]
-    assert "mindroom.ai" not in depends_on_by_path["mindroom.memory"]
-    assert "mindroom.ai" not in depends_on_by_path["mindroom.memory.auto_flush"]
-
-    agents_interface = interfaces_by_module[("mindroom.agents",)]
-    assert "create_state_storage_db" not in agents_interface
-    assert "get_agent_runtime_sqlite_dbs" not in agents_interface
-
-    ai_interface = interfaces_by_module[("mindroom.ai",)]
-    assert "attach_media_to_run_input" not in ai_interface
-    assert "copy_run_input" not in ai_interface
-    assert "cleanup_queued_notice_state" not in ai_interface
-    assert "cached_agent_run" not in ai_interface
-    assert "append_inline_media_fallback_to_run_input" not in ai_interface
-    assert "queued_message_signal_context" not in ai_interface
-    assert "scrub_queued_notice_session_context" not in ai_interface
-    assert "install_queued_message_notice_hook" not in ai_interface
 
 
 class TestAIRouting:

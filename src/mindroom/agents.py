@@ -20,15 +20,13 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 import mindroom.tools  # noqa: F401
-from mindroom import agent_prompts, constants
+from mindroom import agent_prompts, agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
-from mindroom.agent_storage import create_state_storage_db
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID
-from mindroom.model_loading import get_model_instance
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
@@ -115,7 +113,7 @@ class _AdditionalContextChunk:
 
 
 @dataclass(frozen=True)
-class AgentToolInitContext:
+class _AgentToolInitContext:
     """Shared agent tool-init settings used across local and command-dispatch paths."""
 
     workspace_path: Path | None
@@ -412,7 +410,7 @@ def build_agent_tool_init_context(
     agent_name: str,
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-) -> AgentToolInitContext:
+) -> _AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_runtime = resolve_agent_runtime(
         agent_name,
@@ -424,10 +422,10 @@ def build_agent_tool_init_context(
     return _tool_init_context_from_runtime(agent_runtime)
 
 
-def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> AgentToolInitContext:
+def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> _AgentToolInitContext:
     """Build tool-init settings from an already-resolved agent runtime."""
     workspace_path = agent_runtime.tool_base_dir
-    return AgentToolInitContext(
+    return _AgentToolInitContext(
         workspace_path=workspace_path,
         execution_scope=agent_runtime.execution_scope,
         routing_agent_is_private=agent_runtime.is_private,
@@ -443,7 +441,7 @@ def build_agent_toolkit(  # noqa: PLR0911
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
     tool_config_overrides: dict[str, object] | None = None,
-    tool_init_context: AgentToolInitContext,
+    tool_init_context: _AgentToolInitContext,
     execution_identity: ToolExecutionIdentity | None,
     session_id: str | None = None,
     delegation_depth: int = 0,
@@ -684,7 +682,7 @@ def create_session_storage(
     )
 
 
-def enable_all_history_replay(entity: Agent | Team) -> None:
+def _enable_all_history_replay(entity: Agent | Team) -> None:
     """Undo Agno's default three-run history fallback."""
     entity.num_history_runs = None
 
@@ -705,7 +703,7 @@ def _create_agent_state_db(
         runtime_paths,
         execution_identity=execution_identity,
     ).state_root
-    return create_state_storage_db(
+    return agent_storage.create_state_storage_db(
         storage_name=agent_name,
         state_root=state_storage_path,
         subdir=subdir,
@@ -904,15 +902,6 @@ def _resolve_agent_dynamic_tool_selection(
     )
 
 
-@timed("system_prompt_assembly.agent_create.model_instance")
-def _load_agent_model_instance(
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    model_name: str,
-) -> Model:
-    return get_model_instance(config, runtime_paths, model_name)
-
-
 @timed("system_prompt_assembly.agent_create.skills_load")
 def _load_agent_skills(
     agent_name: str,
@@ -1005,7 +994,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     storage = (
         history_storage
         if history_storage is not None
-        else create_state_storage_db(
+        else agent_storage.create_state_storage_db(
             agent_name,
             agent_runtime.state_root,
             subdir="sessions",
@@ -1057,7 +1046,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 error=str(exc),
             )
     learning_storage = (
-        create_state_storage_db(
+        agent_storage.create_state_storage_db(
             storage_name=agent_name,
             state_root=agent_runtime.state_root,
             subdir="learning",
@@ -1120,7 +1109,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
-    model = _load_agent_model_instance(config, runtime_paths, model_name)
+    model = model_loading.get_model_instance(config, runtime_paths, model_name)
     logger.info(
         "create_agent",
         agent=agent_name,
@@ -1239,7 +1228,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         max_tool_calls_from_history=max_tool_calls_from_history,
     )
     if include_all_history:
-        enable_all_history_replay(agent)
+        _enable_all_history_replay(agent)
 
     logger.info(
         "Created agent",

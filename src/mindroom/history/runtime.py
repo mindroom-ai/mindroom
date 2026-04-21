@@ -56,7 +56,6 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
-    from agno.models.base import Model
     from agno.team import Team
 
     from mindroom.config.main import Config
@@ -119,15 +118,6 @@ def resolve_history_scope(agent: Agent) -> HistoryScope | None:
     if isinstance(agent_id, str) and agent_id:
         return HistoryScope(kind="agent", scope_id=agent_id)
     return None
-
-
-@timed("system_prompt_assembly.history_prepare.compaction_model_init")
-def _load_compaction_model(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    model_name: str,
-) -> Model:
-    return get_model_instance(config, runtime_paths, model_name)
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
@@ -211,7 +201,7 @@ async def prepare_scope_history(
 
     if should_compact:
         assert execution_plan.summary_input_budget_tokens is not None
-        summary_model = _load_compaction_model(
+        summary_model = get_model_instance(
             config,
             runtime_paths,
             execution_plan.compaction_model_name,

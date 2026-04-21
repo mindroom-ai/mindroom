@@ -1206,6 +1206,11 @@ def materialize_exact_team_members(
         build_member=_build_member,
     )
     if team_members.failed_agent_names:
+        close_team_runtime_sqlite_dbs(
+            agents=team_members.agents,
+            team_db=None,
+            shared_scope_storage=None,
+        )
         raise ValueError(
             _not_materializable_team_agents_message(team_members.failed_agent_names, prefix=reason_prefix),
         )

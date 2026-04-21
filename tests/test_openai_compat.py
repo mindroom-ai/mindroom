@@ -3599,6 +3599,54 @@ class TestTeamCompletion:
         assert team.num_history_runs is None
         assert team.num_history_messages is None
 
+    def test_build_team_closes_materialized_agents_when_resolution_rejects_team(self) -> None:
+        """Configured-team validation failures should close partially built member resources."""
+        config = Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            router=RouterConfig(model="default"),
+            teams={
+                "coord_team": TeamConfig(
+                    display_name="Coord Team",
+                    role="Coordinated team",
+                    agents=["general"],
+                    mode="coordinate",
+                ),
+            },
+        )
+        built_agent = _make_test_agent("GeneralAgent")
+
+        with (
+            patch(
+                "mindroom.api.openai_compat.materialize_exact_team_members",
+                return_value=openai_compat.ResolvedExactTeamMembers(
+                    requested_agent_names=["general"],
+                    agents=[built_agent],
+                    display_names=["GeneralAgent"],
+                    materialized_agent_names={"general"},
+                    failed_agent_names=[],
+                ),
+            ),
+            patch(
+                "mindroom.api.openai_compat.resolve_configured_team",
+                return_value=SimpleNamespace(
+                    outcome=openai_compat.TeamOutcome.NONE,
+                    reason="Team 'coord_team' cannot be materialized",
+                ),
+            ),
+            patch("mindroom.api.openai_compat.close_team_runtime_sqlite_dbs") as mock_close,
+        ):
+            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
+
+            with pytest.raises(ValueError, match="cannot be materialized"):
+                _build_team("coord_team", config, _runtime_paths(), execution_identity=None)
+
+        mock_close.assert_called_once_with(
+            agents=[built_agent],
+            team_db=None,
+            shared_scope_storage=None,
+        )
+
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
         """Team member creation resolves and passes configured knowledge."""
         from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: PLC0415

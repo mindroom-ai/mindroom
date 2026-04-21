@@ -991,7 +991,7 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
             return_value=prepared_execution,
         ),
         patch("mindroom.ai.get_model_instance", return_value=model),
-        patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=run_output) as mock_run,
+        patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=run_output) as mock_run,
     ):
         response = await ai_response(
             agent_name="code",
