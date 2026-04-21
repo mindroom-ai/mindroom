@@ -492,6 +492,29 @@ class ResponseRunner:
         if recorder.outcome != "interrupted":
             recorder.mark_interrupted()
 
+    def _persist_interrupted_recorder(
+        self,
+        *,
+        recorder: TurnRecorder,
+        session_scope: HistoryScope,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+        run_id: str | None,
+        is_team: bool,
+        response_event_id: str | None = None,
+    ) -> None:
+        """Persist one interrupted recorder snapshot after marking it interrupted."""
+        self._ensure_recorder_interrupted(recorder)
+        self._persist_interrupted_turn(
+            recorder=recorder,
+            session_scope=session_scope,
+            session_id=session_id,
+            execution_identity=execution_identity,
+            run_id=run_id,
+            is_team=is_team,
+            response_event_id=response_event_id,
+        )
+
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
         thread_key = (target.room_id, target.resolved_thread_id)
@@ -1170,8 +1193,7 @@ class ResponseRunner:
                         if event_id is not None:
                             tracked_event_id = event_id
                     except asyncio.CancelledError:
-                        self._ensure_recorder_interrupted(team_turn_recorder)
-                        self._persist_interrupted_turn(
+                        self._persist_interrupted_recorder(
                             recorder=team_turn_recorder,
                             session_scope=session_scope,
                             session_id=session_id,
@@ -1194,22 +1216,35 @@ class ResponseRunner:
                     return
 
                 delivery_kind: Literal["sent", "edited"] = "edited" if message_id else "sent"
-                delivery_result = await self.deps.delivery_gateway.finalize_streamed_response(
-                    FinalizeStreamedResponseRequest(
-                        target=delivery_target,
-                        streamed_event_id=event_id,
-                        streamed_text=accumulated,
-                        delivery_kind=delivery_kind,
-                        response_kind="team",
-                        response_envelope=resolved_response_envelope,
-                        correlation_id=resolved_correlation_id,
-                        tool_trace=None,
-                        extra_content=None,
-                        cleanup_suppressed_streamed_event=(
-                            delivery_request.existing_event_is_placeholder or delivery_request.existing_event_id is None
+                try:
+                    delivery_result = await self.deps.delivery_gateway.finalize_streamed_response(
+                        FinalizeStreamedResponseRequest(
+                            target=delivery_target,
+                            streamed_event_id=event_id,
+                            streamed_text=accumulated,
+                            delivery_kind=delivery_kind,
+                            response_kind="team",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                            cleanup_suppressed_streamed_event=(
+                                delivery_request.existing_event_is_placeholder
+                                or delivery_request.existing_event_id is None
+                            ),
                         ),
-                    ),
-                )
+                    )
+                except asyncio.CancelledError:
+                    self._persist_interrupted_recorder(
+                        recorder=team_turn_recorder,
+                        session_scope=session_scope,
+                        session_id=session_id,
+                        execution_identity=tool_dispatch.execution_identity,
+                        run_id=response_run_id,
+                        is_team=True,
+                        response_event_id=event_id or tracked_event_id,
+                    )
+                    raise
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply("final")
                     request.pipeline_timing.mark("response_complete")
@@ -1251,8 +1286,7 @@ class ResponseRunner:
                                     operation=build_response_text,
                                 )
                             except asyncio.CancelledError:
-                                self._ensure_recorder_interrupted(team_turn_recorder)
-                                self._persist_interrupted_turn(
+                                self._persist_interrupted_recorder(
                                     recorder=team_turn_recorder,
                                     session_scope=session_scope,
                                     session_id=session_id,
@@ -1290,19 +1324,31 @@ class ResponseRunner:
                     raise
 
                 delivery_stage_started = True
-                delivery_result = await self.deps.delivery_gateway.deliver_final(
-                    FinalDeliveryRequest(
-                        target=delivery_target,
-                        existing_event_id=message_id,
-                        existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
-                        response_text=response_text,
-                        response_kind="team",
-                        response_envelope=resolved_response_envelope,
-                        correlation_id=resolved_correlation_id,
-                        tool_trace=None,
-                        extra_content=None,
-                    ),
-                )
+                try:
+                    delivery_result = await self.deps.delivery_gateway.deliver_final(
+                        FinalDeliveryRequest(
+                            target=delivery_target,
+                            existing_event_id=message_id,
+                            existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
+                            response_text=response_text,
+                            response_kind="team",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                        ),
+                    )
+                except asyncio.CancelledError:
+                    self._persist_interrupted_recorder(
+                        recorder=team_turn_recorder,
+                        session_scope=session_scope,
+                        session_id=session_id,
+                        execution_identity=tool_dispatch.execution_identity,
+                        run_id=response_run_id,
+                        is_team=True,
+                        response_event_id=tracked_event_id,
+                    )
+                    raise
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply("final")
                     request.pipeline_timing.mark("response_complete")
@@ -1632,8 +1678,7 @@ class ResponseRunner:
                     operation=build_response_text,
                 )
         except asyncio.CancelledError:
-            self._ensure_recorder_interrupted(turn_recorder)
-            self._persist_interrupted_turn(
+            self._persist_interrupted_recorder(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
                 session_id=runtime.session_id,
@@ -1728,8 +1773,7 @@ class ResponseRunner:
                     request.pipeline_timing.mark("streaming_complete")
                 return event_id, accumulated
         except asyncio.CancelledError:
-            self._ensure_recorder_interrupted(turn_recorder)
-            self._persist_interrupted_turn(
+            self._persist_interrupted_recorder(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
                 session_id=runtime.session_id,
@@ -1740,7 +1784,7 @@ class ResponseRunner:
             )
             raise
 
-    async def process_and_respond(  # noqa: C901
+    async def process_and_respond(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -1842,22 +1886,34 @@ class ResponseRunner:
         )
         if on_delivery_started is not None:
             on_delivery_started(request.existing_event_id)
-        delivery = await self.deps.delivery_gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=runtime.resolved_target,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-                response_text=response_text,
-                response_kind=response_kind,
-                response_envelope=self._response_envelope_for_request(
-                    request,
-                    resolved_target=runtime.resolved_target,
+        try:
+            delivery = await self.deps.delivery_gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=runtime.resolved_target,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    response_text=response_text,
+                    response_kind=response_kind,
+                    response_envelope=self._response_envelope_for_request(
+                        request,
+                        resolved_target=runtime.resolved_target,
+                    ),
+                    correlation_id=self._correlation_id_for_request(request),
+                    tool_trace=tool_trace if self._show_tool_calls() else None,
+                    extra_content=response_extra_content or None,
                 ),
-                correlation_id=self._correlation_id_for_request(request),
-                tool_trace=tool_trace if self._show_tool_calls() else None,
-                extra_content=response_extra_content or None,
-            ),
-        )
+            )
+        except asyncio.CancelledError:
+            self._persist_interrupted_recorder(
+                recorder=turn_recorder,
+                session_scope=session_scope,
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
+                response_event_id=request.existing_event_id,
+            )
+            raise
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
@@ -1999,22 +2055,34 @@ class ResponseRunner:
 
         if on_delivery_started is not None:
             on_delivery_started(event_id)
-        delivery = await self.deps.delivery_gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=runtime.resolved_target,
-                streamed_event_id=event_id,
-                streamed_text=accumulated,
-                delivery_kind=delivery_kind,
-                response_kind=response_kind,
-                response_envelope=request.response_envelope,
-                correlation_id=request.correlation_id,
-                tool_trace=tool_trace if self._show_tool_calls() else None,
-                extra_content=response_extra_content,
-                cleanup_suppressed_streamed_event=(
-                    request.existing_event_is_placeholder or request.existing_event_id is None
+        try:
+            delivery = await self.deps.delivery_gateway.finalize_streamed_response(
+                FinalizeStreamedResponseRequest(
+                    target=runtime.resolved_target,
+                    streamed_event_id=event_id,
+                    streamed_text=accumulated,
+                    delivery_kind=delivery_kind,
+                    response_kind=response_kind,
+                    response_envelope=request.response_envelope,
+                    correlation_id=request.correlation_id,
+                    tool_trace=tool_trace if self._show_tool_calls() else None,
+                    extra_content=response_extra_content,
+                    cleanup_suppressed_streamed_event=(
+                        request.existing_event_is_placeholder or request.existing_event_id is None
+                    ),
                 ),
-            ),
-        )
+            )
+        except asyncio.CancelledError:
+            self._persist_interrupted_recorder(
+                recorder=turn_recorder,
+                session_scope=session_scope,
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
+                response_event_id=event_id,
+            )
+            raise
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
