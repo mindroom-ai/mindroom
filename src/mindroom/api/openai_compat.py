@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
@@ -1459,6 +1460,8 @@ def _extract_team_stream_failure(event: RunOutputEvent | TeamRunOutputEvent | Ru
     """Extract explicit terminal-failure text from a team stream event."""
     if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
         return str(event.content or "Unknown team error")
+    if isinstance(event, TeamRunCancelledEvent):
+        return str(event.reason or event.content or "Unknown team failure")
     if isinstance(event, (TeamRunOutput, RunOutput)) and _is_failed_team_output(event):
         formatted_output = _format_team_output(event).strip()
         return formatted_output or "Unknown team failure"
