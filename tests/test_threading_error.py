@@ -5448,6 +5448,72 @@ class TestThreadingBehavior:
         await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
 
     @pytest.mark.asyncio
+    async def test_wait_for_thread_idle_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:
+        """Thread reads should ignore cancelled room fences that only preserve write ordering."""
+        first_thread_started = asyncio.Event()
+        release_first_thread = asyncio.Event()
+        second_thread_started = asyncio.Event()
+        release_second_thread = asyncio.Event()
+        coordinator = _runtime_write_coordinator()
+
+        async def first_thread_update() -> None:
+            first_thread_started.set()
+            await release_first_thread.wait()
+
+        async def second_thread_update() -> None:
+            second_thread_started.set()
+            await release_second_thread.wait()
+
+        async def cancelled_room_update() -> None:
+            msg = "Cancelled room cache update should not start"
+            raise AssertionError(msg)
+
+        first_thread_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-a:localhost",
+            first_thread_update,
+            name="matrix_cache_first_thread_update",
+        )
+        second_thread_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-b:localhost",
+            second_thread_update,
+            name="matrix_cache_second_thread_update",
+        )
+        await asyncio.wait_for(first_thread_started.wait(), timeout=1.0)
+        await asyncio.wait_for(second_thread_started.wait(), timeout=1.0)
+
+        cancelled_room_task = coordinator.queue_room_update(
+            "!test:localhost",
+            cancelled_room_update,
+            name="matrix_cache_cancelled_room_update",
+        )
+        try:
+            cancelled_room_task.cancel()
+            await asyncio.gather(cancelled_room_task, return_exceptions=True)
+
+            await asyncio.wait_for(
+                coordinator.wait_for_thread_idle("!test:localhost", "$thread-c:localhost"),
+                timeout=0.1,
+            )
+            assert first_thread_task.done() is False
+            assert second_thread_task.done() is False
+        finally:
+            release_first_thread.set()
+            release_second_thread.set()
+            if not cancelled_room_task.done():
+                cancelled_room_task.cancel()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    first_thread_task,
+                    second_thread_task,
+                    cancelled_room_task,
+                    return_exceptions=True,
+                ),
+                timeout=1.0,
+            )
+
+    @pytest.mark.asyncio
     async def test_cancelled_room_cache_update_does_not_start_queued_coro(self) -> None:
         """Cancelling a queued room update before it runs should not invoke its coroutine factory."""
         blocker_started = asyncio.Event()

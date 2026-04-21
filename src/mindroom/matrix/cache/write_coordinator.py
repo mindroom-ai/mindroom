@@ -451,12 +451,20 @@ class _EventCacheWriteCoordinator:
         room_threads = self._thread_update_tasks_by_room.get(room_id)
         return not room_threads
 
-    def _thread_is_idle(self, room_id: str, thread_id: str) -> bool:
+    def _thread_is_idle(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        ignore_cancelled_room_fences: bool = False,
+    ) -> bool:
         self._prune_done_task_maps(room_id)
         state = self._room_states.get(room_id)
         if state is not None:
             for entry in state.entries:
                 if isinstance(entry, _QueuedRoomFence):
+                    if ignore_cancelled_room_fences:
+                        continue
                     return False
                 if entry.kind == "room":
                     return False
@@ -643,7 +651,11 @@ class _EventCacheWriteCoordinator:
         """Wait for room-wide and same-thread queued updates to drain."""
         while True:
             self._reevaluate_room(room_id)
-            if self._thread_is_idle(room_id, thread_id):
+            if self._thread_is_idle(
+                room_id,
+                thread_id,
+                ignore_cancelled_room_fences=True,
+            ):
                 return
 
             state = self._room_states.get(room_id)
@@ -660,7 +672,11 @@ class _EventCacheWriteCoordinator:
             waiter = asyncio.get_running_loop().create_future()
             state.waiters.append(waiter)
             self._reevaluate_room(room_id)
-            if self._thread_is_idle(room_id, thread_id):
+            if self._thread_is_idle(
+                room_id,
+                thread_id,
+                ignore_cancelled_room_fences=True,
+            ):
                 self._discard_waiter(room_id, waiter)
                 return
             try:
