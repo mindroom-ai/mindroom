@@ -1775,7 +1775,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-    assert event_id is None
+    assert event_id == "$thinking"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1846,7 +1846,7 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-    assert event_id is None
+    assert event_id == "$thinking"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2057,7 +2057,7 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
 
-    assert event_id is None
+    assert event_id == "$stream-msg"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2664,7 +2664,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
             team_mode="coordinate",
         )
 
-    assert event_id is None
+    assert event_id == "$thinking"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2788,7 +2788,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             team_mode="coordinate",
         )
 
-    assert event_id is None
+    assert event_id == "$team-msg"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2917,7 +2917,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
             team_mode="coordinate",
         )
 
-    assert event_id is None
+    assert event_id == "$thinking"
     assert model_prompts
     assert model_prompts[0] != "Hello"
     assert 'Current message:\n<msg from="@alice:localhost">' in model_prompts[0]
@@ -3014,7 +3014,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
             team_mode="coordinate",
         )
 
-    assert event_id is None
+    assert event_id == "$thinking"
     assert sequence == [
         "team",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
@@ -3130,7 +3130,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             team_mode="coordinate",
         )
 
-    assert event_id is None
+    assert event_id == "$thinking"
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -5436,6 +5436,41 @@ class TestUserIdPassthrough:
         assert len(chunks) == 1
         assert isinstance(chunks[0], RunCompletedEvent)
         assert chunks[0].content == "hello from final event"
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_yields_reasoning_only_chunks_downstream(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Reasoning-only stream events must reach the transport layer."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content=None, reasoning_content="pondering")
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+            ]
+
+        assert len(chunks) == 1
+        assert isinstance(chunks[0], RunContentEvent)
+        assert chunks[0].reasoning_content == "pondering"
 
     @pytest.mark.asyncio
     async def test_ai_response_metadata_uses_room_resolved_runtime_model(self, tmp_path: Path) -> None:

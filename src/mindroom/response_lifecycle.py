@@ -113,10 +113,10 @@ class ResponseLifecycle:
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> str | None:
-        """Run outer lifecycle finalization and return the canonical response-identity event id."""
+        """Run outer lifecycle finalization and return the event that marks the turn complete."""
         final_delivery_outcome = outcome.final_delivery_outcome
-        response_identity_event_id = await self.apply_effects_safely(
-            response_event_id=final_delivery_outcome.response_identity_event_id,
+        turn_completion_event_id = await self.apply_effects_safely(
+            response_event_id=final_delivery_outcome.turn_completion_event_id,
             post_response_outcome=lambda: build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
@@ -124,7 +124,7 @@ class ResponseLifecycle:
             self.request,
             outcome=self.runner._response_outcome(final_delivery_outcome),
         )
-        return response_identity_event_id
+        return turn_completion_event_id
 
     async def apply_effects_safely(
         self,

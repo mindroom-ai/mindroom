@@ -77,9 +77,13 @@ class StreamTransportOutcome:
     rendered_body: str | None
     visible_body_state: VisibleBodyState
     failure_reason: str | None = None
+    option_map: Mapping[str, str] | None = None
+    options_list: tuple[Mapping[str, str], ...] | None = None
 
     def __post_init__(self) -> None:
         """Validate transport invariants for one terminal streaming snapshot."""
+        object.__setattr__(self, "option_map", _freeze_string_mapping(self.option_map))
+        object.__setattr__(self, "options_list", _freeze_options_list(self.options_list))
         if self.terminal_result == "not_attempted" and self.terminal_operation != "none":
             msg = "terminal_operation must be 'none' when terminal_result is 'not_attempted'"
             raise ValueError(msg)
@@ -300,6 +304,24 @@ class FinalDeliveryOutcome:
         return None
 
     @property
+    def turn_completion_event_id(self) -> str | None:
+        """Return the event id that means the turn visibly completed and should not be retried."""
+        if self.state in {
+            "final_visible_delivery",
+            "error_with_visible_response",
+            "cancelled_with_visible_response",
+            "cancelled_with_visible_note",
+        }:
+            return self.final_visible_event_id
+        if self.state in {
+            "kept_prior_visible_stream_after_completed_terminal_failure",
+            "kept_prior_visible_stream_after_cancel",
+            "kept_prior_visible_stream_after_error",
+        }:
+            return self.last_physical_stream_event_id
+        return None
+
+    @property
     def logical_response_event_id(self) -> str | None:
         """Compatibility alias for the downstream response-identity event id."""
         return self.response_identity_event_id
@@ -361,6 +383,8 @@ class FinalDeliveryOutcome:
         failure_reason: str | None = None,
         tool_trace: Sequence[ToolTraceEntry] = (),
         extra_content: Mapping[str, Any] | None = None,
+        option_map: Mapping[str, str] | None = None,
+        options_list: Sequence[Mapping[str, str]] | None = None,
     ) -> FinalDeliveryOutcome:
         """Build the completed state where terminal delivery failed after a visible stream."""
         return cls(
@@ -372,6 +396,8 @@ class FinalDeliveryOutcome:
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace),
             extra_content=extra_content or EMPTY_MAPPING,
+            option_map=option_map,
+            options_list=tuple(options_list) if options_list is not None else None,
         )
 
     @classmethod
@@ -383,6 +409,8 @@ class FinalDeliveryOutcome:
         failure_reason: str | None = None,
         tool_trace: Sequence[ToolTraceEntry] = (),
         extra_content: Mapping[str, Any] | None = None,
+        option_map: Mapping[str, str] | None = None,
+        options_list: Sequence[Mapping[str, str]] | None = None,
     ) -> FinalDeliveryOutcome:
         """Build the cancelled state where a prior visible stream remains visible."""
         return cls(
@@ -394,6 +422,8 @@ class FinalDeliveryOutcome:
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace),
             extra_content=extra_content or EMPTY_MAPPING,
+            option_map=option_map,
+            options_list=tuple(options_list) if options_list is not None else None,
         )
 
     @classmethod
@@ -405,6 +435,8 @@ class FinalDeliveryOutcome:
         failure_reason: str | None = None,
         tool_trace: Sequence[ToolTraceEntry] = (),
         extra_content: Mapping[str, Any] | None = None,
+        option_map: Mapping[str, str] | None = None,
+        options_list: Sequence[Mapping[str, str]] | None = None,
     ) -> FinalDeliveryOutcome:
         """Build the error state where a prior visible stream remains visible."""
         return cls(
@@ -416,6 +448,8 @@ class FinalDeliveryOutcome:
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace),
             extra_content=extra_content or EMPTY_MAPPING,
+            option_map=option_map,
+            options_list=tuple(options_list) if options_list is not None else None,
         )
 
     @classmethod

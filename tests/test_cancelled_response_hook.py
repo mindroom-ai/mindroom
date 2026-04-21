@@ -35,6 +35,7 @@ from mindroom.hooks import (
 from mindroom.hooks.context import CancelledResponseInfo, HookContextSupport
 from mindroom.hooks.execution import emit
 from mindroom.hooks.registry import HookRegistryState
+from mindroom.interactive import parse_and_format_interactive
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import PROGRESS_PLACEHOLDER
@@ -563,6 +564,42 @@ async def test_cancelled_visible_note_emits_cancelled_hook_not_after_response(tm
 
 
 @pytest.mark.asyncio
+async def test_cancelled_visible_note_failed_placeholder_edit_redacts_placeholder(tmp_path: Path) -> None:
+    """A failed cancellation-note edit on a placeholder must clean up the visible placeholder."""
+    config, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    redact_message_event = AsyncMock(return_value=True)
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=redact_message_event,
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    with patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=False)):
+        result = await gateway.deliver_cancelled_visible_note(
+            CancelledVisibleNoteRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$event"),
+                event_id="$thinking",
+                existing_event_is_placeholder=True,
+                restart=False,
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-cancelled-note-cleanup",
+            ),
+        )
+
+    assert result.state == "cancelled_without_visible_response"
+    assert result.visible_response_event_id is None
+    redact_message_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_stream_terminal_error_emits_cancelled_hook_once_for_visible_stream(tmp_path: Path) -> None:
     """Visible streamed terminal errors must emit message:cancelled exactly once."""
     after_seen: list[str] = []
@@ -784,3 +821,94 @@ async def test_stream_completed_reedit_failure_preserves_prior_visible_stream(tm
     assert after_seen == []
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].visible_response_event_id == "$stream"
+
+
+@pytest.mark.asyncio
+async def test_final_placeholder_edit_failure_redacts_placeholder(tmp_path: Path) -> None:
+    """A failed final edit on a placeholder must not leave Thinking... visible."""
+    config, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    redact_message_event = AsyncMock(return_value=True)
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=redact_message_event,
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    with patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=False)):
+        result = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$event"),
+                existing_event_id="$thinking",
+                existing_event_is_placeholder=True,
+                response_text="Done",
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-final-placeholder-cleanup",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+    assert result.state == "error_without_visible_response"
+    assert result.visible_response_event_id is None
+    redact_message_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_streamed_interactive_delivery_preserves_option_mapping_without_reedit(tmp_path: Path) -> None:
+    """Streamed interactive replies must carry their option mapping even when no final re-edit occurs."""
+    config, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+    interactive_json = """```interactive
+{"question":"Pick one","options":[{"emoji":"1","label":"One","value":"one"},{"emoji":"2","label":"Two","value":"two"}]}
+```"""
+    interactive_response = parse_and_format_interactive(interactive_json, extract_mapping=True)
+    streamed_text = interactive_response.formatted_text
+
+    result = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            stream_transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$stream",
+                terminal_operation="edit",
+                terminal_result="succeeded",
+                terminal_status="completed",
+                rendered_body=streamed_text,
+                visible_body_state="visible_body",
+                failure_reason=None,
+                option_map=interactive_response.option_map,
+                options_list=interactive_response.options_list,
+            ),
+            initial_delivery_kind="edited",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-stream-interactive",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert result.state == "final_visible_delivery"
+    assert result.option_map == {"1": "one", "2": "two"}
+    assert result.options_list == (
+        {"emoji": "1", "label": "One", "value": "one"},
+        {"emoji": "2", "label": "Two", "value": "two"},
+    )

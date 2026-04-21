@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
 
 class SuppressedPlaceholderCleanupError(RuntimeError):
-    """Raised when one provisional suppressed response cannot be removed safely."""
+    """Raised when one visible placeholder/provisional response cannot be removed safely."""
 
 
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
@@ -510,6 +510,36 @@ class DeliveryGateway:
             extra_content=extra_content,
         )
 
+    async def _cleanup_visible_placeholder_or_raise(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        response_kind: str,
+        response_envelope: MessageEnvelope,
+        correlation_id: str,
+        redaction_reason: str,
+        failure_reason: str,
+        tool_trace: list[ToolTraceEntry] | None = None,
+        extra_content: dict[str, Any] | None = None,
+    ) -> None:
+        """Redact a visible placeholder and raise if cleanup fails."""
+        cleanup_outcome = await self._redact_visible_response_event(
+            room_id=room_id,
+            event_id=event_id,
+            response_kind=response_kind,
+            response_envelope=response_envelope,
+            correlation_id=correlation_id,
+            redaction_reason=redaction_reason,
+            failure_reason=failure_reason,
+            tool_trace=tool_trace,
+            extra_content=extra_content,
+        )
+        if cleanup_outcome.state == "suppression_cleanup_failed":
+            raise SuppressedPlaceholderCleanupError(
+                cleanup_outcome.failure_reason or "visible placeholder cleanup failed",
+            )
+
     async def _deliver_visible_response(
         self,
         *,
@@ -560,6 +590,17 @@ class DeliveryGateway:
                 return outcome
 
             if existing_event_is_placeholder:
+                await self._cleanup_visible_placeholder_or_raise(
+                    room_id=target.room_id,
+                    event_id=existing_event_id,
+                    response_kind=response_kind,
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                    redaction_reason="Failed placeholder response",
+                    failure_reason="delivery_failed",
+                    tool_trace=tool_trace,
+                    extra_content=extra_content,
+                )
                 return FinalDeliveryOutcome.error_without_visible_response(
                     failure_reason="delivery_failed",
                     tool_trace=tool_trace or (),
@@ -819,6 +860,16 @@ class DeliveryGateway:
                 extra_content=extra_content,
             )
         elif request.existing_event_is_placeholder:
+            await self._cleanup_visible_placeholder_or_raise(
+                room_id=request.target.room_id,
+                event_id=request.event_id,
+                response_kind=request.response_kind,
+                response_envelope=request.response_envelope,
+                correlation_id=request.correlation_id,
+                redaction_reason="Failed cancelled placeholder response",
+                failure_reason=failure_reason,
+                extra_content=extra_content,
+            )
             outcome = FinalDeliveryOutcome.cancelled_without_visible_response(
                 failure_reason=failure_reason,
                 extra_content=extra_content,
@@ -1100,6 +1151,8 @@ class DeliveryGateway:
             streamed_text,
             extract_mapping=True,
         )
+        option_map = stream_outcome.option_map or interactive_response.option_map
+        options_list = stream_outcome.options_list or interactive_response.options_list
         assert streamed_event_id is not None
         outcome = FinalDeliveryOutcome.final_visible_delivery(
             final_visible_event_id=streamed_event_id,
@@ -1108,8 +1161,8 @@ class DeliveryGateway:
             delivery_kind=request.initial_delivery_kind,
             tool_trace=request.tool_trace or (),
             extra_content=request.extra_content,
-            option_map=interactive_response.option_map,
-            options_list=interactive_response.options_list,
+            option_map=option_map,
+            options_list=options_list,
         )
         await self._emit_after_response_best_effort(
             correlation_id=request.correlation_id,

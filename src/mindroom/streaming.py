@@ -364,15 +364,20 @@ class StreamingResponse:
         is_final: bool,
         allow_empty_progress: bool,
         stream_status: str | None,
-    ) -> tuple[str | None, dict[str, Any] | None]:
+    ) -> tuple[
+        str | None,
+        dict[str, Any] | None,
+        dict[str, str] | None,
+        tuple[dict[str, str], ...] | None,
+    ]:
         """Build the rendered display text and Matrix payload for one send or edit."""
         if not self.accumulated_text.strip() and not allow_empty_progress:
-            return None, None
+            return None, None, None, None
 
         assert self.target is not None
         effective_thread_id = self.target.resolved_thread_id
         text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
-        response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=False)
+        response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=is_final)
         display_text = response.formatted_text
         latest_for_message = self.latest_thread_event_id if self.event_id is None and not self.room_mode else None
         resolved_stream_status = self._resolve_stream_status(is_final=is_final, stream_status=stream_status)
@@ -389,7 +394,11 @@ class StreamingResponse:
             tool_trace=self.tool_trace if self.show_tool_calls else None,
             extra_content=extra_content,
         )
-        return display_text, content
+        option_map = dict(response.option_map) if response.option_map is not None else None
+        options_list = (
+            tuple(dict(item) for item in response.options_list) if response.options_list is not None else None
+        )
+        return display_text, content, option_map, options_list
 
     def _classify_visible_body_state(
         self,
@@ -420,7 +429,7 @@ class StreamingResponse:
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
         terminal_operation: StreamTerminalOperation = "edit" if self.event_id is not None else "send"
-        rendered_body, _content = self._build_rendered_message(
+        rendered_body, _content, option_map, options_list = self._build_rendered_message(
             is_final=True,
             allow_empty_progress=has_placeholder,
             stream_status=final_stream_status,
@@ -434,6 +443,8 @@ class StreamingResponse:
                 terminal_status=final_stream_status,
                 rendered_body=None,
                 visible_body_state="none",
+                option_map=None,
+                options_list=None,
             )
 
         try:
@@ -459,6 +470,8 @@ class StreamingResponse:
                 rendered_body=rendered_body,
                 visible_body_state=self._classify_visible_body_state(rendered_body),
                 failure_reason="terminal_update_cancelled",
+                option_map=option_map,
+                options_list=options_list,
             )
         except Exception as exc:
             logger.warning(
@@ -477,6 +490,8 @@ class StreamingResponse:
                 rendered_body=rendered_body,
                 visible_body_state=self._classify_visible_body_state(rendered_body),
                 failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
+                option_map=option_map,
+                options_list=options_list,
             )
 
         terminal_result: StreamTerminalResult = "succeeded" if send_succeeded else "failed"
@@ -495,6 +510,8 @@ class StreamingResponse:
             rendered_body=rendered_body,
             visible_body_state=self._classify_visible_body_state(rendered_body),
             failure_reason=None if send_succeeded else "terminal_update_failed",
+            option_map=option_map,
+            options_list=options_list,
         )
 
     async def _send_or_edit_message(
@@ -506,7 +523,7 @@ class StreamingResponse:
         stream_status: str | None = None,
     ) -> bool:
         """Send new message or edit existing one."""
-        display_text, content = self._build_rendered_message(
+        display_text, content, _option_map, _options_list = self._build_rendered_message(
             is_final=is_final,
             allow_empty_progress=allow_empty_progress,
             stream_status=stream_status,

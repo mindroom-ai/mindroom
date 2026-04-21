@@ -95,7 +95,7 @@ __all__ = [
     "build_matrix_run_metadata",
     "stream_agent_response",
 ]
-AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _AI_RUN_METADATA_VERSION = 1
 
 
@@ -1225,14 +1225,15 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     del timing_scope
     try:
         async for event in stream_generator:
-            if isinstance(event, RunContentEvent) and event.content:
-                if not state.first_token_logged:
-                    state.first_token_logged = True
-                    if pipeline_timing is not None:
-                        pipeline_timing.mark("model_first_token")
-                chunk_text = str(event.content)
-                state.assistant_text += chunk_text
-                state.full_response += chunk_text
+            if isinstance(event, RunContentEvent):
+                if event.content:
+                    if not state.first_token_logged:
+                        state.first_token_logged = True
+                        if pipeline_timing is not None:
+                            pipeline_timing.mark("model_first_token")
+                    chunk_text = str(event.content)
+                    state.assistant_text += chunk_text
+                    state.full_response += chunk_text
                 if state_updated is not None:
                     state_updated()
                 yield event

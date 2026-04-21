@@ -235,6 +235,26 @@ def _stream_transport_outcome_from_delivery_exception(
     )
 
 
+def _late_stream_finalize_cancelled_outcome(
+    *,
+    transport_outcome: StreamTransportOutcome,
+    failure_reason: str,
+) -> FinalDeliveryOutcome | None:
+    """Preserve one already-visible streamed reply when finalization is cancelled late."""
+    if (
+        transport_outcome.last_physical_stream_event_id is None
+        or transport_outcome.visible_body_state != "visible_body"
+    ):
+        return None
+    return FinalDeliveryOutcome.keep_prior_visible_stream_after_completed_terminal_failure(
+        last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
+        final_visible_body=transport_outcome.rendered_body,
+        failure_reason=failure_reason,
+        option_map=transport_outcome.option_map,
+        options_list=transport_outcome.options_list,
+    )
+
+
 def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911, PLR0912
     delivery: FinalDeliveryOutcome | DeliveryResult | None,
     *,
@@ -1476,6 +1496,18 @@ class ResponseRunner:
                         is_team=True,
                         response_event_id=event_id or tracked_event_id,
                     )
+                    late_outcome = _late_stream_finalize_cancelled_outcome(
+                        transport_outcome=transport_outcome,
+                        failure_reason="stream_finalize_cancelled",
+                    )
+                    if late_outcome is not None:
+                        final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
+                            outcome=late_outcome,
+                            correlation_id=resolved_correlation_id,
+                            envelope=resolved_response_envelope,
+                            response_kind="team",
+                        )
+                        return
                     raise
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply("final")
@@ -2411,6 +2443,17 @@ class ResponseRunner:
                 is_team=False,
                 response_event_id=transport_outcome.last_physical_stream_event_id,
             )
+            late_outcome = _late_stream_finalize_cancelled_outcome(
+                transport_outcome=transport_outcome,
+                failure_reason="stream_finalize_cancelled",
+            )
+            if late_outcome is not None:
+                return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
+                    outcome=late_outcome,
+                    correlation_id=correlation_id,
+                    envelope=response_envelope,
+                    response_kind=response_kind,
+                )
             raise
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")

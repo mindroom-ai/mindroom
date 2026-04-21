@@ -252,6 +252,9 @@ async def apply_post_response_effects(
     response_identity_event_id = final_outcome.response_identity_event_id
     interactive_event_id = final_outcome.final_visible_event_id if final_outcome.has_final_visible_delivery else None
     delivered_interactive_target = interactive_event_id is not None
+    compaction_event_id = response_identity_event_id
+    if compaction_event_id is None and outcome.dispatch_compaction_when_suppressed:
+        compaction_event_id = final_outcome.visible_response_event_id
 
     if (
         delivered_interactive_target
@@ -268,14 +271,9 @@ async def apply_post_response_effects(
             [dict(item) for item in final_outcome.options_list],
         )
 
-    if (
-        response_identity_event_id is not None
-        and deps.dispatch_compaction_notices is not None
-        and outcome.compaction_outcomes
-    ):
-        assert response_identity_event_id is not None
+    if compaction_event_id is not None and deps.dispatch_compaction_notices is not None and outcome.compaction_outcomes:
         await deps.dispatch_compaction_notices(
-            response_identity_event_id,
+            compaction_event_id,
             outcome.compaction_outcomes,
         )
 

@@ -350,6 +350,31 @@ async def test_post_response_effects_skip_persistence_and_summary_for_cancelled_
 
 
 @pytest.mark.asyncio
+async def test_post_response_effects_dispatch_compaction_when_suppressed_visible_outcome_is_opted_in() -> None:
+    """Suppressed outcomes with a visible event should still dispatch compaction notices when requested."""
+    dispatch_compaction_notices = AsyncMock()
+    compaction_outcome = MagicMock()
+    compaction_outcome.notify = True
+
+    await apply_post_response_effects(
+        ResponseOutcome(
+            final_delivery_outcome=FinalDeliveryOutcome.suppression_cleanup_failed(
+                last_physical_stream_event_id="$response",
+                failure_reason="suppressed_by_hook",
+            ),
+            compaction_outcomes=(compaction_outcome,),
+            dispatch_compaction_when_suppressed=True,
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            dispatch_compaction_notices=dispatch_compaction_notices,
+        ),
+    )
+
+    dispatch_compaction_notices.assert_awaited_once_with("$response", (compaction_outcome,))
+
+
+@pytest.mark.asyncio
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(tmp_path: Path) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)
