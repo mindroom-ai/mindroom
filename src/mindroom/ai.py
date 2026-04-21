@@ -595,6 +595,26 @@ def _get_model_config(
     return model_name, config.models.get(model_name)
 
 
+def _finalize_usage_payload(
+    payload: dict[str, Any],
+    *,
+    output_tokens_hint: int | None = None,
+    total_tokens_hint: int | None = None,
+    derive_total_tokens: bool = False,
+) -> dict[str, Any] | None:
+    if isinstance(output_tokens_hint, int) and "output_tokens" not in payload:
+        payload["output_tokens"] = output_tokens_hint
+    if "total_tokens" not in payload:
+        if isinstance(total_tokens_hint, int) and total_tokens_hint > 0:
+            payload["total_tokens"] = total_tokens_hint
+        elif derive_total_tokens:
+            input_tokens = payload.get("input_tokens")
+            output_tokens = payload.get("output_tokens")
+            if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+                payload["total_tokens"] = input_tokens + output_tokens
+    return payload or None
+
+
 def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
     def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         sanitized: dict[str, Any] = {}
@@ -611,7 +631,15 @@ def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, An
         metrics_dict = metrics.to_dict()
         if not isinstance(metrics_dict, dict):
             return None
-        return _sanitize_metrics_payload(metrics_dict)
+        sanitized = _sanitize_metrics_payload(metrics_dict)
+        if sanitized is None:
+            return None
+        return _finalize_usage_payload(
+            sanitized,
+            output_tokens_hint=metrics.output_tokens,
+            total_tokens_hint=metrics.total_tokens,
+            derive_total_tokens=True,
+        )
     if isinstance(metrics, dict):
         return _sanitize_metrics_payload(metrics)
     return None
@@ -623,14 +651,9 @@ def _build_model_request_metrics_fallback(
     observed_metric_keys: set[str],
 ) -> dict[str, Any] | None:
     payload = {key: value for key, value in totals.items() if value > 0 or key in observed_metric_keys}
-    if payload.get("total_tokens") is None:
-        input_tokens = payload.get("input_tokens")
-        output_tokens = payload.get("output_tokens")
-        if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-            payload["total_tokens"] = input_tokens + output_tokens
     if first_token_latency is not None:
         payload["time_to_first_token"] = format(first_token_latency, ".12g")
-    return payload or None
+    return _finalize_usage_payload(payload, derive_total_tokens=True)
 
 
 def _build_context_payload(
@@ -677,17 +700,6 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     usage_payload = _serialize_metrics(metrics)
     if usage_payload is None and metrics_fallback:
         usage_payload = dict(metrics_fallback)
-    if usage_payload is not None and isinstance(metrics, Metrics):
-        if "output_tokens" not in usage_payload:
-            usage_payload["output_tokens"] = metrics.output_tokens
-        if "total_tokens" not in usage_payload:
-            if metrics.total_tokens > 0:
-                usage_payload["total_tokens"] = metrics.total_tokens
-            else:
-                input_tokens = usage_payload.get("input_tokens")
-                output_tokens = usage_payload.get("output_tokens")
-                if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-                    usage_payload["total_tokens"] = input_tokens + output_tokens
 
     usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
     if not isinstance(usage_input_tokens, int):

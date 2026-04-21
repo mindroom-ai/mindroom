@@ -33,6 +33,7 @@ from mindroom.agents import create_session_storage
 from mindroom.ai import (
     PreparedAgentRun,
     _prepare_agent_and_prompt,
+    _serialize_metrics,
     ai_response,
     append_inline_media_fallback_prompt,
     build_matrix_run_metadata,
@@ -144,6 +145,18 @@ def _prepared_prompt_result(
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(),
     )
+
+
+def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
+    """Metrics serialization should keep zero output usage and derived totals."""
+    payload = _serialize_metrics(Metrics(input_tokens=6, output_tokens=0, cache_read_tokens=46449))
+
+    assert payload == {
+        "input_tokens": 6,
+        "output_tokens": 0,
+        "total_tokens": 6,
+        "cache_read_tokens": 46449,
+    }
 
 
 class _SessionStorage:
