@@ -1359,7 +1359,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
         reason=None,
         resolved_by="@user:localhost",
     )
-    thread.join(timeout=1)
+    await asyncio.to_thread(thread.join, 1)
 
     assert error is None
     assert not thread.is_alive()

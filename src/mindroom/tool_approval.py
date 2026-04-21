@@ -461,6 +461,8 @@ class ApprovalManager:
 
         self._set_event_id(pending.id, event_id)
         self._persist_request(pending)
+        if pending.status != "pending" and pending.resolution_synced_at is None:
+            await self._edit_resolved_event(pending)
 
         try:
             assert pending.future is not None
