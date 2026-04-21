@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -137,6 +138,46 @@ def ensure_workspace_template(
         raise ValueError(msg)
     _copy_workspace_template(workspace_path, template_dir=_MIND_TEMPLATE_DIR, force=force)
     (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
+
+
+def ensure_workspace_knowledge_links(
+    workspace_path: Path,
+    *,
+    knowledge_paths: Mapping[str, Path],
+) -> None:
+    """Expose canonical workspace-local paths for bound knowledge bases.
+
+    Each knowledge base becomes visible under ``<workspace>/knowledge/<base_id>``.
+    The symlink targets may live outside the workspace root; the point of this
+    namespace is to give file-aware tools one stable in-workspace entrypoint for
+    direct inspection of bound knowledge sources.
+    """
+    if not knowledge_paths:
+        return
+
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    knowledge_root = resolve_workspace_relative_path(
+        workspace_path,
+        "knowledge",
+        field_name="workspace knowledge root",
+    )
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+
+    for base_id, target_path in knowledge_paths.items():
+        link_path = resolve_workspace_relative_path(
+            knowledge_root,
+            base_id,
+            field_name="workspace knowledge link",
+        )
+        resolved_target = target_path.expanduser().resolve()
+        if link_path.is_symlink():
+            if link_path.resolve() == resolved_target:
+                continue
+            link_path.unlink()
+        elif link_path.exists():
+            msg = f"Workspace knowledge link path already exists and is not a symlink: {link_path}"
+            raise ValueError(msg)
+        link_path.symlink_to(resolved_target, target_is_directory=True)
 
 
 def _private_root_name(agent_name: str, config: Config) -> str:

@@ -913,6 +913,60 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     assert runtime.file_memory_root == runtime.workspace.root
 
 
+def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_shared_bases(tmp_path: Path) -> None:
+    """Shared agents with a workspace should expose canonical knowledge symlinks inside it."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    knowledge_root = tmp_path / "research"
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].knowledge_bases = ["research"]
+    config.knowledge_bases["research"] = KnowledgeBaseConfig(path=str(knowledge_root))
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert runtime.workspace is not None
+    knowledge_link = runtime.workspace.root / "knowledge" / "research"
+    assert knowledge_link.is_symlink()
+    assert knowledge_link.resolve() == knowledge_root.resolve()
+
+
+def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bases(tmp_path: Path) -> None:
+    """Private requester-local knowledge should also surface through workspace-local symlinks."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        knowledge=AgentPrivateKnowledgeConfig(path="kb_repo"),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="s1",
+    )
+
+    runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+
+    assert runtime.workspace is not None
+    private_base_id = config.get_agent_private_knowledge_base_id("general")
+    assert private_base_id is not None
+    knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
+    assert knowledge_link.is_symlink()
+    assert knowledge_link.resolve() == (runtime.workspace.root / "kb_repo").resolve()
+
+
 def test_private_workspace_template_preserves_metadata_and_backfills_missing_files(tmp_path: Path) -> None:
     """Private templates should preserve file metadata and backfill new files without overwriting edits."""
     template_dir = tmp_path / "template"
