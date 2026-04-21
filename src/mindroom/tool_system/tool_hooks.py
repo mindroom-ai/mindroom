@@ -89,8 +89,6 @@ class _ResolvedToolContext:
     requester_id: str | None
     session_id: str | None
     channel: str | None
-    tenant_id: str | None
-    account_id: str | None
     config: Config | None
     runtime_paths: RuntimePaths | None
     correlation_id: str
@@ -181,8 +179,6 @@ def _resolve_tool_context(
             requester_id=dispatch_context.execution_identity.requester_id,
             session_id=dispatch_context.execution_identity.session_id,
             channel=dispatch_context.execution_identity.channel,
-            tenant_id=dispatch_context.execution_identity.tenant_id or resolved_runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=dispatch_context.execution_identity.account_id or resolved_runtime_paths.env_value("ACCOUNT_ID"),
             config=runtime_context.config,
             runtime_paths=resolved_runtime_paths,
             correlation_id=_correlation_id_for_runtime_context(runtime_context),
@@ -205,10 +201,6 @@ def _resolve_tool_context(
             requester_id=dispatch_context.execution_identity.requester_id,
             session_id=dispatch_context.execution_identity.session_id,
             channel=dispatch_context.execution_identity.channel,
-            tenant_id=dispatch_context.execution_identity.tenant_id
-            or (resolved_runtime_paths.env_value("CUSTOMER_ID") if resolved_runtime_paths is not None else None),
-            account_id=dispatch_context.execution_identity.account_id
-            or (resolved_runtime_paths.env_value("ACCOUNT_ID") if resolved_runtime_paths is not None else None),
             config=bridge_context.config,
             runtime_paths=resolved_runtime_paths,
             correlation_id=_correlation_id_for_runtime_context(None),
@@ -227,12 +219,6 @@ def _resolve_tool_context(
         requester_id=None,
         session_id=None,
         channel=None,
-        tenant_id=bridge_context.runtime_paths.env_value("CUSTOMER_ID")
-        if bridge_context.runtime_paths is not None
-        else None,
-        account_id=bridge_context.runtime_paths.env_value("ACCOUNT_ID")
-        if bridge_context.runtime_paths is not None
-        else None,
         config=bridge_context.config,
         runtime_paths=bridge_context.runtime_paths,
         correlation_id=_correlation_id_for_runtime_context(None),
