@@ -89,6 +89,7 @@ from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
 from mindroom.streaming import StreamingDeliveryError
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeSupport,
@@ -1324,6 +1325,73 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
 
 
 @pytest.mark.asyncio
+async def test_process_and_respond_streaming_delivery_failure_with_visible_tools_replays_tool_trace_once(
+    tmp_path: Path,
+) -> None:
+    """Visible streamed tool markers should be normalized out before interrupted replay persistence."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response") as mock_stream,
+        patch.object(ResponseRunner, "_show_tool_calls", return_value=True),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def consume_delivery_and_fail(_request: object) -> tuple[str, str]:
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$terminal",
+                accumulated_text="Partial answer\n\n🔧 `run_shell_command` [1]\n\n**[Response interrupted by an error: boom]**",
+                tool_trace=[
+                    ToolTraceEntry(
+                        type="tool_call_completed",
+                        tool_name="run_shell_command",
+                        args_preview="cmd=pwd",
+                        result_preview="/app",
+                    ),
+                ],
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Partial answer"
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        delivery = await coordinator.process_and_respond_streaming(
+            _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+        )
+
+    assert delivery.event_id == "$terminal"
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assistant_text = cast("str", persisted_run.messages[1].content)
+    assert "🔧 `run_shell_command` [1]" not in assistant_text
+    assert assistant_text.count("[tool:run_shell_command completed]") == 1
+    assert assistant_text == (
+        "Partial answer\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]"
+    )
+
+
+@pytest.mark.asyncio
 async def test_process_and_respond_emits_session_started_after_persisted_cancellation(
     tmp_path: Path,
 ) -> None:
@@ -2191,6 +2259,86 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
         ("user", "Hello"),
         ("assistant", "Team hello\n\n[interrupted]"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_stream_delivery_failure_with_visible_tools_replays_tool_trace_once(
+    tmp_path: Path,
+) -> None:
+    """Team stream delivery failures should not persist visible tool markers alongside replay traces."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch.object(ResponseRunner, "_show_tool_calls", return_value=True),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        async def consume_delivery_and_fail(_request: object) -> tuple[str, str]:
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$team-terminal",
+                accumulated_text=(
+                    "🤝 **Team Response** (General):\n\nTeam hello\n\n"
+                    "🔧 `run_shell_command` [1]\n\n"
+                    "**[Response interrupted by an error: boom]**"
+                ),
+                tool_trace=[
+                    ToolTraceEntry(
+                        type="tool_call_completed",
+                        tool_name="run_shell_command",
+                        args_preview="cmd=pwd",
+                        result_preview="/app",
+                    ),
+                ],
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "🤝 **Team Response** (General):\n\nTeam hello"
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id == "$team-terminal"
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assistant_text = cast("str", persisted_run.messages[1].content)
+    assert "🔧 `run_shell_command` [1]" not in assistant_text
+    assert assistant_text.count("[tool:run_shell_command completed]") == 1
+    assert assistant_text == (
+        "🤝 **Team Response** (General):\n\nTeam hello\n\n"
+        "[tool:run_shell_command completed]\n"
+        "  args: cmd=pwd\n"
+        "  result: /app\n\n"
+        "[interrupted]"
+    )
 
 
 @pytest.mark.asyncio

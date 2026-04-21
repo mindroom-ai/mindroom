@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
@@ -117,6 +118,7 @@ if TYPE_CHECKING:
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
+_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 
 
 def _merge_response_extra_content(
@@ -142,6 +144,12 @@ def _split_delivery_tool_trace(
         else:
             interrupted.append(trace_entry)
     return completed, interrupted
+
+
+def _strip_visible_tool_markers(text: str) -> str:
+    """Remove Matrix-visible tool marker lines from streamed text before replay persistence."""
+    filtered_lines = [line for line in text.splitlines() if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)]
+    return "\n".join(filtered_lines).rstrip()
 
 
 def _materialize_matrix_run_metadata(
@@ -538,7 +546,7 @@ class ResponseRunner:
         tool_trace: Sequence[ToolTraceEntry],
     ) -> bool:
         """Capture canonical interrupted replay state from one failed stream delivery."""
-        partial_text = clean_partial_reply_text(accumulated_text)
+        partial_text = clean_partial_reply_text(_strip_visible_tool_markers(accumulated_text))
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
         if not partial_text and not completed_tools and not interrupted_tools:
             return False
