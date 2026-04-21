@@ -42,7 +42,6 @@ depends_on = [
     "mindroom.media_fallback",
     "mindroom.media_inputs",
     "mindroom.memory",
-    "mindroom.model_loading",
     "mindroom.timing",
     "mindroom.tool_system.events",
 ]
@@ -126,6 +125,12 @@ visibility = [
     "mindroom.agents",
     "mindroom.history.runtime",
     "mindroom.memory.auto_flush",
+    "mindroom.routing",
+    "mindroom.scheduling",
+    "mindroom.teams",
+    "mindroom.thread_summary",
+    "mindroom.topic_generator",
+    "mindroom.voice_handler",
 ]
 
 [[modules]]
@@ -423,10 +428,10 @@ depends_on = [
 path = "mindroom.routing"
 depends_on = [
     "mindroom.agent_descriptions",
-    "mindroom.ai",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
+    "mindroom.model_loading",
 ]
 
 [[modules]]
@@ -448,6 +453,7 @@ depends_on = [
     "mindroom.matrix.rooms",
     "mindroom.media_fallback",
     "mindroom.media_inputs",
+    "mindroom.model_loading",
     "mindroom.team_exact_members",
     "mindroom.tool_system.events",
 ]
@@ -584,9 +590,9 @@ visibility = ["mindroom.memory", "mindroom.memory.functions"]
 [[modules]]
 path = "mindroom.topic_generator"
 depends_on = [
-    "mindroom.ai",
     "mindroom.ai_runtime",
     "mindroom.logging_config",
+    "mindroom.model_loading",
 ]
 
 [[modules]]
@@ -930,10 +936,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.scheduling"
 depends_on = [
-    "mindroom.ai",
     "mindroom.hooks.sender",
     "mindroom.constants",
     "mindroom.matrix.client_delivery",
+    "mindroom.model_loading",
 ]
 
 [[modules]]
@@ -1046,20 +1052,20 @@ depends_on = []
 [[modules]]
 path = "mindroom.thread_summary"
 depends_on = [
-    "mindroom.ai",
     "mindroom.ai_runtime",
     "mindroom.matrix.client_delivery",
+    "mindroom.model_loading",
 ]
 
 [[modules]]
 path = "mindroom.voice_handler"
 depends_on = [
-    "mindroom.ai",
     "mindroom.attachments",
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.credentials_sync",
     "mindroom.logging_config",
+    "mindroom.model_loading",
     "mindroom.matrix.identity",
     "mindroom.matrix.media",
     "mindroom.matrix.mentions",
@@ -1260,12 +1266,15 @@ from = ["mindroom.runtime_resolution"]
 [[interfaces]]
 expose = [
     "AIStreamChunk",
-    "get_model_instance",
     "build_matrix_run_metadata",
     "ai_response",
     "stream_agent_response",
 ]
 from = ["mindroom.ai"]
+
+[[interfaces]]
+expose = ["get_model_instance"]
+from = ["mindroom.model_loading"]
 
 [[interfaces]]
 expose = [

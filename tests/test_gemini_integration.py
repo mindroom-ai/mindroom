@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.mindroom.ai import get_model_instance
+from mindroom.model_loading import get_model_instance
 from src.mindroom.config.main import Config
 from src.mindroom.constants import RuntimePaths, resolve_runtime_paths
 

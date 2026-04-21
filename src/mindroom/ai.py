@@ -64,7 +64,6 @@ from mindroom.logging_config import get_logger
 from mindroom.media_fallback import should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
-from mindroom.model_loading import get_model_instance
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
@@ -94,7 +93,6 @@ __all__ = [
     "AIStreamChunk",
     "ai_response",
     "build_matrix_run_metadata",
-    "get_model_instance",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent

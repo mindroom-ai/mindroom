@@ -10,10 +10,10 @@ from agno.models.message import Message
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
 
-from mindroom.ai import get_model_instance
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.model_loading import get_model_instance
 from mindroom.vertex_claude_prompt_cache import (
     copy_messages_with_vertex_prompt_cache_breakpoint,
     install_vertex_claude_prompt_cache_hook,

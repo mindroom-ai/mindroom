@@ -27,12 +27,9 @@ from agno.session.team import TeamSession
 from agno.team import Team
 from pydantic import BaseModel, Field
 
-from mindroom import ai_runtime
+from mindroom import ai_runtime, model_loading
 from mindroom.agents import create_agent, get_team_session
-from mindroom.ai import (
-    build_matrix_run_metadata,
-    get_model_instance,
-)
+from mindroom.ai import build_matrix_run_metadata
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
@@ -560,7 +557,7 @@ Examples:
 
 Return the mode and a one-sentence reason why."""
 
-    model = get_model_instance(config, runtime_paths, "default")
+    model = model_loading.get_model_instance(config, runtime_paths, "default")
     agent = Agent(
         name="TeamModeDecider",
         role="Determine team mode",
@@ -1300,7 +1297,7 @@ def _create_team_instance(
         Configured Team instance
 
     """
-    model = get_model_instance(config, runtime_paths, model_name or "default")
+    model = model_loading.get_model_instance(config, runtime_paths, model_name or "default")
     # Coordinate-mode tool calls run through the shared team model in v1.
     # Member-agent models are intentionally not wrapped here.
     ai_runtime.install_queued_message_notice_hook(model)

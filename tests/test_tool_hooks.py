@@ -1444,7 +1444,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
 
     try:
         with (
-            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
         ):
             target = MessageTarget.resolve(
                 room_id="!room:localhost",
@@ -1690,7 +1690,7 @@ async def test_create_agent_prepends_bridge_to_real_tool_functions(tmp_path: Pat
     plugin_state_root = runtime_paths_for(config).storage_root / "plugins" / "tool-policy"
 
     try:
-        with patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")):
+        with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
             agent = create_agent(
                 "code",
                 config,

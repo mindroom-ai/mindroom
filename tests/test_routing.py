@@ -145,6 +145,7 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     """Curated seam modules should not freeze low-level runtime or prompt-plumbing helpers as public API."""
     agents_module = importlib.import_module("mindroom.agents")
     ai_module = importlib.import_module("mindroom.ai")
+    model_loading_module = importlib.import_module("mindroom.model_loading")
     teams_module = importlib.import_module("mindroom.teams")
 
     assert "create_state_storage_db" not in agents_module.__all__
@@ -158,6 +159,7 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     assert "cleanup_queued_notice_state" not in ai_module.__all__
     assert "cached_agent_run" not in ai_module.__all__
     assert "append_inline_media_fallback_to_run_input" not in ai_module.__all__
+    assert "get_model_instance" not in ai_module.__all__
     assert "install_queued_message_notice_hook" not in ai_module.__all__
     assert "queued_message_signal_context" not in ai_module.__all__
     assert "scrub_queued_notice_session_context" not in ai_module.__all__
@@ -166,9 +168,13 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     assert "cached_agent_run" not in vars(ai_module)
     assert "cleanup_queued_notice_state" not in vars(ai_module)
     assert "copy_run_input" not in vars(ai_module)
+    assert "get_model_instance" not in vars(ai_module)
     assert "install_queued_message_notice_hook" not in vars(ai_module)
     assert "queued_message_signal_context" not in vars(ai_module)
     assert "scrub_queued_notice_session_context" not in vars(ai_module)
+
+    assert "get_model_instance" in model_loading_module.__all__
+    assert "get_model_instance" in vars(model_loading_module)
 
     assert "PreparedMaterializedTeamExecution" not in teams_module.__all__
     assert "attach_media_to_run_input" not in teams_module.__all__
@@ -216,7 +222,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.routing.get_model_instance"):
+        with patch("mindroom.model_loading.get_model_instance"):
             # Mock the Agent and response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -257,7 +263,7 @@ class TestAIRouting:
             _message("@mindroom_finance:localhost", "I can help with that"),
         ]
 
-        with patch("mindroom.routing.get_model_instance"):
+        with patch("mindroom.model_loading.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = _AgentSuggestion(agent_name="finance", reasoning="Continuing financial discussion")
@@ -297,7 +303,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.routing.get_model_instance"):
+        with patch("mindroom.model_loading.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             # AI suggests an agent not in available list
@@ -334,7 +340,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.routing.get_model_instance") as mock_model:
+        with patch("mindroom.model_loading.get_model_instance") as mock_model:
             mock_model.side_effect = Exception("Model error")
 
             agents = [MatrixID(username="mindroom_general", domain="localhost")]

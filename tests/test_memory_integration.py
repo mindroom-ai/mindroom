@@ -75,7 +75,7 @@ class TestMemoryIntegration:
 
         with (
             patch("mindroom.ai_runtime.cached_agent_run", mock_agent_run),
-            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
             patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             response = await ai_response(
@@ -124,7 +124,7 @@ class TestMemoryIntegration:
 
         with (
             patch("mindroom.ai_runtime.cached_agent_run", mock_agent_run),
-            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
             patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             await ai_response(
@@ -183,7 +183,7 @@ class TestMemoryIntegration:
         with (
             patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
             patch("mindroom.ai_runtime.cached_agent_run", AsyncMock(return_value=MagicMock(content="First response"))),
-            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
             patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             # First interaction

@@ -645,7 +645,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     agent = _agent(db=storage)
     with (
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -760,7 +760,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -867,7 +867,7 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -926,7 +926,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -999,7 +999,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1113,7 +1113,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1169,7 +1169,7 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path) -> 
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1251,7 +1251,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
 
     with (
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1400,7 +1400,7 @@ async def test_prepare_history_for_run_auto_compaction_finishes_selected_runs_ac
     )
     with (
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1485,7 +1485,7 @@ async def test_prepare_history_for_run_auto_compaction_compacts_all_runs_when_ov
     )
     with (
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1654,7 +1654,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
 
     with (
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -2264,7 +2264,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
     alpha = _agent(agent_id="alpha", name="Alpha")
     zeta = _agent(agent_id="zeta", name="Zeta")
 
-    with patch("mindroom.teams.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+    with patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
         team = _create_team_instance(
             agents=[alpha, zeta],
             mode=TeamMode.COORDINATE,
@@ -3506,7 +3506,7 @@ async def test_prepare_history_for_run_forced_compaction_leaves_no_effective_rep
     agent = _agent(db=storage)
     with (
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -3704,7 +3704,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
 
     with (
         patch(
-            "mindroom.history.runtime.get_model_instance",
+            "mindroom.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(

@@ -1225,7 +1225,7 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
     model = _FakeModel()
 
     with (
-        patch("mindroom.teams.get_model_instance", return_value=model),
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.teams.Team", side_effect=lambda **kwargs: SimpleNamespace(model=kwargs["model"])),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):

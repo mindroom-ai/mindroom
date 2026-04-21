@@ -124,7 +124,7 @@ class TestDetermineTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_coordinate(self, mock_config):
         """Test AI correctly identifies coordination tasks (different subtasks)."""
-        with patch("mindroom.teams.get_model_instance") as mock_get_model:
+        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -147,7 +147,7 @@ class TestDetermineTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_collaborate(self, mock_config):
         """Test AI correctly identifies collaboration tasks (same task for all)."""
-        with patch("mindroom.teams.get_model_instance") as mock_get_model:
+        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -170,7 +170,7 @@ class TestDetermineTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_fallback_on_error(self, mock_config):
         """Test fallback to collaborate mode on AI error."""
-        with patch("mindroom.teams.get_model_instance") as mock_get_model:
+        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent to raise an error
             mock_agent = AsyncMock()
             mock_agent.arun.side_effect = Exception("AI service unavailable")
@@ -193,7 +193,7 @@ class TestDetermineTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_unexpected_response(self, mock_config):
         """Test fallback when AI returns unexpected response type."""
-        with patch("mindroom.teams.get_model_instance") as mock_get_model:
+        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response with wrong type
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -386,7 +386,7 @@ class TestIntegrationScenarios:
     @pytest.mark.asyncio
     async def test_email_then_call_scenario(self, mock_config):
         """Test the email-then-call scenario - coordinate mode for different tasks."""
-        with patch("mindroom.teams.get_model_instance") as mock_get_model:
+        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI to recognize different subtasks
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -418,7 +418,7 @@ class TestIntegrationScenarios:
     @pytest.mark.asyncio
     async def test_brainstorming_scenario(self, mock_config):
         """Test brainstorming scenario - collaborate mode for same task."""
-        with patch("mindroom.teams.get_model_instance") as mock_get_model:
+        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI to recognize same task for all
             mock_agent = AsyncMock()
             mock_response = MagicMock()

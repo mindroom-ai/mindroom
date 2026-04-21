@@ -54,6 +54,7 @@ For Google image work, use the official product name from the docs even if older
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `routing.py` | Intelligent agent selection when no agent is mentioned |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
+| `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `memory/` | Mem0 memory: agent and team-scoped |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |

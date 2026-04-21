@@ -51,7 +51,7 @@ def mock_config() -> MagicMock:
 class TestEventDrivenScheduling:
     """Test event-driven scheduling conversions."""
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_email_urgent_event(
         self,
@@ -96,7 +96,7 @@ class TestEventDrivenScheduling:
         assert "if" in call_args.lower()
         assert "polling" in call_args.lower()
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_bitcoin_price_event(
         self,
@@ -133,7 +133,7 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_server_monitoring_event(
         self,
@@ -170,7 +170,7 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_build_failure_event(
         self,
@@ -207,7 +207,7 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_reddit_mention_event(
         self,
@@ -244,7 +244,7 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_boss_email_immediate_event(
         self,
@@ -281,7 +281,7 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_prompt_includes_event_examples(
         self,

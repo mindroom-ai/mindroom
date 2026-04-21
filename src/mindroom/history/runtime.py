@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom import model_loading
 from mindroom.agent_storage import create_state_storage_db, get_agent_runtime_sqlite_dbs
 from mindroom.agents import (
     create_session_storage,
@@ -47,7 +48,6 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.logging_config import get_logger
-from mindroom.model_loading import get_model_instance
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens
 
@@ -201,7 +201,7 @@ async def prepare_scope_history(
 
     if should_compact:
         assert execution_plan.summary_input_budget_tokens is not None
-        summary_model = get_model_instance(
+        summary_model = model_loading.get_model_instance(
             config,
             runtime_paths,
             execution_plan.compaction_model_name,
