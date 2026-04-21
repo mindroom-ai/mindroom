@@ -27,16 +27,11 @@ from agno.session.team import TeamSession
 from agno.team import Team
 from pydantic import BaseModel, Field
 
+from mindroom import ai_runtime
 from mindroom.agents import create_agent, get_team_session
 from mindroom.ai import (
     build_matrix_run_metadata,
     get_model_instance,
-)
-from mindroom.ai_runtime import (
-    attach_media_to_run_input,
-    cleanup_queued_notice_state,
-    install_queued_message_notice_hook,
-    scrub_queued_notice_session_context,
 )
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
@@ -123,7 +118,7 @@ class TeamMode(str, Enum):
 
 
 @dataclass(frozen=True)
-class PreparedMaterializedTeamExecution:
+class _PreparedMaterializedTeamExecution:
     """Shared prepared team execution state used by stream and non-stream paths."""
 
     messages: tuple[Message, ...]
@@ -269,7 +264,7 @@ def _cleanup_team_notice_state(
     entity_name: str,
 ) -> None:
     """Strip queued-message notices from returned and persisted team state."""
-    cleanup_queued_notice_state(
+    ai_runtime.cleanup_queued_notice_state(
         run_output=run_output,
         storage=scope_context.storage if scope_context is not None else None,
         session_id=session_id,
@@ -284,7 +279,7 @@ def _scrub_team_retry_notice_state(
     entity_name: str,
 ) -> None:
     """Strip queued-message notices from the loaded team session before retry."""
-    scrub_queued_notice_session_context(
+    ai_runtime.scrub_queued_notice_session_context(
         scope_context=scope_context,
         entity_name=entity_name,
     )
@@ -1308,7 +1303,7 @@ def _create_team_instance(
     model = get_model_instance(config, runtime_paths, model_name or "default")
     # Coordinate-mode tool calls run through the shared team model in v1.
     # Member-agent models are intentionally not wrapped here.
-    install_queued_message_notice_hook(model)
+    ai_runtime.install_queued_message_notice_hook(model)
     if configured_team_name is not None and configured_team_name in config.teams:
         history_settings = config.get_entity_history_settings(configured_team_name)
     else:
@@ -1436,9 +1431,9 @@ async def prepare_materialized_team_execution(
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
-) -> PreparedMaterializedTeamExecution:
+) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
-    scrub_queued_notice_session_context(
+    ai_runtime.scrub_queued_notice_session_context(
         scope_context=scope_context,
         entity_name=configured_team_name or str(team.name or "Team"),
     )
@@ -1475,7 +1470,7 @@ async def prepare_materialized_team_execution(
         prepared_execution.unseen_event_ids,
         extra_metadata=matrix_run_metadata,
     )
-    return PreparedMaterializedTeamExecution(
+    return _PreparedMaterializedTeamExecution(
         messages=prepared_execution.messages,
         run_metadata=run_metadata,
         unseen_event_ids=prepared_execution.unseen_event_ids,
@@ -1546,7 +1541,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             team_name=configured_team_name,
         ) as opened_scope_context:
             scope_context = opened_scope_context
-            scrub_queued_notice_session_context(
+            ai_runtime.scrub_queued_notice_session_context(
                 scope_context=scope_context,
                 entity_name=configured_team_name or team_name,
             )
@@ -1594,7 +1589,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 if run_id_callback is not None and current_run_id is not None:
                     run_id_callback(current_run_id)
                 prepared_input = (
-                    attach_media_to_run_input(current_prompt, current_media_inputs)
+                    ai_runtime.attach_media_to_run_input(current_prompt, current_media_inputs)
                     if current_media_inputs.has_any()
                     else current_prompt
                 )
@@ -1801,7 +1796,7 @@ async def _team_response_stream_raw(
 
     def _start_stream(current_prompt: str, current_media_inputs: MediaInputs) -> AsyncIterator[Any]:
         prepared_input = (
-            attach_media_to_run_input(current_prompt, current_media_inputs)
+            ai_runtime.attach_media_to_run_input(current_prompt, current_media_inputs)
             if current_media_inputs.has_any()
             else current_prompt
         )
@@ -1907,7 +1902,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             team_name=configured_team_name,
         ) as opened_scope_context:
             scope_context = opened_scope_context
-            scrub_queued_notice_session_context(
+            ai_runtime.scrub_queued_notice_session_context(
                 scope_context=scope_context,
                 entity_name=team_label,
             )
@@ -2354,7 +2349,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
 
 __all__ = [
-    "PreparedMaterializedTeamExecution",
     "TeamIntent",
     "TeamMemberStatus",
     "TeamMode",

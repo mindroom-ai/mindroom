@@ -145,6 +145,7 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     """Curated seam modules should not freeze low-level runtime or prompt-plumbing helpers as public API."""
     agents_module = importlib.import_module("mindroom.agents")
     ai_module = importlib.import_module("mindroom.ai")
+    teams_module = importlib.import_module("mindroom.teams")
 
     assert "create_state_storage_db" not in agents_module.__all__
     assert "get_agent_runtime_sqlite_dbs" not in agents_module.__all__
@@ -168,6 +169,17 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     assert "install_queued_message_notice_hook" not in vars(ai_module)
     assert "queued_message_signal_context" not in vars(ai_module)
     assert "scrub_queued_notice_session_context" not in vars(ai_module)
+
+    assert "PreparedMaterializedTeamExecution" not in teams_module.__all__
+    assert "attach_media_to_run_input" not in teams_module.__all__
+    assert "cleanup_queued_notice_state" not in teams_module.__all__
+    assert "install_queued_message_notice_hook" not in teams_module.__all__
+    assert "scrub_queued_notice_session_context" not in teams_module.__all__
+    assert "PreparedMaterializedTeamExecution" not in vars(teams_module)
+    assert "attach_media_to_run_input" not in vars(teams_module)
+    assert "cleanup_queued_notice_state" not in vars(teams_module)
+    assert "install_queued_message_notice_hook" not in vars(teams_module)
+    assert "scrub_queued_notice_session_context" not in vars(teams_module)
 
 
 def test_flattened_seams_avoid_backward_compatibility_signature_shims() -> None:

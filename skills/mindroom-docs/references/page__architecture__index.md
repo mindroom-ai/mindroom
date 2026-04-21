@@ -40,24 +40,28 @@ MindRoom's architecture consists of several key components working together.
 
 ## Key Internal Modules
 
-| Module                  | Purpose                                                                       |
-| ----------------------- | ----------------------------------------------------------------------------- |
-| `orchestrator.py`       | MultiAgentOrchestrator — boots entities, manages sync loops, hot-reload       |
-| `orchestration/`        | Extracted orchestrator helpers (sync loops, config diffing, room invitations) |
-| `runtime_state.py`      | Shared runtime readiness state for health/ready endpoints                     |
-| `runtime_resolution.py` | Authoritative runtime resolution for agent materialization                    |
-| `team_exact_members.py` | Runtime resolution for team member materialization                            |
-| `agent_policy.py`       | Derives canonical execution policies from authored agent config               |
-| `workspaces.py`         | Agent workspace scaffolding, template seeding, context file resolution        |
-| `bot.py`                | AgentBot and TeamBot runtime for Matrix event handling                        |
-| `routing.py`            | Intelligent agent selection when no agent is mentioned                        |
-| `streaming.py`          | Response streaming via progressive message edits                              |
-| `media_inputs.py`       | Shared media-input container passed across bot, teams, and AI layers          |
-| `media_fallback.py`     | Retries model requests without inline media when models reject media inputs   |
-| `avatar_generation.py`  | Generates and manages avatar assets for agents, rooms, and spaces             |
-| `response_tracker.py`   | Duplicate response prevention                                                 |
-| `topic_generator.py`    | AI-generated room topics                                                      |
-| `background_tasks.py`   | Non-blocking async task management with GC protection                         |
+| Module                  | Purpose                                                                             |
+| ----------------------- | ----------------------------------------------------------------------------------- |
+| `orchestrator.py`       | MultiAgentOrchestrator — boots entities, manages sync loops, hot-reload             |
+| `orchestration/`        | Extracted orchestrator helpers (sync loops, config diffing, room invitations)       |
+| `runtime_state.py`      | Shared runtime readiness state for health/ready endpoints                           |
+| `runtime_resolution.py` | Authoritative runtime resolution for agent materialization                          |
+| `team_exact_members.py` | Runtime resolution for team member materialization                                  |
+| `model_loading.py`      | Authoritative model instantiation and provider-specific loader selection            |
+| `ai_runtime.py`         | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `agent_storage.py`      | Agent session and learning SQLite storage construction helpers                      |
+| `agent_descriptions.py` | Shared agent description rendering for routing and delegation                       |
+| `agent_policy.py`       | Derives canonical execution policies from authored agent config                     |
+| `workspaces.py`         | Agent workspace scaffolding, template seeding, context file resolution              |
+| `bot.py`                | AgentBot and TeamBot runtime for Matrix event handling                              |
+| `routing.py`            | Intelligent agent selection when no agent is mentioned                              |
+| `streaming.py`          | Response streaming via progressive message edits                                    |
+| `media_inputs.py`       | Shared media-input container passed across bot, teams, and AI layers                |
+| `media_fallback.py`     | Retries model requests without inline media when models reject media inputs         |
+| `avatar_generation.py`  | Generates and manages avatar assets for agents, rooms, and spaces                   |
+| `response_tracker.py`   | Duplicate response prevention                                                       |
+| `topic_generator.py`    | AI-generated room topics                                                            |
+| `background_tasks.py`   | Non-blocking async task management with GC protection                               |
 
 ## Data Flow
 

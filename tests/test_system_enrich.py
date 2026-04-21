@@ -454,8 +454,8 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
 
 
 @pytest.mark.asyncio
-async def test_prepare_materialized_team_execution_returns_public_seam_type(tmp_path: Path) -> None:
-    """The teams seam should return a public prepared-execution type."""
+async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_path: Path) -> None:
+    """Prepared team execution should expose prompt helpers without exporting its carrier type."""
     import mindroom.teams as teams_module  # noqa: PLC0415
 
     config = _config(tmp_path)
@@ -482,7 +482,7 @@ async def test_prepare_materialized_team_execution_returns_public_seam_type(tmp_
             compaction_outcomes=[],
         )
 
-    assert "PreparedMaterializedTeamExecution" in teams_module.__all__
+    assert "PreparedMaterializedTeamExecution" not in teams_module.__all__
 
     with (
         patch("mindroom.teams._create_team_instance", return_value=prepared_team),
@@ -518,7 +518,6 @@ async def test_prepare_materialized_team_execution_returns_public_seam_type(tmp_
             configured_team_name=None,
         )
 
-    assert type(prepared_execution) is teams_module.PreparedMaterializedTeamExecution
     assert prepared_execution.prepared_prompt == "prepared team prompt"
     assert prepared_execution.context_messages == ()
 
