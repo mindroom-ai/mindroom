@@ -350,15 +350,15 @@ def _collect_agent_toolkits(
 
 
 def _toolkit_declared_function_names(tool_name: str) -> frozenset[str]:
-    if tool_name in _SPECIAL_TOOLKIT_FUNCTION_NAMES:
-        return _SPECIAL_TOOLKIT_FUNCTION_NAMES[tool_name]
     metadata = TOOL_METADATA.get(tool_name)
-    if metadata is None or metadata.factory is None:
+    special_function_names = _SPECIAL_TOOLKIT_FUNCTION_NAMES.get(tool_name)
+    if special_function_names is not None:
+        return special_function_names
+    if metadata is None:
         return frozenset()
-    try:
-        toolkit_type = metadata.factory()
-    except Exception:
-        return frozenset()
+    if metadata.function_names:
+        return frozenset(metadata.function_names)
+    toolkit_type = _toolkit_type_for_declared_function_names(metadata)
     if not isinstance(toolkit_type, type):
         return frozenset()
     return frozenset(
@@ -371,24 +371,44 @@ def _toolkit_declared_function_names(tool_name: str) -> frozenset[str]:
     )
 
 
+def _toolkit_type_for_declared_function_names(metadata: object) -> type[Toolkit] | None:
+    factory = getattr(metadata, "factory", None)
+    if factory is None:
+        return None
+    try:
+        toolkit_type = factory()
+    except Exception:
+        return None
+    return toolkit_type if isinstance(toolkit_type, type) else None
+
+
 def _matching_tool_build_errors(
     command_tool: str,
     build_errors: dict[str, Exception],
-) -> list[Exception]:
+) -> list[tuple[str, Exception]]:
     if "." in command_tool:
         toolkit_name, _ = command_tool.split(".", 1)
         error = build_errors.get(toolkit_name)
-        return [error] if error is not None else []
+        return [(toolkit_name, error)] if error is not None else []
 
     direct_tool_error = build_errors.get(command_tool)
     if direct_tool_error is not None:
-        return [direct_tool_error]
+        return [(command_tool, direct_tool_error)]
 
     return [
-        error
+        (toolkit_name, error)
         for toolkit_name, error in build_errors.items()
         if command_tool in _toolkit_declared_function_names(toolkit_name)
     ]
+
+
+def _format_toolkit_candidates(
+    loaded_toolkits: set[str],
+    failed_toolkits: list[tuple[str, Exception]],
+) -> str:
+    labels = sorted(loaded_toolkits)
+    labels.extend(f"{tool_name} (failed: {error})" for tool_name, error in sorted(failed_toolkits))
+    return ", ".join(labels)
 
 
 def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
@@ -418,12 +438,16 @@ def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
         if function:
             matches.append((function, toolkit, registered_name))
 
-    if len(matches) == 1:
+    matching_build_errors = _matching_tool_build_errors(command_tool, build_errors)
+    if len(matches) == 1 and not matching_build_errors:
         function, toolkit, _ = matches[0]
         return function, toolkit, None
 
-    if len(matches) > 1:
-        toolkit_names = ", ".join(sorted({name for _, _, name in matches}))
+    if matches:
+        toolkit_names = _format_toolkit_candidates(
+            {name for _, _, name in matches},
+            matching_build_errors,
+        )
         return None, None, f"Command tool '{command_tool}' is ambiguous across toolkits: {toolkit_names}."
 
     for registered_name, toolkit in toolkits:
@@ -436,11 +460,11 @@ def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
             return next(iter(functions.values())), toolkit, None
         return None, None, f"Tool '{command_tool}' exposes multiple functions; specify one."
 
-    matching_build_errors = _matching_tool_build_errors(command_tool, build_errors)
     if len(matching_build_errors) == 1:
-        return None, None, f"Tool '{command_tool}' failed: {matching_build_errors[0]}"
+        _, error = matching_build_errors[0]
+        return None, None, f"Tool '{command_tool}' failed: {error}"
     if len(matching_build_errors) > 1:
-        joined_errors = "; ".join(str(error) for error in matching_build_errors)
+        joined_errors = "; ".join(f"{tool_name}: {error}" for tool_name, error in matching_build_errors)
         return None, None, f"Tool '{command_tool}' failed: {joined_errors}"
 
     return None, None, f"Tool '{command_tool}' not found for this agent."

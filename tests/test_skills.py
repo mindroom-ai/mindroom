@@ -14,6 +14,7 @@ import mindroom.tool_system.skills as skills_module
 from mindroom.agents import build_agent_toolkit
 from mindroom.commands.handler import (
     _collect_agent_toolkits,
+    _resolve_tool_dispatch_target,
     _run_skill_command_tool,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -28,6 +29,7 @@ from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolMetadata,
     ToolStatus,
     register_tool_with_metadata,
 )
@@ -1595,6 +1597,130 @@ async def test_skill_command_tool_dispatch_surfaces_requested_inherited_tool_fai
         TOOL_METADATA.update(original_metadata)
 
     assert result == "❌ Tool 'lookup' failed: lookup toolkit failed"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_treats_loaded_and_failed_bare_function_matches_as_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare function dispatch should not silently choose a loaded toolkit when another matching toolkit failed."""
+
+    class WorkingLookupTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="working_lookup_tools", tools=[self.lookup])
+
+        def lookup(self, query: str) -> str:
+            return f"working:{query}"
+
+    class BrokenLookupTools(Toolkit):
+        def __init__(self) -> None:
+            msg = "Credentialed API key is required"
+            raise ValueError(msg)
+
+        def lookup(self, query: str) -> str:
+            return query
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="working_lookup_toolkit",
+            display_name="Working Lookup",
+            description="Working lookup tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def working_lookup_toolkit() -> type[Toolkit]:
+            return WorkingLookupTools
+
+        @register_tool_with_metadata(
+            name="broken_lookup_toolkit",
+            display_name="Broken Lookup",
+            description="Broken lookup tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def broken_lookup_toolkit() -> type[Toolkit]:
+            return BrokenLookupTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["working_lookup_toolkit", "broken_lookup_toolkit"]
+        config.agents["code"].include_default_tools = False
+
+        monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+        monkeypatch.setenv("ACCOUNT_ID", "account-456")
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=resolve_runtime_paths(),
+            agent_name="code",
+            command_tool="lookup",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=resolve_runtime_paths(),
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+            ),
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result.startswith("❌ Command tool 'lookup' is ambiguous across toolkits:")
+    assert "working_lookup_toolkit" in result
+    assert "broken_lookup_toolkit (failed: Credentialed API key is required)" in result
+
+
+def test_resolve_tool_dispatch_target_uses_declared_function_names_when_factory_import_fails() -> None:
+    """Explicit metadata function names should still match build errors when factory discovery raises."""
+    original_metadata = TOOL_METADATA.copy()
+    try:
+        TOOL_METADATA["github"] = ToolMetadata(
+            name="github",
+            display_name="GitHub",
+            description="GitHub toolkit",
+            category=ToolCategory.DEVELOPMENT,
+            function_names=("get_repository",),
+        )
+
+        _, _, error = _resolve_tool_dispatch_target(
+            toolkits=[],
+            build_errors={"github": ImportError("missing optional dep")},
+            command_tool="get_repository",
+        )
+    finally:
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert error == "Tool 'get_repository' failed: missing optional dep"
+
+
+def test_resolve_tool_dispatch_target_uses_declared_function_names_for_dynamic_mcp_tools() -> None:
+    """Dynamic MCP toolkits should match bare function names from metadata even without class methods."""
+    original_metadata = TOOL_METADATA.copy()
+    try:
+        TOOL_METADATA["mcp_demo"] = ToolMetadata(
+            name="mcp_demo",
+            display_name="MCP Demo",
+            description="Dynamic MCP toolkit",
+            category=ToolCategory.DEVELOPMENT,
+            function_names=("remote_lookup",),
+        )
+
+        _, _, error = _resolve_tool_dispatch_target(
+            toolkits=[],
+            build_errors={"mcp_demo": ValueError("mcp toolkit failed")},
+            command_tool="remote_lookup",
+        )
+    finally:
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert error == "Tool 'remote_lookup' failed: mcp toolkit failed"
 
 
 def test_workspace_skills_dir_discovered(tmp_path: Path) -> None:

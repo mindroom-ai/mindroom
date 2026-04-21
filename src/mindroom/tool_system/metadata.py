@@ -659,6 +659,7 @@ class ToolMetadata:
     auth_provider: str | None = None  # Name of integration that provides auth (e.g., "google")
     docs_url: str | None = None  # Documentation URL
     helper_text: str | None = None  # Additional help text for setup
+    function_names: tuple[str, ...] = ()  # Optional explicit callable names for dispatch/error matching
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()  # Explicit MindRoom-managed constructor kwargs
     factory: Callable | None = None  # Factory function to create tool instance
 
@@ -681,6 +682,7 @@ def register_tool_with_metadata(
     auth_provider: str | None = None,
     docs_url: str | None = None,
     helper_text: str | None = None,
+    function_names: tuple[str, ...] = (),
     managed_init_args: tuple[ToolManagedInitArg, ...] = (),
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
     """Decorator to register a tool with metadata.
@@ -705,6 +707,7 @@ def register_tool_with_metadata(
         auth_provider: Name of integration that provides authentication
         docs_url: Link to documentation
         helper_text: Additional setup instructions
+        function_names: Optional explicit callable names exposed by the toolkit
         managed_init_args: Explicit MindRoom-managed constructor kwargs
 
     Returns:
@@ -731,6 +734,7 @@ def register_tool_with_metadata(
             auth_provider=auth_provider,
             docs_url=docs_url,
             helper_text=helper_text,
+            function_names=function_names,
             managed_init_args=managed_init_args,
             factory=func,
         )

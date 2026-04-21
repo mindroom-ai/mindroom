@@ -117,6 +117,8 @@ def validate_mcp_agent_overrides(tool_name: str, overrides: dict[str, object]) -
 def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetadata:
     tool_name = mcp_tool_name(server_id)
     transport_label = server_config.transport.replace("-", " ")
+    manager = require_mcp_server_manager()
+    catalog = manager.get_catalog(server_id) if manager is not None else None
     return ToolMetadata(
         name=tool_name,
         display_name=f"MCP {server_id.replace('_', ' ').title()}",
@@ -127,6 +129,7 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
         config_fields=_tool_override_fields(),
         agent_override_fields=_tool_override_fields(),
         authored_override_validator=ToolAuthoredOverrideValidator.MCP,
+        function_names=tuple(tool.function_name for tool in catalog.tools) if catalog is not None else (),
     )
 
 
