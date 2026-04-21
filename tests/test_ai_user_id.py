@@ -2480,6 +2480,32 @@ class TestUserIdPassthrough:
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
+    async def test_ai_response_passes_raw_prompt_separately_from_model_prompt(self, tmp_path: Path) -> None:
+        """The AI entrypoint should preserve the raw user prompt when model_prompt is provided."""
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = None
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            await ai_response(
+                agent_name="general",
+                prompt="raw prompt",
+                model_prompt="model metadata",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+            )
+
+        assert mock_prepare.await_args.args[1] == "raw prompt"
+        assert mock_prepare.await_args.kwargs["model_prompt"] == "model metadata"
+
+    @pytest.mark.asyncio
     async def test_stream_agent_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
         """Streaming replies should build agents against the orchestrator-owned config file."""
         config_path = tmp_path / "custom-config.yaml"
@@ -2540,6 +2566,38 @@ class TestUserIdPassthrough:
 
         assert mock_prepare.await_args.kwargs["current_sender_id"] is None
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_passes_raw_prompt_separately_from_model_prompt(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming should preserve the raw prompt when model_prompt is present."""
+        mock_agent = MagicMock()
+
+        async def _empty_stream() -> AsyncIterator[str]:
+            if False:
+                yield ""
+
+        mock_agent.arun = MagicMock(return_value=_empty_stream())
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            _ = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="raw prompt",
+                    model_prompt="model metadata",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+            ]
+
+        assert mock_prepare.await_args.args[1] == "raw prompt"
+        assert mock_prepare.await_args.kwargs["model_prompt"] == "model metadata"
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
@@ -2882,7 +2940,8 @@ class TestUserIdPassthrough:
 
         assert response == "Recovered response"
         mock_prepare.assert_awaited_once()
-        assert mock_prepare.await_args.args[1] == "expanded prompt"
+        assert mock_prepare.await_args.args[1] == "raw prompt"
+        assert mock_prepare.await_args.kwargs["model_prompt"] == "expanded prompt"
         assert logged_contexts == [
             {
                 "session_id": "session1",
@@ -3065,7 +3124,8 @@ class TestUserIdPassthrough:
 
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
         mock_prepare.assert_awaited_once()
-        assert mock_prepare.await_args.args[1] == "expanded prompt"
+        assert mock_prepare.await_args.args[1] == "raw prompt"
+        assert mock_prepare.await_args.kwargs["model_prompt"] == "expanded prompt"
         assert logged_contexts == [
             {
                 "session_id": "session1",

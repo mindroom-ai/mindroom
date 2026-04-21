@@ -1644,6 +1644,57 @@ class TestAgentBot:
         assert "reply_to_event_id: $reply_plain:localhost" in model_prompt
 
     @pytest.mark.asyncio
+    async def test_process_and_respond_keeps_thread_root_metadata_when_reply_anchor_is_root(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Thread-root replies should preserve the canonical thread id in tool-call metadata."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["matrix_message"],
+                        include_default_tools=False,
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot.client.room_send.return_value = _room_send_response("$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        mock_ai = AsyncMock(return_value="Handled")
+        target = MessageTarget.resolve(
+            room_id="!test:localhost",
+            thread_id=None,
+            reply_to_event_id="$thread_root:localhost",
+            thread_start_root_event_id="$thread_root:localhost",
+        )
+
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            ai_response=mock_ai,
+        ):
+            await bot._response_runner.process_and_respond(
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Continue",
+                    reply_to_event_id="$thread_root:localhost",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    target=target,
+                ),
+            )
+
+        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
+        assert "thread_id: $thread_root:localhost" in model_prompt
+        assert "reply_to_event_id: $thread_root:localhost" in model_prompt
+
+    @pytest.mark.asyncio
     async def test_process_and_respond_streaming_resolves_knowledge_once(
         self,
         mock_agent_user: AgentMatrixUser,

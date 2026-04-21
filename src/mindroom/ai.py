@@ -1370,7 +1370,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     pipeline_timing.mark("ai_prepare_start")
                 prepared_run = await _prepare_agent_and_prompt(
                     agent_name,
-                    model_prompt or prompt,
+                    prompt,
                     runtime_paths,
                     config,
                     session_id,
@@ -1724,7 +1724,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     pipeline_timing.mark("ai_prepare_start")
                 prepared_run = await _prepare_agent_and_prompt(
                     agent_name,
-                    model_prompt or prompt,
+                    prompt,
                     runtime_paths,
                     config,
                     session_id,

@@ -150,17 +150,12 @@ def _append_matrix_prompt_context(
         return prompt
     if "[Matrix metadata for tool calls]" in prompt:
         return prompt
-    prompt_thread_root = target.resolved_thread_id
-    if prompt_thread_root == target.reply_to_event_id:
-        prompt_thread_root = target.source_thread_id
-    if prompt_thread_root == target.reply_to_event_id:
-        prompt_thread_root = None
 
     metadata_block = "\n".join(
         (
             "[Matrix metadata for tool calls]",
             f"room_id: {target.room_id}",
-            f"thread_id: {prompt_thread_root or 'none'}",
+            f"thread_id: {target.resolved_thread_id or 'none'}",
             f"reply_to_event_id: {target.reply_to_event_id or 'none'}",
             "Use these IDs when calling matrix_message.",
         ),
