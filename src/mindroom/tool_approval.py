@@ -650,7 +650,9 @@ class ApprovalManager:
         if pending is None:
             return AnchoredApprovalActionResult(handled=False)
         if pending.status != "pending":
-            return AnchoredApprovalActionResult(handled=pending.resolution_synced_at is None)
+            return AnchoredApprovalActionResult(
+                handled=pending.resolution_synced_at is None and pending.approver_user_id == resolved_by,
+            )
         if pending.approver_user_id != resolved_by:
             return AnchoredApprovalActionResult(handled=False)
         if status == "approved" and pending.arguments_preview_truncated:
