@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 import pytest
 from agno.agent import Agent as AgnoAgent
+from agno.models.message import Message
+from agno.run.agent import RunOutput
 from agno.team import Team as AgnoTeam
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -69,15 +71,21 @@ def _prepared_team_execution_context(
     final_prompt: str,
     replay_plan: ResolvedReplayPlan | None = None,
     replays_persisted_history: bool = False,
+    messages: list[Message] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         prepared_prompt=final_prompt,
         final_prompt=final_prompt,
+        messages=messages or [Message(role="user", content=final_prompt)],
         replay_plan=replay_plan,
         unseen_event_ids=[],
         replays_persisted_history=replays_persisted_history,
         compaction_outcomes=[],
     )
+
+
+def _message_summaries(messages: list[Message]) -> list[tuple[str, str | None]]:
+    return [(message.role, str(message.content) if message.content is not None else None) for message in messages]
 
 
 @pytest.fixture
@@ -2266,6 +2274,40 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert mock_prepare.await_args.kwargs["message"] == "Build a feature"
+        run_input = mock_team.arun.call_args.args[0]
+        assert _message_summaries(run_input) == [("user", "Build a feature")]
+
+    def test_team_non_streaming_formats_plain_run_output_fallback(self, team_app_client: TestClient) -> None:
+        """Non-streaming team completions should format plain RunOutput fallbacks like the main runtime."""
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = _make_test_team()
+        mock_team.arun = AsyncMock(return_value=RunOutput(content="Recovered team response"))
+        mock_agents = [_make_test_agent("GeneralAgent")]
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                },
+            )
+
+        assert response.status_code == 200
+        content = response.json()["choices"][0]["message"]["content"]
+        assert content == "**Agent**: Recovered team response"
+        assert "RunOutput(" not in content
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
         """Streaming team completion streams TeamContentEvent (leader text) directly."""
@@ -2328,7 +2370,8 @@ class TestTeamCompletion:
         assert mock_prepare.await_count == 1
         assert mock_prepare.await_args.kwargs["agents"] == mock_agents
         assert mock_prepare.await_args.kwargs["team"] is mock_team
-        assert mock_team.arun.call_args.args[0] == "Build it"
+        run_input = mock_team.arun.call_args.args[0]
+        assert _message_summaries(run_input) == [("user", "Build it")]
 
     def test_team_streaming_falls_back_to_final_team_run_output(self, team_app_client: TestClient) -> None:
         """Providers that yield a final TeamRunOutput in stream mode should still emit content."""
@@ -2373,6 +2416,48 @@ class TestTeamCompletion:
                 if "content" in delta:
                     content_parts.append(delta["content"])
         assert "".join(content_parts) == "**Team Consensus**:\n\nTeam consensus result"
+
+    def test_team_streaming_falls_back_to_final_run_output(self, team_app_client: TestClient) -> None:
+        """Providers that yield a final plain RunOutput in stream mode should still emit content."""
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield RunOutput(content="Recovered team response")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        content_parts: list[str] = []
+        for line in response.text.strip().split("\n\n"):
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunk = json.loads(line.removeprefix("data: "))
+                delta = chunk["choices"][0]["delta"]
+                if "content" in delta:
+                    content_parts.append(delta["content"])
+        assert "".join(content_parts) == "**Agent**: Recovered team response"
 
     def test_team_streaming_first_team_run_output_error_returns_500(self, team_app_client: TestClient) -> None:
         """Streaming should treat an error-status TeamRunOutput as a failed team execution."""
@@ -2544,7 +2629,10 @@ class TestTeamCompletion:
                 "mindroom.api.openai_compat._build_team",
                 return_value=([_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE),
             ),
-            patch("mindroom.api.openai_compat._prepare_openai_team_prompt", new=AsyncMock(return_value="Build it")),
+            patch(
+                "mindroom.api.openai_compat._prepare_openai_team_run_input",
+                new=AsyncMock(return_value=[Message(role="user", content="Build it")]),
+            ),
         ):
             response = await openai_compat._stream_team_completion(
                 "super_team",
@@ -3034,8 +3122,12 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        prompt = mock_team.arun.call_args.args[0]
-        assert prompt == "user: Start\n\nassistant: Ack\n\nFollow-up"
+        run_input = mock_team.arun.call_args.args[0]
+        assert _message_summaries(run_input) == [
+            ("user", "user: Start"),
+            ("user", "assistant: Ack"),
+            ("user", "Follow-up"),
+        ]
 
     def test_team_non_streaming_prefers_persisted_history_over_thread_history(
         self,
@@ -3089,11 +3181,8 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
-        prompt = mock_team.arun.call_args.args[0]
-        assert prompt == "Follow-up"
-        assert "Previous conversation in this thread:" not in prompt
-        assert "user: Start" not in prompt
-        assert "assistant: Ack" not in prompt
+        run_input = mock_team.arun.call_args.args[0]
+        assert _message_summaries(run_input) == [("user", "Follow-up")]
 
     def test_team_streaming_prefers_persisted_history_over_thread_history(self, team_app_client: TestClient) -> None:
         """Persisted team history should suppress request-history stuffing in the streaming path too."""
@@ -3140,9 +3229,8 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
-        prompt = mock_team.arun.call_args.args[0]
-        assert prompt == "Follow-up"
-        assert "Previous conversation in this thread:" not in prompt
+        run_input = mock_team.arun.call_args.args[0]
+        assert _message_summaries(run_input) == [("user", "Follow-up")]
 
     def test_collaborate_mode_delegates_to_all(self) -> None:
         """Collaborate mode sets delegate_to_all_members=True on Team."""

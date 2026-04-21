@@ -16,7 +16,7 @@ from html import escape
 from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import uuid4
 
-from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
@@ -69,8 +69,9 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
     from agno.knowledge.knowledge import Knowledge
+    from agno.models.message import Message
     from agno.models.response import ToolExecution
-    from agno.run.agent import RunOutput, RunOutputEvent
+    from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
 
@@ -1179,7 +1180,7 @@ def _format_team_output(response: TeamRunOutput | RunOutput) -> str:
     return "\n\n".join(parts) if parts else str(response.content or "")
 
 
-async def _prepare_openai_team_prompt(
+async def _prepare_openai_team_run_input(
     *,
     scope_context: ScopeSessionContext | None,
     team_name: str,
@@ -1189,8 +1190,8 @@ async def _prepare_openai_team_prompt(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-) -> str:
-    """Prepare the final prompt for one OpenAI-compatible team run."""
+) -> list[Message]:
+    """Prepare the canonical run input for one OpenAI-compatible team run."""
     prepared_execution = await prepare_materialized_team_execution(
         scope_context=scope_context,
         agents=agents,
@@ -1208,7 +1209,7 @@ async def _prepare_openai_team_prompt(
         matrix_run_metadata=None,
         system_enrichment_items=(),
     )
-    return prepared_execution.prepared_prompt
+    return list(prepared_execution.messages)
 
 
 async def _non_stream_team_completion(
@@ -1257,7 +1258,7 @@ async def _non_stream_team_completion(
             )
 
             try:
-                team_prompt = await _prepare_openai_team_prompt(
+                team_run_input = await _prepare_openai_team_run_input(
                     scope_context=scope_context,
                     team_name=team_name,
                     agents=agents,
@@ -1271,11 +1272,13 @@ async def _non_stream_team_completion(
                 logger.exception("Team member preparation failed", team=team_name)
                 return _error_response(500, "Team execution failed", error_type="server_error")
             try:
-                response = await team.arun(team_prompt, session_id=session_id, user_id=user)
+                response = await team.arun(team_run_input, session_id=session_id, user_id=user)
             except Exception:
                 logger.exception("Team execution failed", team=team_name)
                 return _error_response(500, "Team execution failed", error_type="server_error")
-            response_text = _format_team_output(response) if isinstance(response, TeamRunOutput) else str(response)
+            response_text = (
+                _format_team_output(response) if isinstance(response, (TeamRunOutput, RunOutput)) else str(response)
+            )
 
             if _is_error_response(response_text):
                 logger.warning("Team response returned error", team=team_name, error=response_text)
@@ -1318,7 +1321,7 @@ async def _stream_team_completion(  # noqa: C901
     agents: list[Agent] = []
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
-    stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None] | None = None
+    stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
 
     async def _cleanup() -> None:
         if stream is not None:
@@ -1364,7 +1367,7 @@ async def _stream_team_completion(  # noqa: C901
         )
 
         try:
-            team_prompt = await _prepare_openai_team_prompt(
+            team_run_input = await _prepare_openai_team_run_input(
                 scope_context=scope_context,
                 team_name=team_name,
                 agents=agents,
@@ -1384,9 +1387,9 @@ async def _stream_team_completion(  # noqa: C901
                 stream_with_tool_execution_identity(
                     execution_identity,
                     stream_factory=lambda: cast(
-                        "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent, None]",
+                        "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
                         team.arun(
-                            team_prompt,
+                            team_run_input,
                             stream=True,
                             stream_events=True,
                             session_id=session_id,
@@ -1438,7 +1441,7 @@ async def _stream_team_completion(  # noqa: C901
         raise
 
 
-def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent) -> str | None:
+def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput) -> str | None:
     """Extract explicit error text from a team stream event."""
     if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
         return str(event.content or "Unknown team error")
@@ -1449,7 +1452,7 @@ def _extract_team_stream_error(event: RunOutputEvent | TeamRunOutputEvent) -> st
 
 
 def _classify_team_event(
-    event: RunOutputEvent | TeamRunOutputEvent,
+    event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput,
     tool_state: _ToolStreamState,
 ) -> str | None:
     """Classify a team stream event and return formatted content, or ``None`` to skip.
@@ -1460,6 +1463,11 @@ def _classify_team_event(
     from parallel members.
     Tool events (agent-level and team-level) are emitted for progress feedback.
     """
+    # Some providers fall back to a single final TeamRunOutput or RunOutput in streaming mode.
+    if isinstance(event, (TeamRunOutput, RunOutput)):
+        formatted_output = _format_team_output(event).strip()
+        return formatted_output or None
+
     # Tool events — emit for progress feedback
     tool_text = _format_stream_tool_event(event, tool_state)
     if tool_text is not None:
@@ -1468,11 +1476,6 @@ def _classify_team_event(
     # Team leader content — stream directly (synthesized answer)
     if isinstance(event, TeamContentEvent) and event.content:
         return str(event.content)
-
-    # Some providers fall back to a single final TeamRunOutput even in streaming mode.
-    if isinstance(event, TeamRunOutput):
-        formatted_output = _format_team_output(event).strip()
-        return formatted_output or None
 
     # Everything else (member content, reasoning, memory, hooks, etc.) — skip.
     return None
@@ -1491,8 +1494,8 @@ def _finalize_pending_tools(tool_state: _ToolStreamState) -> str | None:
 
 async def _team_stream_event_generator(
     *,
-    stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent],
-    first_event: RunOutputEvent | TeamRunOutputEvent,
+    stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput],
+    first_event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput,
     completion_id: str,
     created: int,
     model_id: str,
