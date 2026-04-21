@@ -821,6 +821,7 @@ class ApprovalManager:
             pending.resolved_at = decision.resolved_at
             pending.resolved_by = resolved_by
             pending.resolution_synced_at = None
+            pending.arguments = {}
             return pending, decision
 
     async def _edit_resolved_event(
@@ -850,6 +851,7 @@ class ApprovalManager:
             return
         pending.resolution_synced_at = _utcnow()
         self._persist_request(pending)
+        self._discard(pending.id)
 
     async def _await_approval_decision(self, pending: PendingApproval) -> ApprovalDecision:
         """Wait for one approval result using the already-advertised absolute expiry."""
@@ -888,6 +890,10 @@ class ApprovalManager:
     def _discard(self, approval_id: str) -> None:
         with self._state_lock:
             pending = self._pending_by_id.pop(approval_id, None)
+            if pending is None:
+                pending = self._requests_by_id.pop(approval_id, None)
+            else:
+                self._requests_by_id.pop(approval_id, None)
             if pending is None or pending.event_id is None:
                 return
             self._approval_id_by_event_id.pop(pending.event_id, None)

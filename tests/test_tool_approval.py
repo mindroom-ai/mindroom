@@ -1084,6 +1084,31 @@ async def test_handle_approval_resolution_updates_future_and_card(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_synced_resolved_approval_is_evicted_from_live_indexes(tmp_path: Path) -> None:
+    """Resolved approvals should clear raw arguments and disappear from live lookup indexes after sync."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock(return_value=True)
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+
+    await store.approve(pending.id, resolved_by="@user:localhost")
+    decision = await task
+
+    assert decision.status == "approved"
+    assert pending.arguments == {}
+    assert pending.id not in store._requests_by_id
+    assert (
+        store.pending_transport_agent_name_for_event(
+            approval_event_id="$approval",
+            room_id="!room:localhost",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_programmatic_approve_requires_original_requester(tmp_path: Path) -> None:
     """Programmatic approval should reject non-requester actors."""
     runtime_paths = test_runtime_paths(tmp_path)
