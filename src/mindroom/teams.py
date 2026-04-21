@@ -42,6 +42,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     prepare_bound_team_execution_context,
+    render_prepared_team_messages_text,
 )
 from mindroom.history.runtime import (
     ScopeSessionContext,
@@ -114,17 +115,6 @@ class _PreparedMaterializedTeamExecution:
     prepared_prompt: str
     run_metadata: dict[str, Any] | None
     unseen_event_ids: list[str]
-
-
-def _render_team_run_input(messages: Sequence[Message]) -> str:
-    """Render prepared messages into the string form Agno teams actually consume."""
-    rendered_chunks: list[str] = []
-    for message in messages:
-        if not message.content:
-            continue
-        content = str(message.content)
-        rendered_chunks.append(f"assistant: {content}" if message.role == "assistant" else content)
-    return "\n\n".join(rendered_chunks)
 
 
 def _next_retry_run_id(run_id: str | None) -> str | None:
@@ -1363,7 +1353,7 @@ async def prepare_materialized_team_execution(
         extra_metadata=matrix_run_metadata,
     )
     return _PreparedMaterializedTeamExecution(
-        prepared_prompt=_render_team_run_input(prepared_execution.messages),
+        prepared_prompt=render_prepared_team_messages_text(prepared_execution.messages),
         run_metadata=run_metadata,
         unseen_event_ids=prepared_execution.unseen_event_ids,
     )
