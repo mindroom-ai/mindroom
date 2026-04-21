@@ -46,6 +46,7 @@ _DEFAULT_REINITIALIZE_REASON = "MindRoom reinitialized before approval completed
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
+_DEFAULT_UNDELIVERED_RESTART_REASON = "MindRoom restarted before approval request could be delivered to Matrix."
 _APPROVE_REACTION_KEYS = frozenset({"✅"})
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MANAGER: ApprovalManager | None = None
@@ -295,6 +296,17 @@ class ApprovalManager:
         with self._state_lock:
             return list(self._pending_by_id.values())
 
+    def _set_event_id(self, approval_id: str, event_id: str) -> None:
+        with self._state_lock:
+            pending = self._requests_by_id.get(approval_id)
+            if pending is None:
+                return
+            if pending.event_id is not None:
+                self._approval_id_by_event_id.pop(pending.event_id, None)
+            pending.event_id = event_id
+            if pending.status == "pending":
+                self._approval_id_by_event_id[event_id] = approval_id
+
     def _load_existing(self) -> None:
         loaded_requests: dict[str, PendingApproval] = {}
         for request_path in sorted(self._storage_dir.glob("*.json")):
@@ -312,7 +324,9 @@ class ApprovalManager:
         for pending in loaded_requests.values():
             if pending.status == "pending":
                 pending.status = "expired"
-                pending.resolution_reason = _DEFAULT_RESTART_REASON
+                pending.resolution_reason = (
+                    _DEFAULT_RESTART_REASON if pending.event_id is not None else _DEFAULT_UNDELIVERED_RESTART_REASON
+                )
                 pending.resolved_at = _utcnow()
                 pending.resolved_by = None
                 pending.resolution_synced_at = None
@@ -404,6 +418,8 @@ class ApprovalManager:
             expires_at=requested_at + timedelta(seconds=max(timeout_seconds, 0.0)),
             future=Future(),
         )
+        self._store_request(pending)
+        self._persist_request(pending)
 
         event_id: str | None = None
         try:
@@ -423,10 +439,22 @@ class ApprovalManager:
                 exc_info=True,
             )
         if not event_id:
-            return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
+            logger.warning(
+                "Approval Matrix event was not delivered",
+                approval_id=pending.id,
+                room_id=room_id,
+                thread_id=thread_id,
+                agent_name=agent_name,
+            )
+            decision = await self._resolve_pending(
+                pending.id,
+                status="expired",
+                reason=_DEFAULT_SEND_FAILURE_REASON,
+                resolved_by=None,
+            )
+            return decision or self._decision_from_pending(pending)
 
-        pending.event_id = event_id
-        self._store_request(pending)
+        self._set_event_id(pending.id, event_id)
         self._persist_request(pending)
 
         try:

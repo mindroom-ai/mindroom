@@ -150,7 +150,7 @@ def _approval_room() -> MagicMock:
     return room
 
 
-def _create_persisted_pending_request(storage_dir: Path) -> str:
+def _create_persisted_pending_request(storage_dir: Path, *, event_id: str | None = "$approval-event") -> str:
     request_id = "persisted-pending"
     payload = {
         "id": request_id,
@@ -170,7 +170,7 @@ def _create_persisted_pending_request(storage_dir: Path) -> str:
         "resolution_reason": None,
         "resolved_at": None,
         "resolved_by": None,
-        "event_id": "$approval-event",
+        "event_id": event_id,
         "resolution_synced_at": None,
     }
     request_path = storage_dir / f"{request_id}.json"
@@ -775,6 +775,45 @@ async def test_request_approval_expires_when_matrix_send_fails(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_request_approval_persists_request_before_matrix_send(tmp_path: Path) -> None:
+    """Approval state should be durable before the Matrix transport is attempted."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    editor = AsyncMock()
+
+    async def sender(room_id: str, thread_id: str, agent_name: str, content: dict[str, object]) -> str | None:
+        del room_id, thread_id, agent_name
+        request_path = runtime_paths.storage_root / "approvals" / f"{content['approval_id']}.json"
+        assert request_path.exists()
+        persisted_payload = json.loads(request_path.read_text(encoding="utf-8"))
+        assert persisted_payload["status"] == "pending"
+        assert persisted_payload["event_id"] is None
+        return None
+
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+
+    decision = await store.request_approval(
+        tool_name="run_shell_command",
+        arguments={"command": "echo hi"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        matched_rule="run_shell_*",
+        script_path=None,
+        timeout_seconds=60,
+    )
+
+    assert decision.status == "expired"
+    assert decision.reason == "Tool approval request could not be delivered to Matrix."
+    persisted_requests = list((runtime_paths.storage_root / "approvals").glob("*.json"))
+    assert len(persisted_requests) == 1
+    persisted_payload = json.loads(persisted_requests[0].read_text(encoding="utf-8"))
+    assert persisted_payload["status"] == "expired"
+    assert persisted_payload["event_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_handle_approval_resolution_updates_future_and_card(tmp_path: Path) -> None:
     """Direct resolution by approval ID should resolve the pending request exactly once."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -906,6 +945,20 @@ def test_initialize_approval_store_expires_persisted_pending_requests(tmp_path: 
     assert payload["status"] == "expired"
     assert payload["resolution_reason"] == "MindRoom restarted before approval completed."
     assert payload["resolution_synced_at"] is None
+
+
+def test_initialize_approval_store_expires_undelivered_pending_requests(tmp_path: Path) -> None:
+    """Startup should fail closed for persisted approvals that never recorded an event ID."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_pending_request(runtime_paths.storage_root / "approvals", event_id=None)
+
+    store = initialize_approval_store(runtime_paths)
+
+    assert store.list_pending() == []
+    payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request_id}.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "expired"
+    assert payload["resolution_reason"] == "MindRoom restarted before approval request could be delivered to Matrix."
+    assert payload["event_id"] is None
 
 
 @pytest.mark.asyncio
