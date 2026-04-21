@@ -1,4 +1,9 @@
-"""Tool-call approval evaluation and Matrix-only approval management."""
+"""Tool-call approval evaluation and Matrix-only approval management.
+
+ApprovalManager is accessed from multiple event loops and threads.
+All reads and writes touching the in-memory approval indexes must go through
+``self._state_lock`` so approval resolution stays consistent across runtimes.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +25,7 @@ from uuid import uuid4
 from mindroom.constants import RuntimePaths, resolve_config_relative_path, safe_replace
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import is_agent_id
+from mindroom.tool_system.tool_failures import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -41,6 +47,7 @@ _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to 
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _APPROVE_REACTION_KEYS = frozenset({"✅"})
+_MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MANAGER: ApprovalManager | None = None
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
 logger = get_logger(__name__)
@@ -60,6 +67,31 @@ def _parse_datetime(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value)
 
 
+def _compact_preview_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(value)
+
+
+def _build_arguments_preview(arguments: dict[str, Any]) -> tuple[object, bool]:
+    sanitized = sanitize_failure_value(arguments)
+    preview_text = _compact_preview_text(sanitized)
+    if len(preview_text) <= _MAX_ARGUMENTS_PREVIEW_CHARS:
+        return sanitized, False
+    preview = sanitize_failure_text(preview_text, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS)
+    while len(json.dumps(preview, ensure_ascii=False, sort_keys=True)) > _MAX_ARGUMENTS_PREVIEW_CHARS:
+        overflow = len(json.dumps(preview, ensure_ascii=False, sort_keys=True)) - _MAX_ARGUMENTS_PREVIEW_CHARS
+        next_max_length = max(len(preview) - overflow - 8, 1)
+        next_preview = sanitize_failure_text(preview_text, max_length=next_max_length)
+        if next_preview == preview:
+            break
+        preview = next_preview
+    return preview, True
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovalDecision:
     """One resolved approval outcome."""
@@ -77,6 +109,8 @@ class PendingApproval:
     id: str
     tool_name: str
     arguments: dict[str, Any]
+    arguments_preview: object
+    arguments_preview_truncated: bool
     agent_name: str
     room_id: str | None
     thread_id: str | None
@@ -99,7 +133,8 @@ class PendingApproval:
         return {
             "id": self.id,
             "tool_name": self.tool_name,
-            "arguments": self.arguments,
+            "arguments_preview": self.arguments_preview,
+            "arguments_preview_truncated": self.arguments_preview_truncated,
             "agent_name": self.agent_name,
             "room_id": self.room_id,
             "thread_id": self.thread_id,
@@ -122,10 +157,24 @@ class PendingApproval:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> PendingApproval:
         """Rebuild one approval payload from disk."""
+        arguments_preview_payload = payload.get("arguments_preview")
+        if arguments_preview_payload is None:
+            legacy_arguments = payload.get("arguments")
+            if isinstance(legacy_arguments, dict):
+                arguments_preview_payload, arguments_preview_truncated = _build_arguments_preview(
+                    cast("dict[str, Any]", legacy_arguments),
+                )
+            else:
+                arguments_preview_payload = sanitize_failure_text(str(legacy_arguments or ""))
+                arguments_preview_truncated = False
+        else:
+            arguments_preview_truncated = bool(payload.get("arguments_preview_truncated"))
         return cls(
             id=cast("str", payload["id"]),
             tool_name=cast("str", payload["tool_name"]),
-            arguments=cast("dict[str, Any]", payload["arguments"]),
+            arguments={},
+            arguments_preview=arguments_preview_payload,
+            arguments_preview_truncated=arguments_preview_truncated,
             agent_name=cast("str", payload["agent_name"]),
             room_id=cast("str | None", payload.get("room_id")),
             thread_id=cast("str | None", payload.get("thread_id")),
@@ -302,10 +351,13 @@ class ApprovalManager:
         assert self._send_event is not None
 
         requested_at = _utcnow()
+        arguments_preview, arguments_preview_truncated = _build_arguments_preview(arguments)
         pending = PendingApproval(
             id=uuid4().hex,
             tool_name=tool_name,
             arguments=arguments,
+            arguments_preview=arguments_preview,
+            arguments_preview_truncated=arguments_preview_truncated,
             agent_name=agent_name,
             room_id=room_id,
             thread_id=thread_id,
@@ -699,7 +751,7 @@ class ApprovalManager:
             "body": self._event_body(pending.tool_name, pending.status),
             "tool_name": pending.tool_name,
             "tool_call_id": pending.id,
-            "arguments": pending.arguments,
+            "arguments": pending.arguments_preview,
             "agent_name": pending.agent_name,
             "status": pending.status,
             "approval_id": pending.id,
@@ -707,6 +759,8 @@ class ApprovalManager:
             "expires_at": pending.expires_at.isoformat(),
             "thread_id": pending.thread_id,
         }
+        if pending.arguments_preview_truncated:
+            content["arguments_truncated"] = True
         if pending.requester_id is not None:
             content["requester_id"] = pending.requester_id
         return content

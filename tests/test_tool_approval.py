@@ -105,12 +105,13 @@ async def _request_tool_approval(
     editor: AsyncMock | None = None,
     timeout_seconds: float = 60,
     requester_id: str = "@user:localhost",
+    arguments: dict[str, object] | None = None,
 ) -> tuple[ApprovalManager, asyncio.Task[ApprovalDecision], PendingApproval | None]:
     store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
     task = asyncio.create_task(
         store.request_approval(
             tool_name="run_shell_command",
-            arguments={"command": "echo hi"},
+            arguments=arguments or {"command": "echo hi"},
             agent_name="code",
             room_id="!room:localhost",
             thread_id="$thread",
@@ -154,7 +155,8 @@ def _create_persisted_pending_request(storage_dir: Path) -> str:
     payload = {
         "id": request_id,
         "tool_name": "run_shell_command",
-        "arguments": {"command": "echo hi"},
+        "arguments_preview": {"command": "echo hi"},
+        "arguments_preview_truncated": False,
         "agent_name": "code",
         "room_id": "!room:localhost",
         "thread_id": "$thread",
@@ -181,7 +183,8 @@ def _create_persisted_resolved_request(storage_dir: Path, *, request_id: str = "
     payload = {
         "id": request_id,
         "tool_name": "run_shell_command",
-        "arguments": {"command": "echo hi"},
+        "arguments_preview": {"command": "echo hi"},
+        "arguments_preview_truncated": False,
         "agent_name": "code",
         "room_id": "!room:localhost",
         "thread_id": "$thread",
@@ -460,6 +463,43 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
     assert editor.await_args.args[3]["status"] == "approved"
     assert editor.await_args.args[3]["thread_id"] == "$thread"
     assert store.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_request_approval_sanitizes_arguments_in_matrix_event_and_persistence(tmp_path: Path) -> None:
+    """Approval cards and persisted records should only expose bounded sanitized previews."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    secret_arguments = {
+        "command": "curl https://user:super-secret@example.com",
+        "headers": {"Authorization": "Bearer sk-live-secret-token"},
+        "prompt": "x" * 5000,
+    }
+    store, task, pending = await _request_tool_approval(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        arguments=secret_arguments,
+    )
+
+    assert pending is not None
+    assert pending.arguments == secret_arguments
+    event_payload = sender.await_args.args[3]
+    event_payload_text = json.dumps(event_payload, sort_keys=True)
+    persisted_text = (runtime_paths.storage_root / "approvals" / f"{pending.id}.json").read_text(encoding="utf-8")
+
+    assert "super-secret" not in event_payload_text
+    assert "sk-live-secret-token" not in event_payload_text
+    assert "super-secret" not in persisted_text
+    assert "sk-live-secret-token" not in persisted_text
+    assert "***redacted***" in event_payload_text
+    assert "***redacted***" in persisted_text
+    assert len(json.dumps(event_payload["arguments"], sort_keys=True)) <= 1200
+    assert event_payload["arguments_truncated"] is True
+
+    await store.approve(pending.id, resolved_by="@user:localhost")
+    await task
 
 
 @pytest.mark.asyncio
