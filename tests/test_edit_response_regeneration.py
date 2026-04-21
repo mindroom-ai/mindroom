@@ -1969,6 +1969,142 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
 
 
 @pytest.mark.asyncio
+async def test_team_handle_message_edit_uses_persisted_interrupted_response_event_id_after_restart(
+    tmp_path: Path,
+) -> None:
+    """A restarted team bot should regenerate against the visible interrupted reply when persistence provides it."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_team",
+        user_id="@mindroom_test_team:example.com",
+        display_name="Test Team",
+        password="test_password",  # noqa: S106
+    )
+    config = _team_test_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    team_member = config.get_ids(runtime_paths)["worker"]
+    session_id = create_session_id("!test:example.com", None)
+
+    bot = TeamBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=["!test:example.com"],
+        team_agents=[team_member],
+        team_mode="coordinate",
+    )
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
+    replace_edit_regenerator_deps(bot)
+    bot.logger = MagicMock()
+    bot.orchestrator = MagicMock(
+        current_config=config,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    storage = MagicMock()
+    storage.get_session.return_value = TeamSession(
+        session_id=session_id,
+        team_id="test_team",
+        runs=[
+            build_interrupted_replay_run(
+                snapshot=build_interrupted_replay_snapshot(
+                    user_message="@test_team original question",
+                    partial_text="## Worker\n\nHalf done",
+                    completed_tools=[],
+                    interrupted_tools=[],
+                    run_metadata={
+                        "matrix_event_id": "$original:example.com",
+                        "matrix_source_event_ids": ["$original:example.com"],
+                        "matrix_source_event_prompts": {
+                            "$original:example.com": "@test_team original question",
+                        },
+                    },
+                    response_event_id="$team-partial-response:example.com",
+                    interruption_reason="Run interrupted",
+                ),
+                run_id="run-interrupted",
+                scope_id="test_team",
+                session_id=session_id,
+                is_team=True,
+            ),
+        ],
+    )
+
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_team:example.com")
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* @test_team updated original question",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "@test_team updated original question",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = {
+        "content": {
+            "body": "* @test_team updated original question",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "@test_team updated original question",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "event_id": "$original:example.com",
+                "rel_type": "m.replace",
+            },
+        },
+        "event_id": "$edit:example.com",
+        "sender": "@user:example.com",
+    }
+
+    with (
+        patch.object(bot._conversation_state_writer, "create_storage", return_value=storage),
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch.object(
+            bot,
+            "_generate_response",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_generate_response,
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[MatrixID.from_agent("test_team", "example.com", runtime_paths)],
+            has_non_agent_mentions=False,
+            requires_full_thread_history=False,
+        )
+
+        await bot._edit_regenerator.handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
+
+    mock_generate_response.assert_awaited_once()
+    call_kwargs = mock_generate_response.call_args.kwargs
+    assert call_kwargs["existing_event_id"] == "$team-partial-response:example.com"
+    assert call_kwargs["reply_to_event_id"] == "$original:example.com"
+    assert _response_event_id(bot, "$original:example.com") == "$team-partial-response:example.com"
+
+
+@pytest.mark.asyncio
 async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp_path: Path) -> None:
     """Editing a numeric selection should keep the original question anchor and selection lookup metadata."""
     agent_user = AgentMatrixUser(
