@@ -606,6 +606,11 @@ class AgentBot:
         self._runtime_view.startup_thread_prewarm_registry = value
 
     @property
+    def runtime_started_at(self) -> float:
+        """Return the current runtime freshness boundary for this bot."""
+        return self._runtime_view.runtime_started_at
+
+    @property
     def hook_registry(self) -> HookRegistry:
         """Return the currently active hook registry."""
         return self._hook_registry_state.registry

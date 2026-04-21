@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
-EVENT_CACHE_SCHEMA_VERSION = 8
+EVENT_CACHE_SCHEMA_VERSION = 9
 _EVENT_CACHE_TABLES = (
     "thread_events",
     "events",
@@ -80,9 +80,16 @@ async def create_event_cache_schema(db: aiosqlite.Connection) -> None:
         CREATE TABLE IF NOT EXISTS events (
             event_id TEXT PRIMARY KEY,
             room_id TEXT NOT NULL,
+            origin_server_ts INTEGER NOT NULL,
             event_json TEXT NOT NULL,
             cached_at REAL NOT NULL
         )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_events_room_origin_ts
+        ON events(room_id, origin_server_ts DESC, event_id DESC)
         """,
     )
     await db.execute(

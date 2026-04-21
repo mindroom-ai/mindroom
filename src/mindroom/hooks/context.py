@@ -192,6 +192,7 @@ class HookContextSupport:
             "runtime_paths": self.runtime_paths,
             "logger": self.logger.bind(event_name=event_name),
             "correlation_id": correlation_id,
+            "runtime_started_at": getattr(self.runtime, "runtime_started_at", None),
             "message_sender": self.message_sender(),
             "matrix_admin": self.matrix_admin(),
             "room_state_querier": self.room_state_querier(),
@@ -251,6 +252,7 @@ class HookContext:
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
     correlation_id: str
+    runtime_started_at: float | None = field(default=None, kw_only=True)
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
     matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)

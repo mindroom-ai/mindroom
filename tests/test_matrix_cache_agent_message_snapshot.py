@@ -1,0 +1,506 @@
+"""Tests for the public latest-agent-message cache accessor."""
+
+from __future__ import annotations
+
+import sqlite3
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from mindroom.matrix.cache import (
+    AgentMessageSnapshot,
+    CacheUnavailable,
+    get_latest_agent_message_snapshot,
+)
+from mindroom.matrix.cache.event_cache import _EventCache
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def _message_event(
+    *,
+    event_id: str,
+    sender: str,
+    body: str,
+    origin_server_ts: int,
+    relates_to: dict[str, object] | None = None,
+    new_content: dict[str, object] | None = None,
+) -> dict[str, Any]:
+    content: dict[str, Any] = {
+        "body": body,
+        "msgtype": "m.text",
+    }
+    if relates_to is not None:
+        content["m.relates_to"] = relates_to
+    if new_content is not None:
+        content["m.new_content"] = {
+            "msgtype": "m.text",
+            **new_content,
+        }
+    return {
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": origin_server_ts,
+        "type": "m.room.message",
+        "content": content,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message(
+    tmp_path: Path,
+) -> None:
+    """Thread-scope reads should return the latest unedited agent message."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@agent:localhost",
+                    body="Answer",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+                ),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    snapshot = get_latest_agent_message_snapshot(
+        db_path=db_path,
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={
+            "body": "Answer",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+        },
+        origin_server_ts=2000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_sqlite_reader_returns_streaming_status_for_threaded_message(
+    tmp_path: Path,
+) -> None:
+    """Edited threaded messages should surface the latest visible stream status."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@agent:localhost",
+                    body="Working...",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+                ),
+                _message_event(
+                    event_id="$reply-edit",
+                    sender="@agent:localhost",
+                    body="* Working...",
+                    origin_server_ts=3000,
+                    relates_to={"rel_type": "m.replace", "event_id": "$reply"},
+                    new_content={
+                        "body": "Still working",
+                        "io.mindroom.stream_status": "streaming",
+                    },
+                ),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    snapshot = get_latest_agent_message_snapshot(
+        db_path=db_path,
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={
+            "body": "Still working",
+            "msgtype": "m.text",
+            "io.mindroom.stream_status": "streaming",
+        },
+        origin_server_ts=3000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_sqlite_reader_returns_room_level_message_when_thread_id_none(
+    tmp_path: Path,
+) -> None:
+    """Room-scope reads should skip threaded replies and stay on the room timeline."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                (
+                    "$room-message",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$room-message",
+                        sender="@agent:localhost",
+                        body="Room timeline reply",
+                        origin_server_ts=2000,
+                    ),
+                ),
+            ],
+        )
+        await cache.store_events_batch(
+            [
+                (
+                    "$thread-reply",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$thread-reply",
+                        sender="@agent:localhost",
+                        body="Thread reply",
+                        origin_server_ts=3000,
+                        relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+                    ),
+                ),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    snapshot = get_latest_agent_message_snapshot(
+        db_path=db_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={"body": "Room timeline reply", "msgtype": "m.text"},
+        origin_server_ts=2000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_returns_none_when_sender_has_no_message(
+    tmp_path: Path,
+) -> None:
+    """Missing sender matches should return None instead of raising."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                (
+                    "$room-message",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$room-message",
+                        sender="@other:localhost",
+                        body="Not the agent",
+                        origin_server_ts=2000,
+                    ),
+                ),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    snapshot = get_latest_agent_message_snapshot(
+        db_path=db_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_returns_none_when_cache_has_no_rows(
+    tmp_path: Path,
+) -> None:
+    """Empty cache files should return None for any scope lookup."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    await cache.close()
+
+    snapshot = get_latest_agent_message_snapshot(
+        db_path=db_path,
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot is None
+
+
+def test_real_sqlite_reader_handles_missing_db_returns_none(tmp_path: Path) -> None:
+    """Missing cache files should return None instead of raising."""
+    snapshot = get_latest_agent_message_snapshot(
+        db_path=tmp_path / "missing.db",
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot is None
+
+
+def test_accessor_raises_on_corrupt_db(tmp_path: Path) -> None:
+    """Existing non-SQLite cache files should raise CacheUnavailable."""
+    db_path = tmp_path / "event_cache.db"
+    db_path.write_text("not a sqlite database", encoding="utf-8")
+
+    with pytest.raises(CacheUnavailable):
+        get_latest_agent_message_snapshot(
+            db_path=db_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            sender="@agent:localhost",
+            runtime_started_at=0.0,
+        )
+
+
+def test_accessor_raises_when_required_tables_missing(tmp_path: Path) -> None:
+    """Existing SQLite files without the cache schema should raise CacheUnavailable."""
+    db_path = tmp_path / "event_cache.db"
+    sqlite3.connect(db_path).close()
+
+    with pytest.raises(CacheUnavailable):
+        get_latest_agent_message_snapshot(
+            db_path=db_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            sender="@agent:localhost",
+            runtime_started_at=0.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_accessor_rejects_stale_thread_cache_validated_too_long_ago(
+    tmp_path: Path,
+) -> None:
+    """Threaded reads should reject snapshots older than the shared cache max age."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@agent:localhost",
+                    body="Working...",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+                ),
+            ],
+            validated_at=400.0,
+        )
+    finally:
+        await cache.close()
+
+    with pytest.raises(CacheUnavailable, match="cache_too_old"):
+        get_latest_agent_message_snapshot(
+            db_path=db_path,
+            room_id="!room:localhost",
+            thread_id="$thread-root",
+            sender="@agent:localhost",
+            runtime_started_at=0.0,
+            now=1000.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_accessor_rejects_thread_cache_from_prior_bot_run(
+    tmp_path: Path,
+) -> None:
+    """Threaded reads should reject snapshots validated before the current runtime."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@agent:localhost",
+                    body="Working...",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+                ),
+            ],
+            validated_at=1000.0,
+        )
+    finally:
+        await cache.close()
+
+    with pytest.raises(CacheUnavailable, match="validated_before_runtime_start"):
+        get_latest_agent_message_snapshot(
+            db_path=db_path,
+            room_id="!room:localhost",
+            thread_id="$thread-root",
+            sender="@agent:localhost",
+            runtime_started_at=1001.0,
+            now=1001.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_accessor_rejects_invalidated_thread_cache(
+    tmp_path: Path,
+) -> None:
+    """Threaded reads should fail closed after durable invalidation."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@agent:localhost",
+                    body="Working...",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+                ),
+            ],
+            validated_at=1000.0,
+        )
+        await cache.mark_thread_stale(
+            "!room:localhost",
+            "$thread-root",
+            reason="test_invalidated",
+        )
+    finally:
+        await cache.close()
+
+    with pytest.raises(CacheUnavailable, match="thread_invalidated_after_validation"):
+        get_latest_agent_message_snapshot(
+            db_path=db_path,
+            room_id="!room:localhost",
+            thread_id="$thread-root",
+            sender="@agent:localhost",
+            runtime_started_at=0.0,
+            now=1000.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
+    tmp_path: Path,
+) -> None:
+    """Room-scope reads should follow Matrix timeline order, not cache write time."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                (
+                    "$room-message",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$room-message",
+                        sender="@agent:localhost",
+                        body="Newest room message",
+                        origin_server_ts=3000,
+                    ),
+                ),
+            ],
+        )
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@agent:localhost",
+                    body="Older thread root",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$thread-reply",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+                ),
+            ],
+            validated_at=5000.0,
+        )
+    finally:
+        await cache.close()
+
+    snapshot = get_latest_agent_message_snapshot(
+        db_path=db_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={"body": "Newest room message", "msgtype": "m.text"},
+        origin_server_ts=3000,
+    )

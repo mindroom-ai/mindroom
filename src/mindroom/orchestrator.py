@@ -1149,6 +1149,7 @@ class MultiAgentOrchestrator:
         if not self.hook_registry.has_hooks(EVENT_CONFIG_RELOADED):
             return
 
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         context = ConfigReloadedContext(
             event_name=EVENT_CONFIG_RELOADED,
             plugin_name="",
@@ -1157,6 +1158,7 @@ class MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             logger=logger.bind(event_name=EVENT_CONFIG_RELOADED),
             correlation_id=f"config-reload:{uuid4().hex}",
+            runtime_started_at=(router_bot.runtime_started_at if isinstance(router_bot, AgentBot) else time.time()),
             message_sender=self._hook_message_sender(),
             matrix_admin=self._hook_matrix_admin(),
             room_state_querier=self._hook_room_state_querier(),

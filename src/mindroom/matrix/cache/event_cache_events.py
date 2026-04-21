@@ -316,13 +316,14 @@ async def write_lookup_index_rows(
         return
     await db.executemany(
         """
-        INSERT OR REPLACE INTO events(event_id, room_id, event_json, cached_at)
-        VALUES (?, ?, ?, ?)
+        INSERT OR REPLACE INTO events(event_id, room_id, origin_server_ts, event_json, cached_at)
+        VALUES (?, ?, ?, ?, ?)
         """,
         [
             (
                 event.event_id,
                 room_id,
+                event.origin_server_ts,
                 event.event_json,
                 cached_at,
             )
