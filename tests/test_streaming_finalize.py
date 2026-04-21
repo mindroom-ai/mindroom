@@ -195,6 +195,7 @@ def _build_lifecycle(target: MessageTarget) -> tuple[ResponseLifecycle, SimpleNa
     request = _response_request(target)
     delivery_gateway = SimpleNamespace(
         edit_text=AsyncMock(return_value=True),
+        _emit_after_response_best_effort=AsyncMock(),
         deps=SimpleNamespace(response_hooks=SimpleNamespace(emit_cancelled_response=AsyncMock())),
     )
     runner = SimpleNamespace(
@@ -983,6 +984,39 @@ async def test_hook_driven_final_edit_uses_stream_state_terminal_status_when_sna
 
 
 @pytest.mark.asyncio
+async def test_streamed_no_final_edit_defers_after_response_until_terminal_lands(tmp_path: Path) -> None:
+    """A missed terminal stream edit must not emit after_response before the outer repair lands."""
+    gateway, target = _delivery_gateway(tmp_path)
+    request = _response_request(target)
+    stream_state = StreamDeliveryState(
+        finalization_outcome=StreamFinalizationOutcome(
+            terminal_landed=False,
+            terminal_event_id="$placeholder",
+            terminal_status=STREAM_STATUS_ERROR,
+            reason="terminal-edit-missed",
+        ),
+    )
+
+    delivery = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=target,
+            streamed_event_id="$placeholder",
+            streamed_text="answer",
+            delivery_kind="edited",
+            response_kind="ai",
+            response_envelope=request.response_envelope,
+            correlation_id="corr-defer-after-response",
+            tool_trace=None,
+            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+            stream_state=stream_state,
+        ),
+    )
+
+    assert delivery.event_id == "$placeholder"
+    gateway.deps.response_hooks.emit_after_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_runner_skips_outer_repair_after_successful_hook_terminal_fallback(tmp_path: Path) -> None:
     """A successful hook-driven fallback edit must suppress the later outer repair edit."""
     runner, target = _build_real_response_runner(tmp_path)
@@ -1282,6 +1316,45 @@ async def test_outer_repair_updates_post_response_delivery_result(tmp_path: Path
     assert delivery_result.event_id == "$placeholder"
     assert delivery_result.delivery_kind == "edited"
     assert delivery_result.suppressed is False
+
+
+@pytest.mark.asyncio
+async def test_outer_repair_emits_after_response_after_successful_terminal_repair() -> None:
+    """Outer repair should fire after_response exactly once after the repair edit succeeds."""
+    target = MessageTarget.resolve("!room:localhost", None, "$reply")
+    lifecycle, runner = _build_lifecycle(target)
+
+    await _finalize_lifecycle(
+        lifecycle=lifecycle,
+        outcome=DeliveryOutcome(
+            delivery_result=DeliveryResult(
+                event_id="$placeholder",
+                response_text="answer",
+                delivery_kind="edited",
+            ),
+            tracked_event_id="$placeholder",
+            stream_finalization=StreamFinalizationOutcome(
+                terminal_landed=False,
+                terminal_event_id="$placeholder",
+                terminal_status=STREAM_STATUS_COMPLETED,
+                reason="terminal-edit-missed",
+            ),
+            streaming_repair=_repair_payload(
+                target=target,
+                response_text="answer",
+            ),
+        ),
+    )
+
+    runner.deps.delivery_gateway.edit_text.assert_awaited_once()
+    runner.deps.delivery_gateway._emit_after_response_best_effort.assert_awaited_once_with(
+        correlation_id="corr-1",
+        envelope=_response_request(target).response_envelope,
+        response_text="answer",
+        response_event_id="$placeholder",
+        delivery_kind="edited",
+        response_kind="ai",
+    )
 
 
 @pytest.mark.asyncio

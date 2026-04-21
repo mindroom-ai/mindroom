@@ -761,14 +761,15 @@ class DeliveryGateway:
             request.streamed_text,
             extract_mapping=True,
         )
-        await self._emit_after_response_best_effort(
-            correlation_id=request.correlation_id,
-            envelope=request.response_envelope,
-            response_text=interactive_response.formatted_text,
-            response_event_id=request.streamed_event_id,
-            delivery_kind=request.delivery_kind,
-            response_kind=request.response_kind,
-        )
+        if stream_finalization is None or stream_finalization.terminal_landed:
+            await self._emit_after_response_best_effort(
+                correlation_id=request.correlation_id,
+                envelope=request.response_envelope,
+                response_text=interactive_response.formatted_text,
+                response_event_id=request.streamed_event_id,
+                delivery_kind=request.delivery_kind,
+                response_kind=request.response_kind,
+            )
         return DeliveryResult(
             event_id=request.streamed_event_id,
             response_text=interactive_response.formatted_text,

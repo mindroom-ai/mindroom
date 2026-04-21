@@ -266,6 +266,14 @@ class ResponseLifecycle:
             terminal_status=stream_finalization.terminal_status,
             reason=stream_finalization.reason,
         )
+        await self.runner.deps.delivery_gateway._emit_after_response_best_effort(
+            correlation_id=self.correlation_id,
+            envelope=self.response_envelope,
+            response_text=repair_text,
+            response_event_id=outcome.tracked_event_id,
+            delivery_kind="edited",
+            response_kind=self.response_kind,
+        )
         return DeliveryResult(
             event_id=outcome.tracked_event_id,
             response_text=repair_text,
