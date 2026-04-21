@@ -31,10 +31,10 @@ from mindroom.tool_approval import (
     ApprovalRequest,
     ApprovalStore,
     ToolApprovalScriptError,
-    build_tool_approval_edit_content,
     build_tool_approval_event_content,
     evaluate_tool_approval,
     get_approval_store,
+    sync_approval_event_resolution,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 from mindroom.tool_system.tool_failures import record_tool_failure
@@ -242,36 +242,16 @@ async def _sync_tool_approval_event_resolution(
     resolved_context: _ResolvedToolContext,
     approval_request: ApprovalRequest,
 ) -> None:
-    if (
-        resolved_context.client is None
-        or resolved_context.room_id is None
-        or approval_request.approval_event_id is None
-    ):
+    if resolved_context.client is None:
         return
-
-    try:
-        response = await resolved_context.client.room_send(
-            room_id=resolved_context.room_id,
-            message_type=TOOL_APPROVAL_EVENT_TYPE,
-            content=build_tool_approval_edit_content(approval_request),
-        )
-    except Exception:
-        logger.exception(
-            "Failed to update tool approval event",
-            approval_request_id=approval_request.id,
-            room_id=resolved_context.room_id,
-            thread_id=approval_request.thread_id,
-        )
+    store = get_approval_store()
+    if store is None:
         return
-
-    if not isinstance(response, nio.RoomSendResponse):
-        logger.warning(
-            "Matrix rejected tool approval edit",
-            approval_request_id=approval_request.id,
-            room_id=resolved_context.room_id,
-            thread_id=approval_request.thread_id,
-            response=str(response),
-        )
+    await sync_approval_event_resolution(
+        resolved_context.client,
+        approval_request,
+        store=store,
+    )
 
 
 async def _maybe_block_for_unavailable_tool_approval_transport(

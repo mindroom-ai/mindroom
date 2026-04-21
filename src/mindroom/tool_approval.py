@@ -16,14 +16,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
+import nio
+
 from mindroom.constants import RuntimePaths, resolve_config_relative_path, safe_replace
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from types import ModuleType
-
-    import nio
 
     from mindroom.config.main import Config
 
@@ -94,6 +94,7 @@ class ApprovalRequest:
     resolution_reason: str | None = None
     resolved_at: datetime | None = None
     resolved_by: str | None = None
+    resolution_synced_at: datetime | None = None
     _future: asyncio.Future[str] | None = field(default=None, repr=False, compare=False)
     _future_loop: asyncio.AbstractEventLoop | None = field(default=None, repr=False, compare=False)
 
@@ -120,6 +121,9 @@ class ApprovalRequest:
             "resolution_reason": self.resolution_reason,
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at is not None else None,
             "resolved_by": self.resolved_by,
+            "resolution_synced_at": (
+                self.resolution_synced_at.isoformat() if self.resolution_synced_at is not None else None
+            ),
         }
 
     @classmethod
@@ -146,6 +150,7 @@ class ApprovalRequest:
             resolution_reason=cast("str | None", payload.get("resolution_reason")),
             resolved_at=_parse_datetime(cast("str | None", payload.get("resolved_at"))),
             resolved_by=cast("str | None", payload.get("resolved_by")),
+            resolution_synced_at=_parse_datetime(cast("str | None", payload.get("resolution_synced_at"))),
         )
 
 
@@ -273,6 +278,21 @@ class ApprovalStore:
                     return request
         return None
 
+    def list_unsynced_resolved(self) -> list[ApprovalRequest]:
+        """Return resolved Matrix approval requests that still need one status edit."""
+        with self._state_lock:
+            requests = [
+                request
+                for request in self._requests.values()
+                if (
+                    request.status != "pending"
+                    and request.approval_event_id is not None
+                    and request.room_id is not None
+                    and request.resolution_synced_at is None
+                )
+            ]
+        return sorted(requests, key=lambda request: request.resolved_at or request.created_at)
+
     async def record_approval_event(self, request_id: str, approval_event_id: str) -> ApprovalRequest:
         """Persist the Matrix event ID for one emitted approval event."""
         async with self._resolve_lock:
@@ -282,6 +302,27 @@ class ApprovalStore:
                     msg = f"Unknown approval request '{request_id}'."
                     raise LookupError(msg)
                 request.approval_event_id = approval_event_id
+            self._persist_request(request)
+            return request
+
+    async def record_resolution_sync(
+        self,
+        request_id: str,
+        *,
+        synced_at: datetime | None = None,
+    ) -> ApprovalRequest:
+        """Persist that one resolved approval has been edited back into Matrix."""
+        async with self._resolve_lock:
+            with self._state_lock:
+                request = self._requests.get(request_id)
+                if request is None:
+                    msg = f"Unknown approval request '{request_id}'."
+                    raise LookupError(msg)
+                if request.status == "pending":
+                    msg = f"Approval request '{request_id}' is still pending."
+                    raise ValueError(msg)
+                if request.resolution_synced_at is None:
+                    request.resolution_synced_at = synced_at or _utcnow()
             self._persist_request(request)
             return request
 
@@ -560,6 +601,71 @@ def build_tool_approval_edit_content(approval_request: ApprovalRequest) -> dict[
     }
 
 
+async def sync_approval_event_resolution(
+    client: nio.AsyncClient,
+    approval_request: ApprovalRequest,
+    *,
+    store: ApprovalStore,
+) -> ApprovalRequest | None:
+    """Send one Matrix edit that reflects a resolved approval request."""
+    if (
+        approval_request.status == "pending"
+        or approval_request.room_id is None
+        or approval_request.approval_event_id is None
+        or approval_request.resolution_synced_at is not None
+    ):
+        return None
+
+    try:
+        response = await client.room_send(
+            room_id=approval_request.room_id,
+            message_type=TOOL_APPROVAL_EVENT_TYPE,
+            content=build_tool_approval_edit_content(approval_request),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to update tool approval event",
+            approval_request_id=approval_request.id,
+            room_id=approval_request.room_id,
+            thread_id=approval_request.thread_id,
+        )
+        return None
+
+    if not isinstance(response, nio.RoomSendResponse):
+        logger.warning(
+            "Matrix rejected tool approval edit",
+            approval_request_id=approval_request.id,
+            room_id=approval_request.room_id,
+            thread_id=approval_request.thread_id,
+            response=str(response),
+        )
+        return None
+
+    return await store.record_resolution_sync(approval_request.id)
+
+
+async def sync_unsynced_approval_event_resolutions(
+    client: nio.AsyncClient,
+    *,
+    store: ApprovalStore | None = None,
+) -> list[ApprovalRequest]:
+    """Replay any resolved approval edits that were not yet written back to Matrix."""
+    target_store = get_approval_store() if store is None else store
+    if target_store is None:
+        return []
+
+    synced_requests: list[ApprovalRequest] = []
+    for approval_request in target_store.list_unsynced_resolved():
+        synced_request = await sync_approval_event_resolution(
+            client,
+            approval_request,
+            store=target_store,
+        )
+        if synced_request is not None:
+            synced_requests.append(synced_request)
+    return synced_requests
+
+
 def _response_content(event: nio.UnknownEvent) -> Mapping[str, object] | None:
     if not isinstance(event.source, Mapping):
         return None
@@ -673,6 +779,8 @@ def initialize_approval_store(runtime_paths: RuntimePaths) -> ApprovalStore:
 
 async def shutdown_approval_store(
     reason: str = _DEFAULT_SHUTDOWN_REASON,
+    *,
+    client: nio.AsyncClient | None = None,
 ) -> None:
     """Expire pending approvals and drop the module-level store."""
     global _STORE
@@ -683,5 +791,7 @@ async def shutdown_approval_store(
         return
 
     store.expire_pending_requests(reason=reason)
+    if client is not None:
+        await sync_unsynced_approval_event_resolutions(client, store=store)
     _STORE = None
     _SCRIPT_CACHE.clear()

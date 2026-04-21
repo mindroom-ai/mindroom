@@ -7,6 +7,7 @@ import json
 import os
 import threading
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -16,6 +17,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.tool_approval import (
+    TOOL_APPROVAL_EVENT_TYPE,
     TOOL_APPROVAL_RESPONSE_EVENT_TYPE,
     ToolApprovalScriptError,
     evaluate_tool_approval,
@@ -23,6 +25,7 @@ from mindroom.tool_approval import (
     handle_tool_approval_response_event,
     initialize_approval_store,
     shutdown_approval_store,
+    sync_unsynced_approval_event_resolutions,
 )
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -90,6 +93,40 @@ def _create_persisted_pending_request(storage_dir: Path) -> str:
         "resolution_reason": None,
         "resolved_at": None,
         "resolved_by": None,
+    }
+    request_path = storage_dir / f"{request_id}.json"
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    return request_id
+
+
+def _create_persisted_resolved_request(
+    storage_dir: Path,
+    *,
+    request_id: str = "persisted-expired",
+) -> str:
+    payload = {
+        "id": request_id,
+        "status": "expired",
+        "tool_name": "run_shell_command",
+        "arguments": {"command": "echo hi"},
+        "agent_name": "code",
+        "room_id": "!room:localhost",
+        "thread_id": "$thread",
+        "requester_id": "@user:localhost",
+        "session_id": "session-1",
+        "channel": "matrix",
+        "tenant_id": None,
+        "account_id": None,
+        "matched_rule": "run_shell_*",
+        "script_path": None,
+        "created_at": "2026-04-09T12:00:00+00:00",
+        "expires_at": "2026-04-10T12:00:00+00:00",
+        "approval_event_id": "$approval-event",
+        "resolution_reason": "MindRoom restarted before approval completed.",
+        "resolved_at": "2026-04-09T12:30:00+00:00",
+        "resolved_by": None,
+        "resolution_synced_at": None,
     }
     request_path = storage_dir / f"{request_id}.json"
     request_path.parent.mkdir(parents=True, exist_ok=True)
@@ -448,6 +485,30 @@ async def test_tool_approval_response_event_ignores_non_requesters(tmp_path: Pat
     assert current_request.status == "pending"
 
 
+@pytest.mark.asyncio
+async def test_sync_unsynced_approval_event_resolutions_replays_persisted_expired_requests(tmp_path: Path) -> None:
+    """Startup reconciliation should replay expired approval edits that were never synced to Matrix."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_resolved_request(runtime_paths.storage_root / "approvals")
+    store = initialize_approval_store(runtime_paths)
+    nio = pytest.importorskip("nio")
+    client = AsyncMock()
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$approval-edit", room_id="!room:localhost")
+
+    synced_requests = await sync_unsynced_approval_event_resolutions(client, store=store)
+
+    assert [request.id for request in synced_requests] == [request_id]
+    send_kwargs = client.room_send.await_args.kwargs
+    assert send_kwargs["room_id"] == "!room:localhost"
+    assert send_kwargs["message_type"] == TOOL_APPROVAL_EVENT_TYPE
+    assert send_kwargs["content"]["m.new_content"]["status"] == "expired"
+    request = store.get_request(request_id)
+    assert request is not None
+    assert request.resolution_synced_at is not None
+    payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request_id}.json").read_text(encoding="utf-8"))
+    assert payload["resolution_synced_at"] is not None
+
+
 def test_initialize_approval_store_expires_persisted_pending_requests(tmp_path: Path) -> None:
     """Startup should expire any persisted pending approval requests."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -491,6 +552,43 @@ async def test_shutdown_approval_store_expires_pending_requests(tmp_path: Path) 
     payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request.id}.json").read_text(encoding="utf-8"))
     assert payload["status"] == "expired"
     assert payload["resolution_reason"] == "MindRoom shut down before approval completed."
+
+
+@pytest.mark.asyncio
+async def test_shutdown_approval_store_syncs_expired_requests_when_client_available(tmp_path: Path) -> None:
+    """Graceful shutdown should expire and sync pending approvals before dropping the store."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    store = initialize_approval_store(runtime_paths)
+    request = await store.create_request(
+        tool_name="run_shell_command",
+        arguments={"command": "echo hi"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        session_id="session-1",
+        channel="matrix",
+        tenant_id=None,
+        account_id=None,
+        matched_rule="run_shell_*",
+        script_path=None,
+        timeout_seconds=60,
+    )
+    await store.record_approval_event(request.id, "$approval-event")
+    nio = pytest.importorskip("nio")
+    client = AsyncMock()
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$approval-edit", room_id="!room:localhost")
+
+    await shutdown_approval_store(client=client)
+
+    payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request.id}.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "expired"
+    assert payload["resolution_reason"] == "MindRoom shut down before approval completed."
+    assert payload["resolution_synced_at"] is not None
+    send_kwargs = client.room_send.await_args.kwargs
+    assert send_kwargs["room_id"] == "!room:localhost"
+    assert send_kwargs["message_type"] == TOOL_APPROVAL_EVENT_TYPE
+    assert send_kwargs["content"]["m.new_content"]["status"] == "expired"
 
 
 @pytest.mark.asyncio

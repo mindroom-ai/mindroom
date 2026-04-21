@@ -1492,13 +1492,16 @@ class MultiAgentOrchestrator:
         for entity_name in list(self._sync_tasks.keys()):
             await cancel_sync_task(entity_name, self._sync_tasks)
 
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        router_client = router_bot.client if router_bot is not None else None
+        await shutdown_approval_store(client=router_client)
+
         for bot in self.agent_bots.values():
             bot.running = False
 
         stop_tasks = [bot.stop(reason="shutdown") for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         await self._close_runtime_support_services()
-        await shutdown_approval_store()
         logger.info("All agent bots stopped")
 
 

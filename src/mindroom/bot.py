@@ -58,6 +58,7 @@ from mindroom.tool_approval import (
     TOOL_APPROVAL_RESPONSE_EVENT_TYPE,
     get_approval_store,
     handle_tool_approval_response_event,
+    sync_unsynced_approval_event_resolutions,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import (
@@ -1086,6 +1087,10 @@ class AgentBot:
                     await cleanup_all_orphaned_bots(client, self.config, self.runtime_paths)
                 except Exception as e:
                     self.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
+                try:
+                    await sync_unsynced_approval_event_resolutions(client)
+                except Exception as e:
+                    self.logger.warning("tool_approval_resolution_replay_failed", error=str(e))
 
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)

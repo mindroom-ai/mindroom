@@ -970,6 +970,40 @@ class TestAgentBot:
         assert call_order == ["sync"]
 
     @pytest.mark.asyncio
+    @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
+    @patch("mindroom.bot.sync_unsynced_approval_event_resolutions", new_callable=AsyncMock)
+    @patch("mindroom.bot.login_agent_user")
+    @patch("mindroom.bot.AgentBot.ensure_user_account")
+    async def test_router_start_replays_unsynced_tool_approval_resolutions(
+        self,
+        mock_ensure_user: AsyncMock,
+        mock_login: AsyncMock,
+        mock_sync_approvals: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Router startup should reconcile any resolved approval events that were never edited in Matrix."""
+        config = self._config_for_storage(tmp_path)
+        initialize_approval_store(runtime_paths_for(config))
+        mock_client = AsyncMock()
+        mock_client.add_event_callback = MagicMock()
+        mock_client.add_response_callback = MagicMock()
+        mock_login.return_value = mock_client
+        mock_ensure_user.return_value = None
+        router_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+        await bot.start()
+
+        mock_sync_approvals.assert_awaited_once_with(mock_client)
+
+    @pytest.mark.asyncio
     async def test_agent_bot_try_start_reraises_permanent_startup_error(
         self,
         mock_agent_user: AgentMatrixUser,
