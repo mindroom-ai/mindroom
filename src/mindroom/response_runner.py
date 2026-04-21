@@ -30,6 +30,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -59,6 +60,7 @@ from mindroom.post_response_effects import (
     ResponseOutcome,
 )
 from mindroom.streaming import (
+    PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
@@ -159,6 +161,36 @@ def _materialize_matrix_run_metadata(
     if matrix_run_metadata is None:
         return None
     return dict(matrix_run_metadata)
+
+
+def _coerce_stream_transport_outcome(
+    delivery: StreamTransportOutcome | tuple[str | None, str],
+) -> StreamTransportOutcome:
+    """Normalize legacy tuple transport returns into the canonical transport outcome."""
+    if isinstance(delivery, StreamTransportOutcome):
+        return delivery
+
+    event_id, accumulated_text = delivery
+    stripped_text = accumulated_text.strip()
+    if not stripped_text:
+        rendered_body: str | None = None
+        visible_body_state = "none"
+    else:
+        rendered_body = accumulated_text
+        visible_body_state = "placeholder_only" if stripped_text == PROGRESS_PLACEHOLDER else "visible_body"
+
+    terminal_operation: Literal["send", "edit"] = "edit" if event_id is not None else "send"
+    terminal_result: Literal["succeeded", "failed"] = "succeeded" if event_id is not None else "failed"
+    failure_reason = None if event_id is not None else "legacy_tuple_stream_transport_missing_event_id"
+    return StreamTransportOutcome(
+        last_physical_stream_event_id=event_id,
+        terminal_operation=terminal_operation,
+        terminal_result=terminal_result,
+        terminal_status="completed",
+        rendered_body=rendered_body,
+        visible_body_state=visible_body_state,
+        failure_reason=failure_reason,
+    )
 
 
 def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
@@ -1224,20 +1256,24 @@ class ResponseRunner:
 
                     try:
                         delivery_stage_started = True
-                        event_id, accumulated = await self.deps.delivery_gateway.deliver_stream(
-                            StreamingDeliveryRequest(
-                                target=delivery_target,
-                                response_stream=response_stream,
-                                existing_event_id=delivery_request.existing_event_id,
-                                adopt_existing_placeholder=delivery_request.existing_event_id is not None
-                                and delivery_request.existing_event_is_placeholder,
-                                header=None,
-                                show_tool_calls=show_tool_calls,
-                                streaming_cls=ReplacementStreamingResponse,
-                                pipeline_timing=request.pipeline_timing,
-                                visible_event_id_callback=_note_visible_response_event_id,
+                        transport_outcome = _coerce_stream_transport_outcome(
+                            await self.deps.delivery_gateway.deliver_stream(
+                                StreamingDeliveryRequest(
+                                    target=delivery_target,
+                                    response_stream=response_stream,
+                                    existing_event_id=delivery_request.existing_event_id,
+                                    adopt_existing_placeholder=delivery_request.existing_event_id is not None
+                                    and delivery_request.existing_event_is_placeholder,
+                                    header=None,
+                                    show_tool_calls=show_tool_calls,
+                                    streaming_cls=ReplacementStreamingResponse,
+                                    pipeline_timing=request.pipeline_timing,
+                                    visible_event_id_callback=_note_visible_response_event_id,
+                                ),
                             ),
                         )
+                        event_id = transport_outcome.last_physical_stream_event_id
+                        accumulated = transport_outcome.accumulated_text
                         if event_id is not None:
                             tracked_event_id = event_id
                     except asyncio.CancelledError:
@@ -1769,7 +1805,7 @@ class ResponseRunner:
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
         pipeline_timing: DispatchPipelineTiming | None = None,
-    ) -> tuple[str | None, str]:
+    ) -> StreamTransportOutcome:
         """Run one streaming AI request and send the streamed Matrix response."""
 
         def note_attempt_run_id(current_run_id: str) -> None:
@@ -1821,24 +1857,26 @@ class ResponseRunner:
                     run_metadata_content,
                     request.attachment_ids,
                 )
-                event_id, accumulated = await self.deps.delivery_gateway.deliver_stream(
-                    StreamingDeliveryRequest(
-                        target=runtime.resolved_target,
-                        response_stream=wrapped_response_stream,
-                        existing_event_id=request.existing_event_id,
-                        adopt_existing_placeholder=request.existing_event_id is not None
-                        and request.existing_event_is_placeholder,
-                        show_tool_calls=self._show_tool_calls(),
-                        extra_content=response_extra_content,
-                        tool_trace_collector=tool_trace,
-                        streaming_cls=StreamingResponse,
-                        pipeline_timing=request.pipeline_timing,
-                        visible_event_id_callback=note_visible_response_event_id,
+                transport_outcome = _coerce_stream_transport_outcome(
+                    await self.deps.delivery_gateway.deliver_stream(
+                        StreamingDeliveryRequest(
+                            target=runtime.resolved_target,
+                            response_stream=wrapped_response_stream,
+                            existing_event_id=request.existing_event_id,
+                            adopt_existing_placeholder=request.existing_event_id is not None
+                            and request.existing_event_is_placeholder,
+                            show_tool_calls=self._show_tool_calls(),
+                            extra_content=response_extra_content,
+                            tool_trace_collector=tool_trace,
+                            streaming_cls=StreamingResponse,
+                            pipeline_timing=request.pipeline_timing,
+                            visible_event_id_callback=note_visible_response_event_id,
+                        ),
                     ),
                 )
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
-                return event_id, accumulated
+                return transport_outcome
         except asyncio.CancelledError:
             self._persist_interrupted_recorder(
                 recorder=turn_recorder,
@@ -2041,17 +2079,21 @@ class ResponseRunner:
 
         try:
             try:
-                event_id, accumulated = await self.generate_streaming_ai_response(
-                    request,
-                    run_id=run_id,
-                    runtime=runtime,
-                    active_event_ids=active_event_ids,
-                    turn_recorder=turn_recorder,
-                    tool_trace=tool_trace,
-                    run_metadata_content=run_metadata_content,
-                    compaction_outcomes=compaction_outcomes,
-                    pipeline_timing=request.pipeline_timing,
+                transport_outcome = _coerce_stream_transport_outcome(
+                    await self.generate_streaming_ai_response(
+                        request,
+                        run_id=run_id,
+                        runtime=runtime,
+                        active_event_ids=active_event_ids,
+                        turn_recorder=turn_recorder,
+                        tool_trace=tool_trace,
+                        run_metadata_content=run_metadata_content,
+                        compaction_outcomes=compaction_outcomes,
+                        pipeline_timing=request.pipeline_timing,
+                    ),
                 )
+                event_id = transport_outcome.last_physical_stream_event_id
+                accumulated = transport_outcome.accumulated_text
             finally:
                 await lifecycle.emit_session_started(session_started_watch)
         except StreamingDeliveryError as error:

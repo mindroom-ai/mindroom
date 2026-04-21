@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -100,6 +100,21 @@ class StreamTransportOutcome:
     def has_rendered_visible_body(self) -> bool:
         """Return whether the rendered body contains real visible output."""
         return self.visible_body_state == "visible_body"
+
+    @property
+    def event_id(self) -> str | None:
+        """Return the legacy event-id view of the last physical stream event."""
+        return self.last_physical_stream_event_id
+
+    @property
+    def accumulated_text(self) -> str:
+        """Return the legacy text view backed by the rendered terminal body."""
+        return self.rendered_body or ""
+
+    def __iter__(self) -> Iterator[str | None]:
+        """Support legacy tuple unpacking during the transport-boundary migration."""
+        yield self.last_physical_stream_event_id
+        yield self.rendered_body or ""
 
 
 @dataclass(frozen=True)

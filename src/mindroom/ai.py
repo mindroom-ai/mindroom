@@ -1702,7 +1702,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
 
 
 @timed("model_request_to_completion")
-async def _process_stream_events(  # noqa: C901, PLR0912
+async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     stream_generator: AsyncIterator[object],
     *,
     state: _StreamingAttemptState,
@@ -1760,6 +1760,12 @@ async def _process_stream_events(  # noqa: C901, PLR0912
 
             if isinstance(event, RunCompletedEvent):
                 state.completed_run_event = event
+                if event.content and not state.assistant_text:
+                    final_text = str(event.content)
+                    state.assistant_text = final_text
+                    state.full_response = final_text
+                    if state_updated is not None:
+                        state_updated()
                 continue
 
             if isinstance(event, RunCancelledEvent):

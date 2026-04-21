@@ -5063,6 +5063,44 @@ class TestUserIdPassthrough:
         assert "utilization_pct" not in payload["context"]
 
     @pytest.mark.asyncio
+    async def test_stream_agent_response_records_final_event_only_text_in_turn_recorder(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Final-event-only streams must still persist canonical completed assistant text."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunCompletedEvent(
+                content="hello from final event",
+                run_id="run-final-only",
+                session_id="session1",
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+        recorder = TurnRecorder(user_message="test")
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                turn_recorder=recorder,
+            ):
+                pass
+
+        assert recorder.outcome == "completed"
+        assert recorder.assistant_text == "hello from final event"
+
+    @pytest.mark.asyncio
     async def test_ai_response_metadata_uses_room_resolved_runtime_model(self, tmp_path: Path) -> None:
         """Non-streaming metadata should report the room-resolved runtime model."""
         runtime_paths = _runtime_paths(tmp_path)

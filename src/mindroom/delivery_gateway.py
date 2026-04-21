@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.final_delivery import StreamTransportOutcome
     from mindroom.history.types import CompactionOutcome
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
@@ -605,7 +606,7 @@ class DeliveryGateway:
     async def deliver_stream(
         self,
         request: StreamingDeliveryRequest,
-    ) -> tuple[str | None, str]:
+    ) -> StreamTransportOutcome:
         """Send one streaming Matrix response."""
         client = self._client()
         config = self.deps.runtime.config
