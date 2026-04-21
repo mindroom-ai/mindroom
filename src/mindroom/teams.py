@@ -1527,17 +1527,22 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                         event_ids=_run_metadata_seen_event_ids(run_metadata),
                     )
 
-                if isinstance(response, TeamRunOutput):
-                    if response.member_responses:
+                if isinstance(response, (TeamRunOutput, RunOutput)):
+                    if isinstance(response, TeamRunOutput) and response.member_responses:
                         logger.debug("team_member_response_count", response_count=len(response.member_responses))
 
-                    logger.info(
-                        "team_consensus_preview",
-                        content_preview=response.content[:200] if response.content else None,
-                    )
+                    if isinstance(response, TeamRunOutput):
+                        logger.info(
+                            "team_consensus_preview",
+                            content_preview=response.content[:200] if response.content else None,
+                        )
 
                     parts = format_team_response(response)
-                    team_response_text = "\n\n".join(parts) if parts else "No team response generated."
+                    team_response_text = (
+                        "\n\n".join(parts)
+                        if parts
+                        else (_get_response_content(response) or "No team response generated.")
+                    )
                 else:
                     logger.warning(
                         "team_response_unexpected_type",
@@ -1558,7 +1563,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 return team_header + team_response_text
             finally:
                 cleanup_queued_notice_state(
-                    run_output=response if isinstance(response, TeamRunOutput) else None,
+                    run_output=response if isinstance(response, (TeamRunOutput, RunOutput)) else None,
                     storage=scope_context.storage if scope_context is not None else None,
                     session_id=session_id,
                     session_type=SessionType.TEAM,

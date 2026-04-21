@@ -76,8 +76,7 @@ from mindroom.llm_request_logging import (
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
-from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts
-from mindroom.memory._prompting import strip_user_turn_time_prefix
+from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.events import (
     complete_pending_tool_block,

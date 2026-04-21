@@ -276,7 +276,7 @@ If a hook name appears in `hooks:` but the plugin has no hook with that name, Mi
 
 ## Enrichment pipeline
 
-The `message:enrich` event powers a full enrichment pipeline that injects live context into AI prompts while preserving exact replayed history for prompt caching.
+The `message:enrich` event powers a full enrichment pipeline that injects live context into the current AI prompt without changing the persisted replay history.
 
 ### How it works
 
@@ -291,7 +291,7 @@ The `message:enrich` event powers a full enrichment pipeline that injects live c
     ```
 
 3. **AI sees it**: The model receives the enrichment block as part of the current user message, so it has live context for its response.
-4. **Preserve replay fidelity**: MindRoom keeps the exact enriched user turn everywhere it is replayed or summarized, so later requests can reuse the same prefix byte-for-byte for prompt caching.
+4. **Strip after the run**: MindRoom removes transient `message:enrich` content from persisted session history after the response completes, so later replays see the original user turn rather than stale live context.
 
 ### Enrichment policy
 

@@ -425,53 +425,6 @@ async def build_memory_enhanced_prompt(
     return "\n\n".join(prompt_chunks)
 
 
-@timed("system_prompt_assembly.memory_enhancement")
-async def build_memory_prompt_parts(
-    prompt: str,
-    agent_name: str,
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    timing_scope: str | None = None,
-) -> MemoryPromptParts:
-    """Split stable entrypoint context from turn-local searched memories."""
-    logger.debug("Building enhanced prompt", agent=agent_name)
-    use_file_backend = use_file_memory_backend(config, agent_name=agent_name)
-    agent_memories = await search_agent_memories(
-        prompt,
-        agent_name,
-        storage_path,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-        timing_scope=timing_scope,
-    )
-    if agent_memories:
-        logger.debug("Agent memories added", count=len(agent_memories))
-
-    session_preamble = ""
-    context_type = "agent"
-    if use_file_backend:
-        agent_entrypoint = _load_agent_file_entrypoint_context(
-            agent_name,
-            storage_path,
-            config,
-            runtime_paths,
-            execution_identity,
-            timing_scope,
-        )
-        if agent_entrypoint:
-            session_preamble = f"[File memory entrypoint (agent)]\n{agent_entrypoint}"
-        context_type = "agent file"
-
-    turn_context = _format_memories_as_context(agent_memories, context_type) if agent_memories else ""
-    return MemoryPromptParts(
-        session_preamble=session_preamble,
-        turn_context=turn_context,
-    )
-
-
 async def store_conversation_memory(
     prompt: str,
     agent_name: str | list[str],

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
+from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
@@ -208,6 +209,51 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     assert first_prompt[-1].audio == [audio_input]
     assert not second_prompt[-1].audio
     assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
+
+
+@pytest.mark.asyncio
+async def test_team_response_fallback_run_output_cleans_queued_notice_before_formatting() -> None:
+    """Fallback RunOutput values should be cleaned and formatted like normal agent results."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = _make_test_team()
+    fallback_result = RunOutput(
+        run_id="run-123",
+        session_id="session-123",
+        agent_name="general",
+        content=None,
+        messages=[
+            Message(role="assistant", content="Recovered team response"),
+            _queued_notice_message(),
+        ],
+        status=RunStatus.completed,
+    )
+    mock_team.arun = AsyncMock(return_value=fallback_result)
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            session_id="session-123",
+        )
+
+    assert "Recovered team response" in response
+    assert "RunOutput(" not in response
+    assert QUEUED_MESSAGE_NOTICE_TEXT not in response
+    assert not _has_queued_notice(fallback_result.messages)
 
 
 @pytest.mark.asyncio
