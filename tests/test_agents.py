@@ -1039,6 +1039,28 @@ def test_resolve_agent_runtime_reuses_existing_workspace_local_knowledge_directo
     assert not knowledge_link.is_symlink()
 
 
+def test_resolve_agent_runtime_skips_workspace_knowledge_links_for_targets_below_canonical_alias_path(
+    tmp_path: Path,
+) -> None:
+    """A knowledge base already nested under the canonical alias path should be reused without a new alias."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    knowledge_root = tmp_path / "agents" / "general" / "workspace" / "knowledge" / "research" / "docs"
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].knowledge_bases = ["research"]
+    config.knowledge_bases["research"] = KnowledgeBaseConfig(path=str(knowledge_root))
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert runtime.workspace is not None
+    knowledge_link = runtime.workspace.root / "knowledge" / "research"
+    assert knowledge_link.exists()
+    assert knowledge_link.is_dir()
+    assert not knowledge_link.is_symlink()
+    assert (knowledge_link / "docs").resolve() == knowledge_root.resolve()
+
+
 def test_resolve_agent_runtime_preserves_configured_external_workspace_knowledge_symlink(tmp_path: Path) -> None:
     """A configured canonical knowledge symlink should not be deleted just because it points outside the workspace."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -1058,6 +1080,37 @@ def test_resolve_agent_runtime_preserves_configured_external_workspace_knowledge
     knowledge_link = runtime.workspace.root / "knowledge" / "research"
     assert knowledge_link.is_symlink()
     assert knowledge_link.resolve() == external_root.resolve()
+
+
+def test_resolve_agent_runtime_preserves_configured_workspace_local_knowledge_symlink_when_unbound(
+    tmp_path: Path,
+) -> None:
+    """A configured canonical knowledge symlink should survive agent unbinding when it is the real knowledge root."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    workspace_root = tmp_path / "agents" / "general" / "workspace"
+    target_root = workspace_root / "docs" / "research"
+    target_root.mkdir(parents=True, exist_ok=True)
+    knowledge_root = workspace_root / "knowledge" / "research"
+    knowledge_root.parent.mkdir(parents=True, exist_ok=True)
+    knowledge_root.symlink_to(target_root, target_is_directory=True)
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].knowledge_bases = ["research"]
+    config.knowledge_bases["research"] = KnowledgeBaseConfig(path=str(knowledge_root))
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert runtime.workspace is not None
+    assert knowledge_root.is_symlink()
+    assert knowledge_root.resolve() == target_root.resolve()
+
+    config.agents["general"].knowledge_bases = []
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert runtime.workspace is not None
+    assert knowledge_root.is_symlink()
+    assert knowledge_root.resolve() == target_root.resolve()
 
 
 def test_resolve_agent_runtime_skips_workspace_knowledge_links_for_private_root_dot_path(tmp_path: Path) -> None:
@@ -2526,21 +2579,25 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     assert config.agents["calculator"].knowledge_bases == ["research"]
 
 
-def test_config_rejects_knowledge_base_ids_with_path_separators() -> None:
-    """Knowledge base IDs must stay single-component so workspace aliases remain well-defined."""
+@pytest.mark.parametrize("base_id", ["", ".", "..", "group/research"])
+def test_config_rejects_knowledge_base_ids_that_are_not_normal_single_path_components(base_id: str) -> None:
+    """Knowledge base IDs must stay single-component and avoid dot-segment aliases."""
     with pytest.raises(
         ValidationError,
-        match=re.escape("knowledge_bases keys must not contain path separators; invalid keys: group/research"),
+        match=re.escape(
+            "knowledge_bases keys must be non-empty single path components without path separators or dot segments; "
+            f"invalid keys: {base_id}",
+        ),
     ):
         Config(
             agents={
                 "calculator": AgentConfig(
                     display_name="CalculatorAgent",
-                    knowledge_bases=["group/research"],
+                    knowledge_bases=[base_id],
                 ),
             },
             knowledge_bases={
-                "group/research": KnowledgeBaseConfig(
+                base_id: KnowledgeBaseConfig(
                     path="./knowledge_docs/research",
                     watch=False,
                 ),

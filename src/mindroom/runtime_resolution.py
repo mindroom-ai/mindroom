@@ -11,7 +11,11 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
     resolve_private_knowledge_base_agent,
 )
-from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.constants import (
+    RuntimePaths,
+    resolve_config_relative_path,
+    resolve_config_relative_path_preserving_leaf,
+)
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
@@ -217,6 +221,18 @@ def resolve_agent_runtime(
         create=create,
     )
     if workspace is not None and (create or workspace.root.exists()):
+        workspace_knowledge_root = resolve_workspace_relative_path(
+            workspace.root,
+            "knowledge",
+            field_name="workspace knowledge root",
+        )
+        protected_knowledge_paths = {
+            configured_path
+            for base_config in config.knowledge_bases.values()
+            if (
+                configured_path := resolve_config_relative_path_preserving_leaf(base_config.path, runtime_paths)
+            ).is_relative_to(workspace_knowledge_root)
+        }
         knowledge_paths: dict[str, Path] = {}
         for base_id in config.get_agent_knowledge_base_ids(agent_name):
             base_config = config.get_knowledge_base_config(base_id)
@@ -231,6 +247,7 @@ def resolve_agent_runtime(
         ensure_workspace_knowledge_links(
             workspace.root,
             knowledge_paths=knowledge_paths,
+            protected_paths=protected_knowledge_paths,
         )
     tool_base_dir = workspace.root if workspace is not None else None
     file_memory_root = workspace.file_memory_path if workspace is not None else None

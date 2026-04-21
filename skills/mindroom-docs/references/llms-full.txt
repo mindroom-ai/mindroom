@@ -1059,6 +1059,7 @@ memory:
 # MindRoom auto-installs that optional extra on first use.
 
 # Knowledge base configuration (optional)
+# Keys must be non-empty single path components, so do not use "", ., .., /, or \ in a knowledge base ID.
 knowledge_bases:
   docs:
     path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
@@ -8654,7 +8655,7 @@ agents:
     knowledge_bases: [docs]
 ```
 
-Place files in `./knowledge_docs/` and they'll be indexed automatically on startup. When `watch: true`, new or modified files are re-indexed in real time.
+Place files in `./knowledge_docs/` and they'll be indexed automatically on startup. When `watch: true`, new or modified files are re-indexed in real time. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
 
 ## Configuration
 

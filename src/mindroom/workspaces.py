@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from mindroom.config.main import Config
 
@@ -192,7 +192,9 @@ def _build_workspace_knowledge_links(
         resolved_target = target_path.expanduser().resolve()
         if not resolved_target.is_relative_to(workspace_root):
             continue
-        if resolved_target in link_path.parents and resolved_target != link_path:
+        if resolved_target == link_path or resolved_target.is_relative_to(link_path):
+            continue
+        if link_path.is_relative_to(resolved_target):
             continue
         desired_links[link_path] = resolved_target
     return desired_links
@@ -201,6 +203,7 @@ def _build_workspace_knowledge_links(
 def _remove_stale_workspace_knowledge_links(
     knowledge_root: Path,
     *,
+    protected_paths: Collection[Path],
     workspace_root: Path,
     desired_links: Mapping[Path, Path],
 ) -> None:
@@ -208,6 +211,7 @@ def _remove_stale_workspace_knowledge_links(
         if (
             existing_path.is_symlink()
             and existing_path not in desired_links
+            and existing_path not in protected_paths
             and existing_path.resolve().is_relative_to(workspace_root)
         ):
             existing_path.unlink()
@@ -234,6 +238,7 @@ def ensure_workspace_knowledge_links(
     workspace_path: Path,
     *,
     knowledge_paths: Mapping[str, Path],
+    protected_paths: Collection[Path] = (),
 ) -> None:
     """Expose canonical workspace-local paths for bound knowledge rooted inside the workspace.
 
@@ -258,6 +263,7 @@ def ensure_workspace_knowledge_links(
     )
     _remove_stale_workspace_knowledge_links(
         knowledge_root,
+        protected_paths=protected_paths,
         workspace_root=workspace_root,
         desired_links=desired_links,
     )
