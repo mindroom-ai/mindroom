@@ -552,18 +552,6 @@ async def _execute_bridge(
         has_after_hooks=has_after_hooks,
     )
     hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else None
-    blocked_result = await _maybe_block_for_tool_approval(
-        hook_registry=hook_registry,
-        resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
-        args=args,
-        tool_name=tool_name,
-        has_after_hooks=has_after_hooks,
-        started_at=started_at,
-    )
-    if blocked_result is not None:
-        return blocked_result
-
     blocked_result = await _maybe_block_for_before_hooks(
         hook_registry=hook_registry,
         resolved_context=resolved_context,
@@ -571,6 +559,18 @@ async def _execute_bridge(
         args=args,
         tool_name=tool_name,
         has_before_hooks=has_before_hooks,
+        has_after_hooks=has_after_hooks,
+        started_at=started_at,
+    )
+    if blocked_result is not None:
+        return blocked_result
+
+    blocked_result = await _maybe_block_for_tool_approval(
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
         has_after_hooks=has_after_hooks,
         started_at=started_at,
     )

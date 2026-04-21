@@ -1535,8 +1535,8 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_tool_approval_gate_runs_before_before_call_hooks(tmp_path: Path) -> None:
-    """Approval should block tool:before_call hooks until approval is granted."""
+async def test_tool_before_call_hooks_run_before_tool_approval_gate(tmp_path: Path) -> None:
+    """Policy gates should run before approval requests are emitted."""
     seen: list[str] = []
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -1586,13 +1586,65 @@ async def test_tool_approval_gate_runs_before_before_call_hooks(tmp_path: Path) 
         assert store is not None
         pending = store.list_pending()
         assert len(pending) == 1
-        assert seen == []
+        assert seen == ["before"]
 
         await store.approve(pending[0].id, resolved_by="dashboard-user")
         result = await task
 
     assert result == "ok"
     assert seen == ["before", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_tool_before_call_decline_short_circuits_tool_approval(tmp_path: Path) -> None:
+    """Denied policy hooks should prevent approval cards from being shown."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=[],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        ctx.decline("policy blocked the tool")
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    next_func = AsyncMock(return_value="should not run")
+    with tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert next_func.await_count == 0
+    assert result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: read_file\n"
+        "Reason: policy blocked the tool\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    sender.assert_not_awaited()
+    store = get_approval_store()
+    assert store is not None
+    assert store.list_pending() == []
 
 
 @pytest.mark.asyncio
