@@ -95,7 +95,7 @@ The `src/mindroom/orchestration/` subpackage contains helpers extracted from the
 Agent and team materialization is handled by dedicated top-level modules (not inside the `orchestration/` subpackage):
 
 - **`src/mindroom/runtime_resolution.py`** — Resolves `ResolvedAgentRuntime` (the full set of runtime parameters for one agent instance) including `ResolvedKnowledgeBinding` for knowledge base attachment.
-- **`src/mindroom/team_runtime_resolution.py`** — Resolves `ResolvedExactTeamMembers` for team materialization via `materialize_exact_requested_team_members()`.
+- **`src/mindroom/team_exact_members.py`** — Resolves `ResolvedExactTeamMembers` for team materialization via `materialize_exact_requested_team_members()`.
 - **`src/mindroom/runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.
 
 ## Message Handling

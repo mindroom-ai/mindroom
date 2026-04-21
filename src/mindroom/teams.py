@@ -1582,7 +1582,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                         logger.exception("team_response_failed", agents=agent_list)
                         return get_user_friendly_error_message(e, team_name)
 
-                    if isinstance(response, (TeamRunOutput, RunOutput)) and response.status == RunStatus.error:
+                    if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
                         error_text = str(response.content or "Unknown team error")
                         if not retried_without_inline_media and should_retry_without_inline_media(
                             error_text,
@@ -2338,6 +2338,8 @@ __all__ = [
     "build_materialized_team_instance",
     "decide_team_formation",
     "format_team_response",
+    "is_cancelled_run_output",
+    "is_errored_run_output",
     "materialize_exact_team_members",
     "prepare_materialized_team_execution",
     "resolve_configured_team",

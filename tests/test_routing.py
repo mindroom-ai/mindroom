@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.util
 import tempfile
@@ -163,6 +164,38 @@ def test_domain_seams_are_flattened_top_level_modules() -> None:
         except ModuleNotFoundError:
             spec = None
         assert spec is None
+
+
+def test_domain_seams_define_one_public_export_contract() -> None:
+    """Flattened seam modules should define one authoritative top-level `__all__`."""
+    flattened_modules = (
+        "mindroom.agents",
+        "mindroom.ai",
+        "mindroom.routing",
+        "mindroom.agent_policy",
+        "mindroom.runtime_resolution",
+        "mindroom.teams",
+    )
+
+    for module_name in flattened_modules:
+        module = importlib.import_module(module_name)
+        module_file = Path(module.__file__ or "")
+        tree = ast.parse(module_file.read_text(encoding="utf-8"))
+        all_assignments = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets)
+        ]
+        assert len(all_assignments) == 1, f"{module_name} should define __all__ exactly once"
+
+
+def test_teams_public_seam_exports_status_helpers() -> None:
+    """The declared teams seam should export the fallback status helpers it exposes elsewhere."""
+    teams_module = importlib.import_module("mindroom.teams")
+
+    assert "is_cancelled_run_output" in teams_module.__all__
+    assert "is_errored_run_output" in teams_module.__all__
 
 
 class TestAIRouting:

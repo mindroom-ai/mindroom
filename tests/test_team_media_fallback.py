@@ -250,7 +250,7 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
 
 @pytest.mark.asyncio
 async def test_team_response_retries_errored_plain_run_output_with_fresh_run_id() -> None:
-    """Inline-media team retries must also cover plain errored RunOutput fallbacks."""
+    """Inline-media team retries must also cover plain-string errored RunOutput fallbacks."""
     config = _build_test_config()
     orchestrator = MagicMock()
     orchestrator.config = config
@@ -261,7 +261,7 @@ async def test_team_response_retries_errored_plain_run_output_with_fresh_run_id(
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
         side_effect=[
-            RunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error),
+            RunOutput(content="Error code: 500 - audio input is not supported", status="error"),
             TeamRunOutput(content="Recovered team response", status=RunStatus.completed),
         ],
     )

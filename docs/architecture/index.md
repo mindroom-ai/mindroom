@@ -50,7 +50,7 @@ MindRoom's architecture consists of several key components working together.
 | `orchestration/` | Extracted orchestrator helpers (sync loops, config diffing, room invitations) |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `runtime_resolution.py` | Authoritative runtime resolution for agent materialization |
-| `team_runtime_resolution.py` | Runtime resolution for team member materialization |
+| `team_exact_members.py` | Runtime resolution for team member materialization |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
 | `bot.py` | AgentBot and TeamBot runtime for Matrix event handling |
