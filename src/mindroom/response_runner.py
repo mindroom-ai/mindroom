@@ -62,6 +62,7 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingResponse,
     build_restart_interrupted_body,
+    clean_partial_reply_text,
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
@@ -106,6 +107,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import (
         ToolRuntimeContext,
         ToolRuntimeSupport,
@@ -126,6 +128,20 @@ def _merge_response_extra_content(
     if attachment_ids:
         merged_extra_content[ATTACHMENT_IDS_KEY] = list(attachment_ids)
     return merged_extra_content if extra_content is not None or attachment_ids else None
+
+
+def _split_delivery_tool_trace(
+    tool_trace: Sequence[ToolTraceEntry],
+) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
+    """Split visible stream trace state into completed and still-interrupted tools."""
+    completed: list[ToolTraceEntry] = []
+    interrupted: list[ToolTraceEntry] = []
+    for trace_entry in tool_trace:
+        if trace_entry.type == "tool_call_completed":
+            completed.append(trace_entry)
+        else:
+            interrupted.append(trace_entry)
+    return completed, interrupted
 
 
 def _materialize_matrix_run_metadata(
@@ -443,7 +459,6 @@ class ResponseRunner:
         *,
         user_message: str,
         reply_to_event_id: str,
-        active_event_ids: set[str],
         matrix_run_metadata: dict[str, Any] | None,
     ) -> TurnRecorder:
         """Create one lifecycle-owned recorder seeded with canonical Matrix metadata."""
@@ -451,7 +466,7 @@ class ResponseRunner:
         recorder.set_run_metadata(
             build_matrix_run_metadata(
                 reply_to_event_id,
-                sorted(active_event_ids),
+                [],
                 extra_metadata=matrix_run_metadata,
             ),
         )
@@ -514,6 +529,26 @@ class ResponseRunner:
             is_team=is_team,
             response_event_id=response_event_id,
         )
+
+    def _record_stream_delivery_error(
+        self,
+        *,
+        recorder: TurnRecorder,
+        accumulated_text: str,
+        tool_trace: Sequence[ToolTraceEntry],
+    ) -> bool:
+        """Capture canonical interrupted replay state from one failed stream delivery."""
+        partial_text = clean_partial_reply_text(accumulated_text)
+        completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
+        if not partial_text and not completed_tools and not interrupted_tools:
+            return False
+        recorder.record_interrupted(
+            run_metadata=recorder.run_metadata,
+            assistant_text=partial_text,
+            completed_tools=completed_tools,
+            interrupted_tools=interrupted_tools,
+        )
+        return True
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
@@ -1106,7 +1141,6 @@ class ResponseRunner:
         team_turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
-            active_event_ids=active_event_ids,
             matrix_run_metadata=matrix_run_metadata,
         )
 
@@ -1377,6 +1411,20 @@ class ResponseRunner:
             delivery_failure_reason = str(error.error)
             if error.event_id is not None:
                 tracked_event_id = error.event_id
+            if self._record_stream_delivery_error(
+                recorder=team_turn_recorder,
+                accumulated_text=error.accumulated_text,
+                tool_trace=error.tool_trace,
+            ):
+                self._persist_interrupted_recorder(
+                    recorder=team_turn_recorder,
+                    session_scope=session_scope,
+                    session_id=session_id,
+                    execution_identity=tool_dispatch.execution_identity,
+                    run_id=response_run_id,
+                    is_team=True,
+                    response_event_id=tracked_event_id,
+                )
             delivery_kind: Literal["sent", "edited"] | None = None
             if error.event_id is not None:
                 delivery_kind = "edited" if request.existing_event_id else "sent"
@@ -1833,7 +1881,6 @@ class ResponseRunner:
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
-            active_event_ids=active_event_ids,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
         )
 
@@ -1970,7 +2017,6 @@ class ResponseRunner:
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
-            active_event_ids=active_event_ids,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
         )
 
@@ -1992,6 +2038,20 @@ class ResponseRunner:
         except StreamingDeliveryError as error:
             self.deps.logger.exception("Error in streaming response", error=str(error.error))
             tool_trace[:] = error.tool_trace
+            if self._record_stream_delivery_error(
+                recorder=turn_recorder,
+                accumulated_text=error.accumulated_text,
+                tool_trace=error.tool_trace,
+            ):
+                self._persist_interrupted_recorder(
+                    recorder=turn_recorder,
+                    session_scope=session_scope,
+                    session_id=runtime.session_id,
+                    execution_identity=runtime.tool_dispatch.execution_identity,
+                    run_id=run_id,
+                    is_team=False,
+                    response_event_id=error.event_id,
+                )
             if compaction_outcomes_collector is not None:
                 compaction_outcomes_collector.extend(compaction_outcomes)
             delivery_kind: Literal["sent", "edited"] | None = None

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from agno.models.message import Message
+from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
@@ -15,6 +16,7 @@ from mindroom.history.interrupted_replay import (
     build_interrupted_replay_run,
     build_interrupted_replay_snapshot,
     persist_interrupted_replay_snapshot,
+    split_interrupted_tool_trace,
 )
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.tool_system.events import ToolTraceEntry
@@ -42,6 +44,40 @@ def _completed_run(run_id: str, content: str) -> RunOutput:
         messages=[Message(role="assistant", content=content)],
         status=RunStatus.completed,
     )
+
+
+def test_split_interrupted_tool_trace_treats_explicit_success_without_result_as_completed() -> None:
+    """Explicit successful terminal state should win over missing preview text."""
+    completed, interrupted = split_interrupted_tool_trace(
+        [
+            ToolExecution(
+                tool_name="noop",
+                tool_args={"x": 1},
+                result=None,
+                tool_call_error=False,
+            ),
+        ],
+    )
+
+    assert [entry.tool_name for entry in completed] == ["noop"]
+    assert interrupted == []
+
+
+def test_split_interrupted_tool_trace_keeps_missing_terminal_state_as_interrupted() -> None:
+    """Cancelled tools without an explicit terminal signal should remain interrupted."""
+    completed, interrupted = split_interrupted_tool_trace(
+        [
+            ToolExecution(
+                tool_name="noop",
+                tool_args={"x": 1},
+                result=None,
+                tool_call_error=None,
+            ),
+        ],
+    )
+
+    assert completed == []
+    assert [entry.tool_name for entry in interrupted] == ["noop"]
 
 
 def test_build_interrupted_replay_run_creates_completed_agent_run_with_marker_and_tools() -> None:

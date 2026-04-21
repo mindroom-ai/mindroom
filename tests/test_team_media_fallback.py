@@ -1590,6 +1590,136 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
 
 
 @pytest.mark.asyncio
+async def test_team_response_stream_does_not_retry_after_hidden_tool_progress_on_errored_run_output() -> None:
+    """Inline-media retry must stop once hidden tool activity has already started."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    general_agent = _make_test_agent("GeneralAgent")
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[general_agent],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    attempts = 0
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        nonlocal attempts
+        attempts += 1
+        yield AgentToolCallStartedEvent(
+            agent_name="GeneralAgent",
+            tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}),
+        )
+        yield RunOutput(content="image input is not supported", status=RunStatus.error)
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly team error"),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team_agent_ids,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                mode=TeamMode.COORDINATE,
+                session_id="session-team-stream",
+                run_id="run-789",
+                show_tool_calls=False,
+                media=MediaInputs(images=(object(),)),
+            )
+        ]
+
+    assert attempts == 1
+    assert chunks == ["friendly team error"]
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_does_not_retry_after_hidden_tool_progress_on_team_error_event() -> None:
+    """Hidden tool progress should block retry on TeamRunErrorEvent too."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    general_agent = _make_test_agent("GeneralAgent")
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[general_agent],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    attempts = 0
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        nonlocal attempts
+        attempts += 1
+        yield AgentToolCallStartedEvent(
+            agent_name="GeneralAgent",
+            tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}),
+        )
+        yield TeamRunErrorEvent(content="image input is not supported")
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+
+    with (
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly team error"),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team_agent_ids,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                mode=TeamMode.COORDINATE,
+                session_id="session-team-stream",
+                run_id="run-789",
+                show_tool_calls=False,
+                media=MediaInputs(images=(object(),)),
+            )
+        ]
+
+    assert attempts == 1
+    assert chunks == ["friendly team error"]
+
+
+@pytest.mark.asyncio
 async def test_team_response_stream_emits_team_run_output_fallback() -> None:
     """A non-streaming provider fallback should still emit one final team response chunk."""
     config = _build_test_config()

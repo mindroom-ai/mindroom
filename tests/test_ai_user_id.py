@@ -1262,6 +1262,68 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
 
 
 @pytest.mark.asyncio
+async def test_process_and_respond_streaming_persists_interrupted_history_when_delivery_fails(
+    tmp_path: Path,
+) -> None:
+    """Stream delivery errors should persist canonical interrupted replay from the partial text."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.stream_agent_response") as mock_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
+            accumulated = ""
+            async for chunk in request.response_stream:
+                accumulated += str(chunk)
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$terminal",
+                accumulated_text="Partial answer\n\n**[Response interrupted by an error: boom]**",
+                tool_trace=[],
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Partial answer"
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        delivery = await coordinator.process_and_respond_streaming(
+            _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+        )
+
+    assert delivery.event_id == "$terminal"
+    assert delivery.failure_reason == "boom"
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "Partial answer\n\n[interrupted]"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_process_and_respond_emits_session_started_after_persisted_cancellation(
     tmp_path: Path,
 ) -> None:
@@ -1494,6 +1556,71 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
 
 
 @pytest.mark.asyncio
+async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_active_response_events(
+    tmp_path: Path,
+) -> None:
+    """Lifecycle-owned minimal interruption must not treat active bot replies as consumed user events."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    started = asyncio.Event()
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        task = asyncio.create_task(response_function("$thinking"))
+        await started.wait()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        return "$thinking"
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch.object(ResponseRunner, "_active_response_event_ids", return_value={"$other-response"}),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+            run_id_callback("run-retry")
+            started.set()
+            await asyncio.sleep(60)
+            return "unreachable"
+
+        mock_ai.side_effect = fake_ai_response
+
+        event_id = await coordinator.generate_response_locked(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+    assert event_id is None
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata["matrix_seen_event_ids"] == ["$user_msg"]
+    assert "$other-response" not in persisted_run.metadata["matrix_seen_event_ids"]
+
+
+@pytest.mark.asyncio
 async def test_generate_response_locked_persists_interrupted_history_when_final_delivery_is_cancelled(
     tmp_path: Path,
 ) -> None:
@@ -1555,6 +1682,76 @@ async def test_generate_response_locked_persists_interrupted_history_when_final_
         ("user", "Hello"),
         ("assistant", "Hello!\n\n[interrupted]"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_generate_response_locked_delivery_cancel_with_visible_tools_replays_tool_trace_once(
+    tmp_path: Path,
+) -> None:
+    """Delivery-interrupted replay must not duplicate inline tool blocks from the finished run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    history_storage = _SessionStorage()
+    ai_scope_storage = _SessionStorage()
+    completed_run = RunOutput(
+        run_id="run-visible-tools",
+        agent_id="general",
+        session_id="session1",
+        content="Half done",
+        messages=[Message(role="assistant", content="Half done")],
+        tools=[
+            ToolExecution(
+                tool_name="run_shell_command",
+                tool_args={"cmd": "pwd"},
+                result="/app",
+            ),
+        ],
+        status=RunStatus.completed,
+    )
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch.object(ResponseRunner, "_show_tool_calls", return_value=True),
+        patch(
+            "mindroom.ai.open_resolved_scope_session_context",
+            new=lambda **_: _open_agent_scope_context(ai_scope_storage),
+        ),
+        patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=completed_run),
+    ):
+        mock_prepare.return_value = _prepared_prompt_result(MagicMock(), prompt="Hello")
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=history_storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        coordinator.deps.delivery_gateway.deliver_final = AsyncMock(
+            side_effect=asyncio.CancelledError("delivery cancel"),
+        )
+
+        event_id = await coordinator.generate_response_locked(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+    assert event_id is None
+    persisted_session = cast("AgentSession", history_storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assistant_content = cast("str", persisted_run.messages[1].content)
+    assert assistant_content.count("[tool:run_shell_command completed]") == 1
+    assert assistant_content == (
+        "Half done\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]"
+    )
 
 
 @pytest.mark.asyncio
@@ -1927,6 +2124,72 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         "stream",
         "deliver:Team hello",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_persists_interrupted_history_when_stream_delivery_fails(
+    tmp_path: Path,
+) -> None:
+    """Team stream delivery errors should persist canonical interrupted replay from the partial text."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.empty(),
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
+            accumulated = ""
+            async for chunk in request.response_stream:
+                accumulated += str(chunk)
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$team-terminal",
+                accumulated_text="Team hello\n\n**[Response interrupted by an error: boom]**",
+                tool_trace=[],
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Team hello"
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id == "$team-terminal"
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "Team hello\n\n[interrupted]"),
     ]
 
 

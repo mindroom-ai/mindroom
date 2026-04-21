@@ -579,6 +579,11 @@ def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = Tr
     return "\n".join(response_parts) if response_parts else ""
 
 
+def _extract_replayable_response_text(response: RunOutput) -> str:
+    """Return canonical assistant text without inline tool-rendering duplication."""
+    return _extract_response_content(response, show_tool_calls=False)
+
+
 def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
     """Extract structured tool-trace metadata from a RunOutput."""
     if not response.tools:
@@ -1656,7 +1661,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             if turn_recorder is not None:
                 turn_recorder.record_completed(
                     run_metadata=metadata,
-                    assistant_text=response_text,
+                    assistant_text=_extract_replayable_response_text(response),
                     completed_tools=_extract_tool_trace(response),
                 )
             return response_text

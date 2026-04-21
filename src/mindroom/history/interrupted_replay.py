@@ -91,14 +91,18 @@ def split_interrupted_tool_trace(
 ) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
     """Split cancelled-run tools into completed and still-interrupted traces.
 
-    Agno's cancelled non-streaming outputs do not currently expose per-tool terminal
-    state, so the only reliable signal we have is whether a tool produced a result.
-    A ``None`` result means the call never produced a completion payload and should
-    remain interrupted in replay history.
+    Prefer explicit terminal state when Agno provides it. Only fall back to
+    ``result is None`` when the provider omitted both a completion payload and any
+    explicit success/failure marker.
     """
     completed: list[ToolTraceEntry] = []
     interrupted: list[ToolTraceEntry] = []
     for tool in tools or ():
+        if tool.tool_call_error is False:
+            _, trace_entry = format_tool_completed_event(tool)
+            if trace_entry is not None:
+                completed.append(trace_entry)
+            continue
         if tool.result is None and tool.tool_call_error is not True:
             _, trace_entry = format_tool_started_event(tool)
             if trace_entry is not None:

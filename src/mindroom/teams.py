@@ -2149,7 +2149,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             error_text = str(event.content or "Unknown team error")
                             if (
                                 not retried_without_inline_media
-                                and not emitted_output
+                                and not (emitted_output or pending_tools or completed_tools)
                                 and should_retry_without_inline_media(error_text, attempt_media_inputs)
                             ):
                                 logger.warning(
@@ -2205,7 +2205,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             error_text = event.content or "Unknown team error"
                             if (
                                 not retried_without_inline_media
-                                and not emitted_output
+                                and not (emitted_output or pending_tools or completed_tools)
                                 and should_retry_without_inline_media(error_text, attempt_media_inputs)
                             ):
                                 logger.warning(
