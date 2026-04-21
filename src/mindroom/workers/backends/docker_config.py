@@ -266,6 +266,7 @@ def docker_backend_config_signature(
     *,
     auth_token: str | None,
     storage_path: Path | None = None,
+    worker_grantable_credentials: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Docker backend config."""
     config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
@@ -296,6 +297,7 @@ def docker_backend_config_signature(
             str(credentials_key.shared_base_path),
             credentials_key.current_worker_key or "",
             str(credentials_key.current_worker_root or ""),
+            *sorted(worker_grantable_credentials or frozenset()),
         ),
         runtime_paths=effective_runtime_paths,
         json_values=(

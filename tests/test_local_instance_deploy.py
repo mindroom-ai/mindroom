@@ -12,6 +12,7 @@ import yaml
 from rich.console import Console
 
 from tests.conftest import normalize_console_output
+
 _SCRIPT_PATH = Path("local/instances/deploy/deploy.py")
 _MODULE_SPEC = importlib.util.spec_from_file_location("mindroom_local_instance_deploy", _SCRIPT_PATH)
 assert _MODULE_SPEC is not None

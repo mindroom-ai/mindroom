@@ -42,7 +42,6 @@ from mindroom.runtime_env_policy import (
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.catalog import (
-    SAFE_TOOL_INIT_OVERRIDE_FIELDS,
     TOOL_METADATA,
     ToolConfigOverrideError,
     ToolInitOverrideError,
@@ -330,12 +329,17 @@ def _filter_runtime_tool_init_overrides(tool_name: str, runtime_overrides: dict[
     if metadata is None or not metadata.config_fields:
         return {}
     allowed_field_names = {field.name for field in metadata.config_fields}
-    supported_runtime_overrides = {
-        name: value
-        for name, value in runtime_overrides.items()
-        if name in allowed_field_names and name in SAFE_TOOL_INIT_OVERRIDE_FIELDS
-    }
-    return sanitize_tool_init_overrides(tool_name, supported_runtime_overrides) or {}
+    supported_runtime_overrides: dict[str, object] = {}
+    for name, value in runtime_overrides.items():
+        if name not in allowed_field_names:
+            continue
+        try:
+            sanitized_override = sanitize_tool_init_overrides(tool_name, {name: value})
+        except ToolInitOverrideError:
+            continue
+        if sanitized_override:
+            supported_runtime_overrides.update(sanitized_override)
+    return supported_runtime_overrides
 
 
 def _request_runtime_overrides(

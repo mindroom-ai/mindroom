@@ -456,6 +456,7 @@ def _assert_projected_worker_mounts(
     assert str(projected_paths["memory_root"].resolve()) not in volumes
     return projection_root
 
+
 def _assert_projected_config_snapshot(projection_root: Path, tmp_path: Path) -> None:
     projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
     assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-my-plugin" in projected_config
@@ -476,6 +477,8 @@ def _assert_projected_config_snapshot(projection_root: Path, tmp_path: Path) -> 
     assert (
         worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / _WORKER_CONFIG_STATE_DIRNAME / "memory" / "file"
     ).is_dir()
+
+
 def _backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -485,7 +488,7 @@ def _backend(
     runtime_paths: RuntimePaths | None = None,
     storage_path: Path | None = None,
     host_config_path: Path | None = None,
-) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, bool]]]:
+) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, frozenset[str]]]]:
     config = _DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
@@ -506,7 +509,7 @@ def _backend(
     config.host_config_path.write_text(config_text, encoding="utf-8")
     fake_client = _FakeDockerClient()
     fake_client.images.by_name[config.image] = _FakeImage("sha256:image-v1")
-    sync_calls: list[tuple[str, bool]] = []
+    sync_calls: list[tuple[str, frozenset[str]]] = []
 
     monkeypatch.setattr(
         "mindroom.workers.backends.docker._load_docker_client_and_errors",
@@ -521,10 +524,10 @@ def _backend(
 
     def _record_sync_call(
         worker_key: str,
-        include_ui_credentials: bool = False,
+        allowed_services: frozenset[str] = frozenset(),
         **_kwargs: object,
     ) -> None:
-        sync_calls.append((worker_key, include_ui_credentials))
+        sync_calls.append((worker_key, allowed_services))
 
     monkeypatch.setattr(
         "mindroom.workers.backends.docker.sync_shared_credentials_to_worker",
@@ -1047,7 +1050,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert handle.status == "ready"
     assert handle.endpoint.endswith("/api/sandbox-runner/execute")
     assert handle.debug_metadata["state_root"] == str(worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY))
-    assert sync_calls == [(_TEST_UNSCOPED_WORKER_KEY, True)]
+    assert sync_calls == [(_TEST_UNSCOPED_WORKER_KEY, frozenset())]
 
     run_call = fake_client.containers.run_calls[0]
     env = run_call["environment"]
@@ -2261,6 +2264,7 @@ def test_docker_backend_recreates_container_when_projected_file_asset_changes(
         second_projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
     )
     assert projected_context_path.read_text(encoding="utf-8") == "# Updated Context\n"
+
 
 def test_docker_backend_recreates_container_when_projected_directory_asset_changes(
     monkeypatch: pytest.MonkeyPatch,
