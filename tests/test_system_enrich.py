@@ -44,7 +44,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.team_exact_members import ResolvedExactTeamMembers
-from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
+from mindroom.teams import TeamMode, _prepare_materialized_team_execution, build_materialized_team_instance
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -428,7 +428,7 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
             model_name=None,
             configured_team_name=None,
         )
-        await prepare_materialized_team_execution(
+        await _prepare_materialized_team_execution(
             scope_context=None,
             agents=team_members.agents,
             team=team,
@@ -501,7 +501,7 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
             model_name=None,
             configured_team_name=None,
         )
-        prepared_execution = await prepare_materialized_team_execution(
+        prepared_execution = await _prepare_materialized_team_execution(
             scope_context=None,
             agents=team_members.agents,
             team=team,

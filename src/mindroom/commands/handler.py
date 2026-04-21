@@ -6,7 +6,7 @@ import inspect
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.agents import build_agent_tool_init_context, build_agent_toolkit, get_agent_toolkit_names
+from mindroom.agents import build_agent_toolkit, get_agent_toolkit_names
 from mindroom.authorization import get_available_agents_for_sender_authoritative
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
@@ -282,12 +282,6 @@ def _collect_agent_toolkits(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> list[tuple[str, Toolkit]]:
     worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
-    tool_init_context = build_agent_tool_init_context(
-        config,
-        agent_name,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in get_agent_toolkit_names(agent_name, config):
         try:
@@ -297,7 +291,6 @@ def _collect_agent_toolkits(
                 config=config,
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
-                tool_init_context=tool_init_context,
                 execution_identity=execution_identity,
             )
             if toolkit is None:

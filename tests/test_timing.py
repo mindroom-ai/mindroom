@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
-from unittest.mock import Mock
+import importlib
+from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock, patch
 
 import pytest
 
+import mindroom.agents as agents_module
+import mindroom.history.runtime as history_runtime_module
 import mindroom.timing as timing_module
 from mindroom.timing import DispatchPipelineTiming, timed, timing_scope
 
@@ -224,6 +227,62 @@ def test_timed_logs_omit_scope_when_unset(monkeypatch: pytest.MonkeyPatch) -> No
     run()
 
     _assert_timing_logged(logger, "plain_label")
+
+
+def test_load_agent_model_instance_preserves_prompt_assembly_subspan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent model init should keep its dedicated system-prompt timing label."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+    reloaded_agents_module = importlib.reload(agents_module)
+    config = cast("object", Mock())
+    runtime_paths = cast("object", Mock())
+    sentinel_model = object()
+
+    with patch(
+        "mindroom.agents.model_loading.get_model_instance",
+        return_value=sentinel_model,
+    ) as mock_get_model_instance:
+        assert (
+            reloaded_agents_module._load_agent_model_instance(
+                config,
+                runtime_paths,
+                "agent-model",
+            )
+            is sentinel_model
+        )
+
+    mock_get_model_instance.assert_called_once_with(config, runtime_paths, "agent-model")
+    _assert_timing_logged(logger, "system_prompt_assembly.agent_create.model_instance")
+
+
+def test_load_compaction_model_preserves_history_prepare_subspan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """History compaction model init should keep its dedicated timing label."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+    reloaded_history_runtime_module = importlib.reload(history_runtime_module)
+    config = cast("object", Mock())
+    runtime_paths = cast("object", Mock())
+    sentinel_model = object()
+
+    with patch(
+        "mindroom.history.runtime.model_loading.get_model_instance",
+        return_value=sentinel_model,
+    ) as mock_get_model_instance:
+        assert (
+            reloaded_history_runtime_module._load_compaction_model(
+                config,
+                runtime_paths,
+                "compaction-model",
+            )
+            is sentinel_model
+        )
+
+    mock_get_model_instance.assert_called_once_with(config, runtime_paths, "compaction-model")
+    _assert_timing_logged(logger, "system_prompt_assembly.history_prepare.compaction_model_init")
 
 
 def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> None:

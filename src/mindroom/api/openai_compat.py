@@ -30,8 +30,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
+from mindroom.execution_preparation import prepare_bound_team_execution_context
 from mindroom.history.runtime import (
     ScopeSessionContext,
+    apply_replay_plan,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
 )
@@ -47,7 +49,6 @@ from mindroom.teams import (
     is_cancelled_run_output,
     is_errored_run_output,
     materialize_exact_team_members,
-    prepare_materialized_team_execution,
     resolve_configured_team,
 )
 from mindroom.tool_system.events import (
@@ -1211,25 +1212,26 @@ async def _prepare_openai_team_run_input(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
 ) -> str:
     """Prepare the canonical prompt text for one OpenAI-compatible team run."""
-    prepared_execution = await prepare_materialized_team_execution(
+    prepared_execution = await prepare_bound_team_execution_context(
         scope_context=scope_context,
         agents=agents,
         team=team,
-        message=prompt,
+        prompt=prompt,
         thread_history=thread_history,
         config=config,
         runtime_paths=runtime_paths,
         active_model_name=config.resolve_runtime_model(entity_name=team_name).model_name,
+        team_name=team_name,
+        active_context_window=config.resolve_runtime_model(entity_name=team_name).context_window,
         reply_to_event_id=None,
         active_event_ids=frozenset(),
         response_sender_id=None,
         current_sender_id=None,
         compaction_outcomes_collector=None,
-        configured_team_name=team_name,
-        matrix_run_metadata=None,
-        system_enrichment_items=(),
     )
-    return prepared_execution.prepared_prompt
+    if prepared_execution.replay_plan is not None:
+        apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
+    return prepared_execution.final_prompt
 
 
 async def _non_stream_team_completion(

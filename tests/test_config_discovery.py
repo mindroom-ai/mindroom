@@ -56,7 +56,6 @@ _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
 }
 _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
     "_build_tool_instance": "worker_target",
-    "build_agent_tool_init_context": "execution_identity",
     "build_agent_toolkit": "execution_identity",
     "build_worker_target_from_runtime_env": "execution_identity",
     "create_agent": "execution_identity",
@@ -72,7 +71,6 @@ _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
     "save_scoped_credentials": "worker_target",
 }
 _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
-    ("src/mindroom/agents.py", "build_agent_tool_init_context", "execution_identity"),
     ("src/mindroom/agents.py", "build_agent_toolkit", "execution_identity"),
     ("src/mindroom/agents.py", "create_session_storage", "execution_identity"),
     ("src/mindroom/agents.py", "create_agent", "execution_identity"),

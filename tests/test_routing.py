@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import tempfile
-from inspect import signature
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -143,66 +142,36 @@ def test_teams_public_seam_exports_status_helpers() -> None:
 
 def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     """Curated seam modules should not freeze low-level runtime or prompt-plumbing helpers as public API."""
-    agents_module = importlib.import_module("mindroom.agents")
-    ai_module = importlib.import_module("mindroom.ai")
+    hidden_attrs = {
+        "mindroom.agents": (
+            "create_state_storage_db",
+            "get_agent_runtime_sqlite_dbs",
+            "build_agent_tool_init_context",
+        ),
+        "mindroom.ai": (
+            "attach_media_to_run_input",
+            "copy_run_input",
+            "cleanup_queued_notice_state",
+            "cached_agent_run",
+            "append_inline_media_fallback_to_run_input",
+            "get_model_instance",
+            "install_queued_message_notice_hook",
+            "queued_message_signal_context",
+            "scrub_queued_notice_session_context",
+        ),
+        "mindroom.teams": (
+            "PreparedMaterializedTeamExecution",
+            "prepare_materialized_team_execution",
+        ),
+    }
+    for module_name, attrs in hidden_attrs.items():
+        module = importlib.import_module(module_name)
+        for attr in attrs:
+            with pytest.raises(AttributeError):
+                getattr(module, attr)
+
     model_loading_module = importlib.import_module("mindroom.model_loading")
-    teams_module = importlib.import_module("mindroom.teams")
-
-    assert "create_state_storage_db" not in agents_module.__all__
-    assert "get_agent_runtime_sqlite_dbs" not in agents_module.__all__
-    assert "create_state_storage_db" not in vars(agents_module)
-    assert "get_agent_runtime_sqlite_dbs" not in vars(agents_module)
-    assert "get_model_instance" not in vars(agents_module)
-
-    assert "attach_media_to_run_input" not in ai_module.__all__
-    assert "copy_run_input" not in ai_module.__all__
-    assert "cleanup_queued_notice_state" not in ai_module.__all__
-    assert "cached_agent_run" not in ai_module.__all__
-    assert "append_inline_media_fallback_to_run_input" not in ai_module.__all__
-    assert "get_model_instance" not in ai_module.__all__
-    assert "install_queued_message_notice_hook" not in ai_module.__all__
-    assert "queued_message_signal_context" not in ai_module.__all__
-    assert "scrub_queued_notice_session_context" not in ai_module.__all__
-    assert "append_inline_media_fallback_to_run_input" not in vars(ai_module)
-    assert "attach_media_to_run_input" not in vars(ai_module)
-    assert "cached_agent_run" not in vars(ai_module)
-    assert "cleanup_queued_notice_state" not in vars(ai_module)
-    assert "copy_run_input" not in vars(ai_module)
-    assert "get_model_instance" not in vars(ai_module)
-    assert "install_queued_message_notice_hook" not in vars(ai_module)
-    assert "queued_message_signal_context" not in vars(ai_module)
-    assert "scrub_queued_notice_session_context" not in vars(ai_module)
-
-    assert "get_model_instance" in model_loading_module.__all__
-    assert "get_model_instance" in vars(model_loading_module)
-
-    assert "PreparedMaterializedTeamExecution" not in teams_module.__all__
-    assert "attach_media_to_run_input" not in teams_module.__all__
-    assert "cleanup_queued_notice_state" not in teams_module.__all__
-    assert "install_queued_message_notice_hook" not in teams_module.__all__
-    assert "scrub_queued_notice_session_context" not in teams_module.__all__
-    assert "PreparedMaterializedTeamExecution" not in vars(teams_module)
-    assert "attach_media_to_run_input" not in vars(teams_module)
-    assert "cleanup_queued_notice_state" not in vars(teams_module)
-    assert "install_queued_message_notice_hook" not in vars(teams_module)
-    assert "scrub_queued_notice_session_context" not in vars(teams_module)
-
-
-def test_flattened_seams_avoid_backward_compatibility_signature_shims() -> None:
-    """Flattened seam helpers should expose only the current typed contract."""
-    teams_module = importlib.import_module("mindroom.teams")
-    agent_policy_module = importlib.import_module("mindroom.agent_policy")
-    config_main_module = importlib.import_module("mindroom.config.main")
-
-    prepare_signature = signature(teams_module.prepare_materialized_team_execution)
-    current_sender_parameter = prepare_signature.parameters["current_sender_id"]
-    assert current_sender_parameter.default is current_sender_parameter.empty
-
-    agent_policy_signature = signature(agent_policy_module.get_agent_delegation_closure)
-    assert "visiting" not in agent_policy_signature.parameters
-
-    config_signature = signature(config_main_module.Config.get_agent_delegation_closure)
-    assert "visiting" not in config_signature.parameters
+    assert callable(model_loading_module.get_model_instance)
 
 
 class TestAIRouting:

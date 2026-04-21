@@ -1409,7 +1409,7 @@ def build_materialized_team_instance(
     )
 
 
-async def prepare_materialized_team_execution(
+async def _prepare_materialized_team_execution(
     *,
     scope_context: ScopeSessionContext | None,
     agents: list[Agent],
@@ -1552,7 +1552,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 model_name=model_name,
                 configured_team_name=configured_team_name,
             )
-            prepared_execution = await prepare_materialized_team_execution(
+            prepared_execution = await _prepare_materialized_team_execution(
                 scope_context=scope_context,
                 agents=agents,
                 team=team,
@@ -1913,7 +1913,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 model_name=model_name,
                 configured_team_name=configured_team_name,
             )
-            prepared_execution = await prepare_materialized_team_execution(
+            prepared_execution = await _prepare_materialized_team_execution(
                 scope_context=scope_context,
                 agents=team_members.agents,
                 team=team,
@@ -2358,7 +2358,6 @@ __all__ = [
     "is_cancelled_run_output",
     "is_errored_run_output",
     "materialize_exact_team_members",
-    "prepare_materialized_team_execution",
     "resolve_configured_team",
     "resolve_live_shared_agent_names",
     "select_model_for_team",

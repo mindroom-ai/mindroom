@@ -60,9 +60,9 @@ from mindroom.teams import (
     TeamMode,
     _ensure_request_team_knowledge_managers,
     _materialize_team_members,
+    _prepare_materialized_team_execution,
     _team_response_stream_raw,
     materialize_exact_team_members,
-    prepare_materialized_team_execution,
     team_response,
     team_response_stream,
 )
@@ -826,7 +826,7 @@ async def test_prepare_materialized_team_execution_scrubs_queued_notices_when_ca
             "mindroom.teams.prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ):
-            await prepare_materialized_team_execution(
+            await _prepare_materialized_team_execution(
                 scope_context=scope_context,
                 agents=[fake_agent],
                 team=mock_team,
@@ -864,7 +864,7 @@ async def test_prepare_materialized_team_execution_forwards_explicit_thread_hist
         "mindroom.teams.prepare_bound_team_execution_context",
         new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
     ):
-        await prepare_materialized_team_execution(
+        await _prepare_materialized_team_execution(
             scope_context=None,
             agents=[fake_agent],
             team=mock_team,
