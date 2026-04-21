@@ -81,7 +81,7 @@ def _plugin_root() -> Path:
     repo_path = Path(__file__).resolve().parents[1] / "plugins" / "workloop"
     if repo_path.is_dir():
         return repo_path
-    return Path.home() / ".mindroom-chat" / "plugins" / "workloop"
+    return Path.home() / ".mindroom" / "plugins" / "workloop"
 
 
 pytestmark = pytest.mark.skipif(

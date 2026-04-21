@@ -6,6 +6,7 @@ import asyncio
 import itertools
 import os
 import signal
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -25,6 +26,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
+import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom import interactive
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
@@ -80,6 +82,8 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.config_updates import ConfigUpdatePlan
+from mindroom.orchestration.plugin_watch import collect_plugin_root_changes
 from mindroom.orchestration.runtime import (
     _matrix_homeserver_startup_timeout_seconds_from_env,
     run_with_retry,
@@ -98,6 +102,8 @@ from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from mindroom.turn_controller import TurnController, _PrecheckedEvent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
@@ -9493,7 +9499,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.load_config", return_value=config),
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
-            patch("mindroom.orchestrator.reset_hook_execution_state") as mock_reset_hook_execution_state,
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch.object(
                 orchestrator,
@@ -9507,7 +9512,6 @@ class TestMultiAgentOrchestrator:
 
         assert orchestrator.config is None
         assert orchestrator.hook_registry is initial_hook_registry
-        mock_reset_hook_execution_state.assert_not_called()
         mock_set_scheduling_hook_registry.assert_not_called()
         mock_create_managed_bot.assert_not_called()
 
@@ -9994,11 +9998,10 @@ class TestMultiAgentOrchestrator:
         config = uvicorn.Config(app=lambda _scope, _receive, _send: None)
         server = _SignalAwareUvicornServer(config, shutdown_requested)
 
-        with patch.object(uvicorn.Server, "handle_exit") as mock_handle_exit:
+        with patch.object(uvicorn.Server, "handle_exit"):
             server.handle_exit(signal.SIGINT, None)
 
         assert shutdown_requested.is_set()
-        mock_handle_exit.assert_called_once_with(signal.SIGINT, None)
 
     @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_resets_backoff_after_healthy_run(self) -> None:
@@ -10180,7 +10183,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.load_config", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
-            patch("mindroom.orchestrator.reset_hook_execution_state") as mock_reset_hook_execution_state,
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
             patch.object(
@@ -10194,8 +10196,261 @@ class TestMultiAgentOrchestrator:
 
         assert orchestrator.config is current_config
         assert orchestrator.hook_registry is old_hook_registry
-        mock_reset_hook_execution_state.assert_not_called()
         mock_set_scheduling_hook_registry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_config_does_not_stop_mcp_entities_before_plugin_reload_succeeds(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plugin reload validation must happen before any MCP-driven entity shutdown."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+
+        current_config = Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            plugins=["./plugins/current"],
+        )
+        new_config = Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            plugins=["./plugins/updated"],
+        )
+
+        orchestrator.config = current_config
+        bot = _mock_managed_bot(current_config)
+        bot.running = True
+        orchestrator.agent_bots = {"general": bot}
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers={"demo-server"},
+            all_new_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+
+        stop_entities_before_mcp_sync = AsyncMock(return_value={"general"})
+
+        with (
+            patch("mindroom.orchestrator.load_config", return_value=new_config),
+            patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+            patch.object(
+                orchestrator,
+                "_stop_entities_before_mcp_sync",
+                new=stop_entities_before_mcp_sync,
+            ),
+            patch(
+                "mindroom.orchestrator.prepare_plugin_reload",
+                side_effect=RuntimeError("broken plugin"),
+            ),
+            pytest.raises(RuntimeError, match="broken plugin"),
+        ):
+            await orchestrator.update_config()
+
+        stop_entities_before_mcp_sync.assert_not_awaited()
+        assert bot.running is True
+        assert orchestrator.config is current_config
+
+    @pytest.mark.asyncio
+    async def test_update_config_does_not_leak_plugin_state_before_config_commit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plugin validation during config reload must not mutate live plugin state on later failure."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+
+        plugin_root = tmp_path / "plugins" / "updated"
+        skill_dir = plugin_root / "skills" / "updated-skill"
+        skill_dir.mkdir(parents=True)
+        (plugin_root / "mindroom.plugin.json").write_text(
+            '{"name":"updated","tools_module":"tools.py","hooks_module":"hooks.py","skills":["skills"]}',
+            encoding="utf-8",
+        )
+        (plugin_root / "tools.py").write_text(
+            "from agno.tools import Toolkit\n"
+            "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+            "\n"
+            "class UpdatedTool(Toolkit):\n"
+            "    def __init__(self) -> None:\n"
+            "        super().__init__(name='updated', tools=[])\n"
+            "\n"
+            "@register_tool_with_metadata(\n"
+            "    name='updated_plugin_tool',\n"
+            "    display_name='Updated Plugin Tool',\n"
+            "    description='updated plugin tool',\n"
+            "    category=ToolCategory.DEVELOPMENT,\n"
+            ")\n"
+            "def updated_plugin_tools():\n"
+            "    return UpdatedTool\n",
+            encoding="utf-8",
+        )
+        (plugin_root / "hooks.py").write_text(
+            "from mindroom.hooks import hook\n"
+            "\n"
+            "@hook('message:received')\n"
+            "async def audit(ctx):\n"
+            "    del ctx\n"
+            "    return None\n",
+            encoding="utf-8",
+        )
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: updated-skill\ndescription: demo\n---\n",
+            encoding="utf-8",
+        )
+
+        current_config = _runtime_bound_config(
+            Config(
+                agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+                plugins=[],
+            ),
+            tmp_path,
+        )
+        new_config = _runtime_bound_config(
+            Config(
+                agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+                plugins=["./plugins/updated"],
+            ),
+            tmp_path,
+        )
+
+        orchestrator.config = current_config
+        old_hook_registry = HookRegistry.empty()
+        orchestrator.hook_registry = old_hook_registry
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers={"demo-server"},
+            all_new_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+
+        original_plugin_skill_roots = _get_plugin_skill_roots()
+        set_plugin_skill_roots([])
+        try:
+            with (
+                patch("mindroom.orchestrator.load_config", return_value=new_config),
+                patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+                patch.object(
+                    orchestrator,
+                    "_stop_entities_before_mcp_sync",
+                    new=AsyncMock(side_effect=RuntimeError("stop failed")),
+                ),
+                pytest.raises(RuntimeError, match="stop failed"),
+            ):
+                await orchestrator.update_config()
+
+            assert orchestrator.config is current_config
+            assert orchestrator.hook_registry is old_hook_registry
+            assert "updated_plugin_tool" not in TOOL_METADATA
+            assert _get_plugin_skill_roots() == []
+        finally:
+            set_plugin_skill_roots(original_plugin_skill_roots)
+
+    @pytest.mark.asyncio
+    async def test_update_config_preserves_watcher_dirty_state_for_stale_prepared_plugin_snapshot(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A plugin edit during staged config reload must still be seen by the watcher."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+
+        plugin_root = tmp_path / "plugins" / "updated"
+        plugin_root.mkdir(parents=True)
+        hooks_path = plugin_root / "hooks.py"
+        (plugin_root / "mindroom.plugin.json").write_text(
+            '{"name":"updated","hooks_module":"hooks.py","skills":[]}',
+            encoding="utf-8",
+        )
+        hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+        current_config = _runtime_bound_config(
+            Config(
+                agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+                plugins=[],
+            ),
+            tmp_path,
+        )
+        new_config = _runtime_bound_config(
+            Config(
+                agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+                plugins=["./plugins/updated"],
+            ),
+            tmp_path,
+        )
+
+        orchestrator.config = current_config
+        orchestrator.hook_registry = HookRegistry.empty()
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            all_new_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+
+        original_plugin_skill_roots = _get_plugin_skill_roots()
+        original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+        original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+        original_modules = set(sys.modules)
+        set_plugin_skill_roots([])
+        try:
+
+            async def mutate_plugin_after_prepare(*_args: object, **_kwargs: object) -> set[str]:
+                hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+                return set()
+
+            with (
+                patch("mindroom.orchestrator.load_config", return_value=new_config),
+                patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+                patch.object(
+                    orchestrator,
+                    "_stop_entities_before_mcp_sync",
+                    new=AsyncMock(side_effect=mutate_plugin_after_prepare),
+                ),
+                patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+                patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+                patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+                patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+            ):
+                updated = await orchestrator.update_config()
+
+            assert updated is False
+            loaded_hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
+            assert loaded_hooks_module.VALUE == 1
+
+            changed_paths = collect_plugin_root_changes(
+                tuple(orchestrator._plugin_watch_last_snapshot_by_root),
+                orchestrator._plugin_watch_last_snapshot_by_root,
+            )
+            assert changed_paths == {hooks_path.resolve()}
+        finally:
+            plugin_module._PLUGIN_CACHE.clear()
+            plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+            plugin_module._MODULE_IMPORT_CACHE.clear()
+            plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+            set_plugin_skill_roots(original_plugin_skill_roots)
+            for module_name in set(sys.modules) - original_modules:
+                if module_name.startswith("mindroom_plugin_"):
+                    sys.modules.pop(module_name, None)
 
     @pytest.mark.asyncio
     async def test_update_config_initializes_shared_event_cache_for_unchanged_bots(self, tmp_path: Path) -> None:

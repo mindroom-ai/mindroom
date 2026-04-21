@@ -66,6 +66,15 @@ def test_invalid_commands() -> None:
         assert command is None
 
 
+def test_reload_plugins_command() -> None:
+    """Test reload-plugins command parsing."""
+    for cmd_text in ("!reload-plugins", "!reload_plugins", "!RELOAD-PLUGINS"):
+        command = command_parser.parse(cmd_text)
+        assert command is not None
+        assert command.type == CommandType.RELOAD_PLUGINS
+        assert command.args == {}
+
+
 def test_schedule_command() -> None:
     """Test schedule command parsing."""
     # Basic schedule with time and message
@@ -241,3 +250,11 @@ def test_get_command_help() -> None:
     edit_help = get_command_help("edit_schedule")
     assert "Edit Schedule Command" in edit_help
     assert "edit_schedule" in edit_help
+
+    reload_help = get_command_help("reload-plugins")
+    assert "Reload Plugins Command" in reload_help
+    assert "!reload-plugins" in reload_help
+    assert "Admin only" in reload_help
+
+    reload_help_alias = get_command_help("reload_plugins")
+    assert reload_help_alias == reload_help

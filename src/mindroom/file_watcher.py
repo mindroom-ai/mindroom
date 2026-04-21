@@ -12,6 +12,20 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 logger = get_logger(__name__)
+_WATCH_SCAN_INTERVAL_SECONDS = 1.0
+_WATCH_TREE_DEBOUNCE_SECONDS = 1.0
+_IGNORED_TREE_PARTS = {"__pycache__", ".ruff_cache", ".mypy_cache", ".pytest_cache", ".git"}
+_IGNORED_TREE_SUFFIXES = (".pyc", ".pyo", ".swp", ".swo", "~", ".tmp")
+
+
+def _is_relevant_path(path: Path) -> bool:
+    """Return whether one tree entry should participate in change snapshots."""
+    if not path.is_file():
+        return False
+    if any(part in _IGNORED_TREE_PARTS for part in path.parts):
+        return False
+    name = path.name
+    return not (name.endswith(_IGNORED_TREE_SUFFIXES) or name.startswith(".#"))
 
 
 async def watch_file(
@@ -31,7 +45,7 @@ async def watch_file(
     last_mtime = file_path.stat().st_mtime if file_path.exists() else 0
 
     while stop_event is None or not stop_event.is_set():
-        await asyncio.sleep(1.0)  # Check every second
+        await asyncio.sleep(_WATCH_SCAN_INTERVAL_SECONDS)
 
         try:
             if file_path.exists():
@@ -47,3 +61,28 @@ async def watch_file(
             # Don't let callback errors stop the watcher
             # The callback should handle its own errors
             logger.exception("Exception during file watcher callback - continuing to watch")
+
+
+def _tree_snapshot(root_path: Path) -> dict[Path, int]:
+    """Return the current mtime snapshot for one directory tree."""
+    if not root_path.exists():
+        return {}
+
+    snapshot: dict[Path, int] = {}
+    for path in root_path.rglob("*"):
+        if not _is_relevant_path(path):
+            continue
+        try:
+            snapshot[path] = path.stat().st_mtime_ns
+        except (OSError, PermissionError):
+            continue
+    return snapshot
+
+
+def _tree_changed_paths(previous: dict[Path, int], current: dict[Path, int]) -> set[Path]:
+    """Return the set of paths added, removed, or modified since the last scan."""
+    changed_paths = set(previous) ^ set(current)
+    for path in set(previous) & set(current):
+        if previous[path] != current[path]:
+            changed_paths.add(path)
+    return changed_paths

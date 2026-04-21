@@ -116,10 +116,10 @@ def _log_skipped_plugin_entry(
         logger.warning("Plugin module could not be resolved, skipping", spec=plugin_path)
         return
 
-    log_kwargs: dict[str, object] = {"plugin_path": plugin_path}
+    log_kwargs: dict[str, object] = {"plugin_path": plugin_path, "error": str(exc)}
     if root is not None:
         log_kwargs["path"] = str(root)
-    logger.exception("Failed to load plugin, skipping", **log_kwargs)
+    logger.warning("Failed to load plugin, skipping", **log_kwargs)
 
 
 def _reject_duplicate_plugin_manifest_names(
@@ -168,7 +168,10 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
         return None
 
     module_name, subpath, _explicit = parsed
-    spec = util.find_spec(module_name)
+    try:
+        spec = util.find_spec(module_name)
+    except ModuleNotFoundError:
+        return None
     if spec is None:
         return None
 

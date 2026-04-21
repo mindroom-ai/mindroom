@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from dataclasses import dataclass
 from importlib import util
@@ -9,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.hooks.decorators import iter_module_hooks
+from mindroom.hooks.registry import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.registry_state import (
@@ -21,7 +23,7 @@ from mindroom.tool_system.registry_state import (
     _snapshot_plugin_tool_registrations,
     _synchronize_plugin_tools,
 )
-from mindroom.tool_system.skills import set_plugin_skill_roots
+from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -52,6 +54,25 @@ class _Plugin:
     discovered_hooks: tuple[HookCallback, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class PluginReloadResult:
+    """Fresh plugin snapshot built from the current config."""
+
+    hook_registry: HookRegistry
+    active_plugin_names: tuple[str, ...]
+    cancelled_task_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPluginReload:
+    """Prepared plugin runtime state that is safe to apply later."""
+
+    hook_registry: HookRegistry
+    active_plugin_names: tuple[str, ...]
+    tool_registry_snapshot: Any
+    plugin_skill_roots: tuple[Path, ...]
+
+
 def _hook_display_name(callback: HookCallback) -> str:
     return cast("Any", callback).__name__
 
@@ -66,11 +87,24 @@ def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
     _synchronize_plugin_tools(active_tool_modules)
 
 
+def deactivate_plugins() -> PluginReloadResult:
+    """Clear live plugin-derived tools, skills, and hooks."""
+    with _locked_tool_registry_state():
+        _sync_loaded_plugin_tools([])
+        set_plugin_skill_roots([])
+    return PluginReloadResult(
+        hook_registry=HookRegistry.empty(),
+        active_plugin_names=(),
+        cancelled_task_count=0,
+    )
+
+
 def load_plugins(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
     set_skill_roots: bool = True,
+    skip_broken_plugins: bool = True,
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
     import mindroom.tools  # noqa: F401, PLC0415
@@ -87,7 +121,7 @@ def load_plugins(
         plugin_bases = plugin_imports._collect_plugin_bases(
             plugin_entries,
             runtime_paths,
-            skip_broken_plugins=True,
+            skip_broken_plugins=skip_broken_plugins,
         )
         snapshot = _capture_tool_registry_snapshot()
         try:
@@ -99,6 +133,8 @@ def load_plugins(
                     plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
                 except Exception as exc:
                     _restore_tool_registry_snapshot(plugin_snapshot)
+                    if not skip_broken_plugins:
+                        raise
                     plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
                     continue
                 plugins.append(plugin)
@@ -116,6 +152,136 @@ def load_plugins(
             raise
 
         return plugins
+
+
+def get_configured_plugin_roots(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[Path, ...]:
+    """Resolve the enabled plugin roots for one config snapshot."""
+    roots: list[Path] = []
+    for plugin_entry in config.plugins:
+        if not plugin_entry.enabled:
+            continue
+        try:
+            roots.append(plugin_imports._resolve_plugin_root(plugin_entry.path, runtime_paths))
+        except PluginValidationError:
+            continue
+    return tuple(dict.fromkeys(roots))
+
+
+def prepare_plugin_reload(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    skip_broken_plugins: bool = False,
+) -> PreparedPluginReload:
+    """Build one fresh plugin snapshot without mutating the live runtime."""
+    with _locked_tool_registry_state():
+        package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
+        previous_snapshot = _capture_tool_registry_snapshot()
+        previous_plugin_skill_roots = tuple(get_plugin_skill_roots())
+        try:
+            _clear_plugin_reload_caches()
+            _evict_synthetic_plugin_subtrees(package_roots)
+            plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
+            return PreparedPluginReload(
+                hook_registry=HookRegistry.from_plugins(plugins),
+                active_plugin_names=tuple(plugin.name for plugin in plugins),
+                tool_registry_snapshot=_capture_tool_registry_snapshot(),
+                plugin_skill_roots=tuple(get_plugin_skill_roots()),
+            )
+        finally:
+            _restore_tool_registry_snapshot(previous_snapshot)
+            set_plugin_skill_roots(previous_plugin_skill_roots)
+
+
+def apply_prepared_plugin_reload(
+    prepared_reload: PreparedPluginReload,
+    *,
+    cancelled_task_count: int = 0,
+    cancel_existing_tasks: bool = False,
+) -> PluginReloadResult:
+    """Commit one previously prepared plugin runtime snapshot."""
+    with _locked_tool_registry_state():
+        if cancel_existing_tasks:
+            package_roots = {
+                cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
+            }
+            cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
+        _restore_tool_registry_snapshot(prepared_reload.tool_registry_snapshot)
+        set_plugin_skill_roots(prepared_reload.plugin_skill_roots)
+    return PluginReloadResult(
+        hook_registry=prepared_reload.hook_registry,
+        active_plugin_names=prepared_reload.active_plugin_names,
+        cancelled_task_count=cancelled_task_count,
+    )
+
+
+def reload_plugins(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    skip_broken_plugins: bool = False,
+) -> PluginReloadResult:
+    """Tear down the live plugin runtime and rebuild it from the current config."""
+    package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
+    cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
+    prepared_reload = prepare_plugin_reload(
+        config,
+        runtime_paths,
+        skip_broken_plugins=skip_broken_plugins,
+    )
+    return apply_prepared_plugin_reload(
+        prepared_reload,
+        cancelled_task_count=cancelled_task_count,
+    )
+
+
+def _cancel_plugin_module_tasks(package_roots: set[str]) -> int:
+    """Best-effort cancel module-global tasks owned by one synthetic plugin subtree."""
+    if not package_roots:
+        return 0
+
+    cancelled_task_ids: set[int] = set()
+    for module_name, module in tuple(sys.modules.items()):
+        if module is None or not any(
+            module_name == root or module_name.startswith(f"{root}.") for root in package_roots
+        ):
+            continue
+        for value in vars(module).values():
+            for task in _iter_module_tasks(value):
+                if task.done() or id(task) in cancelled_task_ids:
+                    continue
+                task.cancel()
+                cancelled_task_ids.add(id(task))
+    return len(cancelled_task_ids)
+
+
+def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
+    """Return task globals or one-level container-held tasks from one module value."""
+    if isinstance(value, asyncio.Task):
+        return (value,)
+    if isinstance(value, dict):
+        values = value.values()
+    elif isinstance(value, tuple | list | set):
+        values = value
+    else:
+        return ()
+    return tuple(item for item in values if isinstance(item, asyncio.Task))
+
+
+def _clear_plugin_reload_caches() -> None:
+    """Drop cached plugin manifests and imported plugin modules before one rebuild."""
+    plugin_imports._PLUGIN_CACHE.clear()
+    plugin_imports._MODULE_IMPORT_CACHE.clear()
+
+
+def _evict_synthetic_plugin_subtrees(package_roots: set[str]) -> None:
+    """Remove all imported synthetic plugin modules for the targeted roots."""
+    for module_name in tuple(sys.modules):
+        if any(module_name == root or module_name.startswith(f"{root}.") for root in package_roots):
+            sys.modules.pop(module_name, None)
 
 
 def _materialize_plugin(

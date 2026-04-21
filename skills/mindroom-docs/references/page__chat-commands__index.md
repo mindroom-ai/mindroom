@@ -4,16 +4,17 @@ MindRoom provides chat commands that users can type in any Matrix room where Min
 
 ## Quick Reference
 
-| Command                      | Description                              |
-| ---------------------------- | ---------------------------------------- |
-| `!help [topic]`              | Get help on commands or a specific topic |
-| `!hi`                        | Show the welcome message again           |
-| `!schedule <task>`           | Schedule a task or reminder              |
-| `!list_schedules`            | List pending scheduled tasks             |
-| `!cancel_schedule <id>`      | Cancel a scheduled task                  |
-| `!edit_schedule <id> <task>` | Edit an existing scheduled task          |
-| `!config <operation>`        | View and modify configuration            |
-| `!skill <name> [args]`       | Run a skill by name                      |
+| Command                      | Description                                      |
+| ---------------------------- | ------------------------------------------------ |
+| `!help [topic]`              | Get help on commands or a specific topic         |
+| `!hi`                        | Show the welcome message again                   |
+| `!schedule <task>`           | Schedule a task or reminder                      |
+| `!list_schedules`            | List pending scheduled tasks                     |
+| `!cancel_schedule <id>`      | Cancel a scheduled task                          |
+| `!edit_schedule <id> <task>` | Edit an existing scheduled task                  |
+| `!config <operation>`        | View and modify configuration                    |
+| `!skill <name> [args]`       | Run a skill by name                              |
+| `!reload-plugins`            | Force-reload all configured plugins (admin only) |
 
 ## Who Handles Commands
 
@@ -192,6 +193,24 @@ Run a user-invocable skill by name.
 - If `disable-model-invocation: true` and no tool dispatch is configured, the command fails.
 
 See [Skills](https://docs.mindroom.chat/skills/index.md) for skill configuration details.
+
+### `!reload-plugins`
+
+Force-reload every configured plugin from disk. Admin-only.
+
+```
+!reload-plugins
+```
+
+Plugins are also auto-reloaded on file save, typically about 1-2 seconds after save — see [plugins.md / Live development](https://docs.mindroom.chat/plugins/#live-development-hot-reload) for details. This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
+
+**Reply format:**
+
+```
+✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
+```
+
+**Permission:** Caller must be in `authorization.global_users`. Aliases: `!reload-plugins`, `!reload_plugins`.
 
 ## Stop Button
 

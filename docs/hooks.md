@@ -5,7 +5,7 @@ icon: lucide/webhook
 # Hooks
 
 Hooks let plugins observe, enrich, and transform messages as they flow through MindRoom.
-A single `@hook("event")` decorator turns any async function into a typed event handler that runs with per-hook timeouts, circuit-breaker fault isolation, and zero risk of crashing the bot.
+A single `@hook("event")` decorator turns any async function into a typed event handler that runs with per-hook timeouts, per-event fault isolation, and zero risk of crashing the bot.
 Hooks integrate with the existing [plugin system](plugins.md) and are configured through `config.yaml`.
 
 ## Quick start
@@ -444,11 +444,9 @@ Failure semantics are mode-aware:
 - **Collector** failures lose only that hook's contributed items
 - **Transformer** failures lose only that hook's draft changes; the previous draft continues
 
-### Circuit breaker
+### No quarantine, no cooldown
 
-The runtime tracks consecutive failures per `(plugin_name, hook_name)`.
-After **5 consecutive failures**, the hook enters a **5-minute cooldown** where it is skipped entirely.
-The next successful invocation clears the failure count.
+A hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](plugins.md#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
 
 ### No automatic retries
 

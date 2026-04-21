@@ -38,20 +38,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5
-_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 5 * 60
 _COLLECT_CONCURRENCY_LIMIT = 10
 _MAX_EMIT_DEPTH = 3
 _EMIT_DEPTH: ContextVar[int] = ContextVar("mindroom_hook_emit_depth", default=0)
-
-
-@dataclass(slots=True)
-class _HookFailureState:
-    consecutive_failures: int = 0
-    cooldown_until_monotonic: float = 0.0
-
-
-_HOOK_FAILURES: dict[tuple[str, str], _HookFailureState] = {}
 
 type HookExecutionContext = HookContext | ToolBeforeCallContext | ToolAfterCallContext
 
@@ -60,11 +49,6 @@ type HookExecutionContext = HookContext | ToolBeforeCallContext | ToolAfterCallC
 class _HookInvocationResult:
     succeeded: bool
     value: object | None = None
-
-
-def reset_hook_execution_state() -> None:
-    """Reset global execution state for unit tests."""
-    _HOOK_FAILURES.clear()
 
 
 def _scope_agent_name(context: HookExecutionContext) -> str | None:  # noqa: PLR0911
@@ -211,32 +195,6 @@ def _effective_timeout_ms(hook: RegisteredHook) -> int:
     return hook.timeout_ms if hook.timeout_ms is not None else default_timeout_ms_for_event(hook.event_name)
 
 
-def _circuit_breaker_key(hook: RegisteredHook) -> tuple[str, str]:
-    return (hook.plugin_name, hook.hook_name)
-
-
-def _is_hook_on_cooldown(hook: RegisteredHook) -> bool:
-    failure_state = _HOOK_FAILURES.get(_circuit_breaker_key(hook))
-    if failure_state is None:
-        return False
-    return failure_state.cooldown_until_monotonic > time.monotonic()
-
-
-def _record_hook_success(hook: RegisteredHook) -> None:
-    failure_state = _HOOK_FAILURES.get(_circuit_breaker_key(hook))
-    if failure_state is None:
-        return
-    failure_state.consecutive_failures = 0
-    failure_state.cooldown_until_monotonic = 0.0
-
-
-def _record_hook_failure(hook: RegisteredHook) -> None:
-    failure_state = _HOOK_FAILURES.setdefault(_circuit_breaker_key(hook), _HookFailureState())
-    failure_state.consecutive_failures += 1
-    if failure_state.consecutive_failures >= _CIRCUIT_BREAKER_FAILURE_THRESHOLD:
-        failure_state.cooldown_until_monotonic = time.monotonic() + _CIRCUIT_BREAKER_COOLDOWN_SECONDS
-
-
 async def _invoke_hook(hook: RegisteredHook, context: HookExecutionContext) -> _HookInvocationResult:
     timeout_seconds = _effective_timeout_ms(hook) / 1000
     started_at = time.monotonic()
@@ -245,7 +203,6 @@ async def _invoke_hook(hook: RegisteredHook, context: HookExecutionContext) -> _
             result = await hook.callback(context)
     except Exception:
         duration_ms = round((time.monotonic() - started_at) * 1000, 2)
-        _record_hook_failure(hook)
         context.logger.exception(
             "Hook execution failed",
             correlation_id=context.correlation_id,
@@ -255,7 +212,6 @@ async def _invoke_hook(hook: RegisteredHook, context: HookExecutionContext) -> _
         return _HookInvocationResult(succeeded=False)
 
     duration_ms = round((time.monotonic() - started_at) * 1000, 2)
-    _record_hook_success(hook)
     context.logger.debug(
         "Hook execution succeeded",
         correlation_id=context.correlation_id,
@@ -282,15 +238,6 @@ def _eligible_hooks(
             and event_name == EVENT_MESSAGE_RECEIVED
             and hook.plugin_name in context.skip_plugin_names
         ):
-            continue
-        if _is_hook_on_cooldown(hook):
-            logger.warning(
-                "Skipping hook on cooldown",
-                plugin_name=hook.plugin_name,
-                hook_name=hook.hook_name,
-                event_name=hook.event_name,
-                correlation_id=context.correlation_id,
-            )
             continue
         eligible_hooks.append(hook)
     return tuple(eligible_hooks)

@@ -17,6 +17,7 @@ class CommandType(Enum):
     """Types of commands supported."""
 
     HELP = "help"
+    RELOAD_PLUGINS = "reload_plugins"
     SCHEDULE = "schedule"
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
@@ -34,6 +35,7 @@ _COMMAND_DOCS = {
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
     CommandType.EDIT_SCHEDULE: ("!edit_schedule <id> <task>", "Edit an existing scheduled task"),
     CommandType.HELP: ("!help [topic]", "Get help"),
+    CommandType.RELOAD_PLUGINS: ("!reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
     CommandType.HI: ("!hi", "Show welcome message"),
     CommandType.SKILL: ("!skill <name> [args]", "Run a skill by name"),
@@ -86,6 +88,7 @@ class _CommandParser:
 
     # Command patterns
     HELP_PATTERN = re.compile(r"^!help(?:\s+(.+))?$", re.IGNORECASE)
+    RELOAD_PLUGINS_PATTERN = re.compile(r"^!reload(?:-|_)plugins$", re.IGNORECASE)
     SCHEDULE_PATTERN = re.compile(r"^!schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
     LIST_SCHEDULES_PATTERN = re.compile(r"^!(?:list|inspect)[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
@@ -130,6 +133,9 @@ class _CommandParser:
                 args={"topic": topic},
                 raw_text=message,
             )
+
+        if self.RELOAD_PLUGINS_PATTERN.match(message):
+            return Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text=message)
 
         # !schedule command
         match = self.SCHEDULE_PATTERN.match(message)
@@ -269,6 +275,18 @@ Examples:
 Notes:
 - Skills must be enabled on the target agent and marked `user-invocable: true`.
 - When a skill uses `command-dispatch: tool`, the tool runs directly with raw args."""
+
+    if topic in {"reload-plugins", "reload_plugins"}:
+        return """**Reload Plugins Command**
+
+Usage: `!reload-plugins` - Force-reload all configured plugins from disk
+
+Alternative syntax: `!reload_plugins`
+
+Notes:
+- Admin only. Caller must be in `authorization.global_users`.
+- Use this when you want to force a plugin reload immediately instead of waiting for the file watcher.
+- The reply shows the active plugin set and the count of cancelled background tasks."""
 
     if topic in {"list_schedules", "inspect_schedules"}:
         return """**List Schedules Command**

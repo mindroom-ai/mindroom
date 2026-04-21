@@ -28,7 +28,7 @@ from mindroom.hooks import (
     build_hook_matrix_admin,
     hook,
 )
-from mindroom.hooks.execution import emit, emit_collect, emit_transform, reset_hook_execution_state
+from mindroom.hooks.execution import emit, emit_collect, emit_transform
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import (
@@ -46,7 +46,6 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
     from pathlib import Path
 
 
@@ -158,14 +157,6 @@ def _custom_event_context(tmp_path: Path) -> CustomEventContext:
     )
 
 
-@pytest.fixture(autouse=True)
-def reset_execution_state() -> Generator[None, None, None]:
-    """Keep global hook failure state isolated per test."""
-    reset_hook_execution_state()
-    yield
-    reset_hook_execution_state()
-
-
 @pytest.mark.asyncio
 async def test_emit_observer_continues_after_failure_and_propagates_suppression(tmp_path: Path) -> None:
     """Observer failures should not stop later hooks or lose suppression changes."""
@@ -235,26 +226,6 @@ async def test_emit_transform_keeps_previous_draft_when_one_hook_fails(tmp_path:
     result = await emit_transform(registry, EVENT_MESSAGE_BEFORE_RESPONSE, _before_response_context(tmp_path))
 
     assert result.response_text == "start one three"
-
-
-@pytest.mark.asyncio
-async def test_emit_uses_circuit_breaker_after_five_failures(tmp_path: Path) -> None:
-    """After five consecutive failures, the hook should enter cooldown and be skipped."""
-    call_count = 0
-
-    @hook(EVENT_MESSAGE_RECEIVED)
-    async def always_fails(ctx: MessageReceivedContext) -> None:
-        nonlocal call_count
-        del ctx
-        call_count += 1
-        raise RuntimeError
-
-    registry = HookRegistry.from_plugins([_plugin("breaker-plugin", [always_fails])])
-
-    for _ in range(6):
-        await emit(registry, EVENT_MESSAGE_RECEIVED, _message_received_context(tmp_path))
-
-    assert call_count == 5
 
 
 @pytest.mark.asyncio

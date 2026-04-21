@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.tool_system.plugins import PluginReloadResult
 
 logger = get_logger(__name__)
 
@@ -107,6 +108,7 @@ class CommandHandlerContext:
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]
     run_skill_command_tool: Callable[..., Awaitable[str]]
+    reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
 
 
@@ -204,6 +206,15 @@ def _build_skill_command_prompt(skill_name: str, args_text: str) -> str:
 def _normalized_response_event_id(raw_response_event_id: str | None) -> str | None:
     """Normalize Matrix send helpers that may return empty strings or None."""
     return raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
+
+
+def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
+    """Return a short user-facing summary for one plugin reload."""
+    plugin_count = len(result.active_plugin_names)
+    task_label = "task" if result.cancelled_task_count == 1 else "tasks"
+    plugin_label = "plugin" if plugin_count == 1 else "plugins"
+    active_plugins = ", ".join(result.active_plugin_names) if result.active_plugin_names else "none"
+    return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
 
 
 def _resolve_skill_command_agent(  # noqa: C901
@@ -511,6 +522,19 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     if command.type == CommandType.HELP:
         topic = command.args.get("topic")
         response_text = get_command_help(topic)
+
+    elif command.type == CommandType.RELOAD_PLUGINS:
+        resolved_requester_user_id = context.config.authorization.resolve_alias(requester_user_id)
+        if resolved_requester_user_id not in context.config.authorization.global_users:
+            response_text = "❌ Admin only."
+        elif context.reload_plugins is None:
+            response_text = "❌ Plugin reload unavailable."
+        else:
+            try:
+                response_text = _format_plugin_reload_summary(await context.reload_plugins())
+            except Exception as exc:
+                context.logger.exception("Plugin reload command failed", error=str(exc))
+                response_text = f"❌ Plugin reload failed: {exc}"
 
     elif command.type == CommandType.HI:
         # Generate the welcome message for this room

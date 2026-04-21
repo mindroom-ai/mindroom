@@ -253,9 +253,14 @@ def set_plugin_skill_roots(roots: Sequence[Path]) -> None:
     clear_skill_cache()
 
 
-def _get_plugin_skill_roots() -> list[Path]:
+def get_plugin_skill_roots() -> list[Path]:
     """Return the current plugin-provided skill roots."""
     return list(_PLUGIN_SKILL_ROOTS)
+
+
+def _get_plugin_skill_roots() -> list[Path]:
+    """Return the current plugin-provided skill roots."""
+    return get_plugin_skill_roots()
 
 
 def get_user_skills_dir() -> Path:
