@@ -29,6 +29,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
 from mindroom.timing import timed
 
@@ -47,6 +48,26 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _DEFAULT_UNSEEN_MESSAGES_HEADER = "Messages since your last response:"
+_INTERRUPTED_PARTIAL_REPLY_HEADER = (
+    "Messages since your last response:\n"
+    "Your previous response was interrupted before completion. "
+    "The partial content below may be incomplete. Continue from where you left off if appropriate."
+)
+_IN_PROGRESS_PARTIAL_REPLY_HEADER = (
+    "Messages since your last response:\n"
+    "Your previous response is still being delivered. Do NOT repeat or redo that work. "
+    "The partial content is shown below for context only."
+)
+_MIXED_PARTIAL_REPLY_HEADER = (
+    "Messages since your last response:\n"
+    "Some partial content from your previous response is still being delivered, so do NOT repeat or redo that work. "
+    "Other partial content was interrupted before completion and may be incomplete. "
+    "Continue from where you left off if appropriate."
+)
+_PARTIAL_REPLY_SENDER_LABELS = {
+    "interrupted": "You (interrupted reply draft)",
+    "in_progress": "You (reply still streaming)",
+}
 
 
 class _PartialReplyKind(str, Enum):
@@ -233,6 +254,17 @@ def _message_speaker_label(message: ResolvedVisibleMessage) -> str:
     return message.sender
 
 
+def _build_unseen_messages_header(partial_reply_kinds: set[_PartialReplyKind]) -> str:
+    """Choose the unseen-context guidance for the partial-reply mix present."""
+    if not partial_reply_kinds:
+        return _DEFAULT_UNSEEN_MESSAGES_HEADER
+    if partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}:
+        return _INTERRUPTED_PARTIAL_REPLY_HEADER
+    if partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}:
+        return _IN_PROGRESS_PARTIAL_REPLY_HEADER
+    return _MIXED_PARTIAL_REPLY_HEADER
+
+
 def _context_message_from_visible_message(
     message: ResolvedVisibleMessage,
     *,
@@ -299,20 +331,26 @@ def _build_unseen_context_messages(
     current_sender_id: str | None = None,
 ) -> tuple[tuple[Message, ...], list[str]]:
     """Return canonical request messages for unseen thread context plus the current turn."""
-    unseen_messages, _partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
+    unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
         thread_history,
         sender_id=response_sender_id,
         seen_event_ids=seen_event_ids,
         current_event_id=current_event_id,
         active_event_ids=active_event_ids,
     )
+    context_messages = _context_messages_from_visible_messages(
+        unseen_messages,
+        response_sender_id=response_sender_id,
+    )
+    if partial_reply_kinds:
+        context_messages = (
+            Message(role="user", content=_build_unseen_messages_header(partial_reply_kinds)),
+            *context_messages,
+        )
     return (
         _messages_with_current_prompt(
             prompt,
-            context_messages=_context_messages_from_visible_messages(
-                unseen_messages,
-                response_sender_id=response_sender_id,
-            ),
+            context_messages=context_messages,
             current_sender_id=current_sender_id,
         ),
         _get_unseen_event_ids_for_metadata(
@@ -392,7 +430,13 @@ def _get_unseen_messages_for_sender(
             partial_reply_kinds.add(partial_kind)
             if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
                 in_progress_event_ids.add(event_id)
-            unseen.append(msg)
+            unseen.append(
+                replace_visible_message(
+                    msg,
+                    sender=_PARTIAL_REPLY_SENDER_LABELS.get(partial_kind.value, "You (partial reply)"),
+                    body=cleaned_body,
+                ),
+            )
             continue
         unseen.append(msg)
     return unseen, partial_reply_kinds, in_progress_event_ids
