@@ -1225,9 +1225,17 @@ class MultiAgentOrchestrator:
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
 
-        prepared_plugin_reload: PreparedPluginReload | None = (
-            prepare_plugin_reload(new_config, self.runtime_paths, skip_broken_plugins=True) if plugin_changes else None
-        )
+        prepared_plugin_roots: tuple[Path, ...] = ()
+        prepared_plugin_root_snapshots: dict[Path, dict[Path, int]] = {}
+        prepared_plugin_reload: PreparedPluginReload | None = None
+        if plugin_changes:
+            prepared_plugin_roots = get_configured_plugin_roots(new_config, self.runtime_paths)
+            prepared_plugin_root_snapshots = _capture_plugin_root_snapshots(prepared_plugin_roots)
+            prepared_plugin_reload = prepare_plugin_reload(
+                new_config,
+                self.runtime_paths,
+                skip_broken_plugins=True,
+            )
         pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
             current_config,
             new_config,
@@ -1236,13 +1244,19 @@ class MultiAgentOrchestrator:
 
         # Only apply the new config after validation and account checks succeed.
         self.config = new_config
-        self._sync_plugin_watch_roots(new_config)
         new_hook_registry = self.hook_registry
         if prepared_plugin_reload is not None:
             new_hook_registry = apply_prepared_plugin_reload(
                 prepared_plugin_reload,
                 cancel_existing_tasks=True,
             ).hook_registry
+            _replace_plugin_root_snapshots(
+                prepared_plugin_roots,
+                prepared_plugin_root_snapshots,
+                self._plugin_watch_last_snapshot_by_root,
+            )
+        else:
+            self._sync_plugin_watch_roots(new_config)
         self._activate_hook_registry(new_hook_registry)
         changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
         await self._sync_event_cache_service(new_config)
@@ -1685,6 +1699,25 @@ def _sync_plugin_root_snapshots(
         if root in last_snapshot_by_root:
             continue
         last_snapshot_by_root[root] = file_watcher._tree_snapshot(root)
+
+
+def _capture_plugin_root_snapshots(configured_roots: tuple[Path, ...]) -> dict[Path, dict[Path, int]]:
+    """Return the current watcher baselines for one explicit plugin-root set."""
+    return {root: file_watcher._tree_snapshot(root) for root in configured_roots}
+
+
+def _replace_plugin_root_snapshots(
+    configured_roots: tuple[Path, ...],
+    root_snapshots: dict[Path, dict[Path, int]],
+    last_snapshot_by_root: dict[Path, dict[Path, int]],
+) -> None:
+    """Replace watcher baselines with the snapshots that match the applied plugin runtime."""
+    configured_root_set = set(configured_roots)
+    for root in tuple(last_snapshot_by_root):
+        if root not in configured_root_set:
+            last_snapshot_by_root.pop(root, None)
+    for root in configured_roots:
+        last_snapshot_by_root[root] = root_snapshots.get(root, {}).copy()
 
 
 def _path_is_under_any_root(path: Path, roots: tuple[Path, ...]) -> bool:

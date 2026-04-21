@@ -207,6 +207,8 @@ def build_llm_request_log_context(
             context["source_event_prompts"] = source_event_prompts
 
     return context
+
+
 @contextmanager
 def bind_llm_request_log_context(**context: object) -> Iterator[None]:
     """Bind per-run request metadata so log entries can be attributed later."""
