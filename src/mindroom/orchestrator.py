@@ -381,7 +381,7 @@ class MultiAgentOrchestrator:
     async def _send_approval_event(
         self,
         room_id: str,
-        thread_id: str,
+        thread_id: str | None,
         agent_name: str,
         content: dict[str, Any],
     ) -> str | None:
@@ -393,7 +393,7 @@ class MultiAgentOrchestrator:
     async def _send_approval_event_now(
         self,
         room_id: str,
-        thread_id: str,
+        thread_id: str | None,
         agent_name: str,
         content: dict[str, Any],
     ) -> str | None:
@@ -401,13 +401,13 @@ class MultiAgentOrchestrator:
         bot = self._get_bot_by_agent_name(agent_name)
         if bot is None or bot.client is None:
             return None
+        send_content = dict(content)
+        if thread_id is not None:
+            send_content["m.relates_to"] = self._approval_thread_relation(thread_id)
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
-            content={
-                **content,
-                "m.relates_to": self._approval_thread_relation(thread_id),
-            },
+            content=send_content,
         )
         if isinstance(response, nio.RoomSendResponse):
             return str(response.event_id)
@@ -448,17 +448,13 @@ class MultiAgentOrchestrator:
             raise RuntimeError(msg)
 
         thread_id = new_content.get("thread_id")
-        if not isinstance(thread_id, str) or not thread_id:
-            logger.warning(
-                "Skipping approval Matrix edit without thread_id",
-                room_id=room_id,
-                event_id=event_id,
-                agent_name=agent_name,
-            )
-            return
+        if thread_id is not None and not isinstance(thread_id, str):
+            msg = "Approval thread_id must be a string when present."
+            raise TypeError(msg)
 
         replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
-        replacement_content["m.relates_to"] = self._approval_thread_relation(thread_id)
+        if isinstance(thread_id, str) and thread_id:
+            replacement_content["m.relates_to"] = self._approval_thread_relation(thread_id)
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",

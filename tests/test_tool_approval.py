@@ -668,7 +668,7 @@ async def test_request_approval_cancellation_marks_request_expired(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_request_approval_requires_matrix_context(tmp_path: Path) -> None:
-    """Requests without a Matrix room and thread should fail closed."""
+    """Requests without a Matrix room should fail closed."""
     runtime_paths = test_runtime_paths(tmp_path)
     store = initialize_approval_store(runtime_paths, sender=AsyncMock(return_value="$approval"), editor=AsyncMock())
 
@@ -686,7 +686,42 @@ async def test_request_approval_requires_matrix_context(tmp_path: Path) -> None:
     )
 
     assert decision.status == "denied"
-    assert decision.reason == "Tool approval requires a Matrix room and thread."
+    assert decision.reason == "Tool approval requires a Matrix room."
+
+
+@pytest.mark.asyncio
+async def test_request_approval_supports_room_mode_without_thread_id(tmp_path: Path) -> None:
+    """Room-mode approvals should anchor to the room even without a thread."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="run_shell_command",
+            arguments={"command": "echo hi"},
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id=None,
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            matched_rule="run_shell_*",
+            script_path=None,
+            timeout_seconds=60,
+        ),
+    )
+    await asyncio.sleep(0)
+    pending = store.list_pending()
+
+    assert len(pending) == 1
+    assert sender.await_args.args[:3] == ("!room:localhost", None, "code")
+    assert sender.await_args.args[3]["thread_id"] is None
+
+    await store.approve(pending[0].id, resolved_by="@user:localhost")
+    decision = await task
+
+    assert decision.status == "approved"
+    assert editor.await_args.args[3]["thread_id"] is None
 
 
 @pytest.mark.asyncio
@@ -1062,6 +1097,53 @@ async def test_orchestrator_send_approval_event_uses_expected_room_send_payload(
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_send_approval_event_supports_room_mode_without_thread_id(tmp_path: Path) -> None:
+    """Room-mode approval cards should send without a thread relation."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+    client = MagicMock()
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$approval-event", room_id="!room:localhost"),
+    )
+    bot = MagicMock()
+    bot.client = client
+    orchestrator.agent_bots = {"code": bot}
+
+    event_id = await orchestrator._send_approval_event(
+        "!room:localhost",
+        None,
+        "code",
+        {
+            "approval_id": "approval-1",
+            "tool_name": "run_shell_command",
+            "arguments": {"command": "echo hi"},
+            "agent_name": "code",
+            "status": "pending",
+            "msgtype": "io.mindroom.tool_approval",
+            "body": "🔒 Approval required: run_shell_command",
+            "thread_id": None,
+        },
+    )
+
+    assert event_id == "$approval-event"
+    client.room_send.assert_awaited_once_with(
+        room_id="!room:localhost",
+        message_type="io.mindroom.tool_approval",
+        content={
+            "approval_id": "approval-1",
+            "tool_name": "run_shell_command",
+            "arguments": {"command": "echo hi"},
+            "agent_name": "code",
+            "status": "pending",
+            "msgtype": "io.mindroom.tool_approval",
+            "body": "🔒 Approval required: run_shell_command",
+            "thread_id": None,
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(tmp_path: Path) -> None:
     """The orchestrator helper should edit approval cards via m.replace."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1113,6 +1195,60 @@ async def test_orchestrator_edit_approval_event_uses_expected_room_send_payload(
             "is_falling_back": True,
             "m.in_reply_to": {"event_id": "$thread"},
         },
+    }
+    client.room_send.assert_awaited_once_with(
+        room_id="!room:localhost",
+        message_type="io.mindroom.tool_approval",
+        content={
+            **new_content,
+            "m.new_content": new_content,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval-event"},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_edit_approval_event_supports_room_mode_without_thread_id(tmp_path: Path) -> None:
+    """Room-mode approval edits should not inject a thread relation."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+    client = MagicMock()
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$edit-event", room_id="!room:localhost"),
+    )
+    bot = MagicMock()
+    bot.client = client
+    orchestrator.agent_bots = {"code": bot}
+
+    await orchestrator._edit_approval_event(
+        "!room:localhost",
+        "$approval-event",
+        "code",
+        {
+            "approval_id": "approval-1",
+            "tool_name": "run_shell_command",
+            "arguments": {"command": "echo hi"},
+            "agent_name": "code",
+            "status": "approved",
+            "msgtype": "io.mindroom.tool_approval",
+            "body": "Approved: run_shell_command",
+            "thread_id": None,
+            "resolved_at": "2026-04-12T00:00:00+00:00",
+            "resolved_by": "@bas:localhost",
+        },
+    )
+
+    new_content = {
+        "approval_id": "approval-1",
+        "tool_name": "run_shell_command",
+        "arguments": {"command": "echo hi"},
+        "agent_name": "code",
+        "status": "approved",
+        "msgtype": "io.mindroom.tool_approval",
+        "body": "Approved: run_shell_command",
+        "resolved_at": "2026-04-12T00:00:00+00:00",
+        "resolved_by": "@bas:localhost",
     }
     client.room_send.assert_awaited_once_with(
         room_id="!room:localhost",

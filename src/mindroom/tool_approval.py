@@ -34,12 +34,12 @@ if TYPE_CHECKING:
 
 ApprovalStatus = Literal["approved", "denied", "expired"]
 PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
-MatrixEventSender = Callable[[str, str, str, dict[str, Any]], Awaitable[str | None]]
+MatrixEventSender = Callable[[str, str | None, str, dict[str, Any]], Awaitable[str | None]]
 MatrixEventEditor = Callable[[str, str, str, dict[str, Any]], Awaitable[None]]
 
 _APPROVALS_DIRNAME = "approvals"
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
-_DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room and thread."
+_DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
 _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
 _DEFAULT_RESTART_REASON = "MindRoom restarted before approval completed."
 _DEFAULT_REINITIALIZE_REASON = "MindRoom reinitialized before approval completed."
@@ -364,7 +364,8 @@ class ApprovalManager:
         thread_id: str | None,
         approver_user_id: str | None,
     ) -> ApprovalDecision | None:
-        if room_id is None or thread_id is None:
+        del thread_id
+        if room_id is None:
             return self._new_decision(status="denied", reason=_DEFAULT_MISSING_CONTEXT_REASON, resolved_by=None)
         if approver_user_id is None:
             return self._new_decision(status="denied", reason=_DEFAULT_MISSING_REQUESTER_REASON, resolved_by=None)
@@ -396,7 +397,6 @@ class ApprovalManager:
             return preflight_decision
         assert approver_user_id is not None
         assert room_id is not None
-        assert thread_id is not None
         assert self._send_event is not None
 
         requested_at = _utcnow()
