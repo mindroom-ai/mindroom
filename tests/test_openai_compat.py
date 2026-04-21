@@ -40,6 +40,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import HistoryScope, ResolvedReplayPlan
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -3619,7 +3620,7 @@ class TestTeamCompletion:
         with (
             patch(
                 "mindroom.api.openai_compat.materialize_exact_team_members",
-                return_value=openai_compat.ResolvedExactTeamMembers(
+                return_value=ResolvedExactTeamMembers(
                     requested_agent_names=["general"],
                     agents=[built_agent],
                     display_names=["GeneralAgent"],
