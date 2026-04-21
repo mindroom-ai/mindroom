@@ -248,8 +248,8 @@ async def test_agent_ignores_other_agents(
 
 
 @pytest.mark.asyncio
-@patch("mindroom.teams.core.get_agent_knowledge")
-@patch("mindroom.teams.core.create_agent")
+@patch("mindroom.teams.get_agent_knowledge")
+@patch("mindroom.teams.create_agent")
 @patch("mindroom.teams.Team.arun")
 async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR0915
     mock_team_arun: AsyncMock,
@@ -280,7 +280,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     with (
         patch("mindroom.bot.login_agent_user") as mock_login,
         patch("mindroom.config.main.Config.from_yaml", return_value=mock_config),
-        patch("mindroom.teams.core._select_team_mode", new=AsyncMock()) as mock_select_mode,
+        patch("mindroom.teams._select_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id

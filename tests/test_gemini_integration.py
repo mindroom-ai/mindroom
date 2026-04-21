@@ -69,7 +69,7 @@ class TestGeminiIntegration:
             ),
         }
 
-        with patch("src.mindroom.ai.core.get_api_key_for_provider") as mock_get_api_key:
+        with patch("src.mindroom.ai.get_api_key_for_provider") as mock_get_api_key:
             mock_get_api_key.return_value = "test-google-api-key"
             with patch.dict("os.environ", {}, clear=True):
                 get_model_instance(config, runtime_paths, "test_model")

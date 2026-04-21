@@ -32,17 +32,17 @@ from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
+from mindroom.team_exact_members import (
+    ResolvedExactTeamMembers,
+    materialize_exact_requested_team_members,
+    resolve_live_shared_agent_names,
+)
 from mindroom.teams import (
     TeamMode,
     _materialize_team_members,
     _team_response_stream_raw,
     team_response,
     team_response_stream,
-)
-from mindroom.teams.exact_members import (
-    ResolvedExactTeamMembers,
-    materialize_exact_requested_team_members,
-    resolve_live_shared_agent_names,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
@@ -186,9 +186,9 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -238,9 +238,9 @@ async def test_team_response_fallback_run_output_cleans_queued_notice_before_for
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -278,10 +278,10 @@ async def test_team_response_fallback_run_output_error_uses_friendly_error() -> 
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.core.get_user_friendly_error_message", return_value="friendly-team-error"),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -310,10 +310,10 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
     collector: list[object] = []
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Analyze this.")
         response = await team_response(
@@ -352,10 +352,10 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
     fake_agent = _make_test_agent("GeneralAgent")
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -416,10 +416,10 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
     ]
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -532,11 +532,11 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
         return _prepared_team_execution_context(final_prompt="Analyze this.")
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.core.prepare_bound_team_execution_context",
+            "mindroom.teams.prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -622,11 +622,11 @@ async def test_team_response_scrubs_queued_notices_after_run_exception() -> None
         return _prepared_team_execution_context(final_prompt="Analyze this.")
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.core.prepare_bound_team_execution_context",
+            "mindroom.teams.prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -715,15 +715,15 @@ async def test_team_response_stream_scrubs_queued_notices_after_stream_exception
         return failing_raw_stream()
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.core.prepare_bound_team_execution_context",
+            "mindroom.teams.prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
         patch(
-            "mindroom.teams.core._team_response_stream_raw",
+            "mindroom.teams._team_response_stream_raw",
             new=AsyncMock(side_effect=fake_team_response_stream_raw),
         ),
     ):
@@ -779,10 +779,10 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
         scope_context.storage.upsert_session(scope_context.session)
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
     ):
         mock_prepare.return_value = _prepared_team_execution_context(
             final_prompt="Analyze this.",
@@ -836,9 +836,9 @@ async def test_team_response_passes_run_id_to_team_arun() -> None:
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -873,9 +873,9 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
         pytest.raises(asyncio.CancelledError),
     ):
         await team_response(
@@ -905,11 +905,11 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.core.get_user_friendly_error_message",
+            "mindroom.teams.get_user_friendly_error_message",
             return_value="friendly-team-error",
         ) as mock_friendly,
     ):
@@ -946,9 +946,9 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
     fake_agent = _make_test_agent("GeneralAgent")
     callback_run_ids: list[str] = []
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -1003,10 +1003,10 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
     ]
 
     with (
-        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
 
         async def collect_chunks_until_cancelled() -> list[str]:
@@ -1065,10 +1065,10 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
     ]
 
     with (
-        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
         chunks = [
             chunk
@@ -1120,10 +1120,10 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
     ]
 
     with (
-        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
         pytest.raises(asyncio.CancelledError),
     ):
         async for _chunk in team_response_stream(
@@ -1168,11 +1168,11 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     ]
 
     with (
-        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
-        patch("mindroom.teams.core.get_user_friendly_error_message", return_value="friendly-team-error"),
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
     ):
         chunks = [
             chunk
@@ -1219,11 +1219,11 @@ async def test_team_response_stream_returns_friendly_error_for_errored_plain_run
     ]
 
     with (
-        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
-        patch("mindroom.teams.core.get_user_friendly_error_message", return_value="friendly-team-error"),
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
     ):
         chunks = [
             chunk
@@ -1277,10 +1277,10 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
     ]
 
     with (
-        patch("mindroom.teams.core._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
-        patch("mindroom.teams.core._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams.core._create_team_instance", return_value=_make_test_team()),
-        patch("mindroom.teams.core._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
         chunks = [
             chunk
@@ -1322,9 +1322,9 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         team_members = _materialize_team_members(["general"], orchestrator, None)
         raw_stream = await _team_response_stream_raw(
@@ -1360,7 +1360,7 @@ async def test_team_response_rejects_missing_materialized_members() -> None:
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    with patch("mindroom.teams.core._create_team_instance") as mock_create_team:
+    with patch("mindroom.teams._create_team_instance") as mock_create_team:
         response = await team_response(
             agent_names=["general", "research"],
             mode=TeamMode.COORDINATE,
@@ -1390,12 +1390,12 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
         yield TeamRunOutput(content="Streamed team response")
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
-            "mindroom.teams.core._team_response_stream_raw",
+            "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
@@ -1443,12 +1443,12 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
         yield TeamRunOutput(content="Streamed team response")
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
-            "mindroom.teams.core._team_response_stream_raw",
+            "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
@@ -1511,12 +1511,12 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
         yield TeamRunOutput(content="Streamed team response")
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
-            "mindroom.teams.core._team_response_stream_raw",
+            "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
@@ -1568,12 +1568,12 @@ async def test_team_response_stream_preserves_assistant_context_in_team_prompt()
         yield TeamRunOutput(content="Streamed team response")
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
-        patch("mindroom.teams.core.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.prepare_bound_team_execution_context", new_callable=AsyncMock) as mock_prepare,
         patch(
-            "mindroom.teams.core._team_response_stream_raw",
+            "mindroom.teams._team_response_stream_raw",
             new_callable=AsyncMock,
             return_value=raw_stream(),
         ) as mock_raw,
@@ -1634,7 +1634,7 @@ async def test_team_response_rejects_non_running_materialized_members() -> None:
         "research": MagicMock(running=False),
     }
 
-    with patch("mindroom.teams.core._create_team_instance") as mock_create_team:
+    with patch("mindroom.teams._create_team_instance") as mock_create_team:
         response = await team_response(
             agent_names=["general", "research"],
             mode=TeamMode.COORDINATE,
@@ -1668,11 +1668,11 @@ async def test_team_response_rejects_request_time_materialization_failure() -> N
 
     with (
         patch(
-            "mindroom.teams.core.create_agent",
+            "mindroom.teams.create_agent",
             side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
         ),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance") as mock_create_team,
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance") as mock_create_team,
     ):
         response = await team_response(
             agent_names=["general", "research"],
@@ -1706,7 +1706,7 @@ async def test_team_stream_rejects_missing_materialized_members() -> None:
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock()}
 
-    with patch("mindroom.teams.core._create_team_instance") as mock_create_team:
+    with patch("mindroom.teams._create_team_instance") as mock_create_team:
         chunks = [
             chunk
             async for chunk in team_response_stream(
@@ -1746,11 +1746,11 @@ async def test_team_stream_rejects_request_time_materialization_failure() -> Non
 
     with (
         patch(
-            "mindroom.teams.core.create_agent",
+            "mindroom.teams.create_agent",
             side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
         ),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance") as mock_create_team,
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance") as mock_create_team,
     ):
         chunks = [
             chunk
@@ -1792,9 +1792,9 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         chunks = [
             chunk
@@ -1847,9 +1847,9 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         chunks = [
             chunk
@@ -2034,9 +2034,9 @@ async def test_team_response_ignores_router_in_direct_team_member_list() -> None
     fake_agent = _make_test_agent("GeneralAgent")
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["router", "general"],
@@ -2067,9 +2067,9 @@ async def test_team_response_stream_ignores_router_in_direct_team_member_list() 
     fake_agent = _make_test_agent("GeneralAgent")
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         chunks = [
             chunk
@@ -2108,9 +2108,9 @@ async def test_team_response_forwards_session_and_user_id_to_team_run() -> None:
     fake_agent = _make_test_agent("GeneralAgent")
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],
@@ -2159,9 +2159,9 @@ async def test_team_response_materializes_members_with_request_execution_identit
     mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="General response"))
 
     with (
-        patch("mindroom.teams.core.create_agent", return_value=fake_agent) as mock_create_agent,
-        patch("mindroom.teams.core.get_agent_knowledge", return_value=None),
-        patch("mindroom.teams.core._create_team_instance", return_value=mock_team),
+        patch("mindroom.teams.create_agent", return_value=fake_agent) as mock_create_agent,
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
             agent_names=["general"],

@@ -39,7 +39,7 @@ def _datetime_test_config() -> Config:
 def test_get_datetime_context_format() -> None:
     """Test the datetime context formatting."""
     frozen_now = datetime(2026, 3, 20, 13, 30, tzinfo=ZoneInfo("America/New_York"))
-    with patch("mindroom.agents.core.datetime") as mock_datetime:
+    with patch("mindroom.agents.datetime") as mock_datetime:
         mock_datetime.now.return_value = frozen_now
         context = _get_datetime_context("America/New_York")
 
@@ -51,7 +51,7 @@ def test_get_datetime_context_format() -> None:
 def test_get_datetime_context_utc() -> None:
     """Test datetime context with UTC timezone."""
     frozen_now = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
-    with patch("mindroom.agents.core.datetime") as mock_datetime:
+    with patch("mindroom.agents.datetime") as mock_datetime:
         mock_datetime.now.return_value = frozen_now
         context = _get_datetime_context("UTC")
 
@@ -72,7 +72,7 @@ def test_agent_prompt_includes_datetime() -> None:
     model = Ollama(id="test-model")
 
     with (
-        patch("mindroom.agents.core.datetime") as mock_datetime,
+        patch("mindroom.agents.datetime") as mock_datetime,
         patch("mindroom.ai.get_model_instance", return_value=model),
     ):
         mock_datetime.now.side_effect = lambda tz: datetime(2026, 3, 20, 8, 15, tzinfo=tz)
@@ -98,7 +98,7 @@ def test_agent_prompt_datetime_changes_with_timezone() -> None:
     model = Ollama(id="test-model")
 
     with (
-        patch("mindroom.agents.core.datetime") as mock_datetime,
+        patch("mindroom.agents.datetime") as mock_datetime,
         patch("mindroom.ai.get_model_instance", return_value=model),
     ):
         mock_datetime.now.side_effect = lambda tz: datetime(2026, 3, 20, 8, 15, tzinfo=tz)
@@ -121,7 +121,7 @@ def test_agent_prompt_datetime_stable_within_same_day() -> None:
     model = Ollama(id="test-model")
 
     with (
-        patch("mindroom.agents.core.datetime") as mock_datetime,
+        patch("mindroom.agents.datetime") as mock_datetime,
         patch("mindroom.ai.get_model_instance", return_value=model),
     ):
         mock_datetime.now.side_effect = [

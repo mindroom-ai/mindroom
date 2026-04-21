@@ -32,7 +32,7 @@ from agno.tools.function import Function
 from defusedxml.ElementTree import fromstring
 
 from mindroom.agents import create_agent, create_session_storage, get_agent_session
-from mindroom.ai.core import _prepare_agent_and_prompt
+from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -2243,7 +2243,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
     alpha = _agent(agent_id="alpha", name="Alpha")
     zeta = _agent(agent_id="zeta", name="Zeta")
 
-    with patch("mindroom.teams.core.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+    with patch("mindroom.teams.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
         team = _create_team_instance(
             agents=[alpha, zeta],
             mode=TeamMode.COORDINATE,
@@ -2290,7 +2290,7 @@ def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None
     alpha = _agent(agent_id="alpha", name="Alpha")
     zeta = _agent(agent_id="zeta", name="Zeta")
 
-    with patch("mindroom.teams.core.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+    with patch("mindroom.teams.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
         team = _create_team_instance(
             agents=[alpha, zeta],
             mode=TeamMode.COORDINATE,
@@ -2861,8 +2861,8 @@ async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(
     ]
 
     with (
-        patch("mindroom.ai.core.create_agent", return_value=live_agent),
-        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch(
             "mindroom.execution_preparation.prepare_scope_history",
             new=AsyncMock(return_value=MagicMock()),
@@ -2911,8 +2911,8 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
     live_agent = _agent()
 
     with (
-        patch("mindroom.ai.core.create_agent", return_value=live_agent) as mock_create_agent,
-        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.create_agent", return_value=live_agent) as mock_create_agent,
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch(
             "mindroom.execution_preparation.prepare_scope_history",
             new=AsyncMock(return_value=MagicMock()),
@@ -2947,8 +2947,8 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
     ]
 
     with (
-        patch("mindroom.ai.core.create_agent", return_value=live_agent),
-        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch(
             "mindroom.execution_preparation.prepare_scope_history",
             new=AsyncMock(return_value=MagicMock()),
@@ -2982,8 +2982,8 @@ async def test_prepare_agent_and_prompt_keeps_matrix_current_sender_when_persist
     live_agent = _agent()
 
     with (
-        patch("mindroom.ai.core.create_agent", return_value=live_agent),
-        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch(
             "mindroom.execution_preparation.prepare_scope_history",
             new=AsyncMock(return_value=MagicMock()),
@@ -3054,10 +3054,10 @@ async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_
     )
 
     with (
-        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.core.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
-            "mindroom.ai.core.prepare_agent_execution_context",
+            "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
@@ -3102,10 +3102,10 @@ async def test_prepare_agent_and_prompt_populates_empty_collector_with_enriched_
     )
 
     with (
-        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.core.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
-            "mindroom.ai.core.prepare_agent_execution_context",
+            "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
@@ -3150,10 +3150,10 @@ async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_col
     )
 
     with (
-        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.core.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
-            "mindroom.ai.core.prepare_agent_execution_context",
+            "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
@@ -3193,10 +3193,10 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     )
 
     with (
-        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.core.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
-            "mindroom.ai.core.prepare_agent_execution_context",
+            "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
@@ -3235,10 +3235,10 @@ async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction
     )
 
     with (
-        patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.core.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
         patch(
-            "mindroom.ai.core.prepare_agent_execution_context",
+            "mindroom.ai.prepare_agent_execution_context",
             new=AsyncMock(return_value=prepared_execution),
         ),
     ):
@@ -3728,8 +3728,8 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     ) as scope_context:
         assert scope_context is not None
         with (
-            patch("mindroom.ai.core.create_agent", return_value=live_agent),
-            patch("mindroom.ai.core.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+            patch("mindroom.ai.create_agent", return_value=live_agent),
+            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         ):
             prepared_run = await _prepare_agent_and_prompt(
                 "test_agent",
@@ -3815,11 +3815,11 @@ async def test_prepare_agent_and_prompt_keeps_prior_request_message_prefix_byte_
 
     with (
         patch(
-            "mindroom.ai.core.create_agent",
+            "mindroom.ai.create_agent",
             side_effect=create_agent_stub,
         ),
         patch(
-            "mindroom.ai.core.build_memory_prompt_parts",
+            "mindroom.ai.build_memory_prompt_parts",
             new=AsyncMock(side_effect=fake_build_memory_prompt_parts),
         ),
     ):
@@ -3903,11 +3903,11 @@ async def test_prepare_agent_and_prompt_strips_timestamped_current_turn_duplicat
 
     with (
         patch(
-            "mindroom.ai.core.create_agent",
+            "mindroom.ai.create_agent",
             side_effect=create_agent_stub,
         ),
         patch(
-            "mindroom.ai.core.build_memory_prompt_parts",
+            "mindroom.ai.build_memory_prompt_parts",
             new=AsyncMock(side_effect=fake_build_memory_prompt_parts),
         ),
     ):

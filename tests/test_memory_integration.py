@@ -40,7 +40,7 @@ class TestMemoryIntegration:
     @pytest.fixture
     def mock_memory_functions(self) -> Generator[AsyncMock, None, None]:
         """Mock memory prompt splitting."""
-        with patch("mindroom.ai.core.build_memory_prompt_parts", new_callable=AsyncMock) as mock_build:
+        with patch("mindroom.ai.build_memory_prompt_parts", new_callable=AsyncMock) as mock_build:
             # Set up async side effects
             async def build_side_effect(
                 prompt: str,
@@ -74,9 +74,9 @@ class TestMemoryIntegration:
         runtime_paths = self._runtime_paths(tmp_path)
 
         with (
-            patch("mindroom.ai.core.cached_agent_run", mock_agent_run),
-            patch("mindroom.ai.core.get_model_instance", return_value=Ollama(id="test-model")),
-            patch("mindroom.ai.core.create_agent", return_value=MagicMock()),
+            patch("mindroom.ai.cached_agent_run", mock_agent_run),
+            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             response = await ai_response(
                 agent_name="general",
@@ -123,9 +123,9 @@ class TestMemoryIntegration:
         runtime_paths = self._runtime_paths(tmp_path)
 
         with (
-            patch("mindroom.ai.core.cached_agent_run", mock_agent_run),
-            patch("mindroom.ai.core.get_model_instance", return_value=Ollama(id="test-model")),
-            patch("mindroom.ai.core.create_agent", return_value=MagicMock()),
+            patch("mindroom.ai.cached_agent_run", mock_agent_run),
+            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             await ai_response(
                 agent_name="general",
@@ -157,7 +157,7 @@ class TestMemoryIntegration:
         mock_memory.search.return_value = {"results": []}
 
         with (
-            patch("mindroom.ai.core.create_agent", side_effect=Exception("Model error")),
+            patch("mindroom.ai.create_agent", side_effect=Exception("Model error")),
             patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
         ):
             response = await ai_response(
@@ -182,9 +182,9 @@ class TestMemoryIntegration:
 
         with (
             patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
-            patch("mindroom.ai.core.cached_agent_run", AsyncMock(return_value=MagicMock(content="First response"))),
-            patch("mindroom.ai.core.get_model_instance", return_value=Ollama(id="test-model")),
-            patch("mindroom.ai.core.create_agent", return_value=MagicMock()),
+            patch("mindroom.ai.cached_agent_run", AsyncMock(return_value=MagicMock(content="First response"))),
+            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             # First interaction
             await ai_response(

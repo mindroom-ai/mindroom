@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -130,6 +132,39 @@ def _agent_description_config() -> Config:
     )
 
 
+def test_domain_seams_are_flattened_top_level_modules() -> None:
+    """Seam domains should resolve to top-level modules, not package facades or submodules."""
+    flattened_modules = (
+        "mindroom.agents",
+        "mindroom.ai",
+        "mindroom.routing",
+        "mindroom.agent_policy",
+        "mindroom.runtime_resolution",
+        "mindroom.teams",
+    )
+    removed_submodules = (
+        "mindroom.agents.prompts",
+        "mindroom.ai.core",
+        "mindroom.routing.core",
+        "mindroom.agent_policy.core",
+        "mindroom.runtime_resolution.core",
+        "mindroom.teams.exact_members",
+        "mindroom.teams.core",
+    )
+
+    for module_name in flattened_modules:
+        module = importlib.import_module(module_name)
+        module_file = Path(module.__file__ or "")
+        assert module_file.name == f"{module_name.rsplit('.', maxsplit=1)[-1]}.py"
+
+    for module_name in removed_submodules:
+        try:
+            spec = importlib.util.find_spec(module_name)
+        except ModuleNotFoundError:
+            spec = None
+        assert spec is None
+
+
 class TestAIRouting:
     """Tests for AI routing in multi-agent threads."""
 
@@ -147,7 +182,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.routing.core.get_model_instance"):
+        with patch("mindroom.routing.get_model_instance"):
             # Mock the Agent and response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -157,7 +192,7 @@ class TestAIRouting:
             )
             mock_agent.arun.return_value = mock_response
 
-            with patch("mindroom.routing.core.Agent", return_value=mock_agent):
+            with patch("mindroom.routing.Agent", return_value=mock_agent):
                 # Create MatrixID objects for agents
                 agents = [
                     MatrixID(username="mindroom_calculator", domain="localhost"),
@@ -188,13 +223,13 @@ class TestAIRouting:
             _message("@mindroom_finance:localhost", "I can help with that"),
         ]
 
-        with patch("mindroom.routing.core.get_model_instance"):
+        with patch("mindroom.routing.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = _AgentSuggestion(agent_name="finance", reasoning="Continuing financial discussion")
             mock_agent.arun.return_value = mock_response
 
-            with patch("mindroom.routing.core.Agent", return_value=mock_agent):
+            with patch("mindroom.routing.Agent", return_value=mock_agent):
                 # Create MatrixID objects for agents
                 agents = [
                     MatrixID(username="mindroom_calculator", domain="localhost"),
@@ -228,7 +263,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.routing.core.get_model_instance"):
+        with patch("mindroom.routing.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             # AI suggests an agent not in available list
@@ -238,7 +273,7 @@ class TestAIRouting:
             )
             mock_agent.arun.return_value = mock_response
 
-            with patch("mindroom.routing.core.Agent", return_value=mock_agent):
+            with patch("mindroom.routing.Agent", return_value=mock_agent):
                 # Create MatrixID objects for agents
                 agents = [
                     MatrixID(username="mindroom_calculator", domain="localhost"),
@@ -265,7 +300,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.routing.core.get_model_instance") as mock_model:
+        with patch("mindroom.routing.get_model_instance") as mock_model:
             mock_model.side_effect = ValueError("Model error")
 
             agents = [MatrixID(username="mindroom_general", domain="localhost")]

@@ -24,7 +24,6 @@ source_roots = ["src"]
 path = "mindroom.ai"
 depends_on = [
     "mindroom.agents",
-    "mindroom.ai.core",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.credentials_sync",
@@ -43,58 +42,12 @@ depends_on = [
     "mindroom.timing",
     "mindroom.tool_system.events",
 ]
-
-[[modules]]
-path = "mindroom.ai.core"
-depends_on = [
-    "mindroom.agents",
-    "mindroom.constants",
-    "mindroom.credentials",
-    "mindroom.credentials_sync",
-    "mindroom.error_handling",
-    "mindroom.execution_preparation",
-    "mindroom.history",
-    "mindroom.history.compaction",
-    "mindroom.history.runtime",
-    "mindroom.history.types",
-    "mindroom.hooks",
-    "mindroom.llm_request_logging",
-    "mindroom.logging_config",
-    "mindroom.media_fallback",
-    "mindroom.media_inputs",
-    "mindroom.memory",
-    "mindroom.timing",
-    "mindroom.tool_system.events",
-]
-visibility = ["mindroom.ai"]
 
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
-    "mindroom.agents.core",
-    "mindroom.constants",
-    "mindroom.credentials",
-    "mindroom.hooks",
-    "mindroom.logging_config",
-    "mindroom.matrix.identity",
-    "mindroom.runtime_resolution",
-    "mindroom.timing",
-    "mindroom.tool_system.catalog",
-    "mindroom.tool_system.dynamic_toolkits",
-    "mindroom.tool_system.plugins",
-    "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.skills",
-    "mindroom.tool_system.tool_hooks",
-    "mindroom.tool_system.worker_routing",
-    "mindroom.tools",
-    "mindroom.workspaces",
-]
-
-[[modules]]
-path = "mindroom.agents.core"
-depends_on = [
     "mindroom.ai",
-    "mindroom.agents.prompts",
+    "mindroom.agent_prompts",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.custom_tools.delegate",
@@ -114,12 +67,11 @@ depends_on = [
     "mindroom.tools",
     "mindroom.workspaces",
 ]
-visibility = ["mindroom.agents"]
 
 [[modules]]
-path = "mindroom.agents.prompts"
+path = "mindroom.agent_prompts"
 depends_on = []
-visibility = ["mindroom.agents", "mindroom.agents.core"]
+visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.teams"
@@ -138,68 +90,30 @@ depends_on = [
     "mindroom.matrix.rooms",
     "mindroom.media_fallback",
     "mindroom.media_inputs",
-    "mindroom.teams.core",
+    "mindroom.team_exact_members",
     "mindroom.tool_system.events",
 ]
 
 [[modules]]
-path = "mindroom.teams.core"
+path = "mindroom.team_exact_members"
 depends_on = [
-    "mindroom.agents",
-    "mindroom.ai",
-    "mindroom.authorization",
     "mindroom.constants",
-    "mindroom.error_handling",
-    "mindroom.execution_preparation",
-    "mindroom.history.runtime",
-    "mindroom.history.storage",
-    "mindroom.hooks",
-    "mindroom.knowledge",
     "mindroom.logging_config",
-    "mindroom.matrix.rooms",
-    "mindroom.media_fallback",
-    "mindroom.media_inputs",
-    "mindroom.teams.exact_members",
-    "mindroom.tool_system.events",
 ]
 visibility = ["mindroom.teams"]
 
 [[modules]]
-path = "mindroom.teams.exact_members"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.logging_config",
-]
-visibility = ["mindroom.teams", "mindroom.teams.core"]
-
-[[modules]]
 path = "mindroom.agent_policy"
-depends_on = ["mindroom.agent_policy.core", "mindroom.config.agent"]
-
-[[modules]]
-path = "mindroom.agent_policy.core"
 depends_on = ["mindroom.config.agent"]
-visibility = ["mindroom.agent_policy"]
 
 [[modules]]
 path = "mindroom.runtime_resolution"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.constants",
-    "mindroom.runtime_resolution.core",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]
-
-[[modules]]
-path = "mindroom.runtime_resolution.core"
-depends_on = [
-    "mindroom.agent_policy",
-    "mindroom.constants",
-    "mindroom.tool_system.worker_routing",
-    "mindroom.workspaces",
-]
-visibility = ["mindroom.runtime_resolution"]
 
 [[modules]]
 path = "mindroom.custom_tools.memory"
@@ -452,19 +366,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
-    "mindroom.routing.core",
 ]
-
-[[modules]]
-path = "mindroom.routing.core"
-depends_on = [
-    "mindroom.agents",
-    "mindroom.ai",
-    "mindroom.logging_config",
-    "mindroom.matrix.client_visible_messages",
-    "mindroom.matrix.identity",
-]
-visibility = ["mindroom.routing"]
 
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
@@ -795,7 +697,6 @@ visibility = [
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.response_runner",
     "mindroom.routing",
-    "mindroom.routing.core",
 ]
 
 [[modules]]
