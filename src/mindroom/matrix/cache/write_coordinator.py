@@ -261,7 +261,7 @@ class _EventCacheWriteCoordinator:
 
         assert entry.thread_id is not None
         if room_barrier_pending or state.active_room is not None:
-            return False
+            return True
         if entry.thread_id in state.active_threads:
             return False
         self._start_entry(room_id, state, entry)

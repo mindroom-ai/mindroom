@@ -5300,6 +5300,110 @@ class TestThreadingBehavior:
         await wait_for_background_tasks(timeout=1.0, owner=owner)
 
     @pytest.mark.asyncio
+    async def test_shared_event_cache_write_coordinator_keeps_pending_room_barrier_across_blocked_threads(  # noqa: PLR0915
+        self,
+    ) -> None:
+        """A queued room update should keep later unrelated threads blocked until the room segment clears."""
+        first_thread_started = asyncio.Event()
+        release_first_thread = asyncio.Event()
+        room_update_started = asyncio.Event()
+        release_room_update = asyncio.Event()
+        second_thread_started = asyncio.Event()
+        release_second_thread = asyncio.Event()
+        sibling_thread_started = asyncio.Event()
+        release_sibling_thread = asyncio.Event()
+        owner = object()
+        coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=owner,
+        )
+
+        async def first_thread_update() -> None:
+            first_thread_started.set()
+            await release_first_thread.wait()
+
+        async def room_update() -> None:
+            room_update_started.set()
+            await release_room_update.wait()
+
+        async def second_thread_update() -> None:
+            second_thread_started.set()
+            await release_second_thread.wait()
+
+        async def sibling_thread_update() -> None:
+            sibling_thread_started.set()
+            await release_sibling_thread.wait()
+
+        first_thread_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-a:localhost",
+            first_thread_update,
+            name="matrix_cache_first_thread_update",
+        )
+        await asyncio.wait_for(first_thread_started.wait(), timeout=1.0)
+
+        room_task = coordinator.queue_room_update(
+            "!test:localhost",
+            room_update,
+            name="matrix_cache_room_update",
+        )
+        second_thread_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-a:localhost",
+            second_thread_update,
+            name="matrix_cache_second_thread_update",
+        )
+        sibling_thread_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread-b:localhost",
+            sibling_thread_update,
+            name="matrix_cache_sibling_thread_update",
+        )
+        try:
+            await asyncio.sleep(0.05)
+            assert room_update_started.is_set() is False
+            assert second_thread_started.is_set() is False
+            assert sibling_thread_started.is_set() is False
+
+            release_first_thread.set()
+            await asyncio.wait_for(first_thread_task, timeout=1.0)
+            await asyncio.wait_for(room_update_started.wait(), timeout=1.0)
+
+            await asyncio.sleep(0.05)
+            assert second_thread_started.is_set() is False
+            assert sibling_thread_started.is_set() is False
+
+            release_room_update.set()
+            await asyncio.wait_for(room_task, timeout=1.0)
+            await asyncio.wait_for(second_thread_started.wait(), timeout=1.0)
+            await asyncio.wait_for(sibling_thread_started.wait(), timeout=1.0)
+
+            release_second_thread.set()
+            release_sibling_thread.set()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    second_thread_task,
+                    sibling_thread_task,
+                ),
+                timeout=1.0,
+            )
+        finally:
+            release_first_thread.set()
+            release_room_update.set()
+            release_second_thread.set()
+            release_sibling_thread.set()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    first_thread_task,
+                    room_task,
+                    second_thread_task,
+                    sibling_thread_task,
+                    return_exceptions=True,
+                ),
+                timeout=1.0,
+            )
+
+    @pytest.mark.asyncio
     async def test_get_thread_history_does_not_wait_for_other_thread_update(self) -> None:
         """Thread reads should not stall behind unrelated thread updates in the same room."""
         access = MatrixConversationCache(
