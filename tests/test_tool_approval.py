@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -581,6 +581,50 @@ async def test_request_approval_resolves_from_different_event_loop(tmp_path: Pat
     assert result.resolved_by == "@user:localhost"
     assert editor.await_args.args[3]["status"] == "approved"
     assert store.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_request_approval_resolution_is_thread_safe_under_concurrent_resolvers(tmp_path: Path) -> None:
+    """Concurrent approval resolutions from different threads should only succeed once."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value="$approval")
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    barrier = threading.Barrier(3)
+    results: list[bool] = []
+    errors: list[BaseException] = []
+
+    def worker(status: Literal["approved", "denied"]) -> None:
+        try:
+            barrier.wait(timeout=1)
+            handled = asyncio.run(
+                store.handle_approval_resolution(
+                    approval_id=pending.id,
+                    status=status,
+                    reason=f"{status} by worker",
+                    resolved_by="@user:localhost",
+                ),
+            )
+            results.append(handled)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    approved_thread = threading.Thread(target=worker, args=("approved",))
+    denied_thread = threading.Thread(target=worker, args=("denied",))
+    approved_thread.start()
+    denied_thread.start()
+    barrier.wait(timeout=1)
+    approved_thread.join(timeout=1)
+    denied_thread.join(timeout=1)
+
+    assert errors == []
+    assert sorted(results) == [False, True]
+    decision = await task
+    assert decision.status in {"approved", "denied"}
+    assert decision.resolved_by == "@user:localhost"
+    assert editor.await_args.args[3]["status"] == decision.status
 
 
 @pytest.mark.asyncio

@@ -262,6 +262,39 @@ class ApprovalManager:
             if pending.event_id is not None and pending.status == "pending":
                 self._approval_id_by_event_id[pending.event_id] = pending.id
 
+    def _pending_request(self, approval_id: str) -> PendingApproval | None:
+        with self._state_lock:
+            return self._pending_by_id.get(approval_id)
+
+    def _anchored_pending_request(
+        self,
+        *,
+        approval_event_id: str,
+        room_id: str,
+        resolved_by: str,
+    ) -> PendingApproval | None:
+        with self._state_lock:
+            approval_id = self._approval_id_by_event_id.get(approval_event_id)
+            if approval_id is None:
+                return None
+            pending = self._pending_by_id.get(approval_id)
+            if (
+                pending is None
+                or pending.event_id != approval_event_id
+                or pending.room_id != room_id
+                or pending.approver_user_id != resolved_by
+            ):
+                return None
+            return pending
+
+    def _pending_ids_snapshot(self) -> list[str]:
+        with self._state_lock:
+            return list(self._pending_by_id)
+
+    def _pending_requests_snapshot(self) -> list[PendingApproval]:
+        with self._state_lock:
+            return list(self._pending_by_id.values())
+
     def _load_existing(self) -> None:
         loaded_requests: dict[str, PendingApproval] = {}
         for request_path in sorted(self._storage_dir.glob("*.json")):
@@ -287,25 +320,27 @@ class ApprovalManager:
 
     def get_request(self, approval_id: str) -> PendingApproval | None:
         """Return one pending approval by ID."""
-        return self._pending_by_id.get(approval_id)
+        return self._pending_request(approval_id)
 
     def list_pending(self) -> list[PendingApproval]:
         """Return pending approvals ordered by request time."""
-        pending = [approval for approval in self._pending_by_id.values() if approval.status == "pending"]
+        with self._state_lock:
+            pending = [approval for approval in self._pending_by_id.values() if approval.status == "pending"]
         return sorted(pending, key=lambda approval: approval.requested_at)
 
     def list_unsynced_resolved(self) -> list[PendingApproval]:
         """Return resolved approvals whose Matrix cards still need one edit."""
-        requests = [
-            approval
-            for approval in self._requests_by_id.values()
-            if (
-                approval.status != "pending"
-                and approval.room_id is not None
-                and approval.event_id is not None
-                and approval.resolution_synced_at is None
-            )
-        ]
+        with self._state_lock:
+            requests = [
+                approval
+                for approval in self._requests_by_id.values()
+                if (
+                    approval.status != "pending"
+                    and approval.room_id is not None
+                    and approval.event_id is not None
+                    and approval.resolution_synced_at is None
+                )
+            ]
         return sorted(requests, key=lambda approval: approval.resolved_at or approval.requested_at)
 
     def _preflight_request_decision(
@@ -426,7 +461,7 @@ class ApprovalManager:
         resolved_by: str,
     ) -> bool:
         """Resolve one approval from a Matrix reaction, reply, or custom event."""
-        pending = self._pending_by_id.get(approval_id)
+        pending = self._pending_request(approval_id)
         if pending is None or pending.approver_user_id != resolved_by:
             return False
         return (
@@ -449,22 +484,17 @@ class ApprovalManager:
         resolved_by: str,
     ) -> bool:
         """Resolve one Matrix-anchored approval action against the original approval card."""
-        approval_id = self._approval_id_by_event_id.get(approval_event_id)
-        if approval_id is None:
-            return False
-
-        pending = self._pending_by_id.get(approval_id)
-        if (
-            pending is None
-            or pending.event_id != approval_event_id
-            or pending.room_id != room_id
-            or pending.approver_user_id != resolved_by
-        ):
+        pending = self._anchored_pending_request(
+            approval_event_id=approval_event_id,
+            room_id=room_id,
+            resolved_by=resolved_by,
+        )
+        if pending is None:
             return False
 
         return (
             await self._resolve_pending(
-                approval_id,
+                pending.id,
                 status=status,
                 reason=reason,
                 resolved_by=resolved_by,
@@ -573,7 +603,7 @@ class ApprovalManager:
 
     async def shutdown(self, *, reason: str = _DEFAULT_SHUTDOWN_REASON) -> None:
         """Expire every live approval and update the corresponding Matrix cards."""
-        for approval_id in list(self._pending_by_id):
+        for approval_id in self._pending_ids_snapshot():
             await self._resolve_pending(
                 approval_id,
                 status="expired",
@@ -584,9 +614,9 @@ class ApprovalManager:
 
     def abort_pending(self, *, reason: str) -> None:
         """Expire every live approval without awaiting Matrix edits."""
-        for pending in list(self._pending_by_id.values()):
+        for pending in self._pending_requests_snapshot():
             decision = self._apply_decision(
-                pending,
+                pending.id,
                 status="expired",
                 reason=reason,
                 resolved_by=None,
@@ -603,7 +633,7 @@ class ApprovalManager:
         reason: str | None,
         resolved_by: str | None,
     ) -> PendingApproval:
-        pending = self._pending_by_id.get(approval_id)
+        pending = self._pending_request(approval_id)
         if pending is None:
             msg = f"Approval request '{approval_id}' was not found."
             raise LookupError(msg)
@@ -626,18 +656,15 @@ class ApprovalManager:
         reason: str | None,
         resolved_by: str | None,
     ) -> ApprovalDecision | None:
-        pending = self._pending_by_id.get(approval_id)
-        if pending is None:
-            return None
-
-        decision = self._apply_decision(
-            pending,
+        applied_decision = self._apply_decision(
+            approval_id,
             status=status,
             reason=reason,
             resolved_by=resolved_by,
         )
-        if decision is None:
+        if applied_decision is None:
             return None
+        pending, decision = applied_decision
 
         self._persist_request(pending)
         await self._edit_resolved_event(pending)
@@ -645,28 +672,32 @@ class ApprovalManager:
 
     def _apply_decision(
         self,
-        pending: PendingApproval,
+        approval_id: str,
         *,
         status: ApprovalStatus,
         reason: str | None,
         resolved_by: str | None,
-    ) -> ApprovalDecision | None:
-        future = pending.future
-        if pending.status != "pending" or (future is not None and future.done()):
-            return None
-
-        decision = self._new_decision(status=status, reason=reason, resolved_by=resolved_by)
-        if future is not None:
-            try:
-                future.set_result(decision)
-            except InvalidStateError:
+    ) -> tuple[PendingApproval, ApprovalDecision] | None:
+        with self._state_lock:
+            pending = self._pending_by_id.get(approval_id)
+            if pending is None:
                 return None
-        pending.status = status
-        pending.resolution_reason = reason
-        pending.resolved_at = decision.resolved_at
-        pending.resolved_by = resolved_by
-        pending.resolution_synced_at = None
-        return decision
+            future = pending.future
+            if pending.status != "pending" or (future is not None and future.done()):
+                return None
+
+            decision = self._new_decision(status=status, reason=reason, resolved_by=resolved_by)
+            if future is not None:
+                try:
+                    future.set_result(decision)
+                except InvalidStateError:
+                    return None
+            pending.status = status
+            pending.resolution_reason = reason
+            pending.resolved_at = decision.resolved_at
+            pending.resolved_by = resolved_by
+            pending.resolution_synced_at = None
+            return pending, decision
 
     async def _edit_resolved_event(
         self,
@@ -695,10 +726,11 @@ class ApprovalManager:
         self._persist_request(pending)
 
     def _discard(self, approval_id: str) -> None:
-        pending = self._pending_by_id.pop(approval_id, None)
-        if pending is None or pending.event_id is None:
-            return
-        self._approval_id_by_event_id.pop(pending.event_id, None)
+        with self._state_lock:
+            pending = self._pending_by_id.pop(approval_id, None)
+            if pending is None or pending.event_id is None:
+                return
+            self._approval_id_by_event_id.pop(pending.event_id, None)
 
     async def sync_unsynced_resolved(self) -> list[PendingApproval]:
         """Replay any resolved approval cards that were never edited in Matrix."""
