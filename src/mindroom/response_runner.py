@@ -481,6 +481,11 @@ class ResponseRunner:
             is_team=is_team,
         )
 
+    def _ensure_recorder_interrupted(self, recorder: TurnRecorder, reason: str) -> None:
+        """Mark one recorder interrupted unless lower layers already captured richer state."""
+        if recorder.outcome != "interrupted":
+            recorder.mark_interrupted(reason)
+
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
         thread_key = (target.room_id, target.resolved_thread_id)
@@ -1151,7 +1156,7 @@ class ResponseRunner:
                         if event_id is not None:
                             tracked_event_id = event_id
                     except asyncio.CancelledError:
-                        team_turn_recorder.mark_interrupted("Run interrupted")
+                        self._ensure_recorder_interrupted(team_turn_recorder, "Run interrupted")
                         self._persist_interrupted_turn(
                             recorder=team_turn_recorder,
                             session_scope=session_scope,
@@ -1231,7 +1236,7 @@ class ResponseRunner:
                                     operation=build_response_text,
                                 )
                             except asyncio.CancelledError:
-                                team_turn_recorder.mark_interrupted("Run interrupted")
+                                self._ensure_recorder_interrupted(team_turn_recorder, "Run interrupted")
                                 self._persist_interrupted_turn(
                                     recorder=team_turn_recorder,
                                     session_scope=session_scope,
@@ -1610,7 +1615,7 @@ class ResponseRunner:
                     operation=build_response_text,
                 )
         except asyncio.CancelledError:
-            turn_recorder.mark_interrupted("Run interrupted")
+            self._ensure_recorder_interrupted(turn_recorder, "Run interrupted")
             self._persist_interrupted_turn(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
@@ -1700,7 +1705,7 @@ class ResponseRunner:
                     request.pipeline_timing.mark("streaming_complete")
                 return event_id, accumulated
         except asyncio.CancelledError:
-            turn_recorder.mark_interrupted("Run interrupted")
+            self._ensure_recorder_interrupted(turn_recorder, "Run interrupted")
             self._persist_interrupted_turn(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),

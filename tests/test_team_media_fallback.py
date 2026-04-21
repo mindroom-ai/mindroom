@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
-from agno.run.agent import RunOutput
 from agno.models.response import ToolExecution
 from agno.run.agent import (
     RunContentEvent as AgentRunContentEvent,
@@ -49,6 +48,7 @@ from mindroom.execution_preparation import (
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.types import PreparedHistoryState
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_runtime_resolution import (
@@ -831,6 +831,72 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
 
     assert response == "friendly-team-error"
     mock_friendly.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_team_response_with_turn_recorder_defers_interrupted_persistence_to_runner() -> None:
+    """Lifecycle-owned team calls should record interrupted state without persisting directly."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        return_value=TeamRunOutput(
+            content="Run cancelled",
+            messages=[Message(role="assistant", content="Half done")],
+            tools=[
+                ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            ],
+            status=RunStatus.cancelled,
+            session_id="session-team",
+            run_id="run-123",
+            member_responses=[RunOutput(content="Half done", agent_id="general")],
+        ),
+    )
+    recorder = TurnRecorder(user_message="Analyze this.")
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+            session_id="session-team",
+            run_id="run-123",
+            reply_to_event_id="e1",
+            turn_recorder=recorder,
+        )
+
+    with open_bound_scope_session_context(
+        agents=[fake_agent],
+        session_id="session-team",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        assert scope_context.session is None
+
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.user_message == "Analyze this."
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
+    assert snapshot.seen_event_ids == ("e1",)
 
 
 @pytest.mark.asyncio

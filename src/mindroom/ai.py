@@ -1406,7 +1406,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
-    interrupted_replay_persisted = False
+    standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
     try:
         try:
@@ -1589,21 +1589,20 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                         interrupted_tools=[],
                         interruption_reason=str(response.content or "Run cancelled"),
                     )
-                persist_interrupted_replay(
-                    scope_context=scope_context,
-                    session_id=response.session_id or session_id,
-                    run_id=response.run_id or attempt_run_id or str(uuid4()),
-                    user_message=prompt,
-                    partial_text=partial_text,
-                    completed_tools=completed_tools,
-                    interrupted_tools=[],
-                    run_metadata=metadata,
-                    interruption_reason=str(response.content or "Run cancelled"),
-                    is_team=False,
-                )
-                interrupted_replay_persisted = True
-                if turn_recorder is not None:
-                    turn_recorder.claim_interrupted_persistence()
+                if turn_recorder is None:
+                    persist_interrupted_replay(
+                        scope_context=scope_context,
+                        session_id=response.session_id or session_id,
+                        run_id=response.run_id or attempt_run_id or str(uuid4()),
+                        user_message=prompt,
+                        partial_text=partial_text,
+                        completed_tools=completed_tools,
+                        interrupted_tools=[],
+                        run_metadata=metadata,
+                        interruption_reason=str(response.content or "Run cancelled"),
+                        is_team=False,
+                    )
+                    standalone_interrupted_replay_persisted = True
                 _raise_agent_run_cancelled(response.content)
             if response.status == RunStatus.error:
                 return get_user_friendly_error_message(
@@ -1632,7 +1631,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 interrupted_tools=turn_recorder.interrupted_tools,
                 interruption_reason="Run interrupted",
             )
-        elif not interrupted_replay_persisted:
+        elif not standalone_interrupted_replay_persisted:
             persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
@@ -1831,7 +1830,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
-    interrupted_replay_persisted = False
+    standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
     state = _StreamingAttemptState()
 
@@ -2015,21 +2014,20 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             )
                             if cancelled_metadata:
                                 run_metadata_collector.update(cancelled_metadata)
-                        persist_interrupted_replay(
-                            scope_context=scope_context,
-                            session_id=state.cancelled_run_event.session_id or session_id,
-                            run_id=state.cancelled_run_event.run_id or attempt_run_id or str(uuid4()),
-                            user_message=prompt,
-                            partial_text=state.assistant_text,
-                            completed_tools=state.completed_tools,
-                            interrupted_tools=state.pending_tools,
-                            run_metadata=metadata,
-                            interruption_reason=state.cancelled_run_event.reason or "Run cancelled",
-                            is_team=False,
-                        )
-                        interrupted_replay_persisted = True
-                        if turn_recorder is not None:
-                            turn_recorder.claim_interrupted_persistence()
+                        if turn_recorder is None:
+                            persist_interrupted_replay(
+                                scope_context=scope_context,
+                                session_id=state.cancelled_run_event.session_id or session_id,
+                                run_id=state.cancelled_run_event.run_id or attempt_run_id or str(uuid4()),
+                                user_message=prompt,
+                                partial_text=state.assistant_text,
+                                completed_tools=state.completed_tools,
+                                interrupted_tools=state.pending_tools,
+                                run_metadata=metadata,
+                                interruption_reason=state.cancelled_run_event.reason or "Run cancelled",
+                                is_team=False,
+                            )
+                            standalone_interrupted_replay_persisted = True
                         _raise_agent_run_cancelled(state.cancelled_run_event.reason)
 
                     break
@@ -2092,7 +2090,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 interrupted_tools=state.pending_tools,
                 interruption_reason="Run interrupted",
             )
-        elif not interrupted_replay_persisted:
+        elif not standalone_interrupted_replay_persisted:
             persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,

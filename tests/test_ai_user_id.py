@@ -62,6 +62,7 @@ from mindroom.conversation_state_writer import ConversationStateWriter, Conversa
 from mindroom.delivery_gateway import DeliveryResult
 from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -3068,6 +3069,60 @@ class TestUserIdPassthrough:
                 "Half done\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]",
             ),
         ]
+
+    @pytest.mark.asyncio
+    async def test_ai_response_with_turn_recorder_defers_interrupted_persistence_to_runner(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Lifecycle-owned calls should record interrupted state without persisting directly."""
+        storage = _SessionStorage()
+        recorder = TurnRecorder(user_message="test")
+        mock_agent = MagicMock()
+        cancelled_run = RunOutput(
+            run_id="run-123",
+            agent_id="general",
+            session_id="session1",
+            content="Half done",
+            messages=[Message(role="assistant", content="Half done")],
+            tools=[
+                ToolExecution(
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            ],
+            status=RunStatus.cancelled,
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.cached_agent_run", new_callable=AsyncMock, return_value=cancelled_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            with pytest.raises(asyncio.CancelledError):
+                await ai_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    reply_to_event_id="e1",
+                    show_tool_calls=False,
+                    turn_recorder=recorder,
+                )
+
+        assert storage.session is None
+        snapshot = recorder.interrupted_snapshot()
+        assert snapshot.user_message == "test"
+        assert snapshot.partial_text == "Half done"
+        assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
+        assert snapshot.seen_event_ids == ("e1",)
 
     @pytest.mark.asyncio
     async def test_ai_response_returns_friendly_error_for_error_status(self, tmp_path: Path) -> None:

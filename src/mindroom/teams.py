@@ -1452,7 +1452,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     replay_user_message = turn_recorder.user_message if turn_recorder is not None else message
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
-    interrupted_replay_persisted = False
+    standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
 
     try:
@@ -1584,7 +1584,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             interrupted_tools=[],
                             interruption_reason=str(response.content or "Run cancelled"),
                         )
-                    if persisted_session_id is not None:
+                    if turn_recorder is None and persisted_session_id is not None:
                         persist_interrupted_replay(
                             scope_context=scope_context,
                             session_id=persisted_session_id,
@@ -1597,9 +1597,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             interruption_reason=str(response.content or "Run cancelled"),
                             is_team=True,
                         )
-                        interrupted_replay_persisted = True
-                        if turn_recorder is not None:
-                            turn_recorder.claim_interrupted_persistence()
+                        standalone_interrupted_replay_persisted = True
                     _raise_team_run_cancelled(response.content)
                 if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
                     return get_user_friendly_error_message(
@@ -1678,7 +1676,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 interrupted_tools=turn_recorder.interrupted_tools,
                 interruption_reason="Run interrupted",
             )
-        elif not interrupted_replay_persisted and session_id is not None:
+        elif not standalone_interrupted_replay_persisted and session_id is not None:
             persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
@@ -1826,7 +1824,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     team_label = f"Team ({', '.join(agent_names)})"
-    interrupted_replay_persisted = False
+    standalone_interrupted_replay_persisted = False
     replay_user_message = turn_recorder.user_message if turn_recorder is not None else message
     unseen_event_ids: list[str] = []
     canonical_per_member: dict[str, str] = {}
@@ -2099,7 +2097,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     interrupted_tools=[],
                                     interruption_reason=str(event.content or "Run cancelled"),
                                 )
-                            if persisted_session_id is not None:
+                            if turn_recorder is None and persisted_session_id is not None:
                                 persist_interrupted_replay(
                                     scope_context=scope_context,
                                     session_id=persisted_session_id,
@@ -2112,9 +2110,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     interruption_reason=str(event.content or "Run cancelled"),
                                     is_team=True,
                                 )
-                                interrupted_replay_persisted = True
-                                if turn_recorder is not None:
-                                    turn_recorder.claim_interrupted_persistence()
+                                standalone_interrupted_replay_persisted = True
                             _raise_team_run_cancelled(event.content)
                         if isinstance(event, (TeamRunOutput, RunOutput)) and is_errored_run_output(event):
                             error_text = str(event.content or "Unknown team error")
@@ -2204,7 +2200,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     interrupted_tools=interrupted_tool_trace,
                                     interruption_reason=event.reason or "Run cancelled",
                                 )
-                            if persisted_session_id is not None:
+                            if turn_recorder is None and persisted_session_id is not None:
                                 persist_interrupted_replay(
                                     scope_context=scope_context,
                                     session_id=persisted_session_id,
@@ -2217,9 +2213,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     interruption_reason=event.reason or "Run cancelled",
                                     is_team=True,
                                 )
-                                interrupted_replay_persisted = True
-                                if turn_recorder is not None:
-                                    turn_recorder.claim_interrupted_persistence()
+                                standalone_interrupted_replay_persisted = True
                             _raise_team_run_cancelled(event.reason)
 
                         if isinstance(event, AgentRunContentEvent):
@@ -2304,7 +2298,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 interrupted_tools=[trace_entry for _, trace_entry in pending_tools],
                 interruption_reason="Run interrupted",
             )
-        elif not interrupted_replay_persisted and session_id is not None:
+        elif not standalone_interrupted_replay_persisted and session_id is not None:
             persist_interrupted_replay(
                 scope_context=scope_context,
                 session_id=session_id,
