@@ -548,6 +548,12 @@ class ResponseRunner:
         """Capture canonical interrupted replay state from one failed stream delivery."""
         partial_text = clean_partial_reply_text(_strip_visible_tool_markers(accumulated_text))
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
+        if not partial_text:
+            partial_text = recorder.assistant_text
+        if not completed_tools:
+            completed_tools = list(recorder.completed_tools)
+        if not interrupted_tools:
+            interrupted_tools = list(recorder.interrupted_tools)
         if not partial_text and not completed_tools and not interrupted_tools:
             return False
         recorder.record_interrupted(
@@ -1277,6 +1283,11 @@ class ResponseRunner:
                         ),
                     )
                 except asyncio.CancelledError:
+                    self._record_stream_delivery_error(
+                        recorder=team_turn_recorder,
+                        accumulated_text=accumulated,
+                        tool_trace=[],
+                    )
                     self._persist_interrupted_recorder(
                         recorder=team_turn_recorder,
                         session_scope=session_scope,
@@ -2141,6 +2152,11 @@ class ResponseRunner:
                 ),
             )
         except asyncio.CancelledError:
+            self._record_stream_delivery_error(
+                recorder=turn_recorder,
+                accumulated_text=accumulated,
+                tool_trace=tool_trace,
+            )
             self._persist_interrupted_recorder(
                 recorder=turn_recorder,
                 session_scope=session_scope,

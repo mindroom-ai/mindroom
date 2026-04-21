@@ -1711,6 +1711,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     media_inputs: MediaInputs,
     retried_without_inline_media: bool,
     timing_scope: str,
+    state_updated: Callable[[], None] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
@@ -1725,6 +1726,8 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                 chunk_text = str(event.content)
                 state.assistant_text += chunk_text
                 state.full_response += chunk_text
+                if state_updated is not None:
+                    state_updated()
                 yield event
                 continue
 
@@ -1734,6 +1737,8 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     event,
                     show_tool_calls=show_tool_calls,
                 )
+                if state_updated is not None:
+                    state_updated()
                 yield event
                 continue
 
@@ -1744,6 +1749,8 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     show_tool_calls=show_tool_calls,
                     agent_name=agent_name,
                 )
+                if state_updated is not None:
+                    state_updated()
                 yield event
                 continue
 
@@ -1757,6 +1764,8 @@ async def _process_stream_events(  # noqa: C901, PLR0912
 
             if isinstance(event, RunCancelledEvent):
                 state.cancelled_run_event = event
+                if state_updated is not None:
+                    state_updated()
                 return
 
             if isinstance(event, RunErrorEvent):
@@ -1951,6 +1960,16 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             attempt_media_inputs = media_inputs
             state = _StreamingAttemptState()
 
+            def _sync_live_turn_recorder() -> None:
+                if turn_recorder is None:
+                    return
+                turn_recorder.sync_partial_state(
+                    run_metadata=metadata,
+                    assistant_text=state.assistant_text,
+                    completed_tools=state.completed_tools,
+                    interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
+                )
+
             try:
                 for retried_without_inline_media in (False, True):
                     state = _StreamingAttemptState()
@@ -1995,6 +2014,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             media_inputs=attempt_media_inputs,
                             retried_without_inline_media=retried_without_inline_media,
                             timing_scope=timing_scope,
+                            state_updated=_sync_live_turn_recorder,
                             pipeline_timing=pipeline_timing,
                         ):
                             yield stream_chunk

@@ -51,6 +51,20 @@ class TurnRecorder:
         """Replace the in-flight interrupted tool list."""
         self.interrupted_tools = list(tools)
 
+    def sync_partial_state(
+        self,
+        *,
+        run_metadata: Mapping[str, Any] | None,
+        assistant_text: str,
+        completed_tools: Sequence[ToolTraceEntry],
+        interrupted_tools: Sequence[ToolTraceEntry],
+    ) -> None:
+        """Refresh the latest observed streaming state without deciding the final outcome."""
+        self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
+        self.set_assistant_text(assistant_text)
+        self.set_completed_tools(list(completed_tools))
+        self.set_interrupted_tools(list(interrupted_tools))
+
     def record_completed(
         self,
         *,

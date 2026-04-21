@@ -2516,15 +2516,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
 
         coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(side_effect=consume_stream)
 
-        def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
-            turn_recorder = cast("TurnRecorder", kwargs["turn_recorder"])
-            turn_recorder.set_run_id("team-run-stream-delivery-cancel")
-            turn_recorder.record_completed(
-                run_metadata={},
-                assistant_text="Team hello",
-                completed_tools=[],
-            )
-
+        def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
             async def fake_stream() -> AsyncIterator[str]:
                 yield "Team hello"
 
@@ -2543,12 +2535,62 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     assert persisted_session is not None
     assert persisted_session.runs is not None
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
-    assert persisted_run.run_id == "team-run-stream-delivery-cancel"
+    assert isinstance(persisted_run.run_id, str)
+    assert persisted_run.run_id
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
         ("assistant", "Team hello\n\n[interrupted]"),
     ]
+
+
+def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_trace_is_empty(
+    tmp_path: Path,
+) -> None:
+    """Delivery failures must keep hidden tool progress already recorded by the stream generator."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.set_run_metadata({"matrix_seen_event_ids": ["$user_msg"]})
+    recorder.set_assistant_text("Partial answer")
+    recorder.set_completed_tools(
+        [
+            ToolTraceEntry(
+                type="tool_call_completed",
+                tool_name="run_shell_command",
+                args_preview="cmd=pwd",
+                result_preview="/app",
+            ),
+        ],
+    )
+    recorder.set_interrupted_tools(
+        [
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="save_file",
+                args_preview="file_name=main.py",
+            ),
+        ],
+    )
+
+    assert coordinator._record_stream_delivery_error(
+        recorder=recorder,
+        accumulated_text="Partial answer\n\n**[Response interrupted by an error: boom]**",
+        tool_trace=[],
+    )
+
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.partial_text == "Partial answer"
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
+    assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
 
 
 @pytest.mark.asyncio

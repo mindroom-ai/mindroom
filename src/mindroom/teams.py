@@ -1962,6 +1962,16 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             render_canonical_partial_text = _current_canonical_partial_text
 
+            def _sync_live_turn_recorder() -> None:
+                if turn_recorder is None:
+                    return
+                turn_recorder.sync_partial_state(
+                    run_metadata=run_metadata,
+                    assistant_text=render_canonical_partial_text(),
+                    completed_tools=completed_tools,
+                    interrupted_tools=[pending.trace_entry for pending in pending_tools],
+                )
+
             def _find_pending_tool_index(
                 *,
                 scope_key: str,
@@ -2288,6 +2298,7 @@ async def team_response_stream(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             logger.debug("ignoring_team_stream_event_type", event_type=type(event).__name__)
                             continue
 
+                        _sync_live_turn_recorder()
                         parts = _render_team_parts(
                             per_member=visible_per_member,
                             consensus=visible_consensus,
