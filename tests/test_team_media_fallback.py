@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -45,6 +46,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_execution_context,
     render_prepared_team_messages_text,
 )
+from mindroom.history.interrupted_replay import render_interrupted_replay_content
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
@@ -135,6 +137,22 @@ def _has_queued_notice(messages: list[Message] | None) -> bool:
     )
 
 
+def _team_turn_recorder(message: str) -> TurnRecorder:
+    return TurnRecorder(user_message=message)
+
+
+def test_team_response_requires_turn_recorder() -> None:
+    """Direct team helper calls should explicitly opt into lifecycle recording."""
+    turn_recorder = inspect.signature(team_response).parameters["turn_recorder"]
+    assert turn_recorder.default is inspect.Signature.empty
+
+
+def test_team_response_stream_requires_turn_recorder() -> None:
+    """Direct team stream helper calls should explicitly opt into lifecycle recording."""
+    turn_recorder = inspect.signature(team_response_stream).parameters["turn_recorder"]
+    assert turn_recorder.default is inspect.Signature.empty
+
+
 def test_resolve_live_shared_agent_names_returns_none_when_runtime_availability_is_unknown() -> None:
     """Missing shared runtime state must remain unknown, not become an empty live set."""
     config = _build_test_config()
@@ -215,6 +233,7 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
             media=MediaInputs(audio=[audio_input]),
@@ -266,6 +285,7 @@ async def test_team_response_fallback_run_output_cleans_queued_notice_before_for
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
             session_id="session-123",
@@ -308,6 +328,7 @@ async def test_team_response_fallback_run_output_error_uses_friendly_error() -> 
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
             session_id="session-123",
@@ -341,6 +362,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
             session_id="session-123",
@@ -387,6 +409,7 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             thread_history=[make_visible_message(sender="user", body="Old thread context")],
             orchestrator=orchestrator,
             execution_identity=None,
@@ -453,6 +476,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             thread_history=thread_history,
             orchestrator=orchestrator,
             execution_identity=None,
@@ -563,6 +587,7 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
             session_id="session-queued",
@@ -622,6 +647,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             thread_history=[
                 make_visible_message(event_id="event-1", sender="user", body="Fresh follow-up"),
                 make_visible_message(event_id="event-2", sender="user", body="Current message body"),
@@ -673,6 +699,7 @@ async def test_team_response_passes_run_id_to_team_arun() -> None:
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
             run_id="run-123",
@@ -711,6 +738,7 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
             run_id="run-123",
@@ -718,8 +746,8 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
 
 
 @pytest.mark.asyncio
-async def test_team_response_persists_interrupted_replay_for_cancelled_runs() -> None:
-    """Cancelled team runs should be rewritten into canonical completed replay history."""
+async def test_team_response_records_interrupted_snapshot_for_cancelled_runs() -> None:
+    """Cancelled team runs should capture canonical replay state in the lifecycle recorder."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -753,6 +781,8 @@ async def test_team_response_persists_interrupted_replay_for_cancelled_runs() ->
         ),
     )
 
+    recorder = TurnRecorder(user_message="Analyze this.")
+
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
@@ -763,6 +793,7 @@ async def test_team_response_persists_interrupted_replay_for_cancelled_runs() ->
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             session_id="session-team",
@@ -770,38 +801,21 @@ async def test_team_response_persists_interrupted_replay_for_cancelled_runs() ->
             reply_to_event_id="e1",
         )
 
-    with open_bound_scope_session_context(
-        agents=[fake_agent],
-        session_id="session-team",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        assert scope_context.session is not None
-        assert scope_context.session.runs is not None
-        persisted_run = scope_context.session.runs[0]
-
-    assert isinstance(persisted_run, TeamRunOutput)
-    assert persisted_run.status in {RunStatus.completed, RunStatus.completed.value}
-    assert persisted_run.messages is not None
-    assert [(message.role, message.content) for message in persisted_run.messages] == [
-        ("user", "Analyze this."),
-        (
-            "assistant",
-            "**GeneralAgent**: Half done\n\n\n"
-            "*No team consensus - showing individual responses only*\n\n"
-            "[tool:run_shell_command completed]\n"
-            "  args: cmd=pwd\n"
-            "  result: /app\n\n"
-            "[interrupted]",
-        ),
-    ]
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.user_message == "Analyze this."
+    assert render_interrupted_replay_content(snapshot) == (
+        "**GeneralAgent**: Half done\n\n\n"
+        "*No team consensus - showing individual responses only*\n\n"
+        "[tool:run_shell_command completed]\n"
+        "  args: cmd=pwd\n"
+        "  result: /app\n\n"
+        "[interrupted]"
+    )
 
 
 @pytest.mark.asyncio
-async def test_team_response_persists_incomplete_cancelled_tools_as_interrupted() -> None:
-    """Cancelled non-streaming team runs must not serialize unfinished tools as completed."""
+async def test_team_response_records_incomplete_cancelled_tools_as_interrupted() -> None:
+    """Cancelled non-streaming team runs must keep unfinished tools in the recorder snapshot."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -835,6 +849,8 @@ async def test_team_response_persists_incomplete_cancelled_tools_as_interrupted(
         ),
     )
 
+    recorder = TurnRecorder(user_message="Analyze this.")
+
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.get_agent_knowledge", return_value=None),
@@ -845,6 +861,7 @@ async def test_team_response_persists_incomplete_cancelled_tools_as_interrupted(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             session_id="session-team",
@@ -852,32 +869,16 @@ async def test_team_response_persists_incomplete_cancelled_tools_as_interrupted(
             reply_to_event_id="e1",
         )
 
-    with open_bound_scope_session_context(
-        agents=[fake_agent],
-        session_id="session-team",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        assert scope_context.session is not None
-        assert scope_context.session.runs is not None
-        persisted_run = scope_context.session.runs[0]
-
-    assert isinstance(persisted_run, TeamRunOutput)
-    assert persisted_run.messages is not None
-    assert [(message.role, message.content) for message in persisted_run.messages] == [
-        ("user", "Analyze this."),
-        (
-            "assistant",
-            "**GeneralAgent**: Half done\n\n\n"
-            "*No team consensus - showing individual responses only*\n\n"
-            "[tool:run_shell_command interrupted]\n"
-            "  args: cmd=pwd\n"
-            "  result: <interrupted before completion>\n\n"
-            "[interrupted]",
-        ),
-    ]
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.user_message == "Analyze this."
+    assert render_interrupted_replay_content(snapshot) == (
+        "**GeneralAgent**: Half done\n\n\n"
+        "*No team consensus - showing individual responses only*\n\n"
+        "[tool:run_shell_command interrupted]\n"
+        "  args: cmd=pwd\n"
+        "  result: <interrupted before completion>\n\n"
+        "[interrupted]"
+    )
 
 
 @pytest.mark.asyncio
@@ -906,6 +907,7 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
         )
@@ -1052,6 +1054,7 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
     )
 
     fake_agent = _make_test_agent("GeneralAgent")
+    recorder = TurnRecorder(user_message="Analyze this.")
     callback_run_ids: list[str] = []
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -1062,11 +1065,15 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             media=MediaInputs(audio=[MagicMock(name="audio_input")]),
             run_id="run-123",
-            run_id_callback=callback_run_ids.append,
+            run_id_callback=lambda current_run_id: (
+                callback_run_ids.append(current_run_id),
+                recorder.set_run_id(current_run_id),
+            ),
         )
 
     assert "Recovered team response" in response
@@ -1079,8 +1086,8 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
 
 
 @pytest.mark.asyncio
-async def test_team_response_persists_retry_run_id_after_hard_cancellation() -> None:
-    """Standalone interrupted team replay should use the last retry attempt id after hard cancellation."""
+async def test_team_response_tracks_retry_run_id_after_hard_cancellation() -> None:
+    """Lifecycle-owned team cancellation should keep the last retry attempt id on the recorder."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -1090,6 +1097,7 @@ async def test_team_response_persists_retry_run_id_after_hard_cancellation() -> 
     orchestrator.agent_bots = {"general": MagicMock()}
 
     fake_agent = _make_test_agent("GeneralAgent")
+    recorder = TurnRecorder(user_message="Analyze this.")
     mock_team = _make_test_team()
     callback_run_ids: list[str] = []
     mock_team.arun = AsyncMock(
@@ -1109,25 +1117,17 @@ async def test_team_response_persists_retry_run_id_after_hard_cancellation() -> 
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             session_id="session-team",
             media=MediaInputs(audio=[MagicMock(name="audio_input")]),
             run_id="run-123",
-            run_id_callback=callback_run_ids.append,
+            run_id_callback=lambda current_run_id: (
+                callback_run_ids.append(current_run_id),
+                recorder.set_run_id(current_run_id),
+            ),
         )
-
-    with open_bound_scope_session_context(
-        agents=[fake_agent],
-        session_id="session-team",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        assert scope_context.session is not None
-        assert scope_context.session.runs is not None
-        persisted_run = scope_context.session.runs[0]
 
     first_call = mock_team.arun.await_args_list[0]
     second_call = mock_team.arun.await_args_list[1]
@@ -1135,8 +1135,7 @@ async def test_team_response_persists_retry_run_id_after_hard_cancellation() -> 
     assert second_call.kwargs["run_id"] is not None
     assert second_call.kwargs["run_id"] != "run-123"
     assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
-    assert isinstance(persisted_run, TeamRunOutput)
-    assert persisted_run.run_id == second_call.kwargs["run_id"]
+    assert recorder.run_id == second_call.kwargs["run_id"]
 
 
 @pytest.mark.asyncio
@@ -1170,6 +1169,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
             runtime_paths,
         ),
     ]
+    recorder = TurnRecorder(user_message="Analyze this.")
 
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
@@ -1184,6 +1184,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
                 async for chunk in team_response_stream(
                     agent_ids=team_agent_ids,
                     message="Analyze this.",
+                    turn_recorder=recorder,
                     orchestrator=orchestrator,
                     execution_identity=None,
                     mode=TeamMode.COORDINATE,
@@ -1203,8 +1204,8 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_persists_hidden_interrupted_tool_state() -> None:
-    """Streaming team cancellation should persist hidden completed tools into replay history."""
+async def test_team_response_stream_records_hidden_interrupted_tool_state() -> None:
+    """Streaming team cancellation should capture hidden completed tools in the lifecycle recorder."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -1245,6 +1246,7 @@ async def test_team_response_stream_persists_hidden_interrupted_tool_state() -> 
             runtime_paths,
         ),
     ]
+    recorder = TurnRecorder(user_message="Analyze this.")
 
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
@@ -1256,6 +1258,7 @@ async def test_team_response_stream_persists_hidden_interrupted_tool_state() -> 
         async for _chunk in team_response_stream(
             agent_ids=team_agent_ids,
             message="Analyze this.",
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             mode=TeamMode.COORDINATE,
@@ -1266,38 +1269,21 @@ async def test_team_response_stream_persists_hidden_interrupted_tool_state() -> 
         ):
             pass
 
-    with open_bound_scope_session_context(
-        agents=[fake_agent],
-        session_id="session-team-stream",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        assert scope_context.session is not None
-        assert scope_context.session.runs is not None
-        persisted_run = scope_context.session.runs[0]
-
-    assert isinstance(persisted_run, TeamRunOutput)
-    assert persisted_run.status in {RunStatus.completed, RunStatus.completed.value}
-    assert persisted_run.messages is not None
-    assert [(message.role, message.content) for message in persisted_run.messages] == [
-        ("user", "Analyze this."),
-        (
-            "assistant",
-            "**GeneralAgent**: Half done\n\n\n"
-            "*No team consensus - showing individual responses only*\n\n"
-            "[tool:run_shell_command completed]\n"
-            "  args: cmd=pwd\n"
-            "  result: /app\n\n"
-            "[interrupted]",
-        ),
-    ]
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.user_message == "Analyze this."
+    assert render_interrupted_replay_content(snapshot) == (
+        "**GeneralAgent**: Half done\n\n\n"
+        "*No team consensus - showing individual responses only*\n\n"
+        "[tool:run_shell_command completed]\n"
+        "  args: cmd=pwd\n"
+        "  result: /app\n\n"
+        "[interrupted]"
+    )
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_persists_interrupted_replay_after_external_task_cancel() -> None:
-    """External task cancellation should still persist interrupted team replay state."""
+async def test_team_response_stream_records_interrupted_snapshot_after_external_task_cancel() -> None:
+    """External task cancellation should still capture interrupted team replay state."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -1315,6 +1301,7 @@ async def test_team_response_stream_persists_interrupted_replay_after_external_t
         failed_agent_names=[],
     )
     first_chunk_seen = asyncio.Event()
+    recorder = TurnRecorder(user_message="Analyze this.")
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         yield AgentRunContentEvent(agent_name="GeneralAgent", content="Half done")
@@ -1331,6 +1318,7 @@ async def test_team_response_stream_persists_interrupted_replay_after_external_t
         async for _chunk in team_response_stream(
             agent_ids=team_agent_ids,
             message="Analyze this.",
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             mode=TeamMode.COORDINATE,
@@ -1353,28 +1341,11 @@ async def test_team_response_stream_persists_interrupted_replay_after_external_t
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    with open_bound_scope_session_context(
-        agents=[fake_agent],
-        session_id="session-team-stream",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        assert scope_context.session is not None
-        assert scope_context.session.runs is not None
-        persisted_run = scope_context.session.runs[0]
-
-    assert isinstance(persisted_run, TeamRunOutput)
-    assert persisted_run.status in {RunStatus.completed, RunStatus.completed.value}
-    assert persisted_run.messages is not None
-    assert [(message.role, message.content) for message in persisted_run.messages] == [
-        ("user", "Analyze this."),
-        (
-            "assistant",
-            "**GeneralAgent**: Half done\n\n\n*No team consensus - showing individual responses only*\n\n[interrupted]",
-        ),
-    ]
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.user_message == "Analyze this."
+    assert render_interrupted_replay_content(snapshot) == (
+        "**GeneralAgent**: Half done\n\n\n*No team consensus - showing individual responses only*\n\n[interrupted]"
+    )
 
 
 @pytest.mark.asyncio
@@ -1442,6 +1413,7 @@ async def test_team_response_stream_preserves_pending_tool_scope_for_same_named_
             runtime_paths,
         ),
     ]
+    recorder = TurnRecorder(user_message="Analyze this.")
 
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
@@ -1453,6 +1425,7 @@ async def test_team_response_stream_preserves_pending_tool_scope_for_same_named_
         async for _chunk in team_response_stream(
             agent_ids=team_agent_ids,
             message="Analyze this.",
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             mode=TeamMode.COORDINATE,
@@ -1463,25 +1436,9 @@ async def test_team_response_stream_preserves_pending_tool_scope_for_same_named_
         ):
             pass
 
-    with open_bound_scope_session_context(
-        agents=[general_agent, research_agent],
-        session_id="session-team-stream",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        assert scope_context.session is not None
-        assert scope_context.session.runs is not None
-        persisted_run = scope_context.session.runs[0]
-
-    assert isinstance(persisted_run, TeamRunOutput)
-    assert persisted_run.messages is not None
-    assert len(persisted_run.messages) == 2
-    assert persisted_run.messages[0].role == "user"
-    assert persisted_run.messages[0].content == "Analyze this."
-    assert isinstance(persisted_run.messages[1].content, str)
-    content = persisted_run.messages[1].content
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.user_message == "Analyze this."
+    content = render_interrupted_replay_content(snapshot)
     assert "[tool:run_shell_command completed]" in content
     assert "args: cmd=pwd" in content
     assert "[tool:run_shell_command interrupted]" in content
@@ -1537,6 +1494,7 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
             runtime_paths,
         ),
     ]
+    recorder = TurnRecorder(user_message="Analyze this.")
 
     with (
         patch("mindroom.teams._ensure_request_team_knowledge_managers", new=AsyncMock(return_value={})),
@@ -1548,6 +1506,7 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
         async for _chunk in team_response_stream(
             agent_ids=team_agent_ids,
             message="Analyze this.",
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             mode=TeamMode.COORDINATE,
@@ -1558,35 +1517,19 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
         ):
             pass
 
-    with open_bound_scope_session_context(
-        agents=[general_agent],
-        session_id="session-team-stream",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        assert scope_context.session is not None
-        assert scope_context.session.runs is not None
-        persisted_run = scope_context.session.runs[0]
-
-    assert isinstance(persisted_run, TeamRunOutput)
-    assert persisted_run.messages is not None
-    assert [(message.role, message.content) for message in persisted_run.messages] == [
-        ("user", "Analyze this."),
-        (
-            "assistant",
-            "**GeneralAgent**: General started\n\n\n"
-            "*No team consensus - showing individual responses only*\n\n"
-            "[tool:run_shell_command completed]\n"
-            "  args: cmd=pwd\n"
-            "  result: /app\n"
-            "[tool:run_shell_command interrupted]\n"
-            "  args: cmd=ls\n"
-            "  result: <interrupted before completion>\n\n"
-            "[interrupted]",
-        ),
-    ]
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.user_message == "Analyze this."
+    assert render_interrupted_replay_content(snapshot) == (
+        "**GeneralAgent**: General started\n\n\n"
+        "*No team consensus - showing individual responses only*\n\n"
+        "[tool:run_shell_command completed]\n"
+        "  args: cmd=pwd\n"
+        "  result: /app\n"
+        "[tool:run_shell_command interrupted]\n"
+        "  args: cmd=ls\n"
+        "  result: <interrupted before completion>\n\n"
+        "[interrupted]"
+    )
 
 
 @pytest.mark.asyncio
@@ -1640,6 +1583,7 @@ async def test_team_response_stream_does_not_retry_after_hidden_tool_progress_on
             async for chunk in team_response_stream(
                 agent_ids=team_agent_ids,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 mode=TeamMode.COORDINATE,
@@ -1705,6 +1649,7 @@ async def test_team_response_stream_does_not_retry_after_hidden_tool_progress_on
             async for chunk in team_response_stream(
                 agent_ids=team_agent_ids,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 mode=TeamMode.COORDINATE,
@@ -1761,6 +1706,7 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
             async for chunk in team_response_stream(
                 agent_ids=team_agent_ids,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 mode=TeamMode.COORDINATE,
@@ -1815,6 +1761,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
         async for _chunk in team_response_stream(
             agent_ids=team_agent_ids,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
             mode=TeamMode.COORDINATE,
@@ -1865,6 +1812,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
             async for chunk in team_response_stream(
                 agent_ids=team_agent_ids,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 mode=TeamMode.COORDINATE,
@@ -1916,6 +1864,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_plain_run
             async for chunk in team_response_stream(
                 agent_ids=team_agent_ids,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 mode=TeamMode.COORDINATE,
@@ -1973,6 +1922,7 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
             async for chunk in team_response_stream(
                 agent_ids=team_agent_ids,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 mode=TeamMode.COORDINATE,
@@ -1991,8 +1941,8 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_persists_retry_run_id_after_hard_cancellation() -> None:
-    """Standalone streaming team replay should keep the final retry attempt id after hard cancellation."""
+async def test_team_response_stream_tracks_retry_run_id_after_hard_cancellation() -> None:
+    """Streaming team cleanup should keep the final retry attempt id after hard cancellation."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -2012,6 +1962,7 @@ async def test_team_response_stream_persists_retry_run_id_after_hard_cancellatio
 
     call_run_ids: list[str | None] = []
     callback_run_ids: list[str] = []
+    recorder = TurnRecorder(user_message="Analyze this.")
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         call_run_ids.append(_kwargs["run_id"])
@@ -2041,34 +1992,25 @@ async def test_team_response_stream_persists_retry_run_id_after_hard_cancellatio
             async for chunk in team_response_stream(
                 agent_ids=team_agent_ids,
                 message="Analyze this.",
+                turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
                 mode=TeamMode.COORDINATE,
                 session_id="session-team-stream",
                 media=MediaInputs(audio=[MagicMock(name="audio_input")]),
                 run_id="run-789",
-                run_id_callback=callback_run_ids.append,
+                run_id_callback=lambda current_run_id: (
+                    callback_run_ids.append(current_run_id),
+                    recorder.set_run_id(current_run_id),
+                ),
             )
         ]
-
-    with open_bound_scope_session_context(
-        agents=[fake_agent],
-        session_id="session-team-stream",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        assert scope_context.session is not None
-        assert scope_context.session.runs is not None
-        persisted_run = scope_context.session.runs[0]
 
     assert call_run_ids[0] == "run-789"
     assert call_run_ids[1] is not None
     assert call_run_ids[1] != "run-789"
     assert callback_run_ids == [run_id for run_id in call_run_ids if run_id is not None]
-    assert isinstance(persisted_run, TeamRunOutput)
-    assert persisted_run.run_id == call_run_ids[1]
+    assert recorder.run_id == call_run_ids[1]
 
 
 @pytest.mark.asyncio
@@ -2132,6 +2074,7 @@ async def test_team_response_rejects_missing_materialized_members() -> None:
             agent_names=["general", "research"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
         )
@@ -2173,6 +2116,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
             async for chunk in team_response_stream(
                 agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 session_id="session-123",
@@ -2229,6 +2173,7 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
             async for chunk in team_response_stream(
                 agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 thread_history=[make_visible_message(sender="user", body="Old thread context")],
                 orchestrator=orchestrator,
                 execution_identity=None,
@@ -2298,6 +2243,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
             async for chunk in team_response_stream(
                 agent_ids=[config.get_ids(runtime_paths)["general"]],
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 thread_history=[
                     make_visible_message(event_id="event-1", sender="user", body="Already seen"),
                     make_visible_message(event_id="event-2", sender="user", body="Fresh follow-up"),
@@ -2353,6 +2299,7 @@ async def test_team_response_stream_preserves_assistant_context_in_team_prompt()
             async for chunk in team_response_stream(
                 agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 session_id="session-123",
@@ -2515,6 +2462,7 @@ async def test_team_response_rejects_non_running_materialized_members() -> None:
             agent_names=["general", "research"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
         )
@@ -2554,6 +2502,7 @@ async def test_team_response_rejects_request_time_materialization_failure() -> N
             agent_names=["general", "research"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
             reason_prefix="Team 'summary'",
@@ -2592,6 +2541,7 @@ async def test_team_stream_rejects_missing_materialized_members() -> None:
                 ],
                 mode=TeamMode.COORDINATE,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
             )
@@ -2637,6 +2587,7 @@ async def test_team_stream_rejects_request_time_materialization_failure() -> Non
                 ],
                 mode=TeamMode.COORDINATE,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 reason_prefix="Team 'summary'",
@@ -2678,6 +2629,7 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
                 agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 media=MediaInputs(audio=[audio_input]),
@@ -2732,6 +2684,7 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
                 agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 media=MediaInputs(audio=[audio_input]),
@@ -2809,6 +2762,7 @@ async def test_team_response_rejects_private_agents_in_ad_hoc_teams() -> None:
             agent_names=["general", "calculator"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
         )
@@ -2824,6 +2778,7 @@ async def test_team_response_rejects_private_agents_even_when_private_member_is_
             agent_names=["general", "calculator"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
         )
@@ -2844,6 +2799,7 @@ async def test_team_response_stream_rejects_private_agents_even_when_private_mem
                 ],
                 mode=TeamMode.COORDINATE,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
             )
@@ -2884,6 +2840,7 @@ async def test_team_response_rejects_members_that_delegate_to_private_agents() -
             agent_names=["leader", "helper"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
         )
@@ -2916,6 +2873,7 @@ async def test_team_response_ignores_router_in_direct_team_member_list() -> None
             agent_names=["router", "general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
         )
@@ -2954,6 +2912,7 @@ async def test_team_response_stream_ignores_router_in_direct_team_member_list() 
                 ],
                 mode=TeamMode.COORDINATE,
                 message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
                 orchestrator=orchestrator,
                 execution_identity=None,
             )
@@ -2990,6 +2949,7 @@ async def test_team_response_forwards_session_and_user_id_to_team_run() -> None:
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=None,
             session_id="session-123",
@@ -3041,6 +3001,7 @@ async def test_team_response_materializes_members_with_request_execution_identit
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
             orchestrator=orchestrator,
             execution_identity=identity,
         )
