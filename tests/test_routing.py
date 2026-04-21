@@ -200,22 +200,21 @@ def test_teams_public_seam_exports_status_helpers() -> None:
     assert "is_errored_run_output" in teams_module.__all__
 
 
-def test_flattened_seams_preserve_legacy_helper_signatures() -> None:
-    """Public seam helpers should keep the legacy optional kwargs they previously accepted."""
+def test_flattened_seams_avoid_backward_compatibility_signature_shims() -> None:
+    """Flattened seam helpers should expose only the current typed contract."""
     teams_module = importlib.import_module("mindroom.teams")
     agent_policy_module = importlib.import_module("mindroom.agent_policy")
     config_main_module = importlib.import_module("mindroom.config.main")
 
     prepare_signature = signature(teams_module.prepare_materialized_team_execution)
-    assert prepare_signature.parameters["current_sender_id"].default is None
+    current_sender_parameter = prepare_signature.parameters["current_sender_id"]
+    assert current_sender_parameter.default is current_sender_parameter.empty
 
     agent_policy_signature = signature(agent_policy_module.get_agent_delegation_closure)
-    assert "visiting" in agent_policy_signature.parameters
-    assert agent_policy_signature.parameters["visiting"].default is None
+    assert "visiting" not in agent_policy_signature.parameters
 
     config_signature = signature(config_main_module.Config.get_agent_delegation_closure)
-    assert "visiting" in config_signature.parameters
-    assert config_signature.parameters["visiting"].default is None
+    assert "visiting" not in config_signature.parameters
 
 
 def test_flattened_seams_do_not_reintroduce_back_edge_imports() -> None:
