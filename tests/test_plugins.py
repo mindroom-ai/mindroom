@@ -1876,7 +1876,6 @@ async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-    original_modules = set(sys.modules)
     shared_task = asyncio.create_task(asyncio.Event().wait())
     extra_task = asyncio.create_task(asyncio.Event().wait())
     try:
@@ -1898,6 +1897,60 @@ async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -
         assert extra_task.cancelled()
     finally:
         await asyncio.gather(shared_task, extra_task, return_exceptions=True)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
+@pytest.mark.asyncio
+async def test_reload_plugins_cancels_tasks_for_removed_plugins(tmp_path: Path) -> None:
+    """Removing a loaded plugin should still cancel its module-global tasks."""
+    plugin_root = tmp_path / "plugins" / "removed-task-plugin"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "removed-task-plugin", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text(
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config_with_plugin = _bind_runtime_paths(Config(plugins=["./plugins/removed-task-plugin"]), config_path)
+    config_without_plugin = _bind_runtime_paths(Config(plugins=[]), config_path)
+    runtime_paths = runtime_paths_for(config_with_plugin)
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        initial = reload_plugins(config_with_plugin, runtime_paths)
+        assert initial.active_plugin_names == ("removed-task-plugin",)
+
+        hooks_path = (plugin_root / "hooks.py").resolve()
+        hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
+        hooks_module._AUTO_POKE_TASK = task
+
+        removed = reload_plugins(config_without_plugin, runtime_paths)
+        await asyncio.sleep(0)
+
+        assert removed.active_plugin_names == ()
+        assert removed.cancelled_task_count == 1
+        assert task.cancelled()
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()

@@ -1591,6 +1591,11 @@ async def _watch_plugins_task(orchestrator: MultiAgentOrchestrator) -> None:
     while not orchestrator.running:  # noqa: ASYNC110
         await asyncio.sleep(0.1)
 
+    config = orchestrator.config
+    if config is not None:
+        configured_roots = get_configured_plugin_roots(config, orchestrator.runtime_paths)
+        _collect_plugin_root_changes(configured_roots, last_snapshot_by_root)
+
     while orchestrator.running:
         await asyncio.sleep(file_watcher._WATCH_SCAN_INTERVAL_SECONDS)
 
@@ -1605,6 +1610,10 @@ async def _watch_plugins_task(orchestrator: MultiAgentOrchestrator) -> None:
                 configured_roots,
                 last_snapshot_by_root,
             )
+            seeded_paths = _seed_new_plugin_root_changes(configured_roots, last_snapshot_by_root)
+            if seeded_paths:
+                pending_changes.update(seeded_paths)
+                last_change_at = loop.time()
             changed_paths = _collect_plugin_root_changes(configured_roots, last_snapshot_by_root)
 
             if changed_paths:
@@ -1655,6 +1664,21 @@ def _collect_plugin_root_changes(
             continue
         changed_paths.update(file_watcher._tree_changed_paths(previous_snapshot, current_snapshot))
     return changed_paths
+
+
+def _seed_new_plugin_root_changes(
+    configured_roots: tuple[Path, ...],
+    last_snapshot_by_root: dict[Path, dict[Path, int]],
+) -> set[Path]:
+    """Capture one initial snapshot for newly configured roots and treat it as pending work."""
+    seeded_paths: set[Path] = set()
+    for root in configured_roots:
+        if root in last_snapshot_by_root:
+            continue
+        current_snapshot = file_watcher._tree_snapshot(root)
+        last_snapshot_by_root[root] = current_snapshot
+        seeded_paths.update(current_snapshot)
+    return seeded_paths
 
 
 def _path_is_under_any_root(path: Path, roots: tuple[Path, ...]) -> bool:
