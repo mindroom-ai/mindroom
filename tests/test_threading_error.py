@@ -757,11 +757,11 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_notify_outbound_message_edit_with_unknown_impact_waits_for_room_barrier(self) -> None:
-        """Ambiguous outbound edits must use the room barrier before invalidating room-wide thread state."""
+    async def test_notify_outbound_event_threaded_edit_waits_for_room_barrier(self) -> None:
+        """Outbound threaded edits must still wait on the room barrier before mutating thread cache."""
         coordinator = _runtime_write_coordinator()
         event_cache = _runtime_event_cache()
-        client = _make_client_mock()
+        client = _make_client_mock(user_id="@agent:localhost")
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(
@@ -772,21 +772,20 @@ class TestMatrixConversationCacheThreadReads:
         )
         sibling_thread_update_started = asyncio.Event()
         release_sibling_thread_update = asyncio.Event()
-        room_invalidation_started = asyncio.Event()
+        thread_invalidation_started = asyncio.Event()
 
         async def blocking_sibling_thread_update() -> None:
             sibling_thread_update_started.set()
             await release_sibling_thread_update.wait()
 
-        async def mark_room_threads_stale(_room_id: str, *, reason: str) -> None:
-            assert reason == "outbound_thread_lookup_unavailable"
-            room_invalidation_started.set()
+        async def mark_thread_stale(room_id: str, thread_id: str, *, reason: str) -> None:
+            assert room_id == "!room:localhost"
+            assert thread_id == "$claimed-thread:localhost"
+            assert reason == "outbound_thread_mutation"
+            thread_invalidation_started.set()
 
-        access._outbound._resolver.resolve_thread_impact_for_mutation = AsyncMock(
-            return_value=MutationThreadImpact.unknown(),
-        )
-        event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
-        coordinator.queue_thread_update(
+        event_cache.mark_thread_stale = AsyncMock(side_effect=mark_thread_stale)
+        sibling_thread_task = coordinator.queue_thread_update(
             "!room:localhost",
             "$sibling-thread:localhost",
             blocking_sibling_thread_update,
@@ -794,30 +793,50 @@ class TestMatrixConversationCacheThreadReads:
         )
         await asyncio.wait_for(sibling_thread_update_started.wait(), timeout=1.0)
 
-        access.notify_outbound_message(
+        access.notify_outbound_event(
             "!room:localhost",
-            "$edit:localhost",
             {
-                "body": "* updated",
-                "msgtype": "m.text",
-                "m.new_content": {
-                    "body": "updated",
+                "type": "m.room.message",
+                "room_id": "!room:localhost",
+                "event_id": "$edit:localhost",
+                "content": {
+                    "body": "* updated",
                     "msgtype": "m.text",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed-thread:localhost"},
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed-thread:localhost"},
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-message:localhost"},
                 },
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$room-message:localhost"},
             },
         )
-        await asyncio.sleep(0)
-        assert room_invalidation_started.is_set() is False
+        try:
+            await asyncio.sleep(0.05)
+            assert thread_invalidation_started.is_set() is False
+            assert event_cache.mark_thread_stale.await_count == 0
+            assert event_cache.append_event.await_count == 0
 
-        release_sibling_thread_update.set()
-        await coordinator.wait_for_room_idle("!room:localhost")
+            release_sibling_thread_update.set()
+            await asyncio.wait_for(sibling_thread_task, timeout=1.0)
+            await coordinator.wait_for_room_idle("!room:localhost")
 
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
-            "!room:localhost",
-            reason="outbound_thread_lookup_unavailable",
-        )
+            event_cache.mark_thread_stale.assert_awaited_once_with(
+                "!room:localhost",
+                "$claimed-thread:localhost",
+                reason="outbound_thread_mutation",
+            )
+            event_cache.append_event.assert_awaited_once()
+            append_args = event_cache.append_event.await_args.args
+            assert append_args[0] == "!room:localhost"
+            assert append_args[1] == "$claimed-thread:localhost"
+            assert append_args[2]["event_id"] == "$edit:localhost"
+        finally:
+            release_sibling_thread_update.set()
+            await asyncio.wait_for(
+                asyncio.gather(sibling_thread_task, return_exceptions=True),
+                timeout=1.0,
+            )
 
     @pytest.mark.asyncio
     async def test_notify_outbound_redaction_lookup_miss_without_cached_target_does_not_invalidate_room_threads(
@@ -5424,14 +5443,16 @@ class TestThreadingBehavior:
         assert third_update_started.is_set()
 
     @pytest.mark.asyncio
-    async def test_cancelled_room_cache_update_keeps_follow_up_thread_update_behind_all_predecessors(
+    async def test_cancelled_room_cache_update_keeps_follow_up_thread_update_behind_all_predecessors(  # noqa: PLR0915
         self,
     ) -> None:
         """Cancelling a room update must not let a later thread update skip unfinished room predecessors."""
         first_thread_started = asyncio.Event()
+        release_first_thread = asyncio.Event()
         second_thread_started = asyncio.Event()
         release_second_thread = asyncio.Event()
         follow_up_thread_started = asyncio.Event()
+        release_follow_up_thread = asyncio.Event()
         owner = object()
         coordinator = _EventCacheWriteCoordinator(
             logger=MagicMock(),
@@ -5440,7 +5461,7 @@ class TestThreadingBehavior:
 
         async def first_thread_update() -> None:
             first_thread_started.set()
-            await asyncio.Future()
+            await release_first_thread.wait()
 
         async def second_thread_update() -> None:
             second_thread_started.set()
@@ -5452,14 +5473,15 @@ class TestThreadingBehavior:
 
         async def follow_up_thread_update() -> None:
             follow_up_thread_started.set()
+            await release_follow_up_thread.wait()
 
-        coordinator.queue_thread_update(
+        first_thread_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread-a:localhost",
             first_thread_update,
             name="matrix_cache_first_thread_update",
         )
-        coordinator.queue_thread_update(
+        second_thread_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread-b:localhost",
             second_thread_update,
@@ -5473,25 +5495,50 @@ class TestThreadingBehavior:
             cancelled_room_update,
             name="matrix_cache_cancelled_room_update",
         )
-        coordinator.queue_thread_update(
+        follow_up_thread_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread-c:localhost",
             follow_up_thread_update,
             name="matrix_cache_follow_up_thread_update",
         )
-        await asyncio.sleep(0)
-        assert follow_up_thread_started.is_set() is False
+        try:
+            cancelled_room_task.cancel()
+            await asyncio.gather(cancelled_room_task, return_exceptions=True)
 
-        cancelled_room_task.cancel()
-        await asyncio.gather(cancelled_room_task, return_exceptions=True)
+            await asyncio.sleep(0.05)
+            assert follow_up_thread_started.is_set() is False
+            assert follow_up_thread_task.done() is False
 
-        await asyncio.sleep(0)
-        assert follow_up_thread_started.is_set() is False
+            release_first_thread.set()
+            await asyncio.wait_for(first_thread_task, timeout=1.0)
 
-        release_second_thread.set()
-        await wait_for_background_tasks(timeout=1.0, owner=owner)
+            await asyncio.sleep(0.05)
+            assert follow_up_thread_started.is_set() is False
+            assert follow_up_thread_task.done() is False
 
-        assert follow_up_thread_started.is_set()
+            release_second_thread.set()
+            await asyncio.wait_for(second_thread_task, timeout=1.0)
+            await asyncio.wait_for(follow_up_thread_started.wait(), timeout=1.0)
+            assert follow_up_thread_task.done() is False
+
+            release_follow_up_thread.set()
+            await asyncio.wait_for(follow_up_thread_task, timeout=1.0)
+        finally:
+            release_first_thread.set()
+            release_second_thread.set()
+            release_follow_up_thread.set()
+            if not cancelled_room_task.done():
+                cancelled_room_task.cancel()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    first_thread_task,
+                    second_thread_task,
+                    cancelled_room_task,
+                    follow_up_thread_task,
+                    return_exceptions=True,
+                ),
+                timeout=1.0,
+            )
 
     @pytest.mark.asyncio
     async def test_run_room_update_does_not_log_handled_exception_as_background_failure(self) -> None:
