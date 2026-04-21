@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 ApprovalStatus = Literal["approved", "denied", "expired"]
 PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 MatrixEventSender = Callable[[str, str | None, str, dict[str, Any]], Awaitable[str | None]]
-MatrixEventEditor = Callable[[str, str, str, dict[str, Any]], Awaitable[bool]]
+MatrixEventEditor = Callable[[str, str, dict[str, Any]], Awaitable[bool]]
 
 _APPROVALS_DIRNAME = "approvals"
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
@@ -47,6 +47,10 @@ _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to 
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_UNDELIVERED_RESTART_REASON = "MindRoom restarted before approval request could be delivered to Matrix."
+_DEFAULT_TRUNCATED_APPROVAL_REASON = (
+    "Cannot approve: the displayed arguments are truncated. "
+    "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+)
 _APPROVE_REACTION_KEYS = frozenset({"✅"})
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MANAGER: ApprovalManager | None = None
@@ -165,6 +169,15 @@ class ApprovalDecision:
     resolved_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class AnchoredApprovalActionResult:
+    """One anchored approval-action outcome."""
+
+    handled: bool
+    error_reason: str | None = None
+    thread_id: str | None = None
+
+
 @dataclass(slots=True)
 class PendingApproval:
     """One approval request plus any live wait state."""
@@ -175,7 +188,6 @@ class PendingApproval:
     arguments_preview: object
     arguments_preview_truncated: bool
     agent_name: str
-    transport_agent_name: str
     room_id: str | None
     thread_id: str | None
     requester_id: str | None
@@ -200,7 +212,6 @@ class PendingApproval:
             "arguments_preview": self.arguments_preview,
             "arguments_preview_truncated": self.arguments_preview_truncated,
             "agent_name": self.agent_name,
-            "transport_agent_name": self.transport_agent_name,
             "room_id": self.room_id,
             "thread_id": self.thread_id,
             "requester_id": self.requester_id,
@@ -241,7 +252,6 @@ class PendingApproval:
             arguments_preview=arguments_preview_payload,
             arguments_preview_truncated=arguments_preview_truncated,
             agent_name=cast("str", payload["agent_name"]),
-            transport_agent_name=cast("str", payload.get("transport_agent_name") or payload["agent_name"]),
             room_id=cast("str | None", payload.get("room_id")),
             thread_id=cast("str | None", payload.get("thread_id")),
             requester_id=cast("str | None", payload.get("requester_id")),
@@ -335,13 +345,21 @@ class ApprovalManager:
         with self._state_lock:
             return self._pending_by_id.get(approval_id)
 
-    def pending_transport_agent_name_for_event(
+    def anchored_request_for_event(
         self,
         *,
         approval_event_id: str,
         room_id: str,
-    ) -> str | None:
-        """Return the transport bot for one pending approval card in the given room."""
+    ) -> PendingApproval | None:
+        """Return one approval card anchored to the given room event."""
+        return self._anchored_request(approval_event_id=approval_event_id, room_id=room_id)
+
+    def _anchored_request(
+        self,
+        *,
+        approval_event_id: str,
+        room_id: str,
+    ) -> PendingApproval | None:
         with self._state_lock:
             approval_id = self._approval_id_by_event_id.get(approval_event_id)
             if approval_id is None:
@@ -350,27 +368,6 @@ class ApprovalManager:
             if pending is None or pending.event_id != approval_event_id or pending.room_id != room_id:
                 return None
             if pending.status != "pending" and pending.resolution_synced_at is not None:
-                return None
-            return pending.transport_agent_name
-
-    def _anchored_request(
-        self,
-        *,
-        approval_event_id: str,
-        room_id: str,
-        transport_agent_name: str,
-    ) -> PendingApproval | None:
-        with self._state_lock:
-            approval_id = self._approval_id_by_event_id.get(approval_event_id)
-            if approval_id is None:
-                return None
-            pending = self._requests_by_id.get(approval_id)
-            if (
-                pending is None
-                or pending.event_id != approval_event_id
-                or pending.room_id != room_id
-                or pending.transport_agent_name != transport_agent_name
-            ):
                 return None
             return pending
 
@@ -495,7 +492,6 @@ class ApprovalManager:
             arguments_preview=arguments_preview,
             arguments_preview_truncated=arguments_preview_truncated,
             agent_name=agent_name,
-            transport_agent_name=transport_agent_name,
             room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
@@ -595,20 +591,24 @@ class ApprovalManager:
         status: Literal["approved", "denied"],
         reason: str | None,
         resolved_by: str,
-        transport_agent_name: str,
-    ) -> bool:
+    ) -> AnchoredApprovalActionResult:
         """Resolve one Matrix-anchored approval action against the original approval card."""
         pending = self._anchored_request(
             approval_event_id=approval_event_id,
             room_id=room_id,
-            transport_agent_name=transport_agent_name,
         )
         if pending is None:
-            return False
+            return AnchoredApprovalActionResult(handled=False)
         if pending.status != "pending":
-            return pending.resolution_synced_at is None
+            return AnchoredApprovalActionResult(handled=pending.resolution_synced_at is None)
         if pending.approver_user_id != resolved_by:
-            return False
+            return AnchoredApprovalActionResult(handled=False)
+        if status == "approved" and pending.arguments_preview_truncated:
+            return AnchoredApprovalActionResult(
+                handled=True,
+                error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON,
+                thread_id=pending.thread_id,
+            )
 
         if (
             await self._resolve_pending(
@@ -619,13 +619,14 @@ class ApprovalManager:
             )
             is not None
         ):
-            return True
+            return AnchoredApprovalActionResult(handled=True)
         refreshed = self._anchored_request(
             approval_event_id=approval_event_id,
             room_id=room_id,
-            transport_agent_name=transport_agent_name,
         )
-        return refreshed is not None and refreshed.status != "pending" and refreshed.resolution_synced_at is None
+        return AnchoredApprovalActionResult(
+            handled=refreshed is not None and refreshed.status != "pending" and refreshed.resolution_synced_at is None,
+        )
 
     async def handle_reaction(
         self,
@@ -634,18 +635,16 @@ class ApprovalManager:
         room_id: str,
         reaction_key: str,
         resolved_by: str,
-        transport_agent_name: str,
-    ) -> bool:
+    ) -> AnchoredApprovalActionResult:
         """Approve one request from a reaction on the approval card."""
         if reaction_key not in _APPROVE_REACTION_KEYS:
-            return False
+            return AnchoredApprovalActionResult(handled=False)
         return await self._handle_anchored_resolution(
             approval_event_id=approval_event_id,
             room_id=room_id,
             status="approved",
             reason=None,
             resolved_by=resolved_by,
-            transport_agent_name=transport_agent_name,
         )
 
     async def handle_reply(
@@ -655,8 +654,7 @@ class ApprovalManager:
         room_id: str,
         reason: str | None,
         resolved_by: str,
-        transport_agent_name: str,
-    ) -> bool:
+    ) -> AnchoredApprovalActionResult:
         """Deny one request from a reply to the approval card."""
         trimmed_reason = reason.strip() if isinstance(reason, str) else ""
         return await self._handle_anchored_resolution(
@@ -665,7 +663,6 @@ class ApprovalManager:
             status="denied",
             reason=trimmed_reason or None,
             resolved_by=resolved_by,
-            transport_agent_name=transport_agent_name,
         )
 
     async def handle_custom_response(
@@ -676,8 +673,7 @@ class ApprovalManager:
         status: Literal["approved", "denied"],
         reason: str | None,
         resolved_by: str,
-        transport_agent_name: str,
-    ) -> bool:
+    ) -> AnchoredApprovalActionResult:
         """Resolve one custom approval response anchored to the original approval card."""
         trimmed_reason = reason.strip() if isinstance(reason, str) else ""
         return await self._handle_anchored_resolution(
@@ -686,7 +682,6 @@ class ApprovalManager:
             status=status,
             reason=trimmed_reason or None,
             resolved_by=resolved_by,
-            transport_agent_name=transport_agent_name,
         )
 
     async def approve(
@@ -848,7 +843,6 @@ class ApprovalManager:
             delivered = await self._edit_event(
                 pending.room_id,
                 pending.event_id,
-                pending.transport_agent_name,
                 self._resolved_event_content(pending),
             )
         except Exception:
@@ -857,7 +851,6 @@ class ApprovalManager:
                 approval_id=pending.id,
                 room_id=pending.room_id,
                 event_id=pending.event_id,
-                agent_name=pending.transport_agent_name,
                 exc_info=True,
             )
             return
@@ -916,13 +909,14 @@ class ApprovalManager:
                 return
             if pending.event_id is None:
                 self._requests_by_id.pop(approval_id, None)
-                return
-            if pending.resolution_synced_at is None:
+                delete_request_file = True
+            elif pending.resolution_synced_at is None:
                 self._approval_id_by_event_id[pending.event_id] = approval_id
                 return
-            self._approval_id_by_event_id.pop(pending.event_id, None)
-            self._requests_by_id.pop(approval_id, None)
-            delete_request_file = True
+            else:
+                self._approval_id_by_event_id.pop(pending.event_id, None)
+                self._requests_by_id.pop(approval_id, None)
+                delete_request_file = True
         if delete_request_file:
             self._delete_request_file(approval_id)
 
