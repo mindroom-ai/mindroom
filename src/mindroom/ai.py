@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -11,17 +10,8 @@ from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 from uuid import uuid4
 
 from agno.db.base import SessionType
-from agno.models.anthropic import Claude
-from agno.models.cerebras import Cerebras
-from agno.models.deepseek import DeepSeek
-from agno.models.google import Gemini
-from agno.models.groq import Groq
 from agno.models.message import Message
 from agno.models.metrics import Metrics
-from agno.models.ollama import Ollama
-from agno.models.openai import OpenAIChat
-from agno.models.openrouter import OpenRouter
-from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
     ModelRequestCompletedEvent,
     RunCancelledEvent,
@@ -46,10 +36,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     ROUTER_AGENT_NAME,
     RuntimePaths,
-    runtime_env_path,
 )
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     prepare_agent_execution_context,
@@ -76,12 +63,12 @@ from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,
-    install_llm_request_logging,
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
+from mindroom.model_loading import get_model_instance
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
@@ -90,7 +77,6 @@ from mindroom.tool_system.events import (
     format_tool_completed_event,
     format_tool_started_event,
 )
-from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Generator, Sequence
@@ -557,11 +543,6 @@ class _PendingStreamingTool:
     visible_tool_index: int | None = None
 
 
-def _canonical_provider(provider: str) -> str:
-    """Return normalized provider key for model dispatch."""
-    return provider.strip().lower().replace("-", "_")
-
-
 def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True) -> str:
     response_parts = []
 
@@ -813,165 +794,6 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     if len(payload) == 1:
         return None
     return {AI_RUN_METADATA_KEY: payload}
-
-
-def _create_model_for_provider(  # noqa: C901, PLR0912
-    provider: str,
-    model_id: str,
-    model_config: ModelConfig,
-    extra_kwargs: dict,
-    runtime_paths: RuntimePaths,
-) -> Model:
-    """Create a model instance for a specific provider.
-
-    Args:
-        provider: The AI provider name
-        model_id: The model identifier
-        model_config: The model configuration object
-        extra_kwargs: Additional keyword arguments for the model
-        runtime_paths: Explicit runtime context for provider credentials and host resolution.
-
-    Returns:
-        Instantiated model for the provider
-
-    Raises:
-        ValueError: If provider not supported
-
-    """
-    canonical_provider = _canonical_provider(provider)
-
-    if canonical_provider not in {"ollama", "vertexai_claude"} and "api_key" not in extra_kwargs:
-        api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
-        if api_key:
-            extra_kwargs["api_key"] = api_key
-
-    if canonical_provider == "vertexai_claude":
-        if "project_id" not in extra_kwargs:
-            project_id = runtime_paths.env_value("ANTHROPIC_VERTEX_PROJECT_ID")
-            if project_id:
-                extra_kwargs["project_id"] = project_id
-        if "region" not in extra_kwargs:
-            region = runtime_paths.env_value("CLOUD_ML_REGION")
-            if region:
-                extra_kwargs["region"] = region
-        if "base_url" not in extra_kwargs:
-            base_url = runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")
-            if base_url:
-                extra_kwargs["base_url"] = base_url
-        client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
-        if "credentials" not in client_params and (
-            google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-        ):
-            google_auth = importlib.import_module("google.auth")
-            load_credentials_from_file = google_auth.load_credentials_from_file
-            credentials, _project_id = load_credentials_from_file(
-                str(google_application_credentials),
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-            client_params["credentials"] = credentials
-        if client_params:
-            extra_kwargs["client_params"] = client_params
-
-    if canonical_provider in {"anthropic", "vertexai_claude"}:
-        extra_kwargs.setdefault("cache_system_prompt", True)
-        extra_kwargs.setdefault("extended_cache_time", True)
-
-    # Handle Ollama separately due to special host configuration
-    if canonical_provider == "ollama":
-        # Priority: model config > env/CredentialsManager > default
-        # This allows per-model host configuration in config.yaml
-        host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or "http://localhost:11434"
-        logger.debug("using_ollama_host", host=host)
-        return Ollama(id=model_id, host=host, **extra_kwargs)
-
-    # Handle OpenRouter separately due to API key capture timing issue
-    if canonical_provider == "openrouter":
-        # OpenRouter needs the API key passed explicitly because it captures
-        # the environment variable at import time, not at instantiation time
-        api_key = extra_kwargs.pop("api_key", None)
-        if not api_key:
-            api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
-        if not api_key:
-            logger.warning("No OpenRouter API key found in environment or CredentialsManager")
-        return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
-
-    # Map providers to their model classes for simple instantiation
-    provider_map: dict[str, type[Model]] = {
-        "openai": OpenAIChat,
-        "anthropic": Claude,
-        "gemini": Gemini,
-        "google": Gemini,
-        "vertexai_claude": VertexAIClaude,
-        "cerebras": Cerebras,
-        "groq": Groq,
-        "deepseek": DeepSeek,
-    }
-
-    model_class = provider_map.get(canonical_provider)
-    if model_class is not None:
-        return model_class(id=model_id, **extra_kwargs)
-
-    msg = f"Unsupported AI provider: {provider}"
-    raise ValueError(msg)
-
-
-def get_model_instance(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    model_name: str = "default",
-) -> Model:
-    """Get a model instance from config.yaml.
-
-    Args:
-        config: Application configuration
-        runtime_paths: Explicit runtime context for model credentials and env-backed settings.
-        model_name: Name of the model configuration to use (default: "default")
-
-    Returns:
-        Instantiated model
-
-    Raises:
-        ValueError: If model not found or provider not supported
-
-    """
-    if model_name not in config.models:
-        available = ", ".join(sorted(config.models.keys()))
-        msg = f"Unknown model: {model_name}. Available models: {available}"
-        raise ValueError(msg)
-
-    model_config = config.models[model_name]
-    provider = model_config.provider
-    model_id = model_config.id
-
-    logger.info("Using AI model", model=model_name, provider=provider, id=model_id)
-
-    # Get extra kwargs if specified
-    extra_kwargs = dict(model_config.extra_kwargs or {})
-
-    # Check for model-specific API key first, then fall back to provider-level
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    model_creds = creds_manager.load_credentials(f"model:{model_name}")
-    model_api_key = model_creds.get("api_key") if model_creds else None
-
-    if model_api_key:
-        extra_kwargs["api_key"] = model_api_key
-
-    model = _create_model_for_provider(
-        provider,
-        model_id,
-        model_config,
-        extra_kwargs,
-        runtime_paths,
-    )
-    if config.debug.log_llm_requests:
-        install_llm_request_logging(
-            model,
-            agent_name=model_name,
-            debug_config=config.debug,
-            default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
-        )
-    install_vertex_claude_prompt_cache_hook(model)
-    return model
 
 
 def _normalized_string_list(values: object) -> list[str]:

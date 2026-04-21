@@ -6,6 +6,8 @@ import ast
 import importlib
 import importlib.util
 import tempfile
+import tomllib
+from inspect import signature
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -196,6 +198,48 @@ def test_teams_public_seam_exports_status_helpers() -> None:
 
     assert "is_cancelled_run_output" in teams_module.__all__
     assert "is_errored_run_output" in teams_module.__all__
+
+
+def test_flattened_seams_preserve_legacy_helper_signatures() -> None:
+    """Public seam helpers should keep the legacy optional kwargs they previously accepted."""
+    teams_module = importlib.import_module("mindroom.teams")
+    agent_policy_module = importlib.import_module("mindroom.agent_policy")
+    config_main_module = importlib.import_module("mindroom.config.main")
+
+    prepare_signature = signature(teams_module.prepare_materialized_team_execution)
+    assert prepare_signature.parameters["current_sender_id"].default is None
+
+    agent_policy_signature = signature(agent_policy_module.get_agent_delegation_closure)
+    assert "visiting" in agent_policy_signature.parameters
+    assert agent_policy_signature.parameters["visiting"].default is None
+
+    config_signature = signature(config_main_module.Config.get_agent_delegation_closure)
+    assert "visiting" in config_signature.parameters
+    assert config_signature.parameters["visiting"].default is None
+
+
+def test_flattened_seams_do_not_reintroduce_back_edge_imports() -> None:
+    """Seam modules should not import back-edge dependencies that recreate architectural cycles."""
+    forbidden_imports = {
+        Path("src/mindroom/agents.py"): {"mindroom.ai"},
+        Path("src/mindroom/api/credentials.py"): {"mindroom.api.main"},
+    }
+
+    for module_path, forbidden_targets in forbidden_imports.items():
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        imported_targets = {
+            node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
+        }
+        assert not (imported_targets & forbidden_targets), f"{module_path} reintroduced a seam back-edge import"
+
+
+def test_tach_seam_map_does_not_codify_known_domain_cycles() -> None:
+    """Tach seam declarations should enforce one-way ownership across curated domain boundaries."""
+    tach_config = tomllib.loads(Path("tach.toml").read_text(encoding="utf-8"))
+    depends_on_by_path = {module["path"]: set(module.get("depends_on", [])) for module in tach_config["modules"]}
+
+    assert "mindroom.ai" not in depends_on_by_path["mindroom.agents"]
+    assert "mindroom.api.main" not in depends_on_by_path["mindroom.api.credentials"]
 
 
 class TestAIRouting:

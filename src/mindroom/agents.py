@@ -930,7 +930,7 @@ def _load_agent_model_instance(
     runtime_paths: constants.RuntimePaths,
     model_name: str,
 ) -> Model:
-    from mindroom.ai import get_model_instance  # noqa: PLC0415
+    from mindroom.model_loading import get_model_instance  # noqa: PLC0415
 
     return get_model_instance(config, runtime_paths, model_name)
 

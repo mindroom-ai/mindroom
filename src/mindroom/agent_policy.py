@@ -203,8 +203,10 @@ def get_agent_delegation_closure(
     seeds: Mapping[str, AgentPolicySeed],
     *,
     closures: dict[str, frozenset[str]] | None = None,
+    visiting: set[str] | None = None,
 ) -> frozenset[str]:
     """Return one agent plus all agents reachable through transitive delegation."""
+    _ = visiting  # Backward-compatible no-op kept for older callers.
     if closures is None:
         closures = {}
     if agent_name in closures:

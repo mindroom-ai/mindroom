@@ -1379,7 +1379,7 @@ async def prepare_materialized_team_execution(
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
-    current_sender_id: str | None,
+    current_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
     configured_team_name: str | None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
