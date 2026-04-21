@@ -757,6 +757,69 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_notify_outbound_message_edit_with_unknown_impact_waits_for_room_barrier(self) -> None:
+        """Ambiguous outbound edits must use the room barrier before invalidating room-wide thread state."""
+        coordinator = _runtime_write_coordinator()
+        event_cache = _runtime_event_cache()
+        client = _make_client_mock()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=client,
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+        sibling_thread_update_started = asyncio.Event()
+        release_sibling_thread_update = asyncio.Event()
+        room_invalidation_started = asyncio.Event()
+
+        async def blocking_sibling_thread_update() -> None:
+            sibling_thread_update_started.set()
+            await release_sibling_thread_update.wait()
+
+        async def mark_room_threads_stale(_room_id: str, *, reason: str) -> None:
+            assert reason == "outbound_thread_lookup_unavailable"
+            room_invalidation_started.set()
+
+        access._outbound._resolver.resolve_thread_impact_for_mutation = AsyncMock(
+            return_value=MutationThreadImpact.unknown(),
+        )
+        event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
+        coordinator.queue_thread_update(
+            "!room:localhost",
+            "$sibling-thread:localhost",
+            blocking_sibling_thread_update,
+            name="matrix_cache_blocking_sibling_thread_update",
+        )
+        await asyncio.wait_for(sibling_thread_update_started.wait(), timeout=1.0)
+
+        access.notify_outbound_message(
+            "!room:localhost",
+            "$edit:localhost",
+            {
+                "body": "* updated",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "updated",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed-thread:localhost"},
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$room-message:localhost"},
+            },
+        )
+        await asyncio.sleep(0)
+        assert room_invalidation_started.is_set() is False
+
+        release_sibling_thread_update.set()
+        await coordinator.wait_for_room_idle("!room:localhost")
+
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!room:localhost",
+            reason="outbound_thread_lookup_unavailable",
+        )
+
+    @pytest.mark.asyncio
     async def test_notify_outbound_redaction_lookup_miss_without_cached_target_does_not_invalidate_room_threads(
         self,
     ) -> None:

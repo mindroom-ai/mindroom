@@ -283,11 +283,10 @@ class ThreadOutboundWritePolicy:
                 return
             if not is_thread_affecting_relation(event_info):
                 return
-            direct_thread_id = event_info.thread_id or event_info.thread_id_from_edit
-            if direct_thread_id is not None:
+            if event_info.is_thread and event_info.thread_id is not None:
                 self._schedule_fail_open_thread_update(
                     room_id,
-                    direct_thread_id,
+                    event_info.thread_id,
                     lambda: self._apply_outbound_event_notification(
                         room_id,
                         event_id,
