@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
-from typing import TYPE_CHECKING, cast
-from unittest.mock import Mock, patch
+import json
+import os
+import subprocess
+import sys
+import textwrap
+from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 
-import mindroom.agents as agents_module
-import mindroom.history.runtime as history_runtime_module
 import mindroom.timing as timing_module
 from mindroom.timing import DispatchPipelineTiming, timed, timing_scope
 
@@ -229,60 +231,65 @@ def test_timed_logs_omit_scope_when_unset(monkeypatch: pytest.MonkeyPatch) -> No
     _assert_timing_logged(logger, "plain_label")
 
 
-def test_load_agent_model_instance_preserves_prompt_assembly_subspan(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _timing_probe_labels(
+    *,
+    module_name: str,
+    call_expression: str,
+    patch_target: str,
+) -> list[str]:
+    """Run one isolated subprocess probe and return emitted timing labels."""
+    env = os.environ.copy()
+    env["MINDROOM_TIMING"] = "1"
+    script = textwrap.dedent(
+        f"""
+        import json
+        from unittest.mock import Mock, patch
+
+        import mindroom.timing as timing_module
+
+        timing_module.logger = Mock()
+
+        import {module_name} as target_module
+
+        with patch("{patch_target}", return_value=object()):
+            {call_expression}
+
+        labels = [
+            call.kwargs["label"]
+            for call in timing_module.logger.info.call_args_list
+            if call.args == ("timing_elapsed",)
+        ]
+        print(json.dumps(labels))
+        """,
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_load_agent_model_instance_preserves_prompt_assembly_subspan() -> None:
     """Agent model init should keep its dedicated system-prompt timing label."""
-    monkeypatch.setenv("MINDROOM_TIMING", "1")
-    logger = _mock_timing_logger(monkeypatch)
-    reloaded_agents_module = importlib.reload(agents_module)
-    config = cast("object", Mock())
-    runtime_paths = cast("object", Mock())
-    sentinel_model = object()
-
-    with patch(
-        "mindroom.agents.model_loading.get_model_instance",
-        return_value=sentinel_model,
-    ) as mock_get_model_instance:
-        assert (
-            reloaded_agents_module._load_agent_model_instance(
-                config,
-                runtime_paths,
-                "agent-model",
-            )
-            is sentinel_model
-        )
-
-    mock_get_model_instance.assert_called_once_with(config, runtime_paths, "agent-model")
-    _assert_timing_logged(logger, "system_prompt_assembly.agent_create.model_instance")
+    labels = _timing_probe_labels(
+        module_name="mindroom.agents",
+        call_expression='target_module._load_agent_model_instance(object(), object(), "agent-model")',
+        patch_target="mindroom.agents.model_loading.get_model_instance",
+    )
+    assert labels == ["system_prompt_assembly.agent_create.model_instance"]
 
 
-def test_load_compaction_model_preserves_history_prepare_subspan(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_load_compaction_model_preserves_history_prepare_subspan() -> None:
     """History compaction model init should keep its dedicated timing label."""
-    monkeypatch.setenv("MINDROOM_TIMING", "1")
-    logger = _mock_timing_logger(monkeypatch)
-    reloaded_history_runtime_module = importlib.reload(history_runtime_module)
-    config = cast("object", Mock())
-    runtime_paths = cast("object", Mock())
-    sentinel_model = object()
-
-    with patch(
-        "mindroom.history.runtime.model_loading.get_model_instance",
-        return_value=sentinel_model,
-    ) as mock_get_model_instance:
-        assert (
-            reloaded_history_runtime_module._load_compaction_model(
-                config,
-                runtime_paths,
-                "compaction-model",
-            )
-            is sentinel_model
-        )
-
-    mock_get_model_instance.assert_called_once_with(config, runtime_paths, "compaction-model")
-    _assert_timing_logged(logger, "system_prompt_assembly.history_prepare.compaction_model_init")
+    labels = _timing_probe_labels(
+        module_name="mindroom.history.runtime",
+        call_expression='target_module._load_compaction_model(object(), object(), "compaction-model")',
+        patch_target="mindroom.history.runtime.model_loading.get_model_instance",
+    )
+    assert labels == ["system_prompt_assembly.history_prepare.compaction_model_init"]
 
 
 def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> None:

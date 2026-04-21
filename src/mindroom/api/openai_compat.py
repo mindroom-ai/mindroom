@@ -30,12 +30,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.execution_preparation import prepare_bound_team_execution_context
+from mindroom.execution_preparation import (
+    prepare_bound_team_execution_context,
+    render_prepared_team_messages_text,
+)
 from mindroom.history.runtime import (
     ScopeSessionContext,
     apply_replay_plan,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
+    scrub_scope_session_queued_notices,
 )
 from mindroom.knowledge import get_agent_knowledge, initialize_shared_knowledge_managers
 from mindroom.logging_config import get_logger
@@ -1212,6 +1216,10 @@ async def _prepare_openai_team_run_input(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
 ) -> str:
     """Prepare the canonical prompt text for one OpenAI-compatible team run."""
+    scrub_scope_session_queued_notices(
+        scope_context=scope_context,
+        entity_name=team_name,
+    )
     prepared_execution = await prepare_bound_team_execution_context(
         scope_context=scope_context,
         agents=agents,
@@ -1231,7 +1239,7 @@ async def _prepare_openai_team_run_input(
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
-    return prepared_execution.final_prompt
+    return render_prepared_team_messages_text(prepared_execution.messages)
 
 
 async def _non_stream_team_completion(
