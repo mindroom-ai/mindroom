@@ -184,6 +184,7 @@ class AnchoredApprovalActionResult:
     handled: bool
     error_reason: str | None = None
     thread_id: str | None = None
+    notice_sender_user_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -657,6 +658,7 @@ class ApprovalManager:
                 handled=True,
                 error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON,
                 thread_id=pending.thread_id,
+                notice_sender_user_id=pending.original_event_sender_user_id,
             )
 
         if (

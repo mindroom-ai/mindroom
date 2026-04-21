@@ -1622,7 +1622,10 @@ class AgentBot:
         if not self._sender_can_resolve_tool_approval(room, sender_id):
             return False
         result = await action(approval_manager)
-        if result.error_reason is not None:
+        if result.error_reason is not None and self._should_send_tool_approval_notice(
+            room_id=room.room_id,
+            preferred_sender_user_id=result.notice_sender_user_id,
+        ):
             await self._send_tool_approval_notice(
                 room_id=room.room_id,
                 approval_event_id=approval_event_id,
@@ -1630,6 +1633,66 @@ class AgentBot:
                 reason=result.error_reason,
             )
         return result.handled
+
+    def _should_send_tool_approval_notice(
+        self,
+        *,
+        room_id: str,
+        preferred_sender_user_id: str | None,
+    ) -> bool:
+        """Return whether this bot should emit one truncated-approval notice."""
+        if self.client is None:
+            return False
+        current_user_id = self.client.user_id
+        if not isinstance(current_user_id, str) or not current_user_id:
+            return False
+        target_user_id = self._tool_approval_notice_sender_user_id(
+            room_id=room_id,
+            preferred_sender_user_id=preferred_sender_user_id,
+        )
+        return current_user_id == target_user_id
+
+    def _tool_approval_notice_sender_user_id(
+        self,
+        *,
+        room_id: str,
+        preferred_sender_user_id: str | None,
+    ) -> str | None:
+        """Return which live bot should emit one truncated-approval notice."""
+        if self.client is None:
+            return None
+        current_user_id = self.client.user_id
+        if not isinstance(current_user_id, str) or not current_user_id:
+            return None
+
+        orchestrator = self.orchestrator
+        if isinstance(preferred_sender_user_id, str) and preferred_sender_user_id:
+            if orchestrator is None:
+                return preferred_sender_user_id
+            preferred_bot = orchestrator._pick_room_bot_for_approval(room_id, preferred_sender_user_id)
+            if preferred_bot is not None:
+                return preferred_sender_user_id
+
+        live_room_user_ids = self._live_room_bot_user_ids(room_id)
+        if live_room_user_ids:
+            return live_room_user_ids[0]
+        return current_user_id
+
+    def _live_room_bot_user_ids(self, room_id: str) -> list[str]:
+        """Return sorted Matrix user ids for live bots that are present in one room."""
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            return []
+
+        user_ids: list[str] = []
+        for bot in orchestrator.agent_bots.values():
+            if not bot.running or bot.client is None or room_id not in bot.client.rooms:
+                continue
+            user_id = bot.client.user_id
+            if not isinstance(user_id, str) or not user_id:
+                continue
+            user_ids.append(user_id)
+        return sorted(user_ids)
 
     async def _on_media_message(
         self,

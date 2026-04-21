@@ -2601,6 +2601,74 @@ async def test_bot_custom_approval_response_event_refuses_truncated_approval(tmp
 
 
 @pytest.mark.asyncio
+async def test_truncated_approval_notice_is_sent_once_by_original_sender_bot(tmp_path: Path) -> None:
+    """Concurrent bot handlers should emit one truncated-preview notice from the card owner."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    code_bot = _agent_bot(tmp_path, config=config, agent_name="code")
+    general_bot = _agent_bot(tmp_path, config=config, agent_name="general")
+    assert code_bot.client is not None
+    assert general_bot.client is not None
+    code_bot.client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$notice", room_id="!room:localhost"),
+    )
+    general_bot.client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$notice-2", room_id="!room:localhost"),
+    )
+    sender = AsyncMock(return_value=_sent_approval_event(sender_user_id="@mindroom_code:localhost"))
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        arguments={"command": "echo hi", "prompt": "x" * 5000},
+    )
+
+    assert pending is not None
+    room = _approval_room()
+    reaction = nio.ReactionEvent.from_dict(
+        {
+            "type": "m.reaction",
+            "event_id": "$reaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$approval",
+                    "key": "✅",
+                },
+            },
+        },
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(code_bot._turn_policy), "can_reply_to_sender", return_value=True),
+        patch.object(type(general_bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await asyncio.gather(
+            code_bot._handle_reaction_inner(room, reaction),
+            general_bot._handle_reaction_inner(room, reaction),
+        )
+
+    assert task.done() is False
+    assert store.list_pending() == [pending]
+    code_bot.client.room_send.assert_awaited_once()
+    general_bot.client.room_send.assert_not_awaited()
+
+    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
+    decision = await task
+    assert decision.status == "denied"
+
+
+@pytest.mark.asyncio
 async def test_handle_custom_response_requires_matching_room_and_event_id(tmp_path: Path) -> None:
     """Custom approval responses should anchor to the original approval card in the original room."""
     runtime_paths = test_runtime_paths(tmp_path)
