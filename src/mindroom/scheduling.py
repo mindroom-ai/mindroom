@@ -20,7 +20,7 @@ from croniter import croniter
 from pydantic import BaseModel, Field
 
 from mindroom.ai import get_model_instance
-from mindroom.authorization import get_available_agents_for_sender
+from mindroom.authorization import get_available_agents_for_sender_authoritative
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.hooks import (
     HookRegistry,
@@ -1260,7 +1260,13 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
 
-    sender_visible_room_agents = get_available_agents_for_sender(room, scheduled_by, config, runtime_paths)
+    sender_visible_room_agents = await get_available_agents_for_sender_authoritative(
+        client,
+        room,
+        scheduled_by,
+        config,
+        runtime_paths,
+    )
 
     available_agents: list[MatrixID] = []
     if new_thread:

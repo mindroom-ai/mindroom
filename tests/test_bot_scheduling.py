@@ -1575,7 +1575,10 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User message
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
+            patch(
+                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                new_callable=AsyncMock,
+            ) as mock_get_available,
         ):
             # Return only one agent (general)
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
@@ -1661,7 +1664,10 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User message
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
+            patch(
+                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                new_callable=AsyncMock,
+            ) as mock_get_available,
         ):
             # Return multiple agents
             mock_get_available.return_value = [
@@ -1762,7 +1768,10 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
+            patch(
+                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                new_callable=AsyncMock,
+            ) as mock_get_available,
         ):
             mock_get_available.return_value = [
                 config.get_ids(runtime_paths_for(config))["general"],
@@ -1834,7 +1843,10 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-            patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
+            patch(
+                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                new_callable=AsyncMock,
+            ) as mock_get_available,
         ):
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
@@ -1902,7 +1914,10 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-            patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
+            patch(
+                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                new_callable=AsyncMock,
+            ) as mock_get_available,
         ):
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
@@ -1983,7 +1998,10 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-            patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
+            patch(
+                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                new_callable=AsyncMock,
+            ) as mock_get_available,
             patch("mindroom.turn_policy.get_agents_in_thread") as mock_agents_in_thread,
         ):
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
@@ -2057,7 +2075,10 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-            patch("mindroom.turn_policy.get_available_agents_for_sender") as mock_get_available,
+            patch(
+                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                new_callable=AsyncMock,
+            ) as mock_get_available,
         ):
             mock_get_available.return_value = [
                 config.get_ids(runtime_paths_for(config))["general"],
