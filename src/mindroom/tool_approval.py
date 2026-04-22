@@ -676,7 +676,7 @@ class ApprovalManager:
             is not None
         )
 
-    async def _handle_anchored_resolution(
+    async def _handle_anchored_resolution(  # noqa: PLR0911
         self,
         *,
         approval_event_id: str,
@@ -717,7 +717,9 @@ class ApprovalManager:
                     room_id=room_id,
                 )
                 return AnchoredApprovalActionResult(
-                    handled=refreshed is not None and refreshed.status != "pending" and refreshed.resolution_synced_at is None,
+                    handled=refreshed is not None
+                    and refreshed.status != "pending"
+                    and refreshed.resolution_synced_at is None,
                 )
             return AnchoredApprovalActionResult(
                 handled=handled_on_truncated_approval,
@@ -953,9 +955,12 @@ class ApprovalManager:
     async def _edit_resolved_event(
         self,
         pending: PendingApproval,
+        *,
+        edit_event: MatrixEventEditor | None = None,
     ) -> None:
+        event_editor = edit_event or self._edit_event
         if (
-            self._edit_event is None
+            event_editor is None
             or pending.room_id is None
             or pending.event_id is None
             or not isinstance(pending.original_event_sender_user_id, str)
@@ -963,7 +968,7 @@ class ApprovalManager:
         ):
             return
         try:
-            delivered = await self._edit_event(
+            delivered = await event_editor(
                 pending.room_id,
                 pending.event_id,
                 pending.original_event_sender_user_id,
@@ -1060,7 +1065,12 @@ class ApprovalManager:
                 self._finish_unsynced_resolved_replay(pending.id)
         return synced_requests
 
-    async def sync_unsynced_request(self, approval_id: str) -> PendingApproval | None:
+    async def sync_unsynced_request(
+        self,
+        approval_id: str,
+        *,
+        edit_event: MatrixEventEditor | None = None,
+    ) -> PendingApproval | None:
         """Replay one resolved approval card that still needs one Matrix edit."""
         with self._state_lock:
             pending = self._requests_by_id.get(approval_id)
@@ -1072,7 +1082,7 @@ class ApprovalManager:
             return None
         try:
             previous_synced_at = claimed_pending.resolution_synced_at
-            await self._edit_resolved_event(claimed_pending)
+            await self._edit_resolved_event(claimed_pending, edit_event=edit_event)
             if claimed_pending.resolution_synced_at != previous_synced_at:
                 return claimed_pending
             return None
