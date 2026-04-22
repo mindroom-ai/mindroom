@@ -28,6 +28,14 @@ class SerializedCachedEvent:
     event: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class LoadedCachedEvent:
+    """One cached event payload plus the time its visible row was written."""
+
+    event: dict[str, Any]
+    cached_at: float | None
+
+
 def event_id_for_cache(event: dict[str, Any]) -> str:
     """Return the required event ID from one normalized cached event."""
     event_id = event.get("event_id")
@@ -143,6 +151,34 @@ async def load_latest_edit(
     row = await cursor.fetchone()
     await cursor.close()
     return None if row is None else json.loads(row[0])
+
+
+async def load_latest_edit_row(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    original_event_id: str,
+) -> LoadedCachedEvent | None:
+    """Return the latest cached edit event plus its lookup-row write time."""
+    cursor = await db.execute(
+        """
+        SELECT events.event_json, events.cached_at
+        FROM event_edits
+        JOIN events ON events.event_id = event_edits.edit_event_id
+        WHERE event_edits.room_id = ? AND event_edits.original_event_id = ?
+        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
+        LIMIT 1
+        """,
+        (room_id, original_event_id),
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    if row is None:
+        return None
+    return LoadedCachedEvent(
+        event=json.loads(row[0]),
+        cached_at=None if row[1] is None else float(row[1]),
+    )
 
 
 async def load_mxc_text(

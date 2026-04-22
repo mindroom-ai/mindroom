@@ -14,6 +14,7 @@ import aiosqlite
 from mindroom.logging_config import get_logger
 
 from . import event_cache_events, event_cache_threads
+from .agent_message_snapshot import AgentMessageSnapshot, load_latest_agent_message_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -384,6 +385,17 @@ class ConversationEventCache(Protocol):
     async def get_latest_edit(self, room_id: str, original_event_id: str) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
 
+    async def get_latest_agent_message_snapshot(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        sender: str,
+        *,
+        runtime_started_at: float | None,
+        now: float | None = None,
+    ) -> AgentMessageSnapshot | None:
+        """Return the latest visible cached message from one sender in the given scope."""
+
     async def get_mxc_text(self, room_id: str, mxc_url: str) -> str | None:
         """Return one durably cached MXC text payload when present."""
 
@@ -573,6 +585,30 @@ class _EventCache:
                 db,
                 room_id=room_id,
                 original_event_id=original_event_id,
+            ),
+        )
+
+    async def get_latest_agent_message_snapshot(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        sender: str,
+        *,
+        runtime_started_at: float | None,
+        now: float | None = None,
+    ) -> AgentMessageSnapshot | None:
+        """Return the latest visible cached message from one sender in the given scope."""
+        return await self._read_operation(
+            room_id,
+            operation="get_latest_agent_message_snapshot",
+            disabled_result=None,
+            reader=lambda db: load_latest_agent_message_snapshot(
+                db,
+                room_id=room_id,
+                thread_id=thread_id,
+                sender=sender,
+                runtime_started_at=runtime_started_at,
+                now=now,
             ),
         )
 

@@ -20,7 +20,6 @@ Main invariants:
 from .agent_message_snapshot import (
     AgentMessageSnapshot,
     CacheUnavailable,
-    get_latest_agent_message_snapshot,
 )
 from .event_cache import ConversationEventCache, ThreadCacheState
 from .event_cache_events import normalize_nio_event_for_cache
@@ -52,7 +51,6 @@ __all__ = [
     "EventCacheWriteCoordinator",
     "ThreadCacheState",
     "ThreadHistoryResult",
-    "get_latest_agent_message_snapshot",
     "normalize_nio_event_for_cache",
     "thread_cache_rejection_reason",
     "thread_cache_state_is_usable",

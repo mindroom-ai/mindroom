@@ -1,18 +1,13 @@
-"""Tests for the public latest-agent-message cache accessor."""
+"""Tests for latest-agent-message snapshot reads via the event cache API."""
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.matrix.cache import (
-    AgentMessageSnapshot,
-    CacheUnavailable,
-    get_latest_agent_message_snapshot,
-)
+from mindroom.matrix.cache import AgentMessageSnapshot, CacheUnavailable
 from mindroom.matrix.cache.event_cache import _EventCache
 
 if TYPE_CHECKING:
@@ -48,6 +43,29 @@ def _message_event(
     }
 
 
+async def _read_snapshot(
+    db_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+    runtime_started_at: float | None,
+    now: float | None = None,
+) -> AgentMessageSnapshot | None:
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        return await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            sender,
+            runtime_started_at=runtime_started_at,
+            now=now,
+        )
+    finally:
+        await cache.close()
+
+
 @pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message(
     tmp_path: Path,
@@ -79,8 +97,8 @@ async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message
     finally:
         await cache.close()
 
-    snapshot = get_latest_agent_message_snapshot(
-        db_path=db_path,
+    snapshot = await _read_snapshot(
+        db_path,
         room_id="!room:localhost",
         thread_id="$thread-root",
         sender="@agent:localhost",
@@ -98,7 +116,7 @@ async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message
 
 
 @pytest.mark.asyncio
-async def test_real_sqlite_reader_returns_streaming_status_for_threaded_message(
+async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_threaded_message(
     tmp_path: Path,
 ) -> None:
     """Edited threaded messages should surface the latest visible stream status."""
@@ -139,8 +157,8 @@ async def test_real_sqlite_reader_returns_streaming_status_for_threaded_message(
     finally:
         await cache.close()
 
-    snapshot = get_latest_agent_message_snapshot(
-        db_path=db_path,
+    snapshot = await _read_snapshot(
+        db_path,
         room_id="!room:localhost",
         thread_id="$thread-root",
         sender="@agent:localhost",
@@ -158,7 +176,7 @@ async def test_real_sqlite_reader_returns_streaming_status_for_threaded_message(
 
 
 @pytest.mark.asyncio
-async def test_real_sqlite_reader_returns_room_level_message_when_thread_id_none(
+async def test_get_latest_agent_message_snapshot_returns_room_level_message_when_thread_id_none(
     tmp_path: Path,
 ) -> None:
     """Room-scope reads should skip threaded replies and stay on the room timeline."""
@@ -198,8 +216,8 @@ async def test_real_sqlite_reader_returns_room_level_message_when_thread_id_none
     finally:
         await cache.close()
 
-    snapshot = get_latest_agent_message_snapshot(
-        db_path=db_path,
+    snapshot = await _read_snapshot(
+        db_path,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -238,8 +256,8 @@ async def test_get_latest_agent_message_snapshot_returns_none_when_sender_has_no
     finally:
         await cache.close()
 
-    snapshot = get_latest_agent_message_snapshot(
-        db_path=db_path,
+    snapshot = await _read_snapshot(
+        db_path,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -259,8 +277,8 @@ async def test_get_latest_agent_message_snapshot_returns_none_when_cache_has_no_
     await cache.initialize()
     await cache.close()
 
-    snapshot = get_latest_agent_message_snapshot(
-        db_path=db_path,
+    snapshot = await _read_snapshot(
+        db_path,
         room_id="!room:localhost",
         thread_id="$thread-root",
         sender="@agent:localhost",
@@ -296,8 +314,8 @@ async def test_room_scope_ignores_messages_cached_before_current_runtime(
     finally:
         await cache.close()
 
-    snapshot = get_latest_agent_message_snapshot(
-        db_path=db_path,
+    snapshot = await _read_snapshot(
+        db_path,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -353,8 +371,8 @@ async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
     finally:
         await cache.close()
 
-    snapshot = get_latest_agent_message_snapshot(
-        db_path=db_path,
+    snapshot = await _read_snapshot(
+        db_path,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -412,8 +430,8 @@ async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_
     finally:
         await cache.close()
 
-    snapshot = get_latest_agent_message_snapshot(
-        db_path=db_path,
+    snapshot = await _read_snapshot(
+        db_path,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -421,49 +439,6 @@ async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_
     )
 
     assert snapshot is None
-
-
-def test_real_sqlite_reader_handles_missing_db_returns_none(tmp_path: Path) -> None:
-    """Missing cache files should return None instead of raising."""
-    snapshot = get_latest_agent_message_snapshot(
-        db_path=tmp_path / "missing.db",
-        room_id="!room:localhost",
-        thread_id="$thread-root",
-        sender="@agent:localhost",
-        runtime_started_at=0.0,
-    )
-
-    assert snapshot is None
-
-
-def test_accessor_raises_on_corrupt_db(tmp_path: Path) -> None:
-    """Existing non-SQLite cache files should raise CacheUnavailable."""
-    db_path = tmp_path / "event_cache.db"
-    db_path.write_text("not a sqlite database", encoding="utf-8")
-
-    with pytest.raises(CacheUnavailable):
-        get_latest_agent_message_snapshot(
-            db_path=db_path,
-            room_id="!room:localhost",
-            thread_id=None,
-            sender="@agent:localhost",
-            runtime_started_at=0.0,
-        )
-
-
-def test_accessor_raises_when_required_tables_missing(tmp_path: Path) -> None:
-    """Existing SQLite files without the cache schema should raise CacheUnavailable."""
-    db_path = tmp_path / "event_cache.db"
-    sqlite3.connect(db_path).close()
-
-    with pytest.raises(CacheUnavailable):
-        get_latest_agent_message_snapshot(
-            db_path=db_path,
-            room_id="!room:localhost",
-            thread_id=None,
-            sender="@agent:localhost",
-            runtime_started_at=0.0,
-        )
 
 
 @pytest.mark.asyncio
@@ -499,8 +474,8 @@ async def test_accessor_rejects_stale_thread_cache_validated_too_long_ago(
         await cache.close()
 
     with pytest.raises(CacheUnavailable, match="cache_too_old"):
-        get_latest_agent_message_snapshot(
-            db_path=db_path,
+        await _read_snapshot(
+            db_path,
             room_id="!room:localhost",
             thread_id="$thread-root",
             sender="@agent:localhost",
@@ -542,8 +517,8 @@ async def test_accessor_rejects_thread_cache_from_prior_bot_run(
         await cache.close()
 
     with pytest.raises(CacheUnavailable, match="validated_before_runtime_start"):
-        get_latest_agent_message_snapshot(
-            db_path=db_path,
+        await _read_snapshot(
+            db_path,
             room_id="!room:localhost",
             thread_id="$thread-root",
             sender="@agent:localhost",
@@ -590,8 +565,8 @@ async def test_accessor_rejects_invalidated_thread_cache(
         await cache.close()
 
     with pytest.raises(CacheUnavailable, match="thread_invalidated_after_validation"):
-        get_latest_agent_message_snapshot(
-            db_path=db_path,
+        await _read_snapshot(
+            db_path,
             room_id="!room:localhost",
             thread_id="$thread-root",
             sender="@agent:localhost",
@@ -646,8 +621,8 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
     finally:
         await cache.close()
 
-    snapshot = get_latest_agent_message_snapshot(
-        db_path=db_path,
+    snapshot = await _read_snapshot(
+        db_path,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",

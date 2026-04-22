@@ -31,7 +31,9 @@ class _UnsetType:
 _UNSET = _UnsetType()
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
     from pathlib import Path
+    from typing import Protocol
 
     import structlog
     from agno.models.message import Message
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
+    from mindroom.matrix.cache import AgentMessageSnapshot
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
@@ -46,6 +49,19 @@ if TYPE_CHECKING:
     from .registry import HookRegistry, HookRegistryState
     from .sender import HookMessageSender
     from .types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
+
+    class HookLatestAgentMessageSnapshotReader(Protocol):
+        """Callable contract for hook-facing latest-agent-message snapshot reads."""
+
+        def __call__(
+            self,
+            room_id: str,
+            thread_id: str | None,
+            sender: str,
+            *,
+            runtime_started_at: float | None,
+        ) -> Awaitable[AgentMessageSnapshot | None]:
+            """Read the latest visible cached sender message for one room or thread scope."""
 
 
 def _resolve_plugin_state_root(
@@ -134,6 +150,7 @@ class HookContextSupport:
     agent_name: str
     hook_registry_state: HookRegistryState
     hook_send_message: HookMessageSender
+    latest_agent_message_snapshot_reader: HookLatestAgentMessageSnapshotReader | None = None
 
     @property
     def registry(self) -> HookRegistry:
@@ -194,6 +211,7 @@ class HookContextSupport:
             "correlation_id": correlation_id,
             "runtime_started_at": self.runtime.runtime_started_at,
             "message_sender": self.message_sender(),
+            "latest_agent_message_snapshot_reader": self.latest_agent_message_snapshot_reader,
             "matrix_admin": self.matrix_admin(),
             "room_state_querier": self.room_state_querier(),
             "room_state_putter": self.room_state_putter(),
@@ -254,6 +272,10 @@ class HookContext:
     correlation_id: str
     runtime_started_at: float | None = field(default=None, kw_only=True)
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
+    latest_agent_message_snapshot_reader: HookLatestAgentMessageSnapshotReader | None = field(
+        default=None,
+        kw_only=True,
+    )
     matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
@@ -312,6 +334,24 @@ class HookContext:
             room_id,
             event_type,
             state_key,
+        )
+
+    async def get_latest_agent_message_snapshot(
+        self,
+        room_id: str,
+        sender: str,
+        *,
+        thread_id: str | None = None,
+    ) -> AgentMessageSnapshot | None:
+        """Return the latest visible cached sender message when a reader is available."""
+        if self.latest_agent_message_snapshot_reader is None:
+            self.logger.warning("No latest-agent-message snapshot reader available")
+            return None
+        return await self.latest_agent_message_snapshot_reader(
+            room_id=room_id,
+            thread_id=thread_id,
+            sender=sender,
+            runtime_started_at=self.runtime_started_at,
         )
 
     async def put_room_state(
