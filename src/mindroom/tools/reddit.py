@@ -71,6 +71,16 @@ if TYPE_CHECKING:
     ],
     dependencies=["praw"],
     docs_url=None,
+    function_names=(
+        "create_post",
+        "get_subreddit_info",
+        "get_subreddit_stats",
+        "get_top_posts",
+        "get_trending_subreddits",
+        "get_user_info",
+        "reply_to_comment",
+        "reply_to_post",
+    ),
 )
 def reddit_tools() -> type[RedditTools]:
     """Return Reddit tools for social media interaction."""

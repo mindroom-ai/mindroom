@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     icon_color="text-blue-500",
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
+    function_names=("matrix_room",),
 )
 def matrix_room_tools() -> type[MatrixRoomTools]:
     """Return native Matrix room introspection tools."""

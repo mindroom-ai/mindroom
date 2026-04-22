@@ -11,6 +11,7 @@ import pytest
 from agno.tools import Toolkit
 
 import mindroom.tool_system.skills as skills_module
+import mindroom.tools  # noqa: F401
 from mindroom.agents import build_agent_toolkit
 from mindroom.commands.handler import (
     _collect_agent_toolkits,
@@ -1678,12 +1679,15 @@ async def test_skill_command_tool_dispatch_treats_loaded_and_failed_bare_functio
 @pytest.mark.parametrize(
     ("tool_name", "function_name"),
     [
+        ("agentql", "custom_scrape_website"),
         ("github", "get_repository"),
         ("googlesearch", "web_search"),
         ("duckduckgo", "web_search"),
         ("gmail", "search_emails"),
         ("google_calendar", "create_event"),
         ("google_sheets", "read_sheet"),
+        ("notion", "create_page"),
+        ("telegram", "send_message"),
     ],
 )
 def test_resolve_tool_dispatch_target_uses_declared_function_names_when_factory_import_fails(
@@ -1703,6 +1707,23 @@ def test_resolve_tool_dispatch_target_uses_declared_function_names_when_factory_
         TOOL_METADATA.update(original_metadata)
 
     assert error == f"Tool '{function_name}' failed: missing optional dep"
+
+
+def test_runtime_tool_wrappers_declare_function_names_for_bare_dispatch() -> None:
+    """Built-in tool wrappers should author function names so bare dispatch survives factory failures."""
+    missing = []
+    for tool_name, metadata in sorted(TOOL_METADATA.items()):
+        factory = metadata.factory
+        if factory is None:
+            continue
+        if "/src/mindroom/tools/" not in factory.__code__.co_filename:
+            continue
+        if tool_name == "openclaw_compat":
+            continue
+        if not metadata.function_names:
+            missing.append(tool_name)
+
+    assert missing == []
 
 
 def test_resolve_tool_dispatch_target_uses_declared_function_names_for_dynamic_mcp_tools() -> None:

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     icon_color="text-emerald-500",
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
+    function_names=("list_thread_tags", "tag_thread", "untag_thread"),
 )
 def thread_tags_tools() -> type[ThreadTagsTools]:
     """Return Matrix thread tagging tools."""

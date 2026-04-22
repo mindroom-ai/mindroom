@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["arxiv", "pypdf"],
     docs_url="https://docs.agno.com/tools/toolkits/search/arxiv",
+    function_names=("read_arxiv_papers", "search_arxiv_and_return_articles"),
 )
 def arxiv_tools() -> type[ArxivTools]:
     """Return ArXiv tools for academic paper research."""

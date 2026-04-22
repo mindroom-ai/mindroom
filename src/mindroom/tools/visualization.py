@@ -72,6 +72,13 @@ if TYPE_CHECKING:
     ],
     dependencies=["matplotlib"],
     docs_url="https://docs.agno.com/tools/toolkits/others/visualization",
+    function_names=(
+        "create_bar_chart",
+        "create_histogram",
+        "create_line_chart",
+        "create_pie_chart",
+        "create_scatter_plot",
+    ),
 )
 def visualization_tools() -> type[VisualizationTools]:
     """Return Visualization tools for creating charts and plots."""

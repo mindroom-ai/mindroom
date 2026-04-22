@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["openai"],  # OpenAI Python package
     docs_url="https://docs.agno.com/tools/toolkits/others/dalle",  # URL without .md extension
+    function_names=("create_image",),
 )
 def dalle_tools() -> type[DalleTools]:
     """Return DALL-E tools for image generation from text prompts."""

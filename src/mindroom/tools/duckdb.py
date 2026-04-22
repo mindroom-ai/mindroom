@@ -64,6 +64,22 @@ if TYPE_CHECKING:
     ],
     dependencies=["duckdb"],
     docs_url="https://docs.agno.com/tools/toolkits/database/duckdb",
+    function_names=(
+        "create_fts_index",
+        "create_table_from_path",
+        "describe_table",
+        "export_table_to_path",
+        "full_text_search",
+        "get_table_name_from_path",
+        "inspect_query",
+        "load_local_csv_to_table",
+        "load_local_path_to_table",
+        "load_s3_csv_to_table",
+        "load_s3_path_to_table",
+        "run_query",
+        "show_tables",
+        "summarize_table",
+    ),
 )
 def duckdb_tools() -> type[DuckDbTools]:
     """Return DuckDB tools for data analysis and processing."""

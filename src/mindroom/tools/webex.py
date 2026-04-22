@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["webexpythonsdk"],
     docs_url="https://docs.agno.com/tools/toolkits/social/webex",
+    function_names=("list_rooms", "send_message"),
 )
 def webex_tools() -> type[WebexTools]:
     """Return Webex tools for video conferencing and messaging."""

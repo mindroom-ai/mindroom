@@ -120,6 +120,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["openai"],
     docs_url="https://docs.agno.com/tools/toolkits/models/openai",
+    function_names=("generate_image", "generate_speech", "transcribe_audio"),
 )
 def openai_tools() -> type[OpenAITools]:
     """Return OpenAI tools for AI-powered transcription, image generation, and speech synthesis."""

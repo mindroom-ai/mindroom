@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/others/brandfetch",
     helper_text="Get API keys from [Brandfetch Developers](https://developers.brandfetch.com/)",
+    function_names=("asearch_by_brand", "asearch_by_identifier", "search_by_brand", "search_by_identifier"),
 )
 def brandfetch_tools() -> type[BrandfetchTools]:
     """Return Brandfetch tools for brand data retrieval."""

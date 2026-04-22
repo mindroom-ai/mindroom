@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["wikipedia"],
     docs_url="https://docs.agno.com/tools/toolkits/search/wikipedia",
+    function_names=("search_wikipedia", "search_wikipedia_and_update_knowledge_base"),
 )
 def wikipedia_tools() -> type[WikipediaTools]:
     """Return Wikipedia tools for searching and retrieving information."""

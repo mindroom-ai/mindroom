@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["baidusearch", "pycountry"],
     docs_url="https://docs.agno.com/tools/toolkits/search/baidusearch",
+    function_names=("baidu_search",),
 )
 def baidusearch_tools() -> type[BaiduSearchTools]:
     """Return Baidu search tools for web search."""

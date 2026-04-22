@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     ],
     dependencies=[],  # Uses built-in smtplib
     docs_url="https://docs.agno.com/tools/toolkits/social/email",
+    function_names=("email_user",),
 )
 def email_tools() -> type[EmailTools]:
     """Return email tools for sending messages via SMTP."""

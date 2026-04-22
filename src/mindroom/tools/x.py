@@ -89,6 +89,15 @@ if TYPE_CHECKING:
     ],
     dependencies=["tweepy"],
     docs_url="https://docs.agno.com/tools/toolkits/social/x",
+    function_names=(
+        "create_post",
+        "get_home_timeline",
+        "get_my_info",
+        "get_user_info",
+        "reply_to_post",
+        "search_posts",
+        "send_dm",
+    ),
 )
 def x_tools() -> type[XTools]:
     """Return X (Twitter) tools for posting tweets and social media interaction."""

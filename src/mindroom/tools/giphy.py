@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/others/giphy",
+    function_names=("search_gifs",),
 )
 def giphy_tools() -> type[GiphyTools]:
     """Return Giphy tools for GIF search and integration."""

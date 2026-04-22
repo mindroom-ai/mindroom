@@ -105,6 +105,13 @@ def _load_openbb_tools() -> type[OpenBBTools]:
     ],
     dependencies=["openbb"],
     docs_url="https://docs.agno.com/tools/toolkits/others/openbb",
+    function_names=(
+        "get_company_news",
+        "get_company_profile",
+        "get_price_targets",
+        "get_stock_price",
+        "search_company_symbol",
+    ),
 )
 def openbb_tools() -> type[OpenBBTools]:
     """Return OpenBB tools for financial data."""

@@ -102,6 +102,15 @@ def _python_tools_runtime() -> tuple[Any, Any, Any, Any]:
     ],
     dependencies=["agno"],
     docs_url="https://docs.agno.com/tools/toolkits/local/python",
+    function_names=(
+        "list_files",
+        "pip_install_package",
+        "read_file",
+        "run_python_code",
+        "run_python_file_return_variable",
+        "save_to_file_and_run",
+        "uv_pip_install_package",
+    ),
 )
 def python_tools() -> type[PythonTools]:
     """Return Python tools for code execution and file management."""

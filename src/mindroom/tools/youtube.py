@@ -71,6 +71,12 @@ if TYPE_CHECKING:
     ],
     dependencies=["youtube_transcript_api"],
     docs_url="https://docs.agno.com/tools/toolkits/entertainment/youtube",
+    function_names=(
+        "get_video_timestamps",
+        "get_youtube_video_captions",
+        "get_youtube_video_data",
+        "get_youtube_video_id",
+    ),
 )
 def youtube_tools() -> type[YouTubeTools]:
     """Return YouTube tools for video data extraction."""

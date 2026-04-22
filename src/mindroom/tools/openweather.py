@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["requests"],  # From agno requirements
     docs_url="https://docs.agno.com/tools/toolkits/others/openweather",  # URL without .md extension
+    function_names=("geocode_location", "get_air_pollution", "get_current_weather", "get_forecast"),
 )
 def openweather_tools() -> type[OpenWeatherTools]:
     """Return OpenWeather tools for weather data access."""

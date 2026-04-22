@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["elevenlabs"],
     docs_url="https://docs.agno.com/tools/toolkits/others/eleven_labs",
+    function_names=("generate_sound_effect", "get_voices", "text_to_speech"),
 )
 def eleven_labs_tools() -> type[ElevenLabsTools]:
     """Return Eleven Labs tools for text-to-speech and sound effect generation."""

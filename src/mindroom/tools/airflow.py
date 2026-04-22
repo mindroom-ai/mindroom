@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     ],
     dependencies=[],  # No additional dependencies required beyond agno
     docs_url="https://docs.agno.com/tools/toolkits/others/airflow",
+    function_names=("read_dag_file", "save_dag_file"),
 )
 def airflow_tools() -> type[AirflowTools]:
     """Return Airflow tools for DAG file management."""

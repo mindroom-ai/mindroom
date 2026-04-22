@@ -133,6 +133,14 @@ if TYPE_CHECKING:
     ],
     dependencies=["redshift-connector"],
     docs_url="https://docs.agno.com/tools/toolkits/others/redshift",
+    function_names=(
+        "describe_table",
+        "export_table_to_path",
+        "inspect_query",
+        "run_query",
+        "show_tables",
+        "summarize_table",
+    ),
 )
 def redshift_tools() -> type[RedshiftTools]:
     """Return Amazon Redshift tools for data warehouse operations."""

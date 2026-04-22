@@ -172,6 +172,15 @@ if TYPE_CHECKING:
     ],
     dependencies=["daytona"],
     docs_url="https://docs.agno.com/tools/toolkits/others/daytona",
+    function_names=(
+        "change_directory",
+        "create_file",
+        "delete_file",
+        "list_files",
+        "read_file",
+        "run_code",
+        "run_shell_command",
+    ),
 )
 def daytona_tools() -> type[DaytonaTools]:
     """Return Daytona tools for secure code execution in remote sandbox environments."""

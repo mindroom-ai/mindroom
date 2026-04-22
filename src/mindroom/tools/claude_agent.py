@@ -105,6 +105,13 @@ if TYPE_CHECKING:
     ],
     dependencies=["claude-agent-sdk"],
     docs_url="https://platform.claude.com/docs/en/agent-sdk/python",
+    function_names=(
+        "claude_end_session",
+        "claude_interrupt",
+        "claude_send",
+        "claude_session_status",
+        "claude_start_session",
+    ),
 )
 def claude_agent_tools() -> type[ClaudeAgentTools]:
     """Return tools for managing persistent Claude Agent SDK sessions."""

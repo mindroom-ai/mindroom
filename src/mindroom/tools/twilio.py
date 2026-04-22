@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["twilio"],
     docs_url="https://docs.agno.com/tools/toolkits/social/twilio",
+    function_names=("get_call_details", "list_messages", "send_sms", "validate_phone_number"),
 )
 def twilio_tools() -> type[TwilioTools]:
     """Return Twilio tools for SMS messaging and voice communication."""
