@@ -26,6 +26,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import CancelSource, classify_cancel_source
 from mindroom.streaming_delivery import (
     StreamInputChunk,
+    _consume_streaming_chunks as _consume_streaming_chunks_impl,
     _consume_stream_with_progress_supervision,
     _DeliveryRequest,
     _drain_worker_progress_events,
@@ -239,6 +240,7 @@ class StreamingResponse:
     min_update_char_threshold: int = 48
     min_char_update_interval: float = 0.35
     progress_update_interval: float = 1.0
+    max_idle: float = 0.25
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     room_mode: bool = False  # When True, skip all thread relations (for bridges/mobile)
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
@@ -246,6 +248,7 @@ class StreamingResponse:
     extra_content: dict[str, Any] | None = None
     stream_started_at: float | None = None
     chars_since_last_update: int = 0
+    last_delta_at: float | None = None
     placeholder_progress_sent: bool = False
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
@@ -271,13 +274,18 @@ class StreamingResponse:
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
+        self._append_incremental_text(new_chunk)
+
+    def _append_incremental_text(self, new_chunk: str) -> None:
+        """Append additive streaming text regardless of snapshot replacement mode."""
         self.accumulated_text += new_chunk
         self.chars_since_last_update += len(new_chunk)
+        self.last_delta_at = time.time()
 
     def _ensure_hidden_tool_gap(self) -> None:
         """Insert a single placeholder gap for hidden tool calls."""
         if not self.accumulated_text.endswith("\n\n"):
-            self._update("\n\n")
+            self._append_incremental_text("\n\n")
 
     def _current_update_interval(self, current_time: float) -> float:
         """Return the current throttling interval.
@@ -311,7 +319,32 @@ class StreamingResponse:
         threshold = fast_threshold + (self.update_char_threshold - fast_threshold) * progress
         return max(1, round(threshold))
 
-    async def _throttled_send(self, client: nio.AsyncClient, *, progress_hint: bool = False) -> None:
+    async def force_flush(self, client: nio.AsyncClient) -> None:
+        """Unconditionally send buffered text and reset all throttle state.
+
+        Bypasses _throttled_send's OR but maintains the same post-send invariants.
+        Use at explicit phase boundaries where throttling is semantically wrong.
+        """
+        if self.chars_since_last_update == 0 or not self.accumulated_text.strip():
+            return
+        sent = await self._send_or_edit_message(client)
+        if sent:
+            self._mark_nonterminal_delivery()
+
+    def _mark_nonterminal_delivery(self) -> None:
+        """Reset throttle state after a non-terminal send or edit reached Matrix."""
+        now = time.time()
+        self.last_update = now
+        self.last_delta_at = now
+        self.chars_since_last_update = 0
+
+    async def _throttled_send(
+        self,
+        client: nio.AsyncClient,
+        *,
+        progress_hint: bool = False,
+        prior_delta_at: float | None = None,
+    ) -> None:
         """Send/edit when either time or character thresholds are met."""
         current_time = time.time()
         if self.stream_started_at is None:
@@ -326,18 +359,26 @@ class StreamingResponse:
             self.chars_since_last_update >= self._current_char_threshold(current_time)
             and elapsed_since_last_update >= self.min_char_update_interval
         )
-        should_send = time_triggered or char_triggered
+        idle_reference_delta_at = prior_delta_at if prior_delta_at is not None else self.last_delta_at
+        idle_triggered = (
+            self.chars_since_last_update > 0
+            and idle_reference_delta_at is not None
+            and (current_time - idle_reference_delta_at) >= self.max_idle
+            and elapsed_since_last_update >= self.min_char_update_interval
+        )
+        should_send = time_triggered or char_triggered or idle_triggered
         allow_empty_progress = progress_hint and not self.accumulated_text.strip()
         if should_send and (self.accumulated_text.strip() or allow_empty_progress):
-            await self._send_or_edit_message(client, allow_empty_progress=allow_empty_progress)
-            self.last_update = current_time
-            self.chars_since_last_update = 0
+            sent = await self._send_or_edit_message(client, allow_empty_progress=allow_empty_progress)
+            if sent:
+                self._mark_nonterminal_delivery()
 
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
         self._warmup_state.clear_terminal_failures()
+        previous_last_delta_at = self.last_delta_at
         self._update(new_chunk)
-        await self._throttled_send(client)
+        await self._throttled_send(client, prior_delta_at=previous_last_delta_at)
 
     async def finalize(
         self,
@@ -620,6 +661,31 @@ class ReplacementStreamingResponse(StreamingResponse):
         """Replace accumulated text with new chunk."""
         self.accumulated_text = new_chunk
         self.chars_since_last_update += len(new_chunk)
+        self.last_delta_at = time.time()
+
+
+async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
+    client: nio.AsyncClient,
+    response_stream: AsyncIterator[_StreamInputChunk],
+    streaming: StreamingResponse,
+) -> None:
+    """Compatibility helper for tests that exercise chunk consumption directly."""
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+    delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
+    try:
+        await _consume_streaming_chunks_impl(response_stream, streaming, delivery_queue)
+        delivery_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        delivery_task = None
+        if delivery_error is not None:
+            raise delivery_error
+    finally:
+        if delivery_task is not None:
+            cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            if cleanup_error is not None:
+                logger.warning(
+                    "Stream delivery controller raised during compatibility cleanup",
+                    error=str(cleanup_error),
+                )
 
 
 async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
@@ -670,6 +736,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         update_interval=sc.update_interval,
         min_update_interval=sc.min_update_interval,
         interval_ramp_seconds=sc.interval_ramp_seconds,
+        max_idle=sc.max_idle,
         pipeline_timing=pipeline_timing,
         conversation_cache=conversation_cache,
         visible_event_id_callback=visible_event_id_callback,

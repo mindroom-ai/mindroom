@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn
@@ -79,7 +78,10 @@ class _DeliveryRequest:
 
     progress_hint: bool = False
     force_refresh: bool = False
+    phase_boundary_flush: bool = False
     allow_empty_progress: bool = False
+    prior_delta_at: float | None = None
+    completion: asyncio.Future[None] | None = None
 
 
 def _raise_progress_delivery_error(error: Exception) -> NoReturn:
@@ -92,16 +94,40 @@ def _queue_delivery_request(
     *,
     progress_hint: bool = False,
     force_refresh: bool = False,
+    phase_boundary_flush: bool = False,
     allow_empty_progress: bool = False,
-) -> None:
+    prior_delta_at: float | None = None,
+    wait_for_delivery: bool = False,
+) -> asyncio.Future[None] | None:
     """Queue one non-terminal delivery request for the single delivery owner."""
+    completion = asyncio.get_running_loop().create_future() if wait_for_delivery else None
     delivery_queue.put_nowait(
         _DeliveryRequest(
             progress_hint=progress_hint,
             force_refresh=force_refresh,
+            phase_boundary_flush=phase_boundary_flush,
             allow_empty_progress=allow_empty_progress,
+            prior_delta_at=prior_delta_at,
+            completion=completion,
         ),
     )
+    return completion
+
+
+async def _flush_phase_boundary_if_needed(
+    streaming: StreamingResponse,
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+) -> None:
+    """Flush any buffered visible text before mutating the next phase."""
+    if streaming.chars_since_last_update == 0:
+        return
+    completion = _queue_delivery_request(
+        delivery_queue,
+        phase_boundary_flush=True,
+        wait_for_delivery=True,
+    )
+    assert completion is not None
+    await completion
 
 
 async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
@@ -123,9 +149,14 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             text_chunk = str(chunk.content)
         elif isinstance(chunk, ToolCallStartedEvent):
             if not streaming.show_tool_calls:
+                await _flush_phase_boundary_if_needed(streaming, delivery_queue)
                 if chunk.tool is not None:
                     streaming._ensure_hidden_tool_gap()
                 _queue_delivery_request(delivery_queue, progress_hint=True)
+                continue
+
+            if chunk.tool is None:
+                await _flush_phase_boundary_if_needed(streaming, delivery_queue)
                 continue
 
             tool_index = len(streaming.tool_trace) + 1
@@ -133,6 +164,16 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
                 pending_tools.append((trace_entry.tool_name, tool_index))
+            if text_chunk:
+                streaming._append_incremental_text(text_chunk)
+                completion = _queue_delivery_request(
+                    delivery_queue,
+                    force_refresh=True,
+                    wait_for_delivery=True,
+                )
+                assert completion is not None
+                await completion
+            continue
         elif isinstance(chunk, ToolCallCompletedEvent):
             info = extract_tool_completed_info(chunk.tool)
             if info:
@@ -180,8 +221,9 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
 
         if text_chunk:
             streaming._warmup_state.clear_terminal_failures()
+            prior_delta_at = streaming.last_delta_at
             streaming._update(text_chunk)
-            _queue_delivery_request(delivery_queue)
+            _queue_delivery_request(delivery_queue, prior_delta_at=prior_delta_at)
 
 
 async def _drain_worker_progress_events(
@@ -250,6 +292,7 @@ async def _drive_stream_delivery(
             return
 
         merged_request = request
+        completions = [request.completion] if request.completion is not None else []
         while True:
             try:
                 next_request = delivery_queue.get_nowait()
@@ -258,22 +301,45 @@ async def _drive_stream_delivery(
             if next_request is None:
                 stop_after_current = True
                 break
+            if next_request.completion is not None:
+                completions.append(next_request.completion)
             merged_request = _DeliveryRequest(
                 progress_hint=merged_request.progress_hint or next_request.progress_hint,
                 force_refresh=merged_request.force_refresh or next_request.force_refresh,
+                phase_boundary_flush=merged_request.phase_boundary_flush or next_request.phase_boundary_flush,
                 allow_empty_progress=merged_request.allow_empty_progress or next_request.allow_empty_progress,
+                prior_delta_at=(
+                    merged_request.prior_delta_at
+                    if merged_request.prior_delta_at is not None
+                    else next_request.prior_delta_at
+                ),
             )
 
-        if merged_request.force_refresh:
-            sent = await streaming._send_or_edit_message(
-                client,
-                allow_empty_progress=merged_request.allow_empty_progress,
-            )
-            if sent:
-                streaming.last_update = time.time()
-                streaming.chars_since_last_update = 0
+        try:
+            if merged_request.phase_boundary_flush:
+                await streaming.force_flush(client)
+            if merged_request.force_refresh:
+                sent = await streaming._send_or_edit_message(
+                    client,
+                    allow_empty_progress=merged_request.allow_empty_progress,
+                )
+                if sent:
+                    streaming._mark_nonterminal_delivery()
+            elif not merged_request.phase_boundary_flush:
+                await streaming._throttled_send(
+                    client,
+                    progress_hint=merged_request.progress_hint,
+                    prior_delta_at=merged_request.prior_delta_at,
+                )
+        except Exception as exc:
+            for completion in completions:
+                if not completion.done():
+                    completion.set_exception(exc)
+            raise
         else:
-            await streaming._throttled_send(client, progress_hint=merged_request.progress_hint)
+            for completion in completions:
+                if not completion.done():
+                    completion.set_result(None)
 
         if stop_after_current:
             return

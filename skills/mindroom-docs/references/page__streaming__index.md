@@ -48,6 +48,7 @@ defaults:
     update_interval: 5.0         # Default: 5.0 steady-state seconds between edits
     min_update_interval: 0.5     # Default: 0.5 fast-start seconds between early edits
     interval_ramp_seconds: 15.0  # Default: 15.0; set 0 to disable ramping
+    max_idle: 0.25               # Default: 0.25 event-driven idle ceiling before the next edit
 ```
 
 These timing settings are global-only. Agents inherit them from `defaults` and cannot override them individually.
@@ -86,6 +87,7 @@ MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
 - **Ramp-up**: `defaults.streaming.min_update_interval` and `defaults.streaming.interval_ramp_seconds` control how quickly the time-based interval ramps from a fast start to the steady-state value. By default it ramps from 0.5s to 5s over 15 seconds. Setting `interval_ramp_seconds: 0` disables the ramp and uses the steady-state interval immediately.
 - **Shared ramp window**: The same ramp window also controls the built-in character threshold ramp from 48 characters (fast start) to 240 characters (steady-state).
 - **Minimum interval**: A hard floor (0.35s) prevents edit spam even when character thresholds are met.
+- **Idle flush**: `defaults.streaming.max_idle` triggers an edit on the next streaming event after 0.25s without a new delta, but only once `min_char_update_interval` has also elapsed. This is event-driven and does not run on a background timer.
 
 ## Tool Calls During Streaming
 

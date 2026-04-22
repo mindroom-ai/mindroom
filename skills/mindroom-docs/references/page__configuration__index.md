@@ -229,6 +229,7 @@ defaults:
     update_interval: 5.0           # Default: 5.0 (steady-state seconds between streamed edits)
     min_update_interval: 0.5       # Default: 0.5 (fast-start seconds between early edits)
     interval_ramp_seconds: 15.0    # Default: 15.0 (set 0 to disable interval ramping)
+    max_idle: 0.25                 # Default: 0.25 (event-driven idle ceiling before the next edit)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files

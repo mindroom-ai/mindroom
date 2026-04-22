@@ -13,6 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
+from agno.models.response import ToolExecution
+from agno.run.agent import ToolCallStartedEvent
+from pydantic import ValidationError
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
@@ -46,6 +49,7 @@ from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
+    _consume_streaming_chunks,
     build_restart_interrupted_body,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
@@ -625,6 +629,362 @@ class TestStreamingBehavior:
 
         assert mock_client.room_send.call_count == 1
         assert streaming.event_id == "$stream_char_1"
+
+    @pytest.mark.asyncio
+    async def test_pre_tool_flush_fires_on_immediate_tool_start(self) -> None:
+        """Tool-start phase boundaries should flush buffered text immediately in both visible and hidden modes."""
+
+        async def run_case(*, show_tool_calls: bool) -> list[str]:
+            mock_client = _make_matrix_client_mock()
+            mock_response = MagicMock()
+            mock_response.__class__ = nio.RoomSendResponse
+            mock_response.event_id = "$stream_tool_1"
+            mock_client.room_send.return_value = mock_response
+
+            streaming = StreamingResponse(
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                update_interval=10.0,
+                min_update_interval=10.0,
+                interval_ramp_seconds=0.0,
+                max_idle=0.25,
+                show_tool_calls=show_tool_calls,
+            )
+            streaming.last_update = 100.0
+            streaming.stream_started_at = 100.0
+
+            async def response_stream() -> AsyncIterator[object]:
+                yield "Hello, this is a partial wo"
+                yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
+
+            with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.0, 100.0, 100.0]):
+                await _consume_streaming_chunks(mock_client, response_stream(), streaming)
+            await streaming.finalize(mock_client)
+
+            assert mock_client.room_send.call_count == 2
+            return [
+                call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
+                for call in mock_client.room_send.call_args_list
+            ]
+
+        visible_bodies = await run_case(show_tool_calls=True)
+        assert visible_bodies[0].startswith("Hello, this is a partial wo")
+        assert "search_web" in visible_bodies[0]
+        assert visible_bodies[1].startswith("Hello, this is a partial wo")
+        assert "search_web" in visible_bodies[1]
+
+        hidden_bodies = await run_case(show_tool_calls=False)
+        assert hidden_bodies[0] == "Hello, this is a partial wo"
+        assert hidden_bodies[1] == "Hello, this is a partial wo\n\n"
+
+    @pytest.mark.asyncio
+    async def test_pre_tool_flush_does_not_double_emit_after_idle_gap(self) -> None:
+        """Tool-start after an idle gap should not emit an extra edit before finalization."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$stream_tool_gap_1"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=48,
+            min_update_char_threshold=48,
+            min_char_update_interval=0.0,
+            max_idle=0.25,
+            show_tool_calls=True,
+        )
+        streaming.last_update = 100.0
+        streaming.stream_started_at = 100.0
+
+        async def response_stream() -> AsyncIterator[object]:
+            yield "x" * 40
+            yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
+
+        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 105.0, 105.0, 105.0]):
+            await _consume_streaming_chunks(mock_client, response_stream(), streaming)
+        await streaming.finalize(mock_client)
+
+        assert mock_client.room_send.call_count == 2
+        bodies = [
+            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
+            for call in mock_client.room_send.call_args_list
+        ]
+        assert bodies[0].startswith("x" * 40)
+        assert "search_web" in bodies[0]
+        assert "search_web" in bodies[1]
+
+    @pytest.mark.asyncio
+    async def test_idle_flush_fires_on_text_after_pause(self) -> None:
+        """A long gap before the next text chunk should trigger an idle flush on that text event."""
+        mock_client = _make_matrix_client_mock()
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10_000,
+            min_update_char_threshold=10_000,
+            min_char_update_interval=0.0,
+            max_idle=0.25,
+        )
+        streaming.event_id = "$existing_event"
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+        streaming._send_or_edit_message = AsyncMock(return_value=True)
+
+        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0]):
+            await streaming.update_content("first", mock_client)
+
+        assert streaming._send_or_edit_message.await_count == 0
+
+        with patch("mindroom.streaming.time.time", side_effect=[105.0, 105.0, 105.0]):
+            await streaming.update_content(" second", mock_client)
+
+        assert streaming._send_or_edit_message.await_count == 1
+        assert streaming.last_delta_at == 105.0
+        assert streaming.chars_since_last_update == 0
+
+    @pytest.mark.asyncio
+    async def test_force_flush_ignores_whitespace_only_buffer(self) -> None:
+        """Whitespace-only buffered text should not consume the first visible send window."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$stream_whitespace_1"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10_000,
+            min_update_char_threshold=10_000,
+            min_char_update_interval=10.0,
+            max_idle=0.25,
+        )
+        streaming.last_update = float("-inf")
+
+        with patch("mindroom.streaming.time.time", return_value=100.0):
+            streaming._update("\n")
+
+        with patch("mindroom.streaming.time.time", side_effect=[101.0, 101.0, 101.0]):
+            await streaming.force_flush(mock_client)
+
+        assert mock_client.room_send.call_count == 0
+        assert streaming.last_update == float("-inf")
+        assert streaming.chars_since_last_update == 1
+
+        with patch("mindroom.streaming.time.time", side_effect=[102.0, 102.0, 102.0]):
+            await streaming.update_content("Hi", mock_client)
+
+        assert mock_client.room_send.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_idle_flush_followed_by_small_chunk_does_not_double_emit(self) -> None:
+        """An idle flush should reset the idle baseline before the next small chunk arrives."""
+        mock_client = _make_matrix_client_mock()
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10_000,
+            min_update_char_threshold=10_000,
+            min_char_update_interval=0.0,
+            max_idle=0.25,
+        )
+        streaming.event_id = "$existing_event"
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+        streaming._send_or_edit_message = AsyncMock(return_value=True)
+
+        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0]):
+            await streaming.update_content("partial", mock_client)
+
+        with patch("mindroom.streaming.time.time", return_value=100.3):
+            await streaming._throttled_send(mock_client)
+
+        assert streaming._send_or_edit_message.await_count == 1
+
+        with patch("mindroom.streaming.time.time", side_effect=[100.35, 100.35, 100.35]):
+            await streaming.update_content("!", mock_client)
+
+        assert streaming._send_or_edit_message.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_idle_flush_does_not_fire_during_steady_streaming(self) -> None:
+        """Small inter-delta gaps should not inflate edit cadence via the idle trigger."""
+        mock_client = _make_matrix_client_mock()
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=0.5,
+            min_update_interval=0.5,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10_000,
+            min_update_char_threshold=10_000,
+            min_char_update_interval=0.0,
+            max_idle=0.25,
+        )
+        streaming.event_id = "$existing_event"
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+        streaming._send_or_edit_message = AsyncMock(return_value=True)
+
+        clock = iter(100.0 + 0.03 * step for step in range(1, 80))
+        with patch("mindroom.streaming.time.time", side_effect=lambda: next(clock)):
+            for _ in range(20):
+                await streaming.update_content("a", mock_client)
+
+        assert streaming._send_or_edit_message.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_idle_flush_triggers_after_delta_gap(self) -> None:
+        """A single buffered chunk should flush once the idle gap exceeds max_idle."""
+        mock_client = _make_matrix_client_mock()
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10_000,
+            min_update_char_threshold=10_000,
+            min_char_update_interval=0.0,
+            max_idle=0.25,
+        )
+        streaming.event_id = "$existing_event"
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+        streaming._send_or_edit_message = AsyncMock(return_value=True)
+
+        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.05]):
+            await streaming.update_content("partial", mock_client)
+
+        assert streaming._send_or_edit_message.await_count == 0
+        assert streaming.last_delta_at == 100.0
+
+        with patch("mindroom.streaming.time.time", return_value=100.3):
+            await streaming._throttled_send(mock_client)
+
+        assert streaming._send_or_edit_message.await_count == 1
+        assert streaming.chars_since_last_update == 0
+
+    @pytest.mark.asyncio
+    async def test_pre_tool_flush_does_not_hide_tool_marker_below_threshold(self) -> None:
+        """A failed phase-boundary flush should preserve buffered chars so the marker can still surface."""
+        mock_client = _make_matrix_client_mock()
+        sent_bodies: list[str] = []
+        send_results = iter((False, True))
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=48,
+            min_update_char_threshold=48,
+            min_char_update_interval=0.0,
+            max_idle=10.0,
+            show_tool_calls=True,
+        )
+        streaming.last_update = 100.0
+        streaming.stream_started_at = 100.0
+
+        async def record_send(*args: object, **kwargs: object) -> bool:
+            _ = (args, kwargs)
+            sent_bodies.append(streaming.accumulated_text)
+            return next(send_results)
+
+        streaming._send_or_edit_message = AsyncMock(side_effect=record_send)
+
+        async def response_stream() -> AsyncIterator[object]:
+            yield "x" * 40
+            yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
+
+        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.1, 100.1, 100.1]):
+            await _consume_streaming_chunks(mock_client, response_stream(), streaming)
+        await streaming.finalize(mock_client)
+
+        assert streaming._send_or_edit_message.await_count == 2
+        assert sent_bodies[0].startswith("x" * 40)
+        assert "search_web" in sent_bodies[0]
+        assert sent_bodies[1].startswith("x" * 40)
+        assert "search_web" in sent_bodies[1]
+
+    @pytest.mark.asyncio
+    async def test_idle_does_not_fire_below_min_char_interval(self) -> None:
+        """Idle-triggered edits should still respect the anti-spam minimum interval floor."""
+        mock_client = _make_matrix_client_mock()
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10_000,
+            min_update_char_threshold=10_000,
+            min_char_update_interval=0.35,
+            max_idle=0.25,
+        )
+        streaming.event_id = "$existing_event"
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+        streaming._send_or_edit_message = AsyncMock(return_value=True)
+
+        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0]):
+            await streaming.update_content("first", mock_client)
+
+        with patch("mindroom.streaming.time.time", side_effect=[100.3, 100.3, 100.3]):
+            await streaming.update_content(" second", mock_client)
+
+        assert streaming._send_or_edit_message.await_count == 0
 
     @pytest.mark.asyncio
     async def test_progress_hint_uses_shorter_interval(self) -> None:
@@ -2741,11 +3101,12 @@ class TestStreamingConfig:
         assert sc.update_interval == sr["update_interval"].default
         assert sc.min_update_interval == sr["min_update_interval"].default
         assert sc.interval_ramp_seconds == sr["interval_ramp_seconds"].default
+        assert sc.max_idle == sr["max_idle"].default
 
     @pytest.mark.asyncio
     async def test_streaming_config_applied(self) -> None:
         """Custom StreamingConfig values should propagate to the StreamingResponse instance."""
-        sc = StreamingConfig(update_interval=2.0, min_update_interval=0.3, interval_ramp_seconds=10.0)
+        sc = StreamingConfig(update_interval=2.0, min_update_interval=0.3, interval_ramp_seconds=10.0, max_idle=0.7)
         config = Config(
             agents={"a": AgentConfig(display_name="A", rooms=["!r:localhost"])},
             models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
@@ -2792,6 +3153,7 @@ class TestStreamingConfig:
         assert sr.update_interval == 2.0
         assert sr.min_update_interval == 0.3
         assert sr.interval_ramp_seconds == 10.0
+        assert sr.max_idle == 0.7
 
     def test_streaming_config_partial_override(self) -> None:
         """Setting only update_interval via Config should keep other fields at defaults."""
@@ -2805,6 +3167,7 @@ class TestStreamingConfig:
         assert sc.update_interval == 2.0
         assert sc.min_update_interval == 0.5
         assert sc.interval_ramp_seconds == 15.0
+        assert sc.max_idle == 0.25
 
     def test_streaming_config_validation(self) -> None:
         """Reject invalid values: update_interval <= 0, min_update_interval <= 0, interval_ramp_seconds < 0."""
@@ -2818,6 +3181,10 @@ class TestStreamingConfig:
             StreamingConfig(min_update_interval=-0.5)
         with pytest.raises(ValueError, match="greater than or equal to 0"):
             StreamingConfig(interval_ramp_seconds=-1)
+        with pytest.raises(ValidationError, match="greater than 0"):
+            StreamingConfig(max_idle=0)
+        with pytest.raises(ValidationError, match="greater than 0"):
+            StreamingConfig(max_idle=-0.25)
         # interval_ramp_seconds=0 should be valid (disables ramp)
         sc = StreamingConfig(interval_ramp_seconds=0)
         assert sc.interval_ramp_seconds == 0
