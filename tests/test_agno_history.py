@@ -33,6 +33,7 @@ from defusedxml.ElementTree import fromstring
 
 from mindroom.agents import create_agent, create_session_storage, get_agent_session
 from mindroom.ai import _prepare_agent_and_prompt
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -924,6 +925,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
             storage=storage,
             session=session,
         )
+        await wait_for_background_tasks(timeout=0.2)
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
@@ -931,7 +933,9 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
     assert len(persisted.runs) == 4
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
     assert prepared.compaction_outcomes == []
-    assert "Compaction failed; continuing without compaction" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "Compaction failed; continuing without compaction" in captured.out
+    assert "Timed-out compaction request" not in captured.out
 
 
 def test_compaction_hook_events_are_registered() -> None:

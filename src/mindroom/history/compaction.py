@@ -95,23 +95,8 @@ class _CompactionProviderTimeoutError(Exception):
 
 
 async def _drain_timed_out_compaction_request(response_task: asyncio.Task[ModelResponse]) -> None:
-    """Observe one timed-out provider task until it eventually finishes."""
-    try:
-        response = await response_task
-    except _CompactionProviderTimeoutError as exc:
-        logger.warning(
-            "Timed-out compaction request later failed with provider timeout",
-            error=str(exc.original),
-        )
-    except asyncio.CancelledError:
-        logger.debug("Timed-out compaction request finished as cancelled")
-    except Exception:
-        logger.warning("Timed-out compaction request later failed", exc_info=True)
-    else:
-        logger.warning(
-            "Timed-out compaction request later returned a discarded result",
-            has_text=isinstance(response.content, str) and bool(response.content.strip()),
-        )
+    """Drain one timed-out provider task so it cannot surface later."""
+    await asyncio.gather(response_task, return_exceptions=True)
 
 
 @dataclass(frozen=True)

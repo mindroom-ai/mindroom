@@ -6,7 +6,6 @@ import asyncio
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
-from html import escape
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from mindroom import interactive
