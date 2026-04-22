@@ -474,13 +474,14 @@ class CoalescingGate:
             )
             return
         if self._debounce_seconds() <= 0:
+            pending_count = len(gate.pending)
             await self._flush(key)
             emit_elapsed_timing(
                 "coalescing_gate.enqueue",
                 enqueue_start,
                 path="immediate_flush",
                 source_kind=pending_event.source_kind,
-                pending_count=len(gate.pending),
+                pending_count=pending_count,
             )
             return
         self._reset_timer(key, delay=self._debounce_seconds(), phase=GatePhase.DEBOUNCE)
@@ -605,22 +606,25 @@ class CoalescingGate:
         gate.phase = GatePhase.IN_FLIGHT
         self._cancel_timer(gate)
         pending_events = list(gate.pending)
+        pending_count = len(pending_events)
         gate.pending.clear()
+        dispatched = False
         try:
             dispatch_batch_start = time.monotonic()
             await self._dispatch_batch(build_coalesced_batch(key, pending_events))
+            dispatched = True
             emit_elapsed_timing(
                 "coalescing_gate.flush.dispatch_batch",
                 dispatch_batch_start,
-                pending_count=len(pending_events),
+                pending_count=pending_count,
                 bypass_grace=bypass_grace,
             )
         finally:
             emit_elapsed_timing(
                 "coalescing_gate.flush",
                 flush_start,
-                outcome="dispatched",
-                pending_count=len(pending_events),
+                outcome="dispatched" if dispatched else "failed",
+                pending_count=pending_count,
                 bypass_grace=bypass_grace,
             )
             current_key, gate = self._resolve_gate_entry(key, gate)
