@@ -2156,11 +2156,12 @@ class TestStreamingBehavior:
         await streaming._send_or_edit_message(mock_client)
 
         content = mock_client.room_send.call_args.kwargs["content"]
-        warmup_text = "⏳ Preparing isolated worker for shell.run..."
+        warmup_text = "⏳ Preparing isolated worker for `shell.run`..."
         assert content["body"].endswith(f"\n\n{warmup_text}")
         assert "<pre><code" in content["formatted_body"]
-        assert content["formatted_body"].endswith(f"<p>{warmup_text}</p>")
-        assert content["formatted_body"].rfind(f"<p>{warmup_text}</p>") > content["formatted_body"].rfind("</pre>")
+        expected_html = "<p>⏳ Preparing isolated worker for <code>shell.run</code>...</p>"
+        assert content["formatted_body"].endswith(expected_html)
+        assert content["formatted_body"].rfind(expected_html) > content["formatted_body"].rfind("</pre>")
 
     @pytest.mark.asyncio
     async def test_worker_warmup_visible_body_uses_canonical_matrix_body(self) -> None:
