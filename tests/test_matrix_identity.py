@@ -213,6 +213,18 @@ class TestHelperFunctions:
         drifted_id = MatrixID.parse(f"@mindroom_general_oldns:{domain}")
         assert drifted_id.agent_name(self.config, runtime_paths) == "general"
 
+    def test_matrix_id_agent_name_ignores_configured_id_after_username_drift(self, tmp_path: Path) -> None:
+        """Config-derived IDs should stop resolving once a current persisted username exists."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        domain = self.config.get_domain(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=domain)
+        state.save(runtime_paths=runtime_paths)
+
+        configured_id = MatrixID.parse(f"@mindroom_general:{domain}")
+        assert configured_id.agent_name(self.config, runtime_paths) is None
+
     def test_matrix_id_agent_name_ignores_old_domain_sender_ids(self, tmp_path: Path) -> None:
         """MatrixID.agent_name should only trust the current runtime domain."""
         self.config = _bind_runtime_paths(self.config, tmp_path)

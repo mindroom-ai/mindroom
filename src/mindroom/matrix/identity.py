@@ -34,20 +34,6 @@ def mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
     return _normalize_namespace(runtime_mindroom_namespace(runtime_paths))
 
 
-def _strip_agent_namespace_suffix(agent_identifier: str, runtime_paths: RuntimePaths) -> str | None:
-    """Return the agent name without namespace suffix, or None if namespace mismatches."""
-    namespace = mindroom_namespace(runtime_paths)
-    if not namespace:
-        return agent_identifier
-
-    suffix = f"_{namespace}"
-    if not agent_identifier.endswith(suffix):
-        return None
-
-    stripped = agent_identifier[: -len(suffix)]
-    return stripped or None
-
-
 def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths) -> str:
     """Build the managed room alias localpart for a room key."""
     namespace = mindroom_namespace(runtime_paths)
@@ -120,26 +106,13 @@ class MatrixID:
         if self.domain != config.get_domain(runtime_paths) or not self.username.startswith(self.AGENT_PREFIX):
             return None
 
-        # Remove prefix
-        agent_identifier = self.username[len(self.AGENT_PREFIX) :]
-        name = _strip_agent_namespace_suffix(
-            agent_identifier,
-            runtime_paths=runtime_paths,
-        )
-        if name is None:
-            return None
-
-        # Special check for the router agent:
-        # The router is a built-in agent that handles command routing and doesn't
-        # appear in config.agents. Without this check, extract_agent_name() would
-        # return None for router messages, causing other agents to incorrectly
-        # respond to router's error messages (e.g., when schedule parsing fails).
-        if name == ROUTER_AGENT_NAME or name in config.agents or name in config.teams:
-            return name
-
         persisted_usernames = managed_account_usernames(runtime_paths)
         for account_key, active_name in _active_managed_agent_account_names(config).items():
-            if persisted_usernames.get(account_key) == self.username:
+            expected_username = persisted_usernames.get(account_key) or agent_username_localpart(
+                active_name,
+                runtime_paths,
+            )
+            if expected_username == self.username:
                 return active_name
         return None
 
@@ -225,24 +198,34 @@ def _active_managed_agent_account_names(config: Config) -> dict[str, str]:
     return account_names
 
 
-def _configured_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> set[str]:
-    """Return the current configured internal sender IDs for this runtime."""
-    sender_ids = {matrix_id.full_id for matrix_id in config.get_ids(runtime_paths).values()}
+def _configured_active_account_sender_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, str]:
+    """Return configured sender IDs for active managed accounts.
+
+    These are only used as bootstrap fallbacks before a persisted username exists.
+    """
+    current_domain = config.get_domain(runtime_paths)
+    sender_ids = {
+        account_key: MatrixID.from_agent(agent_name, current_domain, runtime_paths).full_id
+        for account_key, agent_name in _active_managed_agent_account_names(config).items()
+    }
     mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
     if mindroom_user_id is not None:
-        sender_ids.add(mindroom_user_id)
+        sender_ids["agent_user"] = mindroom_user_id
     return sender_ids
 
 
 def active_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return sender IDs trusted for live authorization and relay decisions."""
-    sender_ids = _configured_internal_sender_ids(config, runtime_paths)
+    sender_ids: set[str] = set()
     current_domain = config.get_domain(runtime_paths)
     persisted_usernames = managed_account_usernames(runtime_paths)
+    configured_sender_ids = _configured_active_account_sender_ids(config, runtime_paths)
     for account_key in _active_managed_account_keys(config):
         username = persisted_usernames.get(account_key)
-        if username is not None:
-            sender_ids.add(MatrixID.from_username(username, current_domain).full_id)
+        if username is None:
+            sender_ids.add(configured_sender_ids[account_key])
+            continue
+        sender_ids.add(MatrixID.from_username(username, current_domain).full_id)
     return frozenset(sender_ids)
 
 

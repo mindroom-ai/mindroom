@@ -1239,6 +1239,51 @@ def test_sender_authorization_trusts_persisted_current_internal_accounts(tmp_pat
     assert is_authorized_sender("@mindroom_assistant_oldns:example.com", config, "!room:example.com") is True
 
 
+def test_reply_permissions_do_not_trust_configured_id_after_username_drift(tmp_path: Path) -> None:
+    """Config-derived IDs should stop bypassing allowlists after a persisted username drift."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": False,
+            "agent_reply_permissions": {"assistant": ["@alice:example.com"]},
+        },
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_sender_allowed_for_agent_reply("@mindroom_assistant:example.com", "assistant", config) is False
+
+
+def test_sender_authorization_does_not_trust_configured_id_after_username_drift(tmp_path: Path) -> None:
+    """Config-derived IDs should stop bypassing room auth after a persisted username drift."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": False},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_authorized_sender("@mindroom_assistant:example.com", config, "!room:example.com") is False
+
+
 def test_effective_sender_ignores_persisted_current_internal_accounts_with_domain_drift(tmp_path: Path) -> None:
     """Old-domain sender IDs must not stay trusted for live relay authorization."""
     config = _isolated_config(
