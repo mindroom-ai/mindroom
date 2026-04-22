@@ -12033,6 +12033,7 @@ class TestMultiAgentOrchestrator:
 
         client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
         client.room_send = AsyncMock(side_effect=_room_send)
+        client.rooms["!room:localhost"].add_member(client.user_id, "Code", None)
         bot = MagicMock()
         bot.agent_name = "code"
         bot.running = True
