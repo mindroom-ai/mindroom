@@ -106,10 +106,9 @@ class _ToolStreamState:
 
 @dataclass(slots=True)
 class _AssistantTextStreamState:
-    """Keep the emitted assistant prefix plus one buffered uncommitted suffix."""
+    """Track assistant text already exposed to the SSE client."""
 
     emitted_text: str = ""
-    buffered_suffix: str = ""
 
 
 def _load_config(
@@ -1065,46 +1064,38 @@ def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> 
     return _format_stream_tool_event(event, tool_state)
 
 
-def _flush_pending_assistant_delta(assistant_state: _AssistantTextStreamState) -> str | None:
-    """Flush the buffered assistant delta once it is safe to expose."""
-    pending_delta = assistant_state.buffered_suffix
-    if not pending_delta:
-        return None
-    assistant_state.emitted_text = f"{assistant_state.emitted_text}{pending_delta}"
-    assistant_state.buffered_suffix = ""
-    return pending_delta
-
-
 def _extract_stream_deltas(
     event: AIStreamChunk,
     tool_state: _ToolStreamState,
     assistant_state: _AssistantTextStreamState,
 ) -> list[str]:
-    """Extract SSE deltas while letting a final completion replace the buffered suffix."""
+    """Extract SSE deltas with explicit adapter semantics.
+
+    SSE clients cannot rewrite assistant text that was already emitted.
+    We therefore stream every assistant content delta immediately and only use
+    `RunCompletedEvent.content` as visible content when no assistant text has
+    been sent yet.
+    """
     deltas: list[str] = []
 
     if isinstance(event, RunContentEvent):
         if event.content:
-            if not assistant_state.emitted_text and not assistant_state.buffered_suffix:
-                first_delta = str(event.content)
-                assistant_state.emitted_text = first_delta
-                deltas.append(first_delta)
-                return deltas
-            assistant_state.buffered_suffix = f"{assistant_state.buffered_suffix}{event.content}"
+            delta = str(event.content)
+            assistant_state.emitted_text = f"{assistant_state.emitted_text}{delta}"
+            deltas.append(delta)
         return deltas
 
     if isinstance(event, RunCompletedEvent) and event.content is not None:
         final_text = str(event.content)
-        if final_text.startswith(assistant_state.emitted_text):
-            delta = final_text[len(assistant_state.emitted_text) :] or None
-            assistant_state.emitted_text = final_text
-            assistant_state.buffered_suffix = ""
-            if delta:
-                deltas.append(delta)
-            return deltas
+        had_visible_assistant_text = bool(assistant_state.emitted_text)
         assistant_state.emitted_text = final_text
-        assistant_state.buffered_suffix = ""
+        if final_text and not had_visible_assistant_text:
+            deltas.append(final_text)
         return deltas
+
+    if isinstance(event, str):
+        assistant_state.emitted_text = f"{assistant_state.emitted_text}{event}"
+        return [event]
 
     delta = _extract_stream_text(event, tool_state)
     if delta:
@@ -1185,10 +1176,6 @@ async def _stream_completion(
                     assistant_state,
                 ):
                     yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
-
-            flushed_delta = _flush_pending_assistant_delta(assistant_state)
-            if flushed_delta:
-                yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': flushed_delta})}\n\n"
 
             # 4. Final chunk with finish_reason
             logger.info("Chat completion sent", model=agent_name, stream=True)

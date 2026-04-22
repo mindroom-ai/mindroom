@@ -1359,11 +1359,11 @@ class TestStreamingCompletion:
 
         assert text == "final answer"
 
-    def test_streaming_corrective_final_content_does_not_duplicate_prior_delta(
+    def test_streaming_final_completion_does_not_append_after_emitted_assistant_text(
         self,
         app_client: TestClient,
     ) -> None:
-        """Corrective final completion content should not duplicate already-streamed text."""
+        """Terminal completion text is ignored once assistant text has already streamed."""
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="hel")
@@ -1390,7 +1390,7 @@ class TestStreamingCompletion:
             for chunk in chunks
             if "content" in chunk["choices"][0]["delta"]
         ]
-        assert "".join(contents) == "hello"
+        assert "".join(contents) == "hel"
 
     def test_extract_stream_deltas_emits_first_assistant_chunk_immediately(self) -> None:
         """The first assistant content chunk should not wait for stream completion."""
@@ -1405,17 +1405,34 @@ class TestStreamingCompletion:
 
         assert deltas == ["hello"]
         assert assistant_state.emitted_text == "hello"
-        assert assistant_state.buffered_suffix == ""
 
-    def test_streaming_corrective_final_content_can_replace_stale_buffered_tail(
+    def test_extract_stream_deltas_emits_subsequent_assistant_chunks_immediately(self) -> None:
+        """Later assistant chunks should stream immediately instead of waiting for final flush."""
+        tool_state = openai_compat._ToolStreamState()
+        assistant_state = openai_compat._AssistantTextStreamState()
+
+        first = openai_compat._extract_stream_deltas(
+            RunContentEvent(content="Hello "),
+            tool_state,
+            assistant_state,
+        )
+        second = openai_compat._extract_stream_deltas(
+            RunContentEvent(content="world!"),
+            tool_state,
+            assistant_state,
+        )
+
+        assert first == ["Hello "]
+        assert second == ["world!"]
+        assert assistant_state.emitted_text == "Hello world!"
+
+    def test_streaming_final_only_completion_content_is_emitted_when_no_prior_content(
         self,
         app_client: TestClient,
     ) -> None:
-        """A final corrective body should replace one buffered stale tail, not preserve it."""
+        """Terminal-only completion content should still reach SSE clients."""
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
-            yield RunContentEvent(content="hel")
-            yield RunContentEvent(content="lx")
             yield RunCompletedEvent(content="hello")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -1441,17 +1458,15 @@ class TestStreamingCompletion:
         ]
         assert "".join(contents) == "hello"
 
-    def test_streaming_corrective_final_content_can_replace_multiple_buffered_chunks(
+    def test_streaming_final_completion_does_not_rewrite_emitted_prefix(
         self,
         app_client: TestClient,
     ) -> None:
-        """A final corrective body should replace the full buffered assistant suffix, not one chunk."""
+        """SSE keeps already-emitted assistant text even if final content disagrees."""
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
-            yield RunContentEvent(content="he")
-            yield RunContentEvent(content="llx")
-            yield RunContentEvent(content="y")
-            yield RunCompletedEvent(content="hello")
+            yield RunContentEvent(content="hx")
+            yield RunCompletedEvent(content="hi")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -1474,13 +1489,13 @@ class TestStreamingCompletion:
             for chunk in chunks
             if "content" in chunk["choices"][0]["delta"]
         ]
-        assert "".join(contents) == "hello"
+        assert "".join(contents) == "hx"
 
-    def test_streaming_corrective_final_content_can_replace_buffered_suffix_across_tool_events(
+    def test_streaming_tool_events_do_not_delay_assistant_text(
         self,
         app_client: TestClient,
     ) -> None:
-        """Tool events should not force out a stale buffered suffix before the final correction arrives."""
+        """Assistant chunks should stream before tool events instead of being withheld until completion."""
         from agno.models.response import ToolExecution  # noqa: PLC0415
         from agno.run.agent import ToolCallStartedEvent  # noqa: PLC0415
 
@@ -1492,9 +1507,8 @@ class TestStreamingCompletion:
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="hel")
-            yield RunContentEvent(content="lx")
+            yield RunContentEvent(content="lo")
             yield ToolCallStartedEvent(tool=tool_started)
-            yield RunCompletedEvent(content="hello")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
