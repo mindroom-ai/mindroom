@@ -37,7 +37,7 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
+from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
@@ -1990,9 +1990,10 @@ class TestStreamingBehavior:
                 *,
                 cancelled: bool = False,
                 restart_interrupted: bool = False,
+                cancel_source: CancelSource | None = None,
                 error: Exception | None = None,
             ) -> None:
-                del client, cancelled, restart_interrupted
+                del client, cancelled, restart_interrupted, cancel_source
                 finalize_calls.append(error)
 
         async def fail_stream_supervision(
@@ -2352,7 +2353,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("terminal_kind", "expected_final_text"),
-        [("cancel", CANCELLED_RESPONSE_NOTE), ("complete", PROGRESS_PLACEHOLDER)],
+        [("cancel", INTERRUPTED_RESPONSE_NOTE), ("complete", PROGRESS_PLACEHOLDER)],
     )
     async def test_send_streaming_response_terminal_update_ignores_late_progress(
         self,

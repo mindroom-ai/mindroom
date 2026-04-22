@@ -161,6 +161,7 @@ def build_restart_interrupted_body(text: str) -> str:
         return _RESTART_INTERRUPTED_RESPONSE_NOTE
     return f"{stripped_text}\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}"
 
+
 @dataclass(frozen=True)
 class _CommittedDeliveryState:
     """One frozen non-terminal stream state that definitely reached Matrix."""
