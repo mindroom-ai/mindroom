@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -764,8 +763,15 @@ async def _generate_compaction_summary(
         )
     except asyncio.CancelledError:
         request_task_cancel(response_task)
-        with suppress(asyncio.CancelledError):
+        try:
             await response_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning(
+                "Compaction request raised during cancellation cleanup",
+                exc_info=True,
+            )
         raise
 
     if response_task not in done:

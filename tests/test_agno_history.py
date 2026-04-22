@@ -837,6 +837,47 @@ async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelle
 
 
 @pytest.mark.asyncio
+async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_error() -> None:
+    class _CleanupErrorSummaryModel(FakeModel):
+        def __init__(self, *, model_id: str, provider: str) -> None:
+            super().__init__(id=model_id, provider=provider)
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.response_task: asyncio.Task[object] | None = None
+
+        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            self.response_task = asyncio.current_task()
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                msg = "provider cleanup failed"
+                raise RuntimeError(msg) from None
+            raise AssertionError
+
+    model = _CleanupErrorSummaryModel(model_id="summary-model", provider="fake")
+    summary_task = asyncio.create_task(
+        _generate_compaction_summary(
+            model=model,
+            summary_input="Current prompt",
+        ),
+    )
+
+    await asyncio.wait_for(model.started.wait(), timeout=0.1)
+    summary_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(summary_task, timeout=0.1)
+
+    await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
+    assert model.response_task is not None
+    assert model.response_task.done() is True
+    with pytest.raises(RuntimeError, match="provider cleanup failed"):
+        model.response_task.result()
+
+
+@pytest.mark.asyncio
 async def test_compaction_call_timeout_falls_back_in_runtime(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
