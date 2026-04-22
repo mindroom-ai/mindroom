@@ -47,6 +47,26 @@ if TYPE_CHECKING:
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/others/spotify",
     helper_text="Get an access token from the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)",
+    function_names=(
+        "add_tracks_to_playlist",
+        "create_playlist",
+        "get_album_tracks",
+        "get_artist_top_tracks",
+        "get_current_user",
+        "get_currently_playing",
+        "get_my_top_artists",
+        "get_my_top_tracks",
+        "get_playlist",
+        "get_track_recommendations",
+        "get_user_playlists",
+        "play_track",
+        "remove_tracks_from_playlist",
+        "search_albums",
+        "search_artists",
+        "search_playlists",
+        "search_tracks",
+        "update_playlist_details",
+    ),
 )
 def spotify_tools() -> type[SpotifyTools]:
     """Return Spotify tools for music search and playlist management."""

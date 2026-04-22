@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["groq"],
     docs_url="https://docs.agno.com/tools/toolkits/models/groq",
+    function_names=("generate_speech", "transcribe_audio", "translate_audio"),
 )
 def groq_tools() -> type[GroqTools]:
     """Return Groq AI tools for fast audio transcription, translation, and text-to-speech."""

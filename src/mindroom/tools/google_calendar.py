@@ -53,6 +53,22 @@ if TYPE_CHECKING:
     ),
     dependencies=["google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib"],
     docs_url="https://docs.agno.com/tools/toolkits/others/googlecalendar",
+    function_names=(
+        "check_availability",
+        "create_event",
+        "delete_event",
+        "fetch_all_events",
+        "find_available_slots",
+        "get_event",
+        "get_event_attendees",
+        "list_calendars",
+        "list_events",
+        "move_event",
+        "quick_add_event",
+        "respond_to_event",
+        "search_events",
+        "update_event",
+    ),
 )
 def google_calendar_tools() -> type[GoogleCalendarTools]:
     """Return Google Calendar tools for calendar management."""

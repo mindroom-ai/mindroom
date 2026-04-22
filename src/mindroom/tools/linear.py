@@ -36,6 +36,16 @@ if TYPE_CHECKING:
     ],
     dependencies=["requests"],
     docs_url="https://docs.agno.com/tools/toolkits/others/linear",
+    function_names=(
+        "create_issue",
+        "get_high_priority_issues",
+        "get_issue_details",
+        "get_teams_details",
+        "get_user_assigned_issues",
+        "get_user_details",
+        "get_workflow_issues",
+        "update_issue",
+    ),
 )
 def linear_tools() -> type[LinearTools]:
     """Return Linear tools for issue tracking and project management."""

@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["agentql", "playwright"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/agentql",
+    function_names=("custom_scrape_website", "scrape_website"),
 )
 def agentql_tools() -> type[AgentQLTools]:
     """Return AgentQL tools for AI-powered web scraping."""

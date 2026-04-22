@@ -165,6 +165,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["trafilatura"],
     docs_url="https://docs.agno.com/tools/toolkits/others/trafilatura",
+    function_names=("crawl_website", "extract_batch", "extract_metadata_only", "extract_text", "html_to_text"),
 )
 def trafilatura_tools() -> type[TrafilaturaTools]:
     """Return Trafilatura tools for web content extraction."""

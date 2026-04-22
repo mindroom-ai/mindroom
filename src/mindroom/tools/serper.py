@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["requests"],
     docs_url="https://docs.agno.com/tools/toolkits/search/serper",
+    function_names=("scrape_webpage", "search_news", "search_scholar", "search_web"),
 )
 def serper_tools() -> type[SerperTools]:
     """Return Serper tools for Google search, news, academic papers, and web scraping."""

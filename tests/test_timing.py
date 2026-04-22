@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
+import textwrap
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -224,6 +229,67 @@ def test_timed_logs_omit_scope_when_unset(monkeypatch: pytest.MonkeyPatch) -> No
     run()
 
     _assert_timing_logged(logger, "plain_label")
+
+
+def _timing_probe_labels(
+    *,
+    module_name: str,
+    call_expression: str,
+    patch_target: str,
+) -> list[str]:
+    """Run one isolated subprocess probe and return emitted timing labels."""
+    env = os.environ.copy()
+    env["MINDROOM_TIMING"] = "1"
+    script = textwrap.dedent(
+        f"""
+        import json
+        from unittest.mock import Mock, patch
+
+        import mindroom.timing as timing_module
+
+        timing_module.logger = Mock()
+
+        import {module_name} as target_module
+
+        with patch("{patch_target}", return_value=object()):
+            {call_expression}
+
+        labels = [
+            call.kwargs["label"]
+            for call in timing_module.logger.info.call_args_list
+            if call.args == ("timing_elapsed",)
+        ]
+        print(json.dumps(labels))
+        """,
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_load_agent_model_instance_preserves_prompt_assembly_subspan() -> None:
+    """Agent model init should keep its dedicated system-prompt timing label."""
+    labels = _timing_probe_labels(
+        module_name="mindroom.agents",
+        call_expression='target_module._load_agent_model_instance(object(), object(), "agent-model")',
+        patch_target="mindroom.agents.model_loading.get_model_instance",
+    )
+    assert labels == ["system_prompt_assembly.agent_create.model_instance"]
+
+
+def test_load_compaction_model_preserves_history_prepare_subspan() -> None:
+    """History compaction model init should keep its dedicated timing label."""
+    labels = _timing_probe_labels(
+        module_name="mindroom.history.runtime",
+        call_expression='target_module._load_compaction_model(object(), object(), "compaction-model")',
+        patch_target="mindroom.history.runtime.model_loading.get_model_instance",
+    )
+    assert labels == ["system_prompt_assembly.history_prepare.compaction_model_init"]
 
 
 def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> None:

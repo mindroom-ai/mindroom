@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["reportlab"],
     docs_url="https://docs.agno.com/tools/toolkits/others/file_generation",
+    function_names=("generate_csv_file", "generate_json_file", "generate_pdf_file", "generate_text_file"),
 )
 def file_generation_tools() -> type[FileGenerationTools]:
     """Return File Generation tools for creating JSON, CSV, PDF, and text files."""

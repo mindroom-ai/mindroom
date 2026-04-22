@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["google-genai"],
     docs_url="https://docs.agno.com/tools/toolkits/models/gemini",
+    function_names=("generate_image", "generate_video"),
 )
 def gemini_tools() -> type[GeminiTools]:
     """Return Gemini tools for image and video generation."""

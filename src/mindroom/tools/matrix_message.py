@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     icon_color="text-green-500",
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
+    function_names=("matrix_message",),
 )
 def matrix_message_tools() -> type[MatrixMessageTools]:
     """Return native Matrix messaging tools."""

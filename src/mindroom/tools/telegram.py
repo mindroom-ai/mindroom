@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx"],
     docs_url="https://core.telegram.org/bots/api",
+    function_names=("send_message",),
 )
 def telegram_tools() -> type[TelegramTools]:
     """Return Telegram tools for sending messages."""

@@ -307,6 +307,19 @@ def _openclaw_compat_tools() -> type[Toolkit]:
         ),
     ],
     docs_url="https://www.home-assistant.io/integrations/",
+    function_names=(
+        "activate_scene",
+        "call_service",
+        "get_entity_state",
+        "list_entities",
+        "set_brightness",
+        "set_color",
+        "set_temperature",
+        "toggle",
+        "trigger_automation",
+        "turn_off",
+        "turn_on",
+    ),
 )
 def _homeassistant_tools() -> type[Toolkit]:
     """Return Home Assistant tools for smart home control."""

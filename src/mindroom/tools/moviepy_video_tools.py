@@ -57,6 +57,14 @@ if TYPE_CHECKING:
     ],
     dependencies=["moviepy"],  # From agno requirements
     docs_url="https://docs.agno.com/tools/toolkits/others/moviepy",  # URL from llms.txt but WITHOUT .md extension
+    function_names=(
+        "create_caption_clips",
+        "create_srt",
+        "embed_captions",
+        "extract_audio",
+        "parse_srt",
+        "split_text_into_lines",
+    ),
 )
 def moviepy_video_tools() -> type[MoviePyVideoTools]:
     """Return MoviePy Video Tools for video processing, audio extraction, and caption generation."""

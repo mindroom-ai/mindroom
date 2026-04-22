@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     icon_color="text-emerald-500",
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
+    function_names=("cancel_schedule", "edit_schedule", "list_schedules", "schedule"),
 )
 def scheduler_tools() -> type[SchedulerTools]:
     """Return scheduler tools for scheduling tasks from agent tool calls."""

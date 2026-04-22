@@ -20,19 +20,23 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Provider | Use | Preferred model | Model string to use |
 | --- | --- | --- | --- |
 | Anthropic | Balanced default | Claude Sonnet 4.6 | `claude-sonnet-4-6` |
-| Anthropic | Max intelligence | Claude Opus 4.6 | `claude-opus-4-6` |
+| Anthropic | Max intelligence | Claude Opus 4.7 | `claude-opus-4-7` |
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
 | OpenAI | Frontier default | GPT-5.4 | `gpt-5.4` |
-| Google | Fast / cheap text | Gemini 3.1 Flash-Lite Preview | `gemini-3.1-flash-lite-preview` |
-| Google | Strongest text / coding | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
-| Google | Image generation / editing | Nano Banana 2 Preview | `gemini-3.1-flash-image-preview` |
-| Google | Embeddings for `google` / `vertexai` | Gemini Embedding 2 Preview | `gemini-embedding-2-preview` |
+| Google (Gemini API) | Fast / cheap text | Gemini 3.1 Flash-Lite Preview | `gemini-3.1-flash-lite-preview` |
+| Google (Gemini API) | Strongest text / coding | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
+| Google (Gemini API) | Image generation / editing | Nano Banana 2 Preview | `gemini-3.1-flash-image-preview` |
+| Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 Preview | `gemini-embedding-2-preview` |
 
-For `anthropic`, prefer `claude-sonnet-4-6`, `claude-opus-4-6`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
+For `anthropic`, prefer `claude-sonnet-4-6`, `claude-opus-4-7`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
-Current docs list bare Vertex IDs for Claude 4.6 such as `claude-sonnet-4-6` and `claude-opus-4-6`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
+Current docs list bare Vertex IDs for current Claude models such as `claude-sonnet-4-6` and `claude-opus-4-7`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
-For Google image work, use the official product name from the docs even if older prompts use a different nickname.
+The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
+For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
+Current Vertex AI image docs prominently document `gemini-3-pro-image-preview` and `gemini-2.5-flash-image`, and the right default depends on the specific Vertex surface you are editing.
+For Google image work, use the official product name from the docs for the provider surface you are editing.
+Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Vertex AI docs use their own product naming and model tables.
 
 ## Architecture
 

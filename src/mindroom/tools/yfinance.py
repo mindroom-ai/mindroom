@@ -99,6 +99,17 @@ if TYPE_CHECKING:
     ],
     dependencies=["yfinance"],
     docs_url="https://docs.agno.com/tools/toolkits/others/yfinance",
+    function_names=(
+        "get_analyst_recommendations",
+        "get_company_info",
+        "get_company_news",
+        "get_current_stock_price",
+        "get_historical_stock_prices",
+        "get_income_statements",
+        "get_key_financial_ratios",
+        "get_stock_fundamentals",
+        "get_technical_indicators",
+    ),
 )
 def yfinance_tools() -> type[YFinanceTools]:
     """Return Yahoo Finance tools for financial data."""

@@ -9,6 +9,7 @@ from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from agno.models.message import Message
 
+from mindroom import ai_runtime
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
@@ -21,6 +22,7 @@ from mindroom.constants import (
 )
 from mindroom.history.runtime import (
     ScopeSessionContext,
+    apply_replay_plan,
     estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
@@ -726,3 +728,50 @@ async def prepare_bound_team_execution_context(
         render_messages_text_fn=render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,
     )
+
+
+async def prepare_bound_team_run_context(
+    *,
+    scope_context: ScopeSessionContext | None,
+    agents: list[Agent],
+    team: Team,
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    entity_name: str | None,
+    active_model_name: str | None,
+    active_context_window: int | None,
+    reply_to_event_id: str | None = None,
+    active_event_ids: Collection[str] = frozenset(),
+    response_sender_id: str | None = None,
+    current_sender_id: str | None = None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
+) -> PreparedExecutionContext:
+    """Prepare a team run with queued-notice scrubbing and replay application."""
+    ai_runtime.scrub_queued_notice_session_context(
+        scope_context=scope_context,
+        entity_name=entity_name or str(team.name or "Team"),
+    )
+    prepared_execution = await prepare_bound_team_execution_context(
+        scope_context=scope_context,
+        agents=agents,
+        team=team,
+        prompt=prompt,
+        thread_history=thread_history,
+        runtime_paths=runtime_paths,
+        config=config,
+        team_name=entity_name,
+        active_model_name=active_model_name,
+        active_context_window=active_context_window,
+        reply_to_event_id=reply_to_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
+        current_sender_id=current_sender_id,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+        thread_history_render_limits=thread_history_render_limits,
+    )
+    if prepared_execution.replay_plan is not None:
+        apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
+    return prepared_execution

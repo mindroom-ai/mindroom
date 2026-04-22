@@ -48,6 +48,16 @@ if TYPE_CHECKING:
     ],
     dependencies=[],  # httpx already included in main dependencies
     docs_url="https://docs.agno.com/tools/toolkits/search/searxng",
+    function_names=(
+        "image_search",
+        "it_search",
+        "map_search",
+        "music_search",
+        "news_search",
+        "science_search",
+        "search_web",
+        "video_search",
+    ),
 )
 def searxng_tools() -> type[Searxng]:
     """Return SearxNG search tools for web, images, news, and specialized content search."""

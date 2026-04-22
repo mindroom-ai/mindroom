@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     dependencies=[],
     docs_url="https://docs.agno.com/tools/toolkits/others/unsplash",
     helper_text="Get a free API key from [Unsplash Developers](https://unsplash.com/developers)",
+    function_names=("download_photo", "get_photo", "get_random_photo", "search_photos"),
 )
 def unsplash_tools() -> type[UnsplashTools]:
     """Return Unsplash tools for image search."""

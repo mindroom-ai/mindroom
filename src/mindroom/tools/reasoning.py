@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     ],
     dependencies=[],
     docs_url="https://docs.agno.com/tools/toolkits/others/reasoning",
+    function_names=("analyze", "think"),
 )
 def reasoning_tools() -> type[ReasoningTools]:
     """Return Reasoning tools for step-by-step problem solving."""

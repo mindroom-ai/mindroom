@@ -104,6 +104,9 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
+    "mindroom.api.openai_compat",
+    "mindroom.execution_preparation",
+    "mindroom.history.runtime",
     "mindroom.response_runner",
     "mindroom.teams",
     "mindroom.thread_summary",
@@ -301,6 +304,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.execution_preparation"
 depends_on = [
+    "mindroom.ai_runtime",
     "mindroom.constants",
     "mindroom.history.runtime",
     "mindroom.matrix.client_visible_messages",
@@ -918,7 +922,8 @@ depends_on = [
     "mindroom.agents",
     "mindroom.constants",
     "mindroom.matrix.event_info",
-    "mindroom.scheduling", "mindroom.tool_system.skills", "mindroom.tool_system.worker_routing", "mindroom.tool_system.runtime_context",
+    "mindroom.runtime_resolution",
+    "mindroom.scheduling", "mindroom.tool_system.metadata", "mindroom.tool_system.skills", "mindroom.tool_system.worker_routing", "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
@@ -1193,7 +1198,6 @@ expose = [
     "ensure_default_agent_workspaces",
     "get_rooms_for_entity",
     "show_tool_calls_for_agent",
-    "build_agent_tool_init_context",
     "build_agent_toolkit",
     "get_agent_toolkit_names",
     "create_session_storage",
@@ -1223,7 +1227,6 @@ expose = [
     "decide_team_formation",
     "materialize_exact_team_members",
     "build_materialized_team_instance",
-    "prepare_materialized_team_execution",
     "format_team_response",
     "is_cancelled_run_output",
     "is_errored_run_output",

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     icon_color="text-teal-500",
     config_fields=[],
     dependencies=[],
+    function_names=("get_attachment", "list_attachments", "register_attachment"),
 )
 def attachments_tools() -> type[AttachmentTools]:
     """Return attachments tools."""

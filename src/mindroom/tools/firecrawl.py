@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["firecrawl-py"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/firecrawl",
+    function_names=("crawl_website", "map_website", "scrape_website", "search_web"),
 )
 def firecrawl_tools() -> type[FirecrawlTools]:
     """Return Firecrawl tools for web scraping and crawling."""

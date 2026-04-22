@@ -41,6 +41,7 @@ if TYPE_CHECKING:
             description="Optional directory for browser screenshots, PDFs, and downloads.",
         ),
     ],
+    function_names=("browser",),
 )
 def browser_tools() -> type[BrowserTools]:
     """Return Browser tools with OpenClaw-style action routing."""

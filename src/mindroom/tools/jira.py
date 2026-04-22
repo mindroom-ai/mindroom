@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["jira"],
     docs_url="https://docs.agno.com/tools/toolkits/others/jira",
+    function_names=("add_comment", "add_worklog", "create_issue", "get_issue", "search_issues"),
 )
 def jira_tools() -> type[JiraTools]:
     """Return Jira tools for issue tracking and project management."""

@@ -99,6 +99,16 @@ if TYPE_CHECKING:
     ],
     dependencies=["browserbase", "playwright"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/browserbase",
+    function_names=(
+        "aclose_session",
+        "aget_page_content",
+        "anavigate_to",
+        "ascreenshot",
+        "close_session",
+        "get_page_content",
+        "navigate_to",
+        "screenshot",
+    ),
 )
 def browserbase_tools() -> type[BrowserbaseTools]:
     """Return Browserbase tools for browser automation and web scraping."""

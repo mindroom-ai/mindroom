@@ -97,6 +97,16 @@
       "description": "Tool for interacting with Discord channels and servers",
       "display_name": "Discord",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/discord",
+      "function_names": [
+        "delete_message",
+        "get_channel_info",
+        "get_channel_messages",
+        "get_tool_config",
+        "get_tool_description",
+        "get_tool_name",
+        "list_channels",
+        "send_message"
+      ],
       "helper_text": null,
       "icon": "SiDiscord",
       "icon_color": "text-indigo-500",
@@ -116,6 +126,9 @@
       "description": "Low-level Matrix event, state, and room search operations (send_event, get_state, put_state, redact, get_event, search)",
       "display_name": "Matrix API",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "matrix_api"
+      ],
       "helper_text": "Search uses action='search' with required `search_term`. `room_id` defaults to the current room. If `keys` is omitted, all supported keys (['content.body', 'content.name', 'content.topic']) are searched via the server default. Pass `keys=[...]` to narrow, and when supplied they must only use those values. `order_by` is `rank` or `recent`; `limit` must be 1-50; `filter.rooms` must be omitted or contain only that room; `filter.limit` is not supported because the top-level `limit` parameter is authoritative; `next_batch` is sent as the Matrix search query parameter; and optional `event_context` is passed through. Responses return `{count, next_batch, results}` where each result contains only `rank`, `event_id`, `room_id`, `sender`, `origin_server_ts`, `type`, `snippet`, and optional `context` (including `profile_info` when `event_context.include_profile` is requested). Full event `content` is intentionally omitted; use `get_event` when needed.",
       "icon": "MessageSquare",
       "icon_color": "text-emerald-500",
@@ -135,6 +148,9 @@
       "description": "Send, reply, react, read, room-threads, thread-list, and edit Matrix messages with room/thread context defaults",
       "display_name": "Matrix Message",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "matrix_message"
+      ],
       "helper_text": null,
       "icon": "MessageSquare",
       "icon_color": "text-green-500",
@@ -154,6 +170,9 @@
       "description": "Inspect Matrix room metadata, members, threads, and state",
       "display_name": "Matrix Room",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "matrix_room"
+      ],
       "helper_text": null,
       "icon": "LayoutList",
       "icon_color": "text-blue-500",
@@ -378,6 +397,20 @@
       "description": "Send messages and manage channels",
       "display_name": "Slack",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/slack",
+      "function_names": [
+        "download_file",
+        "download_file_bytes",
+        "get_channel_history",
+        "get_channel_info",
+        "get_thread",
+        "get_user_info",
+        "list_channels",
+        "list_users",
+        "search_messages",
+        "send_message",
+        "send_message_thread",
+        "upload_file"
+      ],
       "helper_text": null,
       "icon": "SiSlack",
       "icon_color": "text-purple-600",
@@ -446,6 +479,9 @@
       "description": "Send messages via Telegram bot",
       "display_name": "Telegram",
       "docs_url": "https://core.telegram.org/bots/api",
+      "function_names": [
+        "send_message"
+      ],
       "helper_text": null,
       "icon": "SiTelegram",
       "icon_color": "text-blue-500",
@@ -465,6 +501,9 @@
       "description": "Set or update Matrix thread summaries with room/thread context defaults",
       "display_name": "Thread Summary",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "set_thread_summary"
+      ],
       "helper_text": null,
       "icon": "MessageCircleMore",
       "icon_color": "text-cyan-500",
@@ -484,6 +523,11 @@
       "description": "Tag, untag, and inspect Matrix threads using shared room-state markers",
       "display_name": "Thread Tags",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "list_thread_tags",
+        "tag_thread",
+        "untag_thread"
+      ],
       "helper_text": null,
       "icon": "Tags",
       "icon_color": "text-emerald-500",
@@ -636,6 +680,12 @@
       "description": "SMS messaging and voice communication platform",
       "display_name": "Twilio",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/twilio",
+      "function_names": [
+        "get_call_details",
+        "list_messages",
+        "send_sms",
+        "validate_phone_number"
+      ],
       "helper_text": null,
       "icon": "SiTwilio",
       "icon_color": "text-red-600",
@@ -704,6 +754,10 @@
       "description": "Video conferencing and messaging platform for teams",
       "display_name": "Webex",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/webex",
+      "function_names": [
+        "list_rooms",
+        "send_message"
+      ],
       "helper_text": null,
       "icon": "SiWebex",
       "icon_color": "text-blue-600",
@@ -880,6 +934,16 @@
       "description": "Send text and template messages via WhatsApp Business API",
       "display_name": "WhatsApp Business",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/whatsapp",
+      "function_names": [
+        "send_document",
+        "send_image",
+        "send_list_message",
+        "send_location",
+        "send_reaction",
+        "send_reply_buttons",
+        "send_template_message",
+        "send_text_message"
+      ],
       "helper_text": null,
       "icon": "SiWhatsapp",
       "icon_color": "text-green-500",
@@ -946,6 +1010,10 @@
       "description": "Apache Airflow DAG file management for workflow orchestration",
       "display_name": "Airflow",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/airflow",
+      "function_names": [
+        "read_dag_file",
+        "save_dag_file"
+      ],
       "helper_text": null,
       "icon": "FaCog",
       "icon_color": "text-blue-600",
@@ -990,6 +1058,9 @@
       "description": "Web scraping, crawling, data extraction, and web automation platform with ready-to-use Actors",
       "display_name": "Apify",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/apify",
+      "function_names": [
+        "register_actor"
+      ],
       "helper_text": null,
       "icon": "FaCode",
       "icon_color": "text-blue-600",
@@ -1058,6 +1129,10 @@
       "description": "Serverless function management and execution",
       "display_name": "AWS Lambda",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/aws_lambda",
+      "function_names": [
+        "invoke_function",
+        "list_functions"
+      ],
       "helper_text": null,
       "icon": "FaAws",
       "icon_color": "text-orange-500",
@@ -1162,6 +1237,16 @@
       "description": "Manage Bitbucket repositories, pull requests, commits, and issues",
       "display_name": "Bitbucket",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/bitbucket",
+      "function_names": [
+        "create_repository",
+        "get_pull_request_changes",
+        "get_pull_request_details",
+        "get_repository_details",
+        "list_all_pull_requests",
+        "list_issues",
+        "list_repositories",
+        "list_repository_commits"
+      ],
       "helper_text": "Create an app password at [Bitbucket Settings](https://bitbucket.org/account/settings/app-passwords/)",
       "icon": "SiBitbucket",
       "icon_color": "text-blue-600",
@@ -1291,6 +1376,13 @@
       "description": "Calendar scheduling and booking management",
       "display_name": "Cal.com",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/calcom",
+      "function_names": [
+        "cancel_booking",
+        "create_booking",
+        "get_available_slots",
+        "get_upcoming_bookings",
+        "reschedule_booking"
+      ],
       "helper_text": null,
       "icon": "FaCalendarAlt",
       "icon_color": "text-blue-600",
@@ -1310,6 +1402,16 @@
       "description": "Mathematical calculator with basic and advanced operations",
       "display_name": "Calculator",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/calculator",
+      "function_names": [
+        "add",
+        "divide",
+        "exponentiate",
+        "factorial",
+        "is_prime",
+        "multiply",
+        "square_root",
+        "subtract"
+      ],
       "helper_text": null,
       "icon": "Calculator",
       "icon_color": "text-blue-500",
@@ -1414,6 +1516,11 @@
       "description": "Voice AI services including text-to-speech and voice localization",
       "display_name": "Cartesia",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/cartesia",
+      "function_names": [
+        "list_voices",
+        "localize_voice",
+        "text_to_speech"
+      ],
       "helper_text": null,
       "icon": "VolumeX",
       "icon_color": "text-purple-500",
@@ -1614,6 +1721,13 @@
       "description": "Run persistent Claude coding sessions with tool-use and subagents",
       "display_name": "Claude Agent SDK",
       "docs_url": "https://platform.claude.com/docs/en/agent-sdk/python",
+      "function_names": [
+        "claude_end_session",
+        "claude_interrupt",
+        "claude_send",
+        "claude_session_status",
+        "claude_start_session"
+      ],
       "helper_text": null,
       "icon": "Bot",
       "icon_color": "text-orange-500",
@@ -1656,6 +1770,14 @@
       "description": "Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents; keep file for backward compatibility.",
       "display_name": "Coding Tools",
       "docs_url": null,
+      "function_names": [
+        "edit_file",
+        "find_files",
+        "grep",
+        "ls",
+        "read_file",
+        "write_file"
+      ],
       "helper_text": null,
       "icon": "Code",
       "icon_color": "text-purple-500",
@@ -1677,6 +1799,11 @@
       "description": "Build and manage MindRoom agents with expert knowledge of the system",
       "display_name": "Config Manager",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "get_info",
+        "manage_agent",
+        "manage_team"
+      ],
       "helper_text": null,
       "icon": "Settings",
       "icon_color": "text-purple-500",
@@ -1757,6 +1884,14 @@
       "description": "Atlassian wiki platform for retrieving, creating, and updating pages",
       "display_name": "Confluence",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/confluence",
+      "function_names": [
+        "create_page",
+        "get_all_page_from_space",
+        "get_all_space_detail",
+        "get_page_content",
+        "get_space_key",
+        "update_page"
+      ],
       "helper_text": null,
       "icon": "SiConfluence",
       "icon_color": "text-blue-600",
@@ -1885,6 +2020,9 @@
       "description": "Make HTTP requests to any external API with customizable authentication and parameters",
       "display_name": "Custom API",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/custom_api",
+      "function_names": [
+        "make_request"
+      ],
       "helper_text": null,
       "icon": "Globe",
       "icon_color": "text-blue-500",
@@ -2001,6 +2139,9 @@
       "description": "OpenAI DALL-E image generation from text prompts",
       "display_name": "DALL-E",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/dalle",
+      "function_names": [
+        "create_image"
+      ],
       "helper_text": null,
       "icon": "FaImage",
       "icon_color": "text-green-600",
@@ -2237,6 +2378,15 @@
       "description": "Execute code in secure, remote sandbox environments",
       "display_name": "Daytona",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/daytona",
+      "function_names": [
+        "change_directory",
+        "create_file",
+        "delete_file",
+        "list_files",
+        "read_file",
+        "run_code",
+        "run_shell_command"
+      ],
       "helper_text": null,
       "icon": "FaTerminal",
       "icon_color": "text-blue-600",
@@ -2317,6 +2467,10 @@
       "description": "Hindi and Indian language text-to-speech synthesis",
       "display_name": "DesiVocal",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/desi_vocal",
+      "function_names": [
+        "get_voices",
+        "text_to_speech"
+      ],
       "helper_text": "Get an API key from [DesiVocal](https://desivocal.com/)",
       "icon": "FaMicrophone",
       "icon_color": "text-orange-600",
@@ -2336,6 +2490,32 @@
       "description": "Container, image, volume, and network management",
       "display_name": "Docker",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/docker",
+      "function_names": [
+        "build_image",
+        "connect_container_to_network",
+        "create_network",
+        "create_volume",
+        "disconnect_container_from_network",
+        "exec_in_container",
+        "get_container_logs",
+        "inspect_container",
+        "inspect_image",
+        "inspect_network",
+        "inspect_volume",
+        "list_containers",
+        "list_images",
+        "list_networks",
+        "list_volumes",
+        "pull_image",
+        "remove_container",
+        "remove_image",
+        "remove_network",
+        "remove_volume",
+        "run_container",
+        "start_container",
+        "stop_container",
+        "tag_image"
+      ],
       "helper_text": null,
       "icon": "SiDocker",
       "icon_color": "text-blue-500",
@@ -2353,6 +2533,7 @@
       "description": "Load and unload allowed toolkits for the current session",
       "display_name": "Dynamic Tools",
       "docs_url": null,
+      "function_names": [],
       "helper_text": null,
       "icon": "PackagePlus",
       "icon_color": "text-sky-500",
@@ -2409,6 +2590,27 @@
       "description": "Code execution sandbox environment with Python, file operations, and web server capabilities",
       "display_name": "E2B Code Execution",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/e2b",
+      "function_names": [
+        "download_chart_data",
+        "download_file_from_sandbox",
+        "download_png_result",
+        "get_public_url",
+        "get_sandbox_status",
+        "kill_background_command",
+        "list_files",
+        "list_running_sandboxes",
+        "read_file_content",
+        "run_background_command",
+        "run_command",
+        "run_python_code",
+        "run_server",
+        "set_sandbox_timeout",
+        "shutdown_sandbox",
+        "stream_command",
+        "upload_file",
+        "watch_directory",
+        "write_file_content"
+      ],
       "helper_text": null,
       "icon": "Terminal",
       "icon_color": "text-blue-600",
@@ -2537,6 +2739,11 @@
       "description": "Text-to-speech and sound effect generation using AI voices",
       "display_name": "Eleven Labs",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/eleven_labs",
+      "function_names": [
+        "generate_sound_effect",
+        "get_voices",
+        "text_to_speech"
+      ],
       "helper_text": null,
       "icon": "SiElevenlabs",
       "icon_color": "text-orange-500",
@@ -2617,6 +2824,11 @@
       "description": "AI model serving platform for media generation (images and videos)",
       "display_name": "Fal",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/fal",
+      "function_names": [
+        "generate_media",
+        "image_to_image",
+        "on_queue_update"
+      ],
       "helper_text": null,
       "icon": "FaRobot",
       "icon_color": "text-purple-600",
@@ -2805,6 +3017,17 @@
       "description": "Local file operations including read, write, list, and search",
       "display_name": "File Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/file",
+      "function_names": [
+        "check_escape",
+        "delete_file",
+        "list_files",
+        "read_file",
+        "read_file_chunk",
+        "replace_file_chunk",
+        "save_file",
+        "search_content",
+        "search_files"
+      ],
       "helper_text": null,
       "icon": "FaFolder",
       "icon_color": "text-yellow-500",
@@ -2897,6 +3120,12 @@
       "description": "Generate JSON, CSV, PDF, and text files from data",
       "display_name": "File Generation",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/file_generation",
+      "function_names": [
+        "generate_csv_file",
+        "generate_json_file",
+        "generate_pdf_file",
+        "generate_text_file"
+      ],
       "helper_text": null,
       "icon": "FaFileExport",
       "icon_color": "text-green-600",
@@ -2929,6 +3158,22 @@
       "description": "Comprehensive financial data API for stocks, financial statements, SEC filings, and cryptocurrency",
       "display_name": "Financial Datasets API",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/financial_datasets",
+      "function_names": [
+        "get_balance_sheets",
+        "get_cash_flow_statements",
+        "get_company_info",
+        "get_crypto_prices",
+        "get_earnings",
+        "get_financial_metrics",
+        "get_income_statements",
+        "get_insider_trades",
+        "get_institutional_ownership",
+        "get_news",
+        "get_sec_filings",
+        "get_segmented_financials",
+        "get_stock_prices",
+        "search_tickers"
+      ],
       "helper_text": null,
       "icon": "TrendingUp",
       "icon_color": "text-green-600",
@@ -3057,6 +3302,10 @@
       "description": "Google AI API services for generating images and videos using Gemini models",
       "display_name": "Gemini",
       "docs_url": "https://docs.agno.com/tools/toolkits/models/gemini",
+      "function_names": [
+        "generate_image",
+        "generate_video"
+      ],
       "helper_text": null,
       "icon": "SiGooglegemini",
       "icon_color": "text-blue-500",
@@ -3125,6 +3374,9 @@
       "description": "GIF search and integration",
       "display_name": "Giphy",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/giphy",
+      "function_names": [
+        "search_gifs"
+      ],
       "helper_text": null,
       "icon": "GiGift",
       "icon_color": "text-purple-500",
@@ -3169,6 +3421,47 @@
       "description": "Repository and issue management",
       "display_name": "GitHub",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/github",
+      "function_names": [
+        "assign_issue",
+        "close_issue",
+        "comment_on_issue",
+        "create_branch",
+        "create_file",
+        "create_issue",
+        "create_pull_request",
+        "create_pull_request_comment",
+        "create_repository",
+        "create_review_request",
+        "delete_file",
+        "delete_repository",
+        "edit_issue",
+        "edit_pull_request_comment",
+        "get_branch_content",
+        "get_directory_content",
+        "get_file_content",
+        "get_issue",
+        "get_pull_request",
+        "get_pull_request_changes",
+        "get_pull_request_comments",
+        "get_pull_request_count",
+        "get_pull_request_with_details",
+        "get_pull_requests",
+        "get_repository",
+        "get_repository_languages",
+        "get_repository_stars",
+        "get_repository_with_stats",
+        "label_issue",
+        "list_branches",
+        "list_issue_comments",
+        "list_issues",
+        "list_repositories",
+        "reopen_issue",
+        "search_code",
+        "search_issues_and_prs",
+        "search_repositories",
+        "set_default_branch",
+        "update_file"
+      ],
       "helper_text": null,
       "icon": "SiGithub",
       "icon_color": "text-gray-800",
@@ -3285,6 +3578,11 @@
       "description": "Query Google BigQuery - list tables, describe schemas, and run SQL queries",
       "display_name": "Google BigQuery",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_bigquery",
+      "function_names": [
+        "describe_table",
+        "list_tables",
+        "run_sql_query"
+      ],
       "helper_text": "Configure dataset, project, and location explicitly. If the toolkit needs credentials, pass them explicitly through saved config or a credentials object.",
       "icon": "SiGooglebigquery",
       "icon_color": "text-blue-600",
@@ -3414,6 +3712,16 @@
       "description": "Tools for interacting with Google Maps services including place search, directions, geocoding, and more",
       "display_name": "Google Maps",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_maps",
+      "function_names": [
+        "geocode_address",
+        "get_directions",
+        "get_distance_matrix",
+        "get_elevation",
+        "get_timezone",
+        "reverse_geocode",
+        "search_places",
+        "validate_address"
+      ],
       "helper_text": null,
       "icon": "SiGooglemaps",
       "icon_color": "text-red-500",
@@ -3508,6 +3816,12 @@
       "description": "Read, create, update, and duplicate Google Sheets spreadsheets",
       "display_name": "Google Sheets",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_sheets",
+      "function_names": [
+        "create_duplicate_sheet",
+        "create_sheet",
+        "read_sheet",
+        "update_sheet"
+      ],
       "helper_text": null,
       "icon": "SiGooglesheets",
       "icon_color": "text-green-600",
@@ -3636,6 +3950,11 @@
       "description": "Fast AI inference for audio transcription, translation, and text-to-speech",
       "display_name": "Groq",
       "docs_url": "https://docs.agno.com/tools/toolkits/models/groq",
+      "function_names": [
+        "generate_speech",
+        "transcribe_audio",
+        "translate_audio"
+      ],
       "helper_text": null,
       "icon": "TbBrain",
       "icon_color": "text-orange-500",
@@ -3776,6 +4095,13 @@
       "description": "Issue tracking and project management",
       "display_name": "Jira",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/jira",
+      "function_names": [
+        "add_comment",
+        "add_worklog",
+        "create_issue",
+        "get_issue",
+        "search_issues"
+      ],
       "helper_text": null,
       "icon": "SiJira",
       "icon_color": "text-blue-600",
@@ -3808,6 +4134,16 @@
       "description": "Issue tracking and project management",
       "display_name": "Linear",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/linear",
+      "function_names": [
+        "create_issue",
+        "get_high_priority_issues",
+        "get_issue_details",
+        "get_teams_details",
+        "get_user_assigned_issues",
+        "get_user_details",
+        "get_workflow_issues",
+        "update_issue"
+      ],
       "helper_text": null,
       "icon": "SiLinear",
       "icon_color": "text-purple-600",
@@ -3912,6 +4248,10 @@
       "description": "3D content creation and video generation using Luma AI Dream Machine",
       "display_name": "Luma Labs",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/lumalabs",
+      "function_names": [
+        "generate_video",
+        "image_to_video"
+      ],
       "helper_text": null,
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
@@ -4028,6 +4368,9 @@
       "description": "AI model marketplace for generating videos, audio, and GIFs from text prompts",
       "display_name": "ModelsLabs",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/models_labs",
+      "function_names": [
+        "generate_media"
+      ],
       "helper_text": null,
       "icon": "Video",
       "icon_color": "text-purple-600",
@@ -4096,6 +4439,14 @@
       "description": "Process videos, extract audio, generate SRT caption files, and embed rich word-highlighted captions",
       "display_name": "MoviePy Video Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/moviepy",
+      "function_names": [
+        "create_caption_clips",
+        "create_srt",
+        "embed_captions",
+        "extract_audio",
+        "parse_srt",
+        "split_text_into_lines"
+      ],
       "helper_text": null,
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
@@ -4224,6 +4575,12 @@
       "description": "Query Neo4j graph databases - list labels, relationships, get schema, and run Cypher queries",
       "display_name": "Neo4j",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/neo4j",
+      "function_names": [
+        "get_schema",
+        "list_labels",
+        "list_relationship_types",
+        "run_cypher_query"
+      ],
       "helper_text": null,
       "icon": "SiNeo4J",
       "icon_color": "text-blue-500",
@@ -4400,6 +4757,11 @@
       "description": "AI-powered tools for transcription, image generation, and speech synthesis",
       "display_name": "OpenAI",
       "docs_url": "https://docs.agno.com/tools/toolkits/models/openai",
+      "function_names": [
+        "generate_image",
+        "generate_speech",
+        "transcribe_audio"
+      ],
       "helper_text": null,
       "icon": "SiOpenai",
       "icon_color": "text-green-600",
@@ -4417,6 +4779,7 @@
       "description": "Convenience bundle that implies shell, coding, browser, and other common tools",
       "display_name": "OpenClaw Compat",
       "docs_url": null,
+      "function_names": [],
       "helper_text": "Implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments.",
       "icon": "Workflow",
       "icon_color": "text-orange-500",
@@ -4521,6 +4884,12 @@
       "description": "Weather data services from OpenWeatherMap API",
       "display_name": "OpenWeather",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/openweather",
+      "function_names": [
+        "geocode_location",
+        "get_air_pollution",
+        "get_current_weather",
+        "get_forecast"
+      ],
       "helper_text": null,
       "icon": "WiDaySunny",
       "icon_color": "text-orange-500",
@@ -4625,6 +4994,14 @@
       "description": "Query PostgreSQL databases - list tables, describe schemas, run SQL queries, and export data",
       "display_name": "PostgreSQL",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/postgres",
+      "function_names": [
+        "describe_table",
+        "export_table_to_path",
+        "inspect_query",
+        "run_query",
+        "show_tables",
+        "summarize_table"
+      ],
       "helper_text": null,
       "icon": "SiPostgresql",
       "icon_color": "text-blue-700",
@@ -4693,6 +5070,15 @@
       "description": "Execute Python code, manage files, and install packages",
       "display_name": "Python Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/python",
+      "function_names": [
+        "list_files",
+        "pip_install_package",
+        "read_file",
+        "run_python_code",
+        "run_python_file_return_variable",
+        "save_to_file_and_run",
+        "uv_pip_install_package"
+      ],
       "helper_text": null,
       "icon": "SiPython",
       "icon_color": "text-blue-500",
@@ -4795,6 +5181,10 @@
       "description": "Step-by-step reasoning scratchpad with think and analyze tools for structured problem solving",
       "display_name": "Reasoning",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/reasoning",
+      "function_names": [
+        "analyze",
+        "think"
+      ],
       "helper_text": null,
       "icon": "FaBrain",
       "icon_color": "text-purple-500",
@@ -4995,6 +5385,14 @@
       "description": "Query Amazon Redshift data warehouse - list tables, run SQL, and export results",
       "display_name": "Amazon Redshift",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/redshift",
+      "function_names": [
+        "describe_table",
+        "export_table_to_path",
+        "inspect_query",
+        "run_query",
+        "show_tables",
+        "summarize_table"
+      ],
       "helper_text": null,
       "icon": "SiAmazonredshift",
       "icon_color": "text-red-600",
@@ -5063,6 +5461,9 @@
       "description": "Generate images and videos using AI models on the Replicate platform",
       "display_name": "Replicate",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/replicate",
+      "function_names": [
+        "generate_media"
+      ],
       "helper_text": null,
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
@@ -5080,6 +5481,7 @@
       "description": "Allow an agent to read and modify its own configuration",
       "display_name": "Self Config",
       "docs_url": null,
+      "function_names": [],
       "helper_text": null,
       "icon": "Settings",
       "icon_color": "text-indigo-500",
@@ -5183,6 +5585,11 @@
       "description": "Execute shell commands and scripts",
       "display_name": "Shell Commands",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/shell",
+      "function_names": [
+        "check_shell_command",
+        "kill_shell_command",
+        "run_shell_command"
+      ],
       "helper_text": null,
       "icon": "Terminal",
       "icon_color": "text-green-500",
@@ -5227,6 +5634,9 @@
       "description": "Sleep utility for introducing delays and pauses in execution",
       "display_name": "Sleep",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/sleep",
+      "function_names": [
+        "sleep"
+      ],
       "helper_text": null,
       "icon": "Clock",
       "icon_color": "text-purple-500",
@@ -5246,6 +5656,12 @@
       "description": "Spawn and communicate with sub-agent sessions",
       "display_name": "Sub-Agents",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "agents_list",
+        "list_sessions",
+        "sessions_send",
+        "sessions_spawn"
+      ],
       "helper_text": null,
       "icon": "Workflow",
       "icon_color": "text-teal-500",
@@ -5302,6 +5718,15 @@
       "description": "Project board management with Trello API integration",
       "display_name": "Trello",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/trello",
+      "function_names": [
+        "create_board",
+        "create_card",
+        "create_list",
+        "get_board_lists",
+        "get_cards",
+        "list_boards",
+        "move_card"
+      ],
       "helper_text": null,
       "icon": "SiTrello",
       "icon_color": "text-blue-600",
@@ -5406,6 +5831,13 @@
       "description": "Create bar charts, line charts, pie charts, scatter plots, and histograms using matplotlib",
       "display_name": "Visualization",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/visualization",
+      "function_names": [
+        "create_bar_chart",
+        "create_histogram",
+        "create_line_chart",
+        "create_pie_chart",
+        "create_scatter_plot"
+      ],
       "helper_text": null,
       "icon": "FaChartBar",
       "icon_color": "text-indigo-500",
@@ -5448,6 +5880,9 @@
       "description": "Open URLs in web browser tabs or windows",
       "display_name": "Web Browser Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/web-browser",
+      "function_names": [
+        "open_page"
+      ],
       "helper_text": null,
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
@@ -5528,6 +5963,9 @@
       "description": "Customer support platform for searching help center articles",
       "display_name": "Zendesk",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/zendesk",
+      "function_names": [
+        "search_zendesk"
+      ],
       "helper_text": null,
       "icon": "SiZendesk",
       "icon_color": "text-green-600",
@@ -5608,6 +6046,9 @@
       "description": "Send emails using Amazon Simple Email Service",
       "display_name": "AWS SES",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/aws_ses",
+      "function_names": [
+        "send_email"
+      ],
       "helper_text": null,
       "icon": "FaAws",
       "icon_color": "text-orange-500",
@@ -5698,6 +6139,9 @@
       "description": "Send emails via SMTP (Gmail)",
       "display_name": "Email",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/email",
+      "function_names": [
+        "email_user"
+      ],
       "helper_text": null,
       "icon": "Mail",
       "icon_color": "text-blue-600",
@@ -5817,6 +6261,41 @@
       "description": "Read, search, and manage Gmail emails",
       "display_name": "Gmail",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/gmail",
+      "function_names": [
+        "apply_label",
+        "archive_email",
+        "create_draft_email",
+        "delete_custom_label",
+        "download_attachment",
+        "get_draft",
+        "get_emails_by_context",
+        "get_emails_by_date",
+        "get_emails_by_thread",
+        "get_emails_from_user",
+        "get_latest_emails",
+        "get_message",
+        "get_starred_emails",
+        "get_thread",
+        "get_unread_emails",
+        "list_custom_labels",
+        "list_drafts",
+        "list_labels",
+        "mark_email_as_read",
+        "mark_email_as_unread",
+        "modify_message_labels",
+        "modify_thread_labels",
+        "remove_label",
+        "search_emails",
+        "search_threads",
+        "send_draft",
+        "send_email",
+        "send_email_reply",
+        "star_email",
+        "trash_message",
+        "trash_thread",
+        "unstar_email",
+        "update_draft"
+      ],
       "helper_text": null,
       "icon": "SiGmail",
       "icon_color": "text-red-500",
@@ -5885,6 +6364,9 @@
       "description": "Email delivery service for sending transactional emails",
       "display_name": "Resend",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/resend",
+      "function_names": [
+        "send_email"
+      ],
       "helper_text": null,
       "icon": "Mail",
       "icon_color": "text-blue-600",
@@ -5941,6 +6423,26 @@
       "description": "Search tracks, manage playlists, get recommendations, and control playback on Spotify",
       "display_name": "Spotify",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/spotify",
+      "function_names": [
+        "add_tracks_to_playlist",
+        "create_playlist",
+        "get_album_tracks",
+        "get_artist_top_tracks",
+        "get_current_user",
+        "get_currently_playing",
+        "get_my_top_artists",
+        "get_my_top_tracks",
+        "get_playlist",
+        "get_track_recommendations",
+        "get_user_playlists",
+        "play_track",
+        "remove_tracks_from_playlist",
+        "search_albums",
+        "search_artists",
+        "search_playlists",
+        "search_tracks",
+        "update_playlist_details"
+      ],
       "helper_text": "Get an access token from the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)",
       "icon": "SiSpotify",
       "icon_color": "text-green-500",
@@ -6033,6 +6535,12 @@
       "description": "Extract video data, captions, and timestamps from YouTube videos",
       "display_name": "YouTube",
       "docs_url": "https://docs.agno.com/tools/toolkits/entertainment/youtube",
+      "function_names": [
+        "get_video_timestamps",
+        "get_youtube_video_captions",
+        "get_youtube_video_data",
+        "get_youtube_video_id"
+      ],
       "helper_text": null,
       "icon": "SiYoutube",
       "icon_color": "text-red-600",
@@ -6245,6 +6753,38 @@
       "description": "Access 1000+ integrations including Gmail, Salesforce, GitHub, and more",
       "display_name": "Composio",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/composio",
+      "function_names": [
+        "check_connected_account",
+        "create_integration",
+        "create_trigger_listener",
+        "delete_trigger",
+        "execute_action",
+        "execute_request",
+        "fetch_expected_integration_params",
+        "find_actions_by_tags",
+        "find_actions_by_use_case",
+        "get_action",
+        "get_action_schemas",
+        "get_active_triggers",
+        "get_agent_instructions",
+        "get_app",
+        "get_apps",
+        "get_auth_params",
+        "get_auth_scheme_for_app",
+        "get_auth_schemes",
+        "get_connected_account",
+        "get_connected_accounts",
+        "get_entity",
+        "get_expected_params_for_user",
+        "get_integration",
+        "get_integrations",
+        "get_tools",
+        "get_trigger",
+        "get_trigger_config_scheme",
+        "initiate_connection",
+        "set_workspace_id",
+        "validate_tools"
+      ],
       "helper_text": null,
       "icon": "FaConnectdevelop",
       "icon_color": "text-blue-600",
@@ -6313,6 +6853,22 @@
       "description": "Analyze sales data, products, orders, and customer insights from your Shopify store",
       "display_name": "Shopify",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/shopify",
+      "function_names": [
+        "get_average_order_value",
+        "get_customer_order_history",
+        "get_inventory_levels",
+        "get_low_stock_products",
+        "get_order_analytics",
+        "get_orders",
+        "get_product_sales_breakdown",
+        "get_products",
+        "get_products_bought_together",
+        "get_repeat_customers",
+        "get_sales_by_date_range",
+        "get_sales_trends",
+        "get_shop_info",
+        "get_top_selling_products"
+      ],
       "helper_text": "Create a custom app in your [Shopify Admin](https://admin.shopify.com/) to get an access token",
       "icon": "SiShopify",
       "icon_color": "text-green-600",
@@ -6330,6 +6886,11 @@
       "description": "List and register context-scoped file attachments",
       "display_name": "Attachments",
       "docs_url": null,
+      "function_names": [
+        "get_attachment",
+        "list_attachments",
+        "register_attachment"
+      ],
       "helper_text": null,
       "icon": "Paperclip",
       "icon_color": "text-teal-500",
@@ -6374,6 +6935,15 @@
       "description": "Manage tasks, spaces, and lists in ClickUp project management",
       "display_name": "ClickUp",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/clickup",
+      "function_names": [
+        "create_task",
+        "delete_task",
+        "get_task",
+        "list_lists",
+        "list_spaces",
+        "list_tasks",
+        "update_task"
+      ],
       "helper_text": "Get your API key from [ClickUp Settings > Apps](https://app.clickup.com/settings/apps)",
       "icon": "SiClickup",
       "icon_color": "text-purple-600",
@@ -6391,6 +6961,7 @@
       "description": "Schedule context compaction for the next reply in the current conversation scope",
       "display_name": "Context Compaction",
       "docs_url": null,
+      "function_names": [],
       "helper_text": null,
       "icon": "Minimize2",
       "icon_color": "text-amber-500",
@@ -6519,6 +7090,12 @@
       "description": "CSV file analysis and querying with SQL support",
       "display_name": "CSV Toolkit",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/csv",
+      "function_names": [
+        "get_columns",
+        "list_csv_files",
+        "query_csv_file",
+        "read_csv_file"
+      ],
       "helper_text": null,
       "icon": "FaFileCsv",
       "icon_color": "text-green-600",
@@ -6536,6 +7113,7 @@
       "description": "Delegate tasks to other configured agents",
       "display_name": "Agent Delegation",
       "docs_url": null,
+      "function_names": [],
       "helper_text": null,
       "icon": "Users",
       "icon_color": "text-blue-500",
@@ -6616,6 +7194,22 @@
       "description": "In-memory analytical database for data processing and analysis",
       "display_name": "DuckDB",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/duckdb",
+      "function_names": [
+        "create_fts_index",
+        "create_table_from_path",
+        "describe_table",
+        "export_table_to_path",
+        "full_text_search",
+        "get_table_name_from_path",
+        "inspect_query",
+        "load_local_csv_to_table",
+        "load_local_path_to_table",
+        "load_s3_csv_to_table",
+        "load_s3_path_to_table",
+        "run_query",
+        "show_tables",
+        "summarize_table"
+      ],
       "helper_text": null,
       "icon": "Database",
       "icon_color": "text-yellow-600",
@@ -6663,6 +7257,22 @@
       "description": "View and schedule meetings with Google Calendar",
       "display_name": "Google Calendar",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/googlecalendar",
+      "function_names": [
+        "check_availability",
+        "create_event",
+        "delete_event",
+        "fetch_all_events",
+        "find_available_slots",
+        "get_event",
+        "get_event_attendees",
+        "list_calendars",
+        "list_events",
+        "move_event",
+        "quick_add_event",
+        "respond_to_event",
+        "search_events",
+        "update_event"
+      ],
       "helper_text": null,
       "icon": "SiGooglecalendar",
       "icon_color": "text-blue-600",
@@ -6815,6 +7425,12 @@
       "description": "Persistent memory system that stores, retrieves, searches, and manages user memories and context",
       "display_name": "Mem0 Memory",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/mem0",
+      "function_names": [
+        "add_memory",
+        "delete_all_memories",
+        "get_all_memories",
+        "search_memory"
+      ],
       "helper_text": null,
       "icon": "Brain",
       "icon_color": "text-purple-600",
@@ -6832,6 +7448,7 @@
       "description": "Explicitly store and search agent memories on demand",
       "display_name": "Agent Memory",
       "docs_url": null,
+      "function_names": [],
       "helper_text": null,
       "icon": "Brain",
       "icon_color": "text-violet-500",
@@ -6924,6 +7541,11 @@
       "description": "Create, update, and search pages in Notion databases",
       "display_name": "Notion",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/notion",
+      "function_names": [
+        "create_page",
+        "search_pages",
+        "update_page"
+      ],
       "helper_text": "Create an integration at [Notion Developers](https://www.notion.so/my-integrations) and share the database with it",
       "icon": "SiNotion",
       "icon_color": "text-gray-800",
@@ -7052,6 +7674,13 @@
       "description": "Get stock prices, company news, price targets, and company profiles from OpenBB financial platform",
       "display_name": "OpenBB",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/openbb",
+      "function_names": [
+        "get_company_news",
+        "get_company_profile",
+        "get_price_targets",
+        "get_stock_price",
+        "search_company_symbol"
+      ],
       "helper_text": null,
       "icon": "FaChartArea",
       "icon_color": "text-blue-500",
@@ -7108,6 +7737,10 @@
       "description": "Advanced data manipulation and analysis",
       "display_name": "Pandas",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/pandas",
+      "function_names": [
+        "create_pandas_dataframe",
+        "run_dataframe_operation"
+      ],
       "helper_text": null,
       "icon": "Database",
       "icon_color": "text-blue-600",
@@ -7127,6 +7760,12 @@
       "description": "Schedule, edit, list, and cancel tasks and reminders",
       "display_name": "Scheduler",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "cancel_schedule",
+        "edit_schedule",
+        "list_schedules",
+        "schedule"
+      ],
       "helper_text": null,
       "icon": "Calendar",
       "icon_color": "text-emerald-500",
@@ -7303,6 +7942,12 @@
       "description": "Database query and management tools for SQL databases",
       "display_name": "SQL Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/sql",
+      "function_names": [
+        "describe_table",
+        "list_tables",
+        "run_sql",
+        "run_sql_query"
+      ],
       "helper_text": null,
       "icon": "Database",
       "icon_color": "text-blue-600",
@@ -7335,6 +7980,15 @@
       "description": "Task management with Todoist - create, update, delete, and organize tasks and projects",
       "display_name": "Todoist",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/todoist",
+      "function_names": [
+        "close_task",
+        "create_task",
+        "delete_task",
+        "get_active_tasks",
+        "get_projects",
+        "get_task",
+        "update_task"
+      ],
       "helper_text": null,
       "icon": "SiTodoist",
       "icon_color": "text-red-500",
@@ -7475,6 +8129,17 @@
       "description": "Get financial data and stock information from Yahoo Finance",
       "display_name": "Yahoo Finance",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/yfinance",
+      "function_names": [
+        "get_analyst_recommendations",
+        "get_company_info",
+        "get_company_news",
+        "get_current_stock_price",
+        "get_historical_stock_prices",
+        "get_income_statements",
+        "get_key_financial_ratios",
+        "get_stock_fundamentals",
+        "get_technical_indicators"
+      ],
       "helper_text": null,
       "icon": "FaChartLine",
       "icon_color": "text-purple-600",
@@ -7615,6 +8280,12 @@
       "description": "Memory system for storing, retrieving, and searching conversational data",
       "display_name": "Zep Memory",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/zep",
+      "function_names": [
+        "add_zep_message",
+        "get_zep_memory",
+        "initialize",
+        "search_zep_memory"
+      ],
       "helper_text": null,
       "icon": "Brain",
       "icon_color": "text-purple-600",
@@ -7696,6 +8367,10 @@
       "description": "AI-powered web scraping and data extraction from websites",
       "display_name": "AgentQL",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/agentql",
+      "function_names": [
+        "custom_scrape_website",
+        "scrape_website"
+      ],
       "helper_text": null,
       "icon": "FaSpider",
       "icon_color": "text-purple-600",
@@ -7765,6 +8440,10 @@
       "description": "Search and read academic papers from ArXiv",
       "display_name": "ArXiv",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/arxiv",
+      "function_names": [
+        "read_arxiv_papers",
+        "search_arxiv_and_return_articles"
+      ],
       "helper_text": null,
       "icon": "SiArxiv",
       "icon_color": "text-red-600",
@@ -7882,6 +8561,9 @@
       "description": "Search the web using Baidu search engine with Chinese language support",
       "display_name": "Baidu Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/baidusearch",
+      "function_names": [
+        "baidu_search"
+      ],
       "helper_text": null,
       "icon": "Search",
       "icon_color": "text-blue-600",
@@ -7998,6 +8680,12 @@
       "description": "Retrieve brand data including logos, colors, and fonts by domain or name",
       "display_name": "Brandfetch",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/brandfetch",
+      "function_names": [
+        "asearch_by_brand",
+        "asearch_by_identifier",
+        "search_by_brand",
+        "search_by_identifier"
+      ],
       "helper_text": "Get API keys from [Brandfetch Developers](https://developers.brandfetch.com/)",
       "icon": "FaPalette",
       "icon_color": "text-blue-500",
@@ -8138,6 +8826,12 @@
       "description": "Web scraping, search engine queries, screenshots, and structured data extraction",
       "display_name": "BrightData",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/brightdata",
+      "function_names": [
+        "get_screenshot",
+        "scrape_as_markdown",
+        "search_engine",
+        "web_data_feed"
+      ],
       "helper_text": null,
       "icon": "FaSpider",
       "icon_color": "text-blue-600",
@@ -8170,6 +8864,9 @@
       "description": "OpenClaw-style browser control (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act)",
       "display_name": "Browser",
       "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
+      "function_names": [
+        "browser"
+      ],
       "helper_text": null,
       "icon": "FaChrome",
       "icon_color": "text-orange-500",
@@ -8311,6 +9008,16 @@
       "description": "Browser automation and web scraping using headless browsers",
       "display_name": "Browserbase",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/browserbase",
+      "function_names": [
+        "aclose_session",
+        "aget_page_content",
+        "anavigate_to",
+        "ascreenshot",
+        "close_session",
+        "get_page_content",
+        "navigate_to",
+        "screenshot"
+      ],
       "helper_text": null,
       "icon": "FaChrome",
       "icon_color": "text-blue-600",
@@ -8451,6 +9158,9 @@
       "description": "Web crawling and scraping using the Crawl4ai library",
       "display_name": "Crawl4AI",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/crawl4ai",
+      "function_names": [
+        "crawl"
+      ],
       "helper_text": null,
       "icon": "FaSpider",
       "icon_color": "text-blue-600",
@@ -8591,6 +9301,10 @@
       "description": "Search engine for web search and news",
       "display_name": "DuckDuckGo",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/duckduckgo",
+      "function_names": [
+        "web_search",
+        "search_news"
+      ],
       "helper_text": null,
       "icon": "SiDuckduckgo",
       "icon_color": "text-orange-500",
@@ -8899,6 +9613,13 @@
       "description": "Advanced AI-powered web search engine for research and content discovery",
       "display_name": "Exa",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/exa",
+      "function_names": [
+        "exa_answer",
+        "find_similar",
+        "get_contents",
+        "research",
+        "search_exa"
+      ],
       "helper_text": null,
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
@@ -9051,6 +9772,12 @@
       "description": "Web scraping and crawling tool for extracting content from websites",
       "display_name": "Firecrawl",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/firecrawl",
+      "function_names": [
+        "crawl_website",
+        "map_website",
+        "scrape_website",
+        "search_web"
+      ],
       "helper_text": null,
       "icon": "FaSpider",
       "icon_color": "text-orange-500",
@@ -9179,6 +9906,10 @@
       "description": "Search Google for web results using the WebSearch backend",
       "display_name": "Google Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/websearch",
+      "function_names": [
+        "web_search",
+        "search_news"
+      ],
       "helper_text": null,
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
@@ -9235,6 +9966,10 @@
       "description": "Get top stories and user details from Hacker News",
       "display_name": "Hacker News",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/hackernews",
+      "function_names": [
+        "get_top_hackernews_stories",
+        "get_user_details"
+      ],
       "helper_text": null,
       "icon": "FaHackerNews",
       "icon_color": "text-orange-600",
@@ -9364,6 +10099,10 @@
       "description": "Web content reading and search using Jina AI Reader API",
       "display_name": "Jina Reader",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
+      "function_names": [
+        "read_url",
+        "search_query"
+      ],
       "helper_text": null,
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
@@ -9444,6 +10183,9 @@
       "description": "Web search using Linkup API for real-time information",
       "display_name": "Linkup",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/linkup",
+      "function_names": [
+        "web_search_with_linkup"
+      ],
       "helper_text": null,
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
@@ -9513,6 +10255,10 @@
       "description": "Read and extract content from news articles using advanced web scraping",
       "display_name": "Newspaper",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper4k",
+      "function_names": [
+        "get_article_data",
+        "read_article"
+      ],
       "helper_text": null,
       "icon": "FaNewspaper",
       "icon_color": "text-blue-600",
@@ -9557,6 +10303,12 @@
       "description": "Powerful web scraping capabilities including SERP, Amazon product data, and universal web scraping",
       "display_name": "Oxylabs",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/oxylabs",
+      "function_names": [
+        "get_amazon_product",
+        "scrape_website",
+        "search_amazon_products",
+        "search_google"
+      ],
       "helper_text": null,
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
@@ -9637,6 +10389,12 @@
       "description": "Search and retrieve medical and life science literature from PubMed",
       "display_name": "PubMed",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/pubmed",
+      "function_names": [
+        "fetch_details",
+        "fetch_pubmed_ids",
+        "parse_details",
+        "search_pubmed"
+      ],
       "helper_text": null,
       "icon": "SiPubmed",
       "icon_color": "text-blue-600",
@@ -9765,6 +10523,14 @@
       "description": "Extract structured data from webpages using AI and natural language prompts",
       "display_name": "ScrapeGraph",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/scrapegraph",
+      "function_names": [
+        "agentic_crawler",
+        "crawl",
+        "markdownify",
+        "scrape",
+        "searchscraper",
+        "smartscraper"
+      ],
       "helper_text": null,
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
@@ -9819,6 +10585,16 @@
       "description": "Open source search engine for web, images, news, science, and specialized content",
       "display_name": "SearxNG",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/searxng",
+      "function_names": [
+        "image_search",
+        "it_search",
+        "map_search",
+        "music_search",
+        "news_search",
+        "science_search",
+        "search_web",
+        "video_search"
+      ],
       "helper_text": null,
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
@@ -9887,6 +10663,10 @@
       "description": "Google and YouTube search using SerpApi",
       "display_name": "SerpApi",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/serpapi",
+      "function_names": [
+        "search_google",
+        "search_youtube"
+      ],
       "helper_text": null,
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
@@ -10027,6 +10807,12 @@
       "description": "Search Google, news, academic papers, and scrape webpages using Serper API",
       "display_name": "Serper",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/serper",
+      "function_names": [
+        "scrape_webpage",
+        "search_news",
+        "search_scholar",
+        "search_web"
+      ],
       "helper_text": null,
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
@@ -10131,6 +10917,11 @@
       "description": "Web scraper and crawler that returns LLM-ready data",
       "display_name": "Spider",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/spider",
+      "function_names": [
+        "crawl",
+        "scrape",
+        "search_web"
+      ],
       "helper_text": "Get your API key from the [Spider dashboard](https://spider.cloud)",
       "icon": "FaSpider",
       "icon_color": "text-red-600",
@@ -10331,6 +11122,11 @@
       "description": "Real-time web search API for retrieving current information",
       "display_name": "Tavily",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/tavily",
+      "function_names": [
+        "extract_url_content",
+        "web_search_using_tavily",
+        "web_search_with_tavily"
+      ],
       "helper_text": null,
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
@@ -10591,6 +11387,13 @@
       "description": "Extract text and metadata from web pages, crawl websites, and convert HTML to text",
       "display_name": "Trafilatura",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/trafilatura",
+      "function_names": [
+        "crawl_website",
+        "extract_batch",
+        "extract_metadata_only",
+        "extract_text",
+        "html_to_text"
+      ],
       "helper_text": null,
       "icon": "FaFileAlt",
       "icon_color": "text-teal-500",
@@ -10681,6 +11484,12 @@
       "description": "Search and retrieve high-quality, royalty-free images from Unsplash",
       "display_name": "Unsplash",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/unsplash",
+      "function_names": [
+        "download_photo",
+        "get_photo",
+        "get_random_photo",
+        "search_photos"
+      ],
       "helper_text": "Get a free API key from [Unsplash Developers](https://unsplash.com/developers)",
       "icon": "SiUnsplash",
       "icon_color": "text-gray-800",
@@ -10714,6 +11523,10 @@
       "description": "Web scraping and content extraction from websites",
       "display_name": "Website Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/website",
+      "function_names": [
+        "add_website_to_knowledge",
+        "read_url"
+      ],
       "helper_text": null,
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
@@ -10758,6 +11571,10 @@
       "description": "Search and retrieve information from Wikipedia",
       "display_name": "Wikipedia",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/wikipedia",
+      "function_names": [
+        "search_wikipedia",
+        "search_wikipedia_and_update_knowledge_base"
+      ],
       "helper_text": null,
       "icon": "SiWikipedia",
       "icon_color": "text-gray-700",
@@ -10802,6 +11619,19 @@
       "description": "Control and monitor smart home devices",
       "display_name": "Home Assistant",
       "docs_url": "https://www.home-assistant.io/integrations/",
+      "function_names": [
+        "activate_scene",
+        "call_service",
+        "get_entity_state",
+        "list_entities",
+        "set_brightness",
+        "set_color",
+        "set_temperature",
+        "toggle",
+        "trigger_automation",
+        "turn_off",
+        "turn_on"
+      ],
       "helper_text": null,
       "icon": "Home",
       "icon_color": "text-blue-500",
@@ -10894,6 +11724,16 @@
       "description": "Social media platform for browsing, posting, and interacting with Reddit communities",
       "display_name": "Reddit",
       "docs_url": null,
+      "function_names": [
+        "create_post",
+        "get_subreddit_info",
+        "get_subreddit_stats",
+        "get_top_posts",
+        "get_trending_subreddits",
+        "get_user_info",
+        "reply_to_comment",
+        "reply_to_post"
+      ],
       "helper_text": null,
       "icon": "SiReddit",
       "icon_color": "text-orange-500",
@@ -10998,6 +11838,15 @@
       "description": "Post tweets, send DMs, and search Twitter/X content",
       "display_name": "X (Twitter)",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/x",
+      "function_names": [
+        "create_post",
+        "get_home_timeline",
+        "get_my_info",
+        "get_user_info",
+        "reply_to_post",
+        "search_posts",
+        "send_dm"
+      ],
       "helper_text": null,
       "icon": "SiX",
       "icon_color": "text-blue-400",
@@ -11054,6 +11903,16 @@
       "description": "Video conferencing platform for scheduling and managing meetings",
       "display_name": "Zoom",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/zoom",
+      "function_names": [
+        "delete_meeting",
+        "get_access_token",
+        "get_meeting",
+        "get_meeting_recordings",
+        "get_upcoming_meetings",
+        "instructions",
+        "list_meetings",
+        "schedule_meeting"
+      ],
       "helper_text": null,
       "icon": "SiZoom",
       "icon_color": "text-blue-500",

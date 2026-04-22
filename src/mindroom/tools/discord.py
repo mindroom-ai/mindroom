@@ -78,6 +78,16 @@ if TYPE_CHECKING:
     ],
     dependencies=["requests"],
     docs_url="https://docs.agno.com/tools/toolkits/social/discord",
+    function_names=(
+        "delete_message",
+        "get_channel_info",
+        "get_channel_messages",
+        "get_tool_config",
+        "get_tool_description",
+        "get_tool_name",
+        "list_channels",
+        "send_message",
+    ),
 )
 def discord_tools() -> type[DiscordTools]:
     """Return Discord tools for interacting with Discord channels and servers."""

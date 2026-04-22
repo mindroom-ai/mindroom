@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["replicate"],
     docs_url="https://docs.agno.com/tools/toolkits/others/replicate",
+    function_names=("generate_media",),
 )
 def replicate_tools() -> type[ReplicateTools]:
     """Return Replicate tools for AI media generation."""
