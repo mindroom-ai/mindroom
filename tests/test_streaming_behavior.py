@@ -18,7 +18,13 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
-from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
+from mindroom.constants import (
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_STREAMING,
+    STREAM_VISIBLE_BODY_KEY,
+)
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -1786,10 +1792,44 @@ class TestStreamingBehavior:
         delivery_task = asyncio.create_task(stuck_delivery())
         await task_started.wait()
 
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await _shutdown_stream_delivery(
+            delivery_queue,
+            delivery_task,
+            drain_timeout_seconds=0.01,
+            cancel_timeout_seconds=0.01,
+        )
 
         assert isinstance(shutdown_error, TimeoutError)
         release_task.set()
+        await delivery_task
+
+    @pytest.mark.asyncio
+    async def test_shutdown_stream_delivery_allows_slow_but_finishing_delivery_task(self) -> None:
+        """A slow delivery task should be allowed to finish without a synthetic timeout failure."""
+        delivery_queue: asyncio.Queue[object | None] = asyncio.Queue()
+        task_started = asyncio.Event()
+        release_task = asyncio.Event()
+
+        async def slow_delivery() -> None:
+            task_started.set()
+            while not release_task.is_set():
+                try:
+                    await asyncio.wait_for(release_task.wait(), timeout=3600)
+                except asyncio.CancelledError:
+                    continue
+
+        delivery_task = asyncio.create_task(slow_delivery())
+        await task_started.wait()
+        asyncio.get_running_loop().call_later(0.05, release_task.set)
+
+        shutdown_error = await _shutdown_stream_delivery(
+            delivery_queue,
+            delivery_task,
+            drain_timeout_seconds=0.1,
+            cancel_timeout_seconds=0.05,
+        )
+
+        assert shutdown_error is None
         await delivery_task
 
     @pytest.mark.asyncio
@@ -2121,6 +2161,43 @@ class TestStreamingBehavior:
         assert "<pre><code" in content["formatted_body"]
         assert content["formatted_body"].endswith(f"<p>{warmup_text}</p>")
         assert content["formatted_body"].rfind(f"<p>{warmup_text}</p>") > content["formatted_body"].rfind("</pre>")
+
+    @pytest.mark.asyncio
+    async def test_worker_warmup_visible_body_uses_canonical_matrix_body(self) -> None:
+        """Warmup metadata should preserve the canonical Matrix body, not the pre-mention display text."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$warmup_visible_body"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+        )
+        streaming.accumulated_text = "Ping @helper"
+        streaming.apply_worker_progress_event(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="cold_start",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=2.0,
+                ),
+            ),
+        )
+
+        await streaming._send_or_edit_message(mock_client)
+
+        content = mock_client.room_send.call_args.kwargs["content"]
+        assert content["body"].startswith("Ping @mindroom_helper:localhost")
+        assert content[STREAM_VISIBLE_BODY_KEY] == "Ping @mindroom_helper:localhost"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

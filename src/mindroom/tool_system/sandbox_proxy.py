@@ -441,10 +441,26 @@ def _record_proxy_exception_for_worker(
     if worker_handle is None:
         return
     manager = _get_worker_manager(runtime_paths, proxy_config)
-    if isinstance(exc, httpx.HTTPStatusError) and 400 <= exc.response.status_code < 500:
+    if _is_request_level_proxy_http_error(exc):
         manager.touch_worker(worker_handle.worker_key)
         return
     manager.record_failure(worker_handle.worker_key, str(exc))
+
+
+def _is_request_level_proxy_http_error(exc: Exception) -> bool:
+    """Return whether one execute-route HTTP failure came from a healthy worker."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    status_code = exc.response.status_code
+    if status_code not in {400, 404}:
+        return False
+    try:
+        payload = exc.response.json()
+    except (ValueError, json.JSONDecodeError):
+        return False
+    detail = payload.get("detail") if isinstance(payload, Mapping) else None
+    is_string_detail = isinstance(detail, str) and bool(detail)
+    return is_string_detail and (status_code == 400 or detail != "Not Found")
 
 
 def _record_proxy_response_failure_for_worker(

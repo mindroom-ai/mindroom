@@ -408,7 +408,6 @@ class StreamingResponse:
         stream_status = self._resolve_stream_status(is_final=is_final, stream_status=stream_status)
         extra_content = dict(self.extra_content or {})
         extra_content[STREAM_STATUS_KEY] = stream_status
-        extra_content[STREAM_VISIBLE_BODY_KEY] = display_text if self.accumulated_text.strip() else ""
 
         content = format_message_with_mentions(
             config=self.config,
@@ -421,7 +420,9 @@ class StreamingResponse:
             tool_trace=self.tool_trace if self.show_tool_calls else None,
             extra_content=extra_content,
         )
+        canonical_visible_body = content["body"]
         if warmup_suffix_lines:
+            content[STREAM_VISIBLE_BODY_KEY] = canonical_visible_body
             warmup_suffix = "\n".join(warmup_suffix_lines)
             display_text = f"{display_text}\n\n{warmup_suffix}" if display_text else warmup_suffix
             content["body"] = f"{content['body']}\n\n{warmup_suffix}"

@@ -13,7 +13,7 @@ from typing import Any
 import nio
 from nio import crypto
 
-from mindroom.constants import AI_RUN_METADATA_KEY, ORIGINAL_SENDER_KEY, STREAM_STATUS_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, ORIGINAL_SENDER_KEY, STREAM_STATUS_KEY, STREAM_VISIBLE_BODY_KEY
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -34,6 +34,7 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
     {
         "io.mindroom.long_text",
         "io.mindroom.tool_trace",
+        STREAM_VISIBLE_BODY_KEY,
     },
 )
 

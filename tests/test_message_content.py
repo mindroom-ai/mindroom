@@ -307,6 +307,18 @@ class TestResolvedMessageExtraction:
 
         assert visible_body_from_event_source(event_source, "hello") == "hello"
 
+    def test_visible_body_from_event_source_ignores_empty_canonical_stream_body(self) -> None:
+        """Empty canonical stream metadata should fall back to the actual Matrix body."""
+        event_source = {
+            "content": {
+                "msgtype": "m.text",
+                "body": "Thinking...",
+                "io.mindroom.visible_body": "",
+            },
+        }
+
+        assert visible_body_from_event_source(event_source, "Thinking...") == "Thinking..."
+
 
 class TestDownloadMxcText:
     """Tests for _download_mxc_text function."""

@@ -168,21 +168,26 @@ class _TrackingWorkerManager:
 
 
 class _HttpStatusErrorResponse:
-    def __init__(self, url: str, *, status_code: int) -> None:
+    def __init__(self, url: str, *, status_code: int, payload: dict[str, object] | None = None) -> None:
         self.url = url
         self.status_code = status_code
+        self.payload = payload
 
     def raise_for_status(self) -> None:
         request = httpx.Request("POST", self.url)
-        response = httpx.Response(self.status_code, request=request)
+        response = (
+            httpx.Response(self.status_code, request=request, json=self.payload)
+            if self.payload is not None
+            else httpx.Response(self.status_code, request=request)
+        )
         message = f"{self.status_code} client error"
         raise httpx.HTTPStatusError(message, request=request, response=response)
 
     def json(self) -> dict[str, object]:
-        return {}
+        return self.payload or {}
 
 
-def _http_status_client_class(*, status_code: int) -> type:
+def _http_status_client_class(*, status_code: int, payload: dict[str, object] | None = None) -> type:
     class _HttpStatusClient:
         def __init__(self, *, timeout: float) -> None:
             del timeout
@@ -196,7 +201,7 @@ def _http_status_client_class(*, status_code: int) -> type:
         def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _HttpStatusErrorResponse:
             del json, headers
             assert url == "http://worker/api/sandbox-runner/execute"
-            return _HttpStatusErrorResponse(url, status_code=status_code)
+            return _HttpStatusErrorResponse(url, status_code=status_code, payload=payload)
 
     return _HttpStatusClient
 
@@ -2344,11 +2349,18 @@ def test_worker_routed_worker_failure_records_worker_failure(
     assert manager.failures == [(worker_target.worker_key, "Sandbox subprocess timed out.")]
 
 
-@pytest.mark.parametrize("status_code", [400, 404])
-def test_worker_routed_http_client_error_does_not_record_worker_failure(
+@pytest.mark.parametrize(
+    ("status_code", "payload"),
+    [
+        (400, {"detail": "credential_overrides must be supplied via lease_id."}),
+        (404, {"detail": "Tool 'file' does not expose 'read_file'."}),
+    ],
+)
+def test_worker_routed_http_request_error_does_not_record_worker_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     status_code: int,
+    payload: dict[str, object],
 ) -> None:
     """Client-side HTTP errors from a healthy worker should fail the call without tearing down the worker."""
     execution_identity = ToolExecutionIdentity(
@@ -2381,13 +2393,73 @@ def test_worker_routed_http_client_error_does_not_record_worker_failure(
 
     with (
         patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
-        patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _http_status_client_class(status_code=status_code)),
+        patch(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _http_status_client_class(status_code=status_code, payload=payload),
+        ),
         pytest.raises(httpx.HTTPStatusError),
     ):
         entrypoint("missing.txt")
 
     assert manager.touched == [worker_target.worker_key]
     assert manager.failures == []
+
+
+@pytest.mark.parametrize(
+    ("status_code", "payload"),
+    [
+        (401, {"detail": "Unauthorized sandbox runner request"}),
+        (404, {"detail": "Not Found"}),
+    ],
+)
+def test_worker_routed_ambiguous_http_client_error_records_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status_code: int,
+    payload: dict[str, object],
+) -> None:
+    """Auth and ambiguous route failures should evict the worker instead of treating it as healthy."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    assert worker_target.worker_key is not None
+    manager = _TrackingWorkerManager()
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=worker_target,
+    )
+    entrypoint = tool.functions["read_file"].entrypoint
+    assert entrypoint is not None
+
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _http_status_client_class(status_code=status_code, payload=payload),
+        ),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        entrypoint("missing.txt")
+
+    assert manager.touched == []
+    assert len(manager.failures) == 1
+    assert manager.failures[0][0] == worker_target.worker_key
 
 
 class TestWorkerToolsOverride:

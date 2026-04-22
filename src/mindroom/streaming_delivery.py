@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+_STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
+_STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS = 5.0
 
 
 class _NonTerminalDeliveryError(Exception):
@@ -280,16 +282,19 @@ async def _drive_stream_delivery(
 async def _shutdown_stream_delivery(
     delivery_queue: asyncio.Queue[_DeliveryRequest | None],
     delivery_task: asyncio.Task[None] | None,
+    *,
+    drain_timeout_seconds: float = _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS,
+    cancel_timeout_seconds: float = _STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS,
 ) -> Exception | None:
     """Stop the single delivery owner before terminal stream finalization."""
     if delivery_task is None:
         return None
     if not delivery_task.done():
         delivery_queue.put_nowait(None)
-    done, _pending = await asyncio.wait({delivery_task}, timeout=0.5)
+    done, _pending = await asyncio.wait({delivery_task}, timeout=drain_timeout_seconds)
     if delivery_task not in done:
         delivery_task.cancel()
-        done, _pending = await asyncio.wait({delivery_task}, timeout=0.5)
+        done, _pending = await asyncio.wait({delivery_task}, timeout=cancel_timeout_seconds)
         if delivery_task not in done:
             return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
     if delivery_task.cancelled():
