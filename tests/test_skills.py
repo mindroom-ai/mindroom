@@ -353,7 +353,744 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     assert refreshed is not None
     assert refreshed.get_skill("alpha").description == "Alpha v2"
 
+def test_skill_command_spec_parses_frontmatter(tmp_path: Path) -> None:
+    """Parse command dispatch fields from SKILL.md frontmatter."""
+    _write_skill(
+        tmp_path,
+        "dispatch",
+        "Dispatch skill",
+        extra_frontmatter=[
+            "user-invocable: false",
+            "command-dispatch: tool",
+            "command-tool: demo_tool",
+            "command-arg-mode: raw",
+        ],
+    )
 
+    config = _base_config(["dispatch"])
+    spec = resolve_skill_command_spec(
+        "dispatch",
+        config,
+        _runtime_paths(tmp_path),
+        "code",
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+
+    assert spec is not None
+    assert spec.user_invocable is False
+    assert spec.dispatch is not None
+    assert spec.dispatch.tool_name == "demo_tool"
+    assert spec.dispatch.arg_mode == "raw"
+
+
+def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Skill command dispatch should reuse the same workspace override rules as create_agent()."""
+    captured_calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_get_tool_by_name(tool_name: str, runtime_paths: object, **kwargs: object) -> object:
+        captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
+        return object()
+
+    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
+
+    runtime_storage_path = tmp_path / "runtime_storage"
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = ["coding", "shell"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].worker_tools = ["coding"]
+    config.agents["code"].private = AgentPrivateConfig(per="user", root="mind_data")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=create_session_id("!room:example.org", "$thread"),
+        tenant_id="tenant-123",
+        account_id="account-456",
+    )
+
+    toolkits, build_errors = _collect_agent_toolkits(
+        config,
+        "code",
+        _runtime_paths(runtime_storage_path),
+        execution_identity=identity,
+    )
+    assert build_errors == {}
+
+    expected_workspace = resolve_agent_runtime(
+        "code",
+        config,
+        _runtime_paths(runtime_storage_path),
+        execution_identity=identity,
+    ).workspace
+
+    assert expected_workspace is not None
+    assert expected_workspace.root.is_dir()
+    assert [tool_name for tool_name, _ in toolkits] == ["coding", "shell"]
+    overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
+    assert overrides_by_tool["coding"] == {"base_dir": str(expected_workspace.root)}
+    assert overrides_by_tool["shell"] == {"base_dir": str(expected_workspace.root)}
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspace_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Skill tool dispatch should resolve workspace overrides from the bot runtime storage path."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            return f"{commandName}:{skillName}:{command}"
+
+    captured_calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_get_tool_by_name(tool_name: str, runtime_paths: object, **kwargs: object) -> DemoTools:
+        captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
+        return DemoTools()
+
+    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
+
+    runtime_storage_path = tmp_path / "runtime_storage"
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = ["coding", "shell"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].worker_tools = ["coding"]
+    config.agents["code"].private = AgentPrivateConfig(per="user", root="mind_data")
+
+    result = await _run_skill_command_tool(
+        config=config,
+        runtime_paths=_runtime_paths(runtime_storage_path),
+        agent_name="code",
+        storage_path=runtime_storage_path,
+        command_tool="shell.demo",
+        skill_name="dispatch",
+        args_text="hello",
+        dispatch_context=_skill_dispatch_context(
+            agent_name="code",
+            runtime_paths=_runtime_paths(runtime_storage_path),
+            requester_user_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+        ),
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=create_session_id("!room:example.org", "$thread"),
+        tenant_id=os.getenv("CUSTOMER_ID"),
+        account_id=os.getenv("ACCOUNT_ID"),
+    )
+    expected_workspace = resolve_agent_runtime(
+        "code",
+        config,
+        _runtime_paths(runtime_storage_path),
+        execution_identity=identity,
+    ).workspace
+
+    assert result == "skill:dispatch:hello"
+    assert expected_workspace is not None
+    overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
+    assert overrides_by_tool == {
+        "coding": {"base_dir": str(expected_workspace.root)},
+        "shell": {"base_dir": str(expected_workspace.root)},
+    }
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_preserves_runtime_env_when_storage_root_changes(
+    tmp_path: Path,
+) -> None:
+    """Skill dispatch should keep runtime env values when rebinding only the storage root."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            return f"{commandName}:{skillName}:{command}"
+
+    captured_runtime_paths: list[RuntimePaths] = []
+
+    def fake_get_tool_by_name(tool_name: str, runtime_paths: RuntimePaths, **_kwargs: object) -> DemoTools:
+        assert tool_name == "demo_toolkit"
+        captured_runtime_paths.append(runtime_paths)
+        return DemoTools()
+
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = ["demo_toolkit"]
+    config.agents["code"].include_default_tools = False
+    config.defaults.tools = []
+    original_runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config" / "config.yaml",
+        config_dir=tmp_path / "config",
+        env_path=tmp_path / "config" / ".env",
+        storage_root=tmp_path / "primary-storage",
+        process_env={"CUSTOMER_ID": "tenant-123", "ACCOUNT_ID": "account-456"},
+        env_file_values={"OPENAI_API_KEY": "sk-test"},
+    )
+
+    with patch("mindroom.agents.get_tool_by_name", side_effect=fake_get_tool_by_name):
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=original_runtime_paths,
+            agent_name="code",
+            storage_path=tmp_path / "alternate-storage",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=original_runtime_paths,
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+            ),
+        )
+
+    assert result == "skill:dispatch:hello"
+    assert len(captured_runtime_paths) == 1
+    assert captured_runtime_paths[0].storage_root == tmp_path / "alternate-storage"
+    assert captured_runtime_paths[0].env_value("CUSTOMER_ID") == "tenant-123"
+    assert captured_runtime_paths[0].env_value("ACCOUNT_ID") == "account-456"
+    assert captured_runtime_paths[0].env_value("OPENAI_API_KEY") == "sk-test"
+
+
+def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Skill command dispatch should respect the bot runtime storage path."""
+    captured_calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_get_tool_by_name(tool_name: str, runtime_paths: object, **kwargs: object) -> object:
+        captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
+        return object()
+
+    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
+
+    config = _base_config(["dispatch"])
+    config.agents["code"].memory_backend = "file"
+    config.agents["code"].tools = ["coding"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].worker_scope = "shared"
+    config.agents["code"].worker_tools = ["coding"]
+
+    runtime_storage = tmp_path / "runtime-storage"
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    expected_workspace = agent_workspace_root_path(runtime_storage, "code")
+
+    with tool_execution_identity(identity):
+        toolkits, build_errors = _collect_agent_toolkits(
+            config,
+            "code",
+            _runtime_paths(runtime_storage, config_path=config_dir / "config.yaml"),
+        )
+        assert build_errors == {}
+
+    assert [tool_name for tool_name, _ in toolkits] == ["coding"]
+    assert captured_calls[0][1]["tool_init_overrides"] == {"base_dir": str(expected_workspace)}
+    assert expected_workspace.is_dir()
+
+
+def test_collect_agent_toolkits_supports_agent_only_toolkits(tmp_path: Path) -> None:
+    """Skill command dispatch should build the same agent-only toolkits as create_agent()."""
+    config = _base_config(["dispatch"])
+    config.agents["code"].memory_backend = "file"
+    config.agents["code"].tools = ["memory", "self_config", "delegate"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].delegate_to = ["reviewer"]
+    config.agents["reviewer"] = AgentConfig(
+        display_name="Reviewer",
+        role="",
+        tools=[],
+    )
+
+    runtime_storage = tmp_path / "runtime-storage"
+    toolkits, build_errors = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage))
+    assert build_errors == {}
+
+    toolkits_by_name = dict(toolkits)
+    assert [tool_name for tool_name, _ in toolkits] == ["memory", "self_config", "delegate"]
+    assert toolkits_by_name["memory"].name == "memory"
+    assert toolkits_by_name["delegate"].name == "delegate"
+    assert toolkits_by_name["self_config"].name == "self_config"
+    assert toolkits_by_name["memory"]._storage_path == runtime_storage
+    assert toolkits_by_name["delegate"]._runtime_paths.storage_root == runtime_storage
+
+
+def test_collect_agent_toolkits_supports_implicit_agent_only_toolkits(tmp_path: Path) -> None:
+    """Implicit delegate/self_config toolkits should match create_agent() behavior."""
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = []
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].allow_self_config = True
+    config.agents["code"].delegate_to = ["reviewer"]
+    config.agents["reviewer"] = AgentConfig(
+        display_name="Reviewer",
+        role="",
+        tools=[],
+    )
+
+    runtime_storage = tmp_path / "runtime-storage"
+    toolkits, build_errors = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage))
+    assert build_errors == {}
+
+    toolkits_by_name = dict(toolkits)
+    assert [tool_name for tool_name, _ in toolkits] == ["delegate", "self_config"]
+    assert toolkits_by_name["delegate"].name == "delegate"
+    assert toolkits_by_name["self_config"].name == "self_config"
+    assert toolkits_by_name["delegate"]._runtime_paths.storage_root == runtime_storage
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch() -> None:
+    """Run a tool dispatch for a skill command with raw args."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            return f"{commandName}:{skillName}:{command}"
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=resolve_runtime_paths(),
+            agent_name="code",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=resolve_runtime_paths(),
+            ),
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == "skill:dispatch:hello"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_uses_default_tools() -> None:
+    """Run skill command dispatch when toolkit is configured via defaults.tools."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            return f"{commandName}:{skillName}:{command}"
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = []
+        config.defaults.tools = ["demo_toolkit"]
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=resolve_runtime_paths(),
+            agent_name="code",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=resolve_runtime_paths(),
+            ),
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == "skill:dispatch:hello"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_sets_execution_identity() -> None:
+    """Skill tool dispatch should establish execution identity before calling tool entrypoints."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            identity = get_tool_execution_identity()
+            assert identity is not None
+            return (
+                f"{identity.requester_id}:{identity.room_id}:{identity.thread_id}:{identity.session_id}:"
+                f"{commandName}:{skillName}:{command}"
+            )
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+        config.agents["code"].worker_tools = ["demo_toolkit"]
+        config.agents["code"].worker_scope = "user"
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=resolve_runtime_paths(),
+            agent_name="code",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=_skill_dispatch_context(
+                agent_name="code",
+                runtime_paths=resolve_runtime_paths(),
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+            ),
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == (
+        f"@alice:example.org:!room:example.org:$thread:{create_session_id('!room:example.org', '$thread')}:"
+        "skill:dispatch:hello"
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_uses_canonical_runtime_thread_identity() -> None:
+    """Skill tool dispatch should derive session state from the canonical runtime thread root."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: ARG002, N803
+            identity = get_tool_execution_identity()
+            assert identity is not None
+            return f"{identity.resolved_thread_id}:{identity.session_id}"
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+        runtime_paths = resolve_runtime_paths()
+        runtime_context = ToolRuntimeContext(
+            agent_name="code",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id="$thread-root",
+            requester_id="@alice:example.org",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
+            reply_to_event_id="$reply:example.org",
+        )
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name="code",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=LiveToolDispatchContext.from_runtime_context(runtime_context),
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == f"$thread-root:{create_session_id('!room:example.org', '$thread-root')}"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_ignores_raw_room_mode_thread_id() -> None:
+    """Skill tool dispatch should not re-scope room-mode calls from raw thread provenance."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: ARG002, N803
+            identity = get_tool_execution_identity()
+            assert identity is not None
+            return f"{identity.thread_id}:{identity.resolved_thread_id}:{identity.session_id}"
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+        runtime_paths = resolve_runtime_paths()
+        runtime_context = ToolRuntimeContext(
+            agent_name="code",
+            room_id="!room:example.org",
+            thread_id="$raw-thread",
+            resolved_thread_id=None,
+            requester_id="@alice:example.org",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
+            reply_to_event_id="$reply:example.org",
+            session_id=create_session_id("!room:example.org", None),
+        )
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name="code",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=LiveToolDispatchContext.from_runtime_context(runtime_context),
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == f"None:None:{create_session_id('!room:example.org', None)}"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_installs_explicit_tool_runtime_context() -> None:
+    """Skill tool dispatch should expose the provided ToolRuntimeContext to tool hooks."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: ARG002, N803
+            context = get_tool_runtime_context()
+            assert context is not None
+            return (
+                f"{context.message_received_depth}:"
+                f"{context.hook_message_sender is not None}:"
+                f"{context.room_state_querier is not None}:"
+                f"{context.room_state_putter is not None}"
+            )
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+        runtime_paths = resolve_runtime_paths()
+
+        async def _message_sender(
+            room_id: str,
+            body: str,
+            thread_id: str | None,
+            source_hook: str,
+            extra_content: dict[str, object] | None,
+            *,
+            trigger_dispatch: bool = False,
+        ) -> str | None:
+            del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch
+            return "$event"
+
+        runtime_context = ToolRuntimeContext(
+            agent_name="code",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            requester_id="@alice:example.org",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
+            hook_message_sender=_message_sender,
+            room_state_querier=AsyncMock(return_value={}),
+            room_state_putter=AsyncMock(return_value=True),
+            message_received_depth=1,
+        )
+
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name="code",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            dispatch_context=LiveToolDispatchContext.from_runtime_context(runtime_context),
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == "1:True:True:True"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_context_from_runtime_context_preserves_live_shape() -> None:
+    """Live skill dispatch should derive execution identity from one full runtime context."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: ARG002, N803
+            return "ok"
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+        runtime_paths = resolve_runtime_paths()
+        runtime_context = ToolRuntimeContext(
+            agent_name="code",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            requester_id="@alice:example.org",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
+        )
+
+        dispatch_context = LiveToolDispatchContext.from_runtime_context(runtime_context)
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert dispatch_context.runtime_context is runtime_context
+    assert dispatch_context.execution_identity == ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=create_session_id("!room:example.org", "$thread"),
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        transport_agent_name="code",
+    )
 def test_live_skill_dispatch_context_rejects_mismatched_execution_identity() -> None:
     """Live dispatch contracts should reject identities that do not match the runtime context."""
     config = _base_config(["dispatch"])

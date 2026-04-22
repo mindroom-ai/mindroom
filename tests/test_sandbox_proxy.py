@@ -2276,6 +2276,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         thread_id="$thread",
         resolved_thread_id="$thread",
         session_id="session-1",
+        transport_agent_name="shared_agent",
     )
 
     tool = get_tool_by_name(
@@ -2333,6 +2334,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         "session_id": "session-1",
         "tenant_id": None,
         "account_id": None,
+        "transport_agent_name": "shared_agent",
     }
     assert captured["json"]["private_agent_names"] == ["code"]
 

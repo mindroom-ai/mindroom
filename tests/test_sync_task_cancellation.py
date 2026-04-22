@@ -484,6 +484,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._first_sync_done = False
     bot._sync_shutting_down = False
     bot.client = FakeClient()
+    bot.orchestrator = None
     bot._runtime_view = BotRuntimeState(
         client=bot.client,
         config=MagicMock(spec=Config),

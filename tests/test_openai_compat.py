@@ -32,8 +32,8 @@ from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
 
 from mindroom import constants
-from mindroom.ai_runtime import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.agents import create_agent
+from mindroom.ai_runtime import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_compat import (
@@ -394,7 +394,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         session_id="openai-session",
     )
 
-    with patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")):
+    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
         agent = create_agent(
             "code",
             config=config,
@@ -441,7 +441,7 @@ def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, t
         session_id="openai-session",
     )
 
-    with patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")):
+    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
         agent = create_agent(
             "code",
             config=config,
