@@ -46,6 +46,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     RuntimePaths,
@@ -8504,7 +8505,8 @@ class TestAgentBot:
         )
         expected_handled_turn = replace(
             expected_handled_turn,
-            visible_echo_event_id=None,
+            response_event_id=None,
+            visible_echo_event_id="$error",
             conversation_target=MessageTarget.resolve(
                 room_id=room.room_id,
                 thread_id=None,
@@ -8530,14 +8532,23 @@ class TestAgentBot:
         install_send_response_mock(bot, mock_send_response)
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
 
-        response_event_id = await bot._turn_controller._finalize_dispatch_failure(
+        resolution = await bot._turn_controller._finalize_dispatch_failure(
             room_id="!test:localhost",
             reply_to_event_id="$event",
             thread_id="$thread_root",
+            response_envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            correlation_id="corr-dispatch-failure",
             error=RuntimeError("boom"),
         )
 
-        assert response_event_id == "$error"
+        assert resolution == TurnDeliveryResolution.from_outcome(
+            FinalDeliveryOutcome.error_with_visible_response(
+                final_visible_event_id="$error",
+                final_visible_body="[calculator] ⚠️ Error: boom",
+                failure_reason="boom",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+            ),
+        )
         mock_send_response.assert_awaited_once_with(
             "!test:localhost",
             "$event",
@@ -8546,7 +8557,7 @@ class TestAgentBot:
             reply_to_event=None,
             skip_mentions=False,
             tool_trace=None,
-            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
             thread_mode_override=None,
             target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
         )
@@ -8620,7 +8631,7 @@ class TestAgentBot:
         tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
-                response_event_id="$error",
+                visible_echo_event_id="$error",
             ),
         )
 
@@ -8667,7 +8678,16 @@ class TestAgentBot:
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
             raise RuntimeError(failure_message)
 
-        with patch("mindroom.bot.TurnController._finalize_dispatch_failure", new=AsyncMock(return_value=None)):
+        with patch(
+            "mindroom.bot.TurnController._finalize_dispatch_failure",
+            new=AsyncMock(
+                return_value=TurnDeliveryResolution.from_outcome(
+                    FinalDeliveryOutcome.error_without_visible_response(
+                        failure_reason="setup failed",
+                    ),
+                ),
+            ),
+        ):
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
@@ -8737,7 +8757,15 @@ class TestAgentBot:
 
         with patch(
             "mindroom.bot.TurnController._finalize_dispatch_failure",
-            new=AsyncMock(return_value="$error"),
+            new=AsyncMock(
+                return_value=TurnDeliveryResolution.from_outcome(
+                    FinalDeliveryOutcome.error_with_visible_response(
+                        final_visible_event_id="$error",
+                        final_visible_body="[calculator] ⚠️ Error: post-lock setup failed",
+                        failure_reason="post-lock setup failed",
+                    ),
+                ),
+            ),
         ):
             await bot._turn_controller._execute_response_action(
                 room,

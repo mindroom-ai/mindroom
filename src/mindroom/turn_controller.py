@@ -33,7 +33,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
-    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
@@ -42,7 +42,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import FinalDeliveryRequest, SendTextRequest
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.final_delivery import TurnDeliveryResolution
+from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
 from mindroom.handled_turns import HandledTurnState, apply_delivery_resolution
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.hooks.ingress import (
@@ -918,22 +918,44 @@ class TurnController:
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
+        response_envelope: MessageEnvelope,
+        correlation_id: str,
         error: Exception,
-    ) -> str | None:
-        """Convert dispatch setup failures into a visible terminal message."""
+    ) -> TurnDeliveryResolution:
+        """Convert dispatch setup failures into one typed terminal delivery resolution."""
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
-        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
-        return await self.deps.delivery_gateway.send_text(
+        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+        target = self.deps.resolver.build_message_target(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        )
+        response_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
-                target=self.deps.resolver.build_message_target(
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    reply_to_event_id=reply_to_event_id,
-                ),
+                target=target,
                 response_text=error_text,
                 extra_content=terminal_extra_content,
             ),
         )
+        if response_event_id is not None:
+            outcome = FinalDeliveryOutcome.error_with_visible_response(
+                final_visible_event_id=response_event_id,
+                final_visible_body=error_text,
+                failure_reason=str(error),
+                extra_content=terminal_extra_content,
+            )
+        else:
+            outcome = FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason=str(error),
+                extra_content=terminal_extra_content,
+            )
+        final_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
+            outcome=outcome,
+            correlation_id=correlation_id,
+            envelope=response_envelope,
+            response_kind="ai",
+        )
+        return TurnDeliveryResolution.from_outcome(final_outcome)
 
     def _log_dispatch_latency(
         self,
@@ -1022,18 +1044,20 @@ class TurnController:
             context_ready_monotonic = time.monotonic()
             payload_ready_monotonic = context_ready_monotonic
         except Exception as error:
-            response_event_id = await self._finalize_dispatch_failure(
+            response_resolution = await self._finalize_dispatch_failure(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
+                response_envelope=dispatch.envelope,
+                correlation_id=dispatch.correlation_id,
                 error=error,
             )
-            if response_event_id is not None:
-                self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
-                if dispatch_timing is not None:
-                    dispatch_timing.mark_first_visible_reply("final")
-                    dispatch_timing.mark("response_complete")
-                    dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
+            if response_resolution.should_mark_handled:
+                self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))
+            if dispatch_timing is not None and response_resolution.turn_completion_event_id is not None:
+                dispatch_timing.mark_first_visible_reply("final")
+                dispatch_timing.mark("response_complete")
+                dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
             return
 
         with bound_log_context(**dispatch.target.log_context):
@@ -1146,14 +1170,16 @@ class TurnController:
                 )
         except PostLockRequestPreparationError as error:
             failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
-            response_event_id = await self._finalize_dispatch_failure(
+            response_resolution = await self._finalize_dispatch_failure(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
+                response_envelope=dispatch.envelope,
+                correlation_id=dispatch.correlation_id,
                 error=failure,
             )
-            if response_event_id is not None:
-                self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+            if response_resolution.should_mark_handled:
+                self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))
             return
         if response_resolution.should_mark_handled:
             self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))

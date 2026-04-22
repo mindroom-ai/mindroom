@@ -106,7 +106,7 @@ class _ToolStreamState:
 
 @dataclass(slots=True)
 class _AssistantTextStreamState:
-    """Buffer the newest assistant text chunk so a final completion can replace its stale tail."""
+    """Buffer only the newest trailing assistant chunk after streaming has started."""
 
     emitted_text: str = ""
     pending_delta: str | None = None
@@ -1085,6 +1085,11 @@ def _extract_stream_deltas(
 
     if isinstance(event, RunContentEvent):
         if event.content:
+            if not assistant_state.emitted_text and assistant_state.pending_delta is None:
+                first_delta = str(event.content)
+                assistant_state.emitted_text = first_delta
+                deltas.append(first_delta)
+                return deltas
             flushed_delta = _flush_pending_assistant_delta(assistant_state)
             if flushed_delta:
                 deltas.append(flushed_delta)

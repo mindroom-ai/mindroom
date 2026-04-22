@@ -1392,14 +1392,30 @@ class TestStreamingCompletion:
         ]
         assert "".join(contents) == "hello"
 
+    def test_extract_stream_deltas_emits_first_assistant_chunk_immediately(self) -> None:
+        """The first assistant content chunk should not wait for stream completion."""
+        tool_state = openai_compat._ToolStreamState()
+        assistant_state = openai_compat._AssistantTextStreamState()
+
+        deltas = openai_compat._extract_stream_deltas(
+            RunContentEvent(content="hello"),
+            tool_state,
+            assistant_state,
+        )
+
+        assert deltas == ["hello"]
+        assert assistant_state.emitted_text == "hello"
+        assert assistant_state.pending_delta is None
+
     def test_streaming_corrective_final_content_can_replace_stale_buffered_tail(
         self,
         app_client: TestClient,
     ) -> None:
-        """A final corrective body should replace an unflushed stale tail, not preserve it."""
+        """A final corrective body should replace one buffered stale tail, not preserve it."""
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
-            yield RunContentEvent(content="hellx")
+            yield RunContentEvent(content="hel")
+            yield RunContentEvent(content="lx")
             yield RunCompletedEvent(content="hello")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
