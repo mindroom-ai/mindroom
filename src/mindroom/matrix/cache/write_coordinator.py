@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
-from mindroom.timing import emit_timing_event
+from mindroom.timing import emit_timing_event, timing_enabled
 
 if TYPE_CHECKING:
     import structlog
@@ -57,9 +57,16 @@ class _EventCacheWriteCoordinator:
         asyncio.Task[Any] | None,
     ] = field(default_factory=weakref.WeakKeyDictionary, init=False)
 
-    @staticmethod
-    def _active_predecessor_count(previous_tasks: tuple[asyncio.Task[Any], ...]) -> int:
-        return sum(1 for task in previous_tasks if not task.done())
+    def _pending_chain_length(self, task: asyncio.Task[Any] | None) -> int:
+        count = 0
+        seen: set[asyncio.Task[Any]] = set()
+        current = task
+        while current is not None and current not in seen:
+            seen.add(current)
+            if not current.done():
+                count += 1
+            current = self._pending_predecessor(current)
+        return count
 
     def _emit_idle_wait_timing(
         self,
@@ -79,6 +86,23 @@ class _EventCacheWriteCoordinator:
             wait_iterations=wait_iterations,
             pending_task_count=pending_task_count,
         )
+
+    async def _await_room_tail(self, room_id: str, tail_task: asyncio.Task[Any]) -> None:
+        try:
+            await tail_task
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
+        except Exception as exc:
+            self.logger.debug(
+                "Room cache update failed before room became idle",
+                room_id=room_id,
+                error=str(exc),
+            )
+        finally:
+            if self._room_update_tasks.get(room_id) is tail_task and tail_task.done():
+                self._clear_room_tail(room_id, tail_task)
 
     def _pending_predecessor(self, task: asyncio.Task[Any]) -> asyncio.Task[Any] | None:
         predecessor = self._room_update_predecessors.get(task)
@@ -133,39 +157,52 @@ class _EventCacheWriteCoordinator:
     ) -> asyncio.Task[object]:
         """Schedule one room-scoped cache update behind any active predecessor."""
         previous_task = self._room_update_tasks.get(room_id)
-        predecessor_count = self._active_predecessor_count((previous_task,)) if previous_task is not None else 0
+        instrument_timing = timing_enabled()
 
-        async def run_after_previous() -> object:
-            started = time.perf_counter()
-            outcome = "ok"
-            update_started: float | None = None
-            try:
+        if not instrument_timing:
+
+            async def run_after_previous() -> object:
                 await self._await_predecessor(room_id, name, previous_task)
-                update_started = time.perf_counter()
                 return await update_coro_factory()
-            except asyncio.CancelledError:
-                outcome = "cancelled"
-                raise
-            except Exception:
-                outcome = "error"
-                raise
-            finally:
-                update_run_ms = (
-                    round((time.perf_counter() - update_started) * 1000, 1) if update_started is not None else 0.0
-                )
-                total_ms = round((time.perf_counter() - started) * 1000, 1)
-                emit_timing_event(
-                    "Event cache update timing",
-                    barrier_kind="room",
-                    room_id=room_id,
-                    operation=name,
-                    predecessor_count=predecessor_count,
-                    queued_behind_predecessor=predecessor_count > 0,
-                    predecessor_wait_ms=round(total_ms - update_run_ms, 1),
-                    update_run_ms=update_run_ms,
-                    total_ms=total_ms,
-                    outcome=outcome,
-                )
+
+        else:
+            predecessor_count = self._pending_chain_length(previous_task)
+
+            async def run_after_previous() -> object:
+                started = time.perf_counter()
+                outcome = "ok"
+                update_started: float | None = None
+                try:
+                    await self._await_predecessor(room_id, name, previous_task)
+                    update_started = time.perf_counter()
+                    return await update_coro_factory()
+                except asyncio.CancelledError:
+                    outcome = "cancelled"
+                    raise
+                except Exception:
+                    outcome = "error"
+                    raise
+                finally:
+                    finished = time.perf_counter()
+                    total_ms = round((finished - started) * 1000, 1)
+                    if update_started is None:
+                        predecessor_wait_ms = total_ms
+                        update_run_ms = 0.0
+                    else:
+                        predecessor_wait_ms = round((update_started - started) * 1000, 1)
+                        update_run_ms = round((finished - update_started) * 1000, 1)
+                    emit_timing_event(
+                        "Event cache update timing",
+                        barrier_kind="room",
+                        room_id=room_id,
+                        operation=name,
+                        predecessor_count=predecessor_count,
+                        queued_behind_predecessor=predecessor_count > 0,
+                        predecessor_wait_ms=predecessor_wait_ms,
+                        update_run_ms=update_run_ms,
+                        total_ms=total_ms,
+                        outcome=outcome,
+                    )
 
         task = create_background_task(
             run_after_previous(),
@@ -193,8 +230,14 @@ class _EventCacheWriteCoordinator:
             log_exceptions=False,
         )
 
-    async def wait_for_room_idle(self, room_id: str) -> None:
-        """Wait for the currently queued same-room update chain to drain."""
+    async def _wait_for_room_idle_without_timing(self, room_id: str) -> None:
+        while True:
+            tail_task = self._room_update_tasks.get(room_id)
+            if tail_task is None:
+                return
+            await self._await_room_tail(room_id, tail_task)
+
+    async def _wait_for_room_idle_with_timing(self, room_id: str) -> None:
         wait_started: float | None = None
         wait_iterations = 0
         pending_task_count = 0
@@ -210,23 +253,16 @@ class _EventCacheWriteCoordinator:
                 return
             if wait_started is None:
                 wait_started = time.perf_counter()
-                pending_task_count = self._active_predecessor_count((tail_task,))
+                pending_task_count = self._pending_chain_length(tail_task)
             wait_iterations += 1
-            try:
-                await tail_task
-            except asyncio.CancelledError:
-                current_task = asyncio.current_task()
-                if current_task is not None and current_task.cancelling():
-                    raise
-            except Exception as exc:
-                self.logger.debug(
-                    "Room cache update failed before room became idle",
-                    room_id=room_id,
-                    error=str(exc),
-                )
-            finally:
-                if self._room_update_tasks.get(room_id) is tail_task and tail_task.done():
-                    self._clear_room_tail(room_id, tail_task)
+            await self._await_room_tail(room_id, tail_task)
+
+    async def wait_for_room_idle(self, room_id: str) -> None:
+        """Wait for the currently queued same-room update chain to drain."""
+        if timing_enabled():
+            await self._wait_for_room_idle_with_timing(room_id)
+            return
+        await self._wait_for_room_idle_without_timing(room_id)
 
     async def close(self) -> None:
         """Drain any queued cache writes for this coordinator."""
