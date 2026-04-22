@@ -254,20 +254,28 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.matrix_helpers"
+depends_on = ["mindroom.matrix.visible_body"]
+
+[[modules]]
 path = "mindroom.custom_tools.matrix_message"
 depends_on = [
     "mindroom.constants",
     "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.matrix_helpers",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.visible_body",
     "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_room"
 depends_on = [
+    "mindroom.custom_tools.matrix_helpers",
     "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.visible_body",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -804,8 +812,15 @@ path = "mindroom.matrix.event_info"
 depends_on = []
 
 [[modules]]
+path = "mindroom.matrix.visible_body"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.identity",
+]
+
+[[modules]]
 path = "mindroom.matrix.message_content"
-depends_on = ["mindroom.constants"]
+depends_on = ["mindroom.matrix.visible_body"]
 
 [[modules]]
 path = "mindroom.matrix.client_thread_history"
@@ -817,6 +832,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_projection",
+    "mindroom.matrix.visible_body",
 ]
 visibility = [
     "mindroom.custom_tools.matrix_message",
@@ -1153,6 +1169,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.image_handler",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.visible_body",
     "mindroom.media_inputs",
     "mindroom.runtime_protocols",
     "mindroom.voice_handler",

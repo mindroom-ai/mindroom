@@ -1064,8 +1064,10 @@ async def _edit_stale_message(
 ) -> bool:
     """Edit a stale message while preserving thread context when present."""
     extra_content = _preserved_cleanup_content(preserved_content)
-    if extra_content is not None and STREAM_VISIBLE_BODY_KEY in extra_content:
-        extra_content[STREAM_VISIBLE_BODY_KEY] = new_text
+    should_preserve_visible_body = extra_content is not None and STREAM_VISIBLE_BODY_KEY in extra_content
+    if should_preserve_visible_body and extra_content is not None:
+        extra_content = dict(extra_content)
+        extra_content.pop(STREAM_VISIBLE_BODY_KEY, None)
     content = format_message_with_mentions(
         config,
         runtime_paths,
@@ -1075,6 +1077,11 @@ async def _edit_stale_message(
         latest_thread_event_id=latest_thread_event_id,
         extra_content=extra_content,
     )
+    if should_preserve_visible_body:
+        canonical_visible_body = content["body"]
+        content[STREAM_VISIBLE_BODY_KEY] = canonical_visible_body
+        extra_content = dict(extra_content or {})
+        extra_content[STREAM_VISIBLE_BODY_KEY] = canonical_visible_body
 
     delivered = await edit_message_result(
         client,

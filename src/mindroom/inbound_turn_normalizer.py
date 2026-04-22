@@ -23,8 +23,8 @@ from mindroom.matrix.image_handler import download_image
 from mindroom.matrix.message_content import (
     is_v2_sidecar_text_preview,
     resolve_event_source_content,
-    visible_body_from_event_source,
 )
+from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.voice_handler import prepare_voice_message
@@ -147,7 +147,11 @@ class InboundTurnNormalizer:
         return PreparedTextEvent(
             sender=event.sender,
             event_id=event.event_id,
-            body=visible_body_from_event_source(resolved_source, event.body),
+            body=visible_body_from_event_source(
+                resolved_source,
+                event.body,
+                local_agent_domain=self.deps.sender_domain,
+            ),
             source=resolved_source,
             server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )
@@ -212,7 +216,11 @@ class InboundTurnNormalizer:
         return PreparedTextEvent(
             sender=event.sender,
             event_id=event.event_id,
-            body=visible_body_from_event_source(resolved_source, event.body),
+            body=visible_body_from_event_source(
+                resolved_source,
+                event.body,
+                local_agent_domain=self.deps.sender_domain,
+            ),
             source=resolved_source,
             server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )

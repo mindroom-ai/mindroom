@@ -48,6 +48,7 @@ def _make_context(
     )
     client = AsyncMock()
     client.rooms = {}
+    client.user_id = "@mindroom_general:localhost"
     return ToolRuntimeContext(
         agent_name="general",
         room_id=room_id,
@@ -415,11 +416,13 @@ def _make_bundled_replacement(
     event_id: str,
     body: str,
     bundle_key: str | None = None,
+    sender: str = "@editor:localhost",
+    visible_body: str | None = None,
 ) -> dict[str, object]:
     replacement_event: dict[str, object] = {
         "type": "m.room.message",
         "event_id": f"{event_id}-edit",
-        "sender": "@editor:localhost",
+        "sender": sender,
         "origin_server_ts": 9999,
         "content": {
             "body": f"* {body}",
@@ -434,6 +437,8 @@ def _make_bundled_replacement(
             },
         },
     }
+    if visible_body is not None:
+        replacement_event["content"]["m.new_content"]["io.mindroom.visible_body"] = visible_body
     if bundle_key is None:
         return replacement_event
     return {bundle_key: replacement_event}
@@ -492,6 +497,32 @@ async def test_threads_preview_prefers_bundled_replacement_body(
     assert payload["status"] == "ok"
     assert payload["threads"][0]["body_preview"] == "Edited body"
     assert payload["threads"][0]["reply_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_threads_preview_prefers_trusted_canonical_body_from_bundled_replacement() -> None:
+    """Threads should hide transient warmup text for trusted local bundled edits."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    event = _thread_event("$thread1", body="Original body", reply_count=3)
+    event.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 3},
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread1",
+                body="Edited body\n\n⏳ Preparing isolated worker...",
+                sender="@mindroom_general:localhost",
+                visible_body="Edited body",
+            ),
+        },
+    }
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Edited body"
 
 
 @pytest.mark.asyncio

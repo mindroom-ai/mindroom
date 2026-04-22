@@ -28,6 +28,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -138,6 +139,11 @@ def _joined_room_cache(room_id: str = ROOM_ID, *, own_user_id: str = BOT_USER_ID
     return {room_id: room}
 
 
+def _make_client() -> AsyncMock:
+    """Return one AsyncClient-shaped cleanup test client with the bot user ID."""
+    return make_matrix_client_mock(user_id=BOT_USER_ID)
+
+
 def _room_messages_response(*events: object, end: str | None = None) -> nio.RoomMessagesResponse:
     response = MagicMock()
     response.__class__ = nio.RoomMessagesResponse
@@ -180,6 +186,7 @@ async def _run_cleanup(
     bot_user_ids: set[str] | None = None,
     now_ms: int = NOW_MS,
 ) -> tuple[int, list[InterruptedThread]]:
+    client.user_id = BOT_USER_ID
     with (
         patch(
             "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
@@ -249,7 +256,7 @@ def test_latest_visible_thread_event_id_by_thread_prefers_same_timestamp_descend
 async def test_relations_api_filters_reactions_and_unions_history_ids(tmp_path: Path) -> None:
     """Cleanup should redact valid relation hits plus any history-scanned stop reactions."""
     config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = _make_client()
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$message",
@@ -409,7 +416,7 @@ async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(t
 async def test_cleanup_scans_until_history_end_for_deep_stale_messages(tmp_path: Path) -> None:
     """Cleanup should keep paginating until history ends, not stop after an arbitrary page cap."""
     config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = _make_client()
     stale_message = _make_message_event(
         event_id="$page12-stale",
         body="Deep history partial",
@@ -1411,7 +1418,7 @@ async def test_cleanup_preserves_stream_status_and_tool_trace_metadata(tmp_path:
 async def test_cleanup_repairs_pending_stream_status_on_restart_note_messages(tmp_path: Path) -> None:
     """Restart-note messages should still get a metadata-only repair when status is pending."""
     config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = _make_client()
     client.rooms = _joined_room_cache()
     interrupted_body = build_restart_interrupted_body("Working ⋯")
     client.room_messages.return_value = _room_messages_response(
@@ -1450,7 +1457,7 @@ async def test_cleanup_repairs_pending_stream_status_on_restart_note_messages(tm
 async def test_cleanup_uses_canonical_stream_body_instead_of_transient_warmup_suffix(tmp_path: Path) -> None:
     """Restart cleanup should resume from canonical stream text, not the transient worker warmup suffix."""
     config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = _make_client()
     client.rooms = _joined_room_cache()
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
@@ -1474,6 +1481,37 @@ async def test_cleanup_uses_canonical_stream_body_instead_of_transient_warmup_su
     assert interrupted[0].partial_text == "hello"
     sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
     assert cast("dict[str, object]", sent_content["m.new_content"])["body"] == build_restart_interrupted_body("hello")
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_canonical_visible_body_after_mention_rewrite(tmp_path: Path) -> None:
+    """Cleanup should store mention-rewritten canonical body in visible_body metadata."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$message",
+            body="Ping @mindroom_helper:localhost\n\n⏳ Preparing isolated worker...",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread", "$user"),
+            extra_content={
+                STREAM_STATUS_KEY: "streaming",
+                "io.mindroom.visible_body": "Ping @helper",
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert len(interrupted) == 1
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    new_content = cast("dict[str, object]", sent_content["m.new_content"])
+    assert sent_content["io.mindroom.visible_body"] == new_content["body"]
+    assert new_content["io.mindroom.visible_body"] == new_content["body"]
 
 
 @pytest.mark.asyncio

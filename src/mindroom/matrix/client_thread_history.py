@@ -35,7 +35,6 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import (
     extract_and_resolve_message,
     resolve_event_source_content,
-    visible_body_from_event_source,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 from mindroom.matrix.thread_projection import (
@@ -44,6 +43,7 @@ from mindroom.matrix.thread_projection import (
     sort_thread_event_sources_root_first,
     sort_thread_messages_root_first,
 )
+from mindroom.matrix.visible_body import local_agent_domain_from_user_id, visible_body_from_event_source
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
@@ -137,7 +137,7 @@ def _room_message_fallback_body(event: nio.Event) -> str:
     return ""
 
 
-def _snapshot_message_dict(event: nio.Event) -> ResolvedVisibleMessage:
+def _snapshot_message_dict(event: nio.Event, *, local_agent_domain: str | None) -> ResolvedVisibleMessage:
     """Build one lightweight visible message without hydrating sidecars."""
     event_source = event.source if isinstance(event.source, dict) else {}
     content = event_source.get("content", {})
@@ -145,7 +145,11 @@ def _snapshot_message_dict(event: nio.Event) -> ResolvedVisibleMessage:
     event_info = EventInfo.from_event(event_source)
     message = ResolvedVisibleMessage.synthetic(
         sender=event.sender,
-        body=visible_body_from_event_source(event_source, _room_message_fallback_body(event)),
+        body=visible_body_from_event_source(
+            event_source,
+            _room_message_fallback_body(event),
+            local_agent_domain=local_agent_domain,
+        ),
         timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
         event_id=event.event_id,
         content=normalized_content,
@@ -241,6 +245,7 @@ async def _resolve_thread_history_from_event_sources_timed(
     ]
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    local_agent_domain = local_agent_domain_from_user_id(client.user_id)
     sidecar_hydration_started = time.perf_counter()
     for event in parsed_events:
         event_info = EventInfo.from_event(event.source)
@@ -269,7 +274,7 @@ async def _resolve_thread_history_from_event_sources_timed(
                 room_id=room_id,
             )
             if hydrate_sidecars
-            else _snapshot_message_dict(event)
+            else _snapshot_message_dict(event, local_agent_domain=local_agent_domain)
         )
 
     await _apply_latest_edits_to_messages(
@@ -618,12 +623,14 @@ async def _resolve_thread_history_message(
     room_id: str,
 ) -> ResolvedVisibleMessage:
     """Resolve one room-message event into the normalized thread-history shape."""
+    local_agent_domain = local_agent_domain_from_user_id(client.user_id)
     if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
         message_data = await extract_and_resolve_message(
             event,
             client,
             event_cache=event_cache,
             room_id=room_id,
+            local_agent_domain=local_agent_domain,
         )
         return ResolvedVisibleMessage.from_message_data(
             message_data,
@@ -642,7 +649,11 @@ async def _resolve_thread_history_message(
     event_info = EventInfo.from_event(resolved_event_source)
     message = ResolvedVisibleMessage.synthetic(
         sender=event.sender,
-        body=visible_body_from_event_source(resolved_event_source, _room_message_fallback_body(event)),
+        body=visible_body_from_event_source(
+            resolved_event_source,
+            _room_message_fallback_body(event),
+            local_agent_domain=local_agent_domain,
+        ),
         timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
         event_id=event.event_id,
         content=normalized_content,

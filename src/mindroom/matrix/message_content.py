@@ -10,8 +10,13 @@ from typing import TYPE_CHECKING, Any
 import nio
 from nio import crypto
 
-from mindroom.constants import STREAM_VISIBLE_BODY_KEY
 from mindroom.logging_config import get_logger
+from mindroom.matrix.visible_body import (
+    has_trusted_stream_body_metadata,
+    local_agent_domain_from_user_id,
+    trusted_local_agent_sender,
+    visible_body_from_content,
+)
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
@@ -22,6 +27,18 @@ logger = get_logger(__name__)
 _mxc_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
 _cache_ttl = 3600.0  # 1 hour TTL
 _mxc_cache_max_entries = 500
+
+
+def _effective_local_agent_domain(
+    client: nio.AsyncClient | None,
+    local_agent_domain: str | None,
+) -> str | None:
+    """Return the trusted local agent domain for visible-body resolution."""
+    if local_agent_domain is not None:
+        return local_agent_domain
+    if client is None:
+        return None
+    return local_agent_domain_from_user_id(client.user_id)
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -40,22 +57,6 @@ def _normalized_content_dict(content: object) -> dict[str, Any]:
     if not isinstance(content, dict):
         return {}
     return {key: value for key, value in content.items() if isinstance(key, str)}
-
-
-def _content_body(content: dict[str, Any], fallback_body: str) -> str:
-    """Return the body from content when present, otherwise the provided fallback."""
-    visible_body = content.get(STREAM_VISIBLE_BODY_KEY)
-    if isinstance(visible_body, str) and visible_body:
-        return visible_body
-    body = content.get("body")
-    return body if isinstance(body, str) else fallback_body
-
-
-def visible_body_from_event_source(event_source: dict[str, Any], fallback_body: str) -> str:
-    """Return the visible message body from an event source dict."""
-    content = _normalized_content_dict(event_source.get("content", {}))
-    visible_content = _normalized_content_dict(content.get("m.new_content")) or content
-    return _content_body(visible_content, fallback_body)
 
 
 def is_v2_sidecar_text_preview(event_source: dict[str, Any]) -> bool:
@@ -209,6 +210,7 @@ async def extract_and_resolve_message(
     *,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    local_agent_domain: str | None = None,
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
 
@@ -220,6 +222,7 @@ async def extract_and_resolve_message(
         client: Optional Matrix client for downloading attachments
         event_cache: Optional durable event cache used for restart-safe sidecar reuse
         room_id: Room scope for durable sidecar cache reads and writes
+        local_agent_domain: Optional trusted local agent domain for visible-body resolution
 
     Returns:
         Dict with sender, body, timestamp, event_id, and content fields.
@@ -235,9 +238,27 @@ async def extract_and_resolve_message(
         event_cache=event_cache,
         room_id=room_id,
     )
+    effective_local_agent_domain = _effective_local_agent_domain(client, local_agent_domain)
+    trusted_local_agent = trusted_local_agent_sender(event.sender, local_agent_domain=effective_local_agent_domain)
+    resolved_body = visible_body_from_content(
+        resolved_content,
+        event.body,
+        sender_id=event.sender,
+        local_agent_domain=effective_local_agent_domain,
+    )
+    relates_to = _normalized_content_dict(resolved_content.get("m.relates_to"))
+    if trusted_local_agent and relates_to.get("rel_type") == "m.replace":
+        new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
+        if has_trusted_stream_body_metadata(new_content):
+            resolved_body = visible_body_from_content(
+                new_content,
+                resolved_body,
+                sender_id=event.sender,
+                local_agent_domain=effective_local_agent_domain,
+            )
     message_data = {
         "sender": event.sender,
-        "body": _content_body(resolved_content, event.body),
+        "body": resolved_body,
         "timestamp": event.server_timestamp,
         "event_id": event.event_id,
         "content": resolved_content,
@@ -254,6 +275,7 @@ async def extract_edit_body(
     *,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    local_agent_domain: str | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
     content = _normalized_content_dict(event_source.get("content", {}))
@@ -264,16 +286,18 @@ async def extract_edit_body(
         room_id=room_id,
     )
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
-    visible_body = new_content.get(STREAM_VISIBLE_BODY_KEY)
-    if isinstance(visible_body, str) and visible_body:
+    effective_local_agent_domain = _effective_local_agent_domain(client, local_agent_domain)
+    body = visible_body_from_content(
+        new_content,
+        "",
+        sender_id=event_source.get("sender"),
+        local_agent_domain=effective_local_agent_domain,
+    )
+    if body:
         normalized_new_content = dict(new_content)
-        normalized_new_content["body"] = visible_body
-        return visible_body, normalized_new_content
-
-    body = new_content.get("body")
-    if not isinstance(body, str):
-        return None, None
-    return body, dict(new_content)
+        normalized_new_content["body"] = body
+        return body, normalized_new_content
+    return None, None
 
 
 async def resolve_event_source_content(
