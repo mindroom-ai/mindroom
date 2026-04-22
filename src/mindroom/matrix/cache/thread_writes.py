@@ -22,6 +22,7 @@ from mindroom.matrix.thread_bookkeeping import (
     ThreadMutationResolver,
     is_thread_affecting_relation,
 )
+from mindroom.timing import emit_timing_event, timing_enabled
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
@@ -475,22 +476,31 @@ class ThreadLiveWritePolicy:
         self._resolver = resolver
         self._cache_ops = cache_ops
 
-    async def append_live_event(
+    async def _resolve_live_event_impact(
+        self,
+        room_id: str,
+        *,
+        event_id: str,
+        event_info: EventInfo,
+    ) -> MutationThreadImpact:
+        return await self._resolver.resolve_thread_impact_for_mutation(
+            room_id,
+            event_info=event_info,
+            event_id=event_id,
+            context="live",
+        )
+
+    async def _append_live_event_without_timing(
         self,
         room_id: str,
         event: nio.RoomMessage,
         *,
         event_info: EventInfo,
     ) -> None:
-        """Append one live threaded event into the advisory cache when the thread is known."""
-        if not self._cache_ops.cache_runtime_available():
-            return
-
-        impact = await self._resolver.resolve_thread_impact_for_mutation(
+        impact = await self._resolve_live_event_impact(
             room_id,
-            event_info=event_info,
             event_id=event.event_id,
-            context="live",
+            event_info=event_info,
         )
         room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"
         if impact.state is not MutationThreadImpactState.THREADED:
@@ -526,6 +536,162 @@ class ThreadLiveWritePolicy:
             room_id,
             append_and_invalidate,
             name="matrix_cache_append_live_event",
+        )
+
+    async def _append_live_threaded_event_with_timing(
+        self,
+        room_id: str,
+        event: nio.RoomMessage,
+        *,
+        impact: MutationThreadImpact,
+        impact_resolution_ms: float,
+        started: float,
+    ) -> None:
+        assert impact.thread_id is not None
+        thread_id = impact.thread_id
+        event_source = normalize_nio_event_for_cache(event)
+        queue_started = time.perf_counter()
+        append_metrics: dict[str, str | int | float | bool] = {}
+
+        async def append_and_invalidate() -> bool:
+            invalidate_started = time.perf_counter()
+            await self._cache_ops.invalidate_known_thread(
+                room_id,
+                thread_id,
+                reason="live_thread_mutation",
+            )
+            append_metrics["invalidate_ms"] = round((time.perf_counter() - invalidate_started) * 1000, 1)
+            append_started = time.perf_counter()
+            appended = await self._cache_ops.append_event_to_cache(
+                room_id,
+                thread_id,
+                event_source,
+                context="live",
+            )
+            append_metrics["append_ms"] = round((time.perf_counter() - append_started) * 1000, 1)
+            append_metrics["appended"] = appended
+            if not appended:
+                fallback_invalidate_started = time.perf_counter()
+                await self._cache_ops.invalidate_known_thread(
+                    room_id,
+                    thread_id,
+                    reason="live_append_failed",
+                )
+                append_metrics["append_failure_invalidate_ms"] = round(
+                    (time.perf_counter() - fallback_invalidate_started) * 1000,
+                    1,
+                )
+            return appended
+
+        outcome = "ok"
+        try:
+            appended = await self._cache_ops.queue_room_cache_update(
+                room_id,
+                append_and_invalidate,
+                name="matrix_cache_append_live_event",
+            )
+            if appended is False:
+                outcome = "append_failed"
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            emit_timing_event(
+                "Live event cache append timing",
+                room_id=room_id,
+                thread_id=thread_id,
+                event_id=event.event_id,
+                impact_state="threaded",
+                impact_resolution_ms=impact_resolution_ms,
+                queue_and_update_ms=round((time.perf_counter() - queue_started) * 1000, 1),
+                total_ms=round((time.perf_counter() - started) * 1000, 1),
+                outcome=outcome,
+                **append_metrics,
+            )
+
+    async def _append_live_event_with_timing(
+        self,
+        room_id: str,
+        event: nio.RoomMessage,
+        *,
+        event_info: EventInfo,
+    ) -> None:
+        started = time.perf_counter()
+        impact_started = time.perf_counter()
+        impact = await self._resolve_live_event_impact(
+            room_id,
+            event_id=event.event_id,
+            event_info=event_info,
+        )
+        impact_resolution_ms = round((time.perf_counter() - impact_started) * 1000, 1)
+        if impact.state is MutationThreadImpactState.ROOM_LEVEL:
+            self._cache_ops.logger.debug(
+                "Skipping live thread cache bookkeeping for known non-threaded message mutation",
+                room_id=room_id,
+                event_id=event.event_id,
+                original_event_id=event_info.original_event_id,
+            )
+            emit_timing_event(
+                "Live event cache append timing",
+                room_id=room_id,
+                event_id=event.event_id,
+                impact_state="room_level",
+                impact_resolution_ms=impact_resolution_ms,
+                total_ms=round((time.perf_counter() - started) * 1000, 1),
+                outcome="non_threaded_skip",
+            )
+            return
+        if impact.state is MutationThreadImpactState.UNKNOWN:
+            invalidate_started = time.perf_counter()
+            await self._cache_ops.invalidate_room_threads(
+                room_id,
+                reason="live_thread_lookup_unavailable",
+            )
+            emit_timing_event(
+                "Live event cache append timing",
+                room_id=room_id,
+                event_id=event.event_id,
+                impact_state="unknown",
+                impact_resolution_ms=impact_resolution_ms,
+                invalidate_ms=round((time.perf_counter() - invalidate_started) * 1000, 1),
+                total_ms=round((time.perf_counter() - started) * 1000, 1),
+                outcome="room_invalidated",
+            )
+            return
+        await self._append_live_threaded_event_with_timing(
+            room_id,
+            event,
+            impact=impact,
+            impact_resolution_ms=impact_resolution_ms,
+            started=started,
+        )
+
+    async def append_live_event(
+        self,
+        room_id: str,
+        event: nio.RoomMessage,
+        *,
+        event_info: EventInfo,
+    ) -> None:
+        """Append one live threaded event into the advisory cache when the thread is known."""
+        if not self._cache_ops.cache_runtime_available():
+            return
+
+        if not timing_enabled():
+            await self._append_live_event_without_timing(
+                room_id,
+                event,
+                event_info=event_info,
+            )
+            return
+
+        await self._append_live_event_with_timing(
+            room_id,
+            event,
+            event_info=event_info,
         )
 
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
