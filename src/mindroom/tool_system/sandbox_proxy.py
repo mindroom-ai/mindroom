@@ -630,7 +630,7 @@ def _sandbox_proxy_enabled_for_tool(
     return primary_worker_backend_is_dedicated(runtime_paths)
 
 
-def _call_proxy_sync(  # noqa: C901, PLR0912
+def _call_proxy_sync(  # noqa: C901, PLR0912, PLR0915
     *,
     runtime_paths: RuntimePaths,
     tool_name: str,
@@ -737,7 +737,9 @@ def _call_proxy_sync(  # noqa: C901, PLR0912
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as exc:
-                    raise RuntimeError(_proxy_http_error_message(exc.response)) from exc
+                    if worker_handle is None:
+                        raise RuntimeError(_proxy_http_error_message(exc.response)) from exc
+                    raise
                 data = response.json()
         except Exception as exc:
             _record_proxy_exception_for_worker(

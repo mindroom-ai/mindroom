@@ -175,6 +175,17 @@ class _TrackingWorkerManager:
         return None
 
 
+def _static_worker_manager_lease(manager: object) -> object:
+    class _StaticLease:
+        def __enter__(self) -> object:
+            return manager
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    return _StaticLease()
+
+
 class _HttpStatusErrorResponse:
     def __init__(self, url: str, *, status_code: int, payload: dict[str, object] | None = None) -> None:
         self.url = url
@@ -2989,6 +3000,9 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_URL", "http://sandbox-runner:8765")
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", _TEST_AUTH_TOKEN)
+    monkeypatch.setenv("MINDROOM_SANDBOX_EXECUTION_MODE", "all")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n"
@@ -3355,7 +3369,11 @@ async def test_sync_only_worker_routed_tool_surfaces_progress_in_real_async_path
 
     progress_queue: asyncio.Queue[object] = asyncio.Queue()
     with (
-        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=_FakeWorkerManager()),
+        patch.object(
+            sandbox_proxy_module,
+            "lease_primary_worker_manager",
+            lambda *_args, **_kwargs: _static_worker_manager_lease(_FakeWorkerManager()),
+        ),
         patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _BlockingClient),
         worker_progress_pump_scope(asyncio.get_running_loop(), progress_queue),
     ):
@@ -3436,7 +3454,11 @@ def test_worker_routed_tool_error_does_not_record_worker_failure(
     assert entrypoint is not None
 
     with (
-        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch.object(
+            sandbox_proxy_module,
+            "lease_primary_worker_manager",
+            lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+        ),
         patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _ToolErrorClient),
         pytest.raises(RuntimeError, match=r"FileNotFoundError: missing\.txt"),
     ):
@@ -3502,7 +3524,11 @@ def test_worker_routed_worker_failure_records_worker_failure(
     assert entrypoint is not None
 
     with (
-        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch.object(
+            sandbox_proxy_module,
+            "lease_primary_worker_manager",
+            lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+        ),
         patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _WorkerFailureClient),
         pytest.raises(RuntimeError, match=r"Sandbox subprocess timed out\."),
     ):
@@ -3567,7 +3593,11 @@ def test_worker_routed_legacy_structured_failure_records_worker_failure(
     assert entrypoint is not None
 
     with (
-        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch.object(
+            sandbox_proxy_module,
+            "lease_primary_worker_manager",
+            lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+        ),
         patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _LegacyFailureClient),
         pytest.raises(RuntimeError, match=r"Sandbox subprocess timed out\."),
     ):
@@ -3622,7 +3652,11 @@ def test_worker_routed_http_request_error_does_not_record_worker_failure(
     assert entrypoint is not None
 
     with (
-        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch.object(
+            sandbox_proxy_module,
+            "lease_primary_worker_manager",
+            lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+        ),
         patch(
             "mindroom.tool_system.sandbox_proxy.httpx.Client",
             _http_status_client_class(status_code=status_code, payload=payload),
@@ -3678,7 +3712,11 @@ def test_worker_routed_ambiguous_http_client_error_records_worker_failure(
     assert entrypoint is not None
 
     with (
-        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch.object(
+            sandbox_proxy_module,
+            "lease_primary_worker_manager",
+            lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+        ),
         patch(
             "mindroom.tool_system.sandbox_proxy.httpx.Client",
             _http_status_client_class(status_code=status_code, payload=payload),

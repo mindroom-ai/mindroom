@@ -542,7 +542,7 @@ def _backend(
     monkeypatch.setattr(
         backend,
         "_wait_for_ready",
-        lambda container: (f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute"),
+        lambda container: f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
     )
     return backend, fake_client, sync_calls
 
@@ -808,7 +808,7 @@ def test_docker_worker_config_rejects_wildcard_endpoint_host_from_publish_host(t
         },
     )
 
-    with pytest.raises(WorkerBackendError, match="endpoint_host cannot be 0.0.0.0"):
+    with pytest.raises(WorkerBackendError, match=r"endpoint_host cannot be 0\.0\.0\.0"):
         _DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
@@ -1494,7 +1494,7 @@ def test_docker_backend_preserves_container_config_path_without_host_projection(
     monkeypatch.setattr(
         backend,
         "_wait_for_ready",
-        lambda container: (f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute"),
+        lambda container: f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
     )
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
@@ -3275,7 +3275,7 @@ def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
     monkeypatch.setattr(
         backend,
         "_wait_for_ready",
-        lambda container: (f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute"),
+        lambda container: f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
     )
 
     first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)

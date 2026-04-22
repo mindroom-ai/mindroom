@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.workers.backend import WorkerBackendError
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.workers.backend import WorkerBackend
 
 _PRIMARY_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _DEDICATED_WORKER_BACKENDS = frozenset({"docker", "kubernetes"})
@@ -245,12 +246,15 @@ def _build_primary_worker_manager(
         )
     if backend_name == "docker":
         return WorkerManager(
-            DockerWorkerBackend.from_runtime(
-                runtime_paths,
-                auth_token=proxy_token,
-                storage_path=resolved_storage_root,
-                worker_grantable_credentials=_resolve_worker_grantable_credentials(
-                    worker_grantable_credentials,
+            cast(
+                "WorkerBackend",
+                DockerWorkerBackend.from_runtime(
+                    runtime_paths,
+                    auth_token=proxy_token,
+                    storage_path=resolved_storage_root,
+                    worker_grantable_credentials=_resolve_worker_grantable_credentials(
+                        worker_grantable_credentials,
+                    ),
                 ),
             ),
         )

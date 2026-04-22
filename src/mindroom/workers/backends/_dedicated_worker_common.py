@@ -316,7 +316,6 @@ def build_dedicated_worker_runtime_paths(
     worker_port: int,
     shared_storage_root: str,
     extra_env: Mapping[str, str],
-    required_existing_storage_root: Path | None = None,
 ) -> RuntimePaths:
     """Build worker-visible runtime paths for one dedicated worker."""
     validate_dedicated_worker_extra_env(
@@ -339,7 +338,6 @@ def build_dedicated_worker_runtime_paths(
         backend_name=backend_name,
         dedicated_root=dedicated_root,
         local_dedicated_root=local_dedicated_root,
-        required_existing_storage_root=required_existing_storage_root,
     ):
         process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
     _rewrite_worker_file_env_values(
@@ -349,7 +347,6 @@ def build_dedicated_worker_runtime_paths(
         local_dedicated_root=local_dedicated_root,
         process_env=process_env,
         env_file_values=env_file_values,
-        required_existing_storage_root=required_existing_storage_root,
     )
 
     process_env.update(
@@ -451,13 +448,10 @@ def _worker_google_application_credentials_path(
     backend_name: str,
     dedicated_root: Path,
     local_dedicated_root: Path,
-    required_existing_storage_root: Path | None,
 ) -> str | None:
     """Return a worker-visible ADC path, copying the source into worker state when needed."""
     raw_value = runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
     if raw_value is None or not raw_value.strip():
-        return None
-    if required_existing_storage_root is not None and not required_existing_storage_root.exists():
         return None
 
     source_path = runtime_env_source_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
@@ -496,7 +490,6 @@ def _rewrite_worker_file_env_values(
     local_dedicated_root: Path,
     process_env: dict[str, str],
     env_file_values: dict[str, str],
-    required_existing_storage_root: Path | None,
 ) -> None:
     for env_name in sorted({*process_env, *env_file_values}):
         if not env_name.endswith("_FILE"):
@@ -509,7 +502,6 @@ def _rewrite_worker_file_env_values(
             backend_name=backend_name,
             dedicated_root=dedicated_root,
             local_dedicated_root=local_dedicated_root,
-            required_existing_storage_root=required_existing_storage_root,
         )
         if worker_visible_path is None:
             continue
@@ -523,12 +515,9 @@ def _worker_file_env_path(
     backend_name: str,
     dedicated_root: Path,
     local_dedicated_root: Path,
-    required_existing_storage_root: Path | None,
 ) -> str | None:
     raw_value = runtime_paths.env_value(env_name)
     if raw_value is None or not raw_value.strip():
-        return None
-    if required_existing_storage_root is not None and not required_existing_storage_root.exists():
         return None
 
     source_path = runtime_env_source_path(runtime_paths, env_name)

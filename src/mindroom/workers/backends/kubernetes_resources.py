@@ -767,7 +767,6 @@ class KubernetesResourceManager:
             worker_port=self.config.worker_port,
             shared_storage_root=self.config.storage_mount_path,
             extra_env=self.config.extra_env,
-            required_existing_storage_root=self.storage_root,
         )
 
     def _volume_mounts(
