@@ -237,13 +237,10 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.side_effect = asyncio.CancelledError()
 
-            # Call the method and expect it to raise CancelledError
-            with pytest.raises(asyncio.CancelledError):
-                await bot._response_runner.process_and_respond(
-                    _response_request(existing_event_id="$thinking_msg"),
-                )
+            await bot._response_runner.process_and_respond(
+                _response_request(existing_event_id="$thinking_msg"),
+            )
 
-            # Verify the thinking message was edited with cancellation message
             assert len(edited_messages) == 1
             event_id, text = edited_messages[0]
             assert event_id == "$thinking_msg"
@@ -338,10 +335,9 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.side_effect = asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
 
-            with pytest.raises(asyncio.CancelledError):
-                await bot._response_runner.process_and_respond(
-                    _response_request(existing_event_id="$thinking_msg"),
-                )
+            await bot._response_runner.process_and_respond(
+                _response_request(existing_event_id="$thinking_msg"),
+            )
 
         assert len(edited_messages) == 1
         event_id, content, text = edited_messages[0]

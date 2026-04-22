@@ -773,6 +773,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         HandledTurnState.from_source_event_id(
             "$voice_event",
             response_event_id="$response",
+            visible_echo_event_id="$response",
             source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
         ).with_response_context(
             response_owner="home",

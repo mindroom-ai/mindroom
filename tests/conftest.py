@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
+from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
 from mindroom.matrix.cache.event_cache import _EventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
@@ -686,14 +687,37 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
     """Route response execution through one legacy-style generate-response mock."""
     wrap_extracted_collaborators(bot, "_response_runner")
 
-    async def _generate(request: ResponseRequest) -> str | None:
+    def _resolution_from_test_result(
+        result: TurnDeliveryResolution | FinalDeliveryOutcome | str | None,
+        *,
+        existing_event_id: str | None,
+    ) -> TurnDeliveryResolution:
+        if isinstance(result, TurnDeliveryResolution):
+            return result
+        if isinstance(result, FinalDeliveryOutcome):
+            return TurnDeliveryResolution.from_outcome(result)
+        if result is None:
+            return TurnDeliveryResolution.from_outcome(
+                FinalDeliveryOutcome.error_without_visible_response(
+                    failure_reason="test_mock_no_visible_response",
+                ),
+            )
+        return TurnDeliveryResolution.from_outcome(
+            FinalDeliveryOutcome.final_visible_delivery(
+                final_visible_event_id=result,
+                final_visible_body="",
+                delivery_kind="edited" if existing_event_id is not None else "sent",
+            ),
+        )
+
+    async def _generate(request: ResponseRequest) -> TurnDeliveryResolution:
         if request.prepare_after_lock is not None:
             try:
                 request = await request.prepare_after_lock(request)
             except Exception as exc:
                 raise PostLockRequestPreparationError from exc
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
-        return await generate_response(
+        result = await generate_response(
             room_id=request.room_id,
             prompt=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
@@ -711,6 +735,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             target=request.target,
             matrix_run_metadata=request.matrix_run_metadata,
         )
+        return _resolution_from_test_result(result, existing_event_id=request.existing_event_id)
 
     bot._response_runner.generate_response = AsyncMock(side_effect=_generate)
     replace_turn_controller_deps(bot, response_runner=bot._response_runner)

@@ -20,6 +20,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
@@ -320,25 +321,33 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
     bot.orchestrator.agent_bots = {"a1": MagicMock()}
-    bot._edit_message = AsyncMock(return_value=True)
     bot._send_response = AsyncMock(return_value="$new_response")
 
-    event_id = await bot._generate_response(
-        room_id="!room:localhost",
-        prompt="@t1 please retry",
-        reply_to_event_id="$evt1",
-        thread_id=None,
-        thread_history=[],
-        existing_event_id="$existing_response",
-        user_id="@user:localhost",
-    )
+    with patch(
+        "mindroom.delivery_gateway.edit_message_result",
+        new=AsyncMock(
+            return_value=DeliveredMatrixEvent(
+                event_id="$existing_response",
+                content_sent={"body": "Team 't1' includes agent 'a2' that could not be materialized for this request."},
+            ),
+        ),
+    ) as mock_edit:
+        resolution = await bot._generate_response(
+            room_id="!room:localhost",
+            prompt="@t1 please retry",
+            reply_to_event_id="$evt1",
+            thread_id=None,
+            thread_history=[],
+            existing_event_id="$existing_response",
+            user_id="@user:localhost",
+        )
 
-    assert event_id == "$existing_response"
-    bot._edit_message.assert_awaited_once_with(
-        "!room:localhost",
-        "$existing_response",
-        "Team 't1' includes agent 'a2' that could not be materialized for this request.",
-        None,
+    assert resolution.state == "final_visible_delivery"
+    assert resolution.visible_response_event_id == "$existing_response"
+    assert resolution.response_identity_event_id == "$existing_response"
+    assert mock_edit.await_args.args[2] == "$existing_response"
+    assert (
+        mock_edit.await_args.args[4] == "Team 't1' includes agent 'a2' that could not be materialized for this request."
     )
     bot._send_response.assert_not_awaited()
 

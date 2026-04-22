@@ -20,6 +20,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     bind_runtime_paths,
@@ -114,7 +115,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         user_message_id = "$user_original_message"
         thread_id = user_message_id
 
-        event_id = await bot._generate_response(
+        resolution = await bot._generate_response(
             room_id=room_id,
             prompt="Test prompt",
             reply_to_event_id=user_message_id,
@@ -125,7 +126,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert event_id == "$agent_message_id"
+        assert resolution.response_identity_event_id == "$agent_message_id"
         mock_register.assert_called_once()
         call_args = mock_register.call_args[0]
         registered_event_id = call_args[0]
@@ -211,7 +212,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         room_id = "!test:localhost"
         user_message_id = "$user_thread_start"
         thread_id = user_message_id
-        event_id = await bot._generate_response(
+        resolution = await bot._generate_response(
             room_id=room_id,
             prompt="Test prompt",
             reply_to_event_id=user_message_id,
@@ -222,7 +223,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert event_id == "$agent_response_id"
+        assert resolution.response_identity_event_id == "$agent_response_id"
         mock_register.assert_called_once()
         call_args = mock_register.call_args[0]
         registered_event_id = call_args[0]
@@ -256,7 +257,14 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
             yield "Test interactive response"
 
         mock_ai_response.return_value = mock_stream()
-        mock_send_streaming_response.return_value = ("$standalone_message", "Test interactive response")
+        mock_send_streaming_response.return_value = StreamTransportOutcome(
+            last_physical_stream_event_id="$standalone_message",
+            terminal_operation="send",
+            terminal_result="succeeded",
+            terminal_status="completed",
+            rendered_body="Test interactive response",
+            visible_body_state="visible_body",
+        )
 
         mock_response = MagicMock()
         mock_response.formatted_text = "Test interactive question"
@@ -291,7 +299,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         install_runtime_cache_support(bot)
 
         room_id = "!test:localhost"
-        event_id = await bot._generate_response(
+        resolution = await bot._generate_response(
             room_id=room_id,
             prompt="Test prompt",
             reply_to_event_id="$some_message",
@@ -300,7 +308,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
             user_id="@user:localhost",
         )
 
-        assert event_id == "$standalone_message"
+        assert resolution.response_identity_event_id == "$standalone_message"
         mock_register.assert_called_once()
         call_args = mock_register.call_args[0]
         registered_event_id = call_args[0]

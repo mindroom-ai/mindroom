@@ -629,7 +629,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
         trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file", args_preview="file_name=a.py")]
         yield StructuredStreamChunk(content="🔧 `save_file` [1] ⏳", tool_trace=trace)
 
-    event_id, _ = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -641,6 +641,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
         streaming_cls=ReplacementStreamingResponse,
     )
 
+    event_id = outcome.last_physical_stream_event_id
     assert event_id is not None
     assert len(client.messages_sent) >= 1
     last_content = client.messages_sent[-1][2]
@@ -660,7 +661,7 @@ async def test_streaming_with_extra_content_metadata() -> None:
         yield "hello"
         extra_content[AI_RUN_METADATA_KEY] = {"version": 1, "usage": {"total_tokens": 10}}
 
-    event_id, _ = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -673,6 +674,7 @@ async def test_streaming_with_extra_content_metadata() -> None:
         extra_content=extra_content,
     )
 
+    event_id = outcome.last_physical_stream_event_id
     assert event_id is not None
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
     assert target_content[AI_RUN_METADATA_KEY]["usage"]["total_tokens"] == 10
@@ -694,7 +696,7 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
         yield StructuredStreamChunk(content="🔧 `save_file` [1]", tool_trace=trace_full)
         yield StructuredStreamChunk(content="🔧 `save_file` [1]", tool_trace=trace_stale)
 
-    event_id, _ = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -706,6 +708,7 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
         streaming_cls=ReplacementStreamingResponse,
     )
 
+    event_id = outcome.last_physical_stream_event_id
     assert event_id is not None
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
     assert _TOOL_TRACE_KEY in target_content
@@ -724,7 +727,7 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
         yield ToolCallCompletedEvent(tool=tool, content="ok")
 
-    event_id, accumulated = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -736,8 +739,11 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
         streaming_cls=ReplacementStreamingResponse,
     )
 
+    event_id = outcome.last_physical_stream_event_id
+    accumulated = outcome.rendered_body
     assert event_id is not None
     # The accumulated text must still contain the tool marker, not be empty
+    assert accumulated is not None
     assert "save_file" in accumulated
     assert accumulated.strip() != ""
 
@@ -753,7 +759,7 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="second_tool", tool_args={}))
         yield "Done"
 
-    event_id, accumulated = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -765,5 +771,8 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
         show_tool_calls=False,
     )
 
+    event_id = outcome.last_physical_stream_event_id
+    accumulated = outcome.rendered_body
     assert event_id is not None
+    assert accumulated is not None
     assert accumulated == "\n\nDone"

@@ -31,6 +31,7 @@ from mindroom.constants import (
 )
 from mindroom.conversation_state_writer import ConversationStateWriter
 from mindroom.delivery_gateway import DeliveryResult
+from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.history.interrupted_replay import build_interrupted_replay_run, build_interrupted_replay_snapshot
 from mindroom.history.types import HistoryScope
@@ -170,6 +171,7 @@ def _record_handled_turn(
         HandledTurnState.create(
             source_event_ids,
             response_event_id=response_event_id,
+            visible_echo_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
             response_owner=response_owner,
             history_scope=history_scope,
@@ -218,16 +220,46 @@ def _team_test_config(tmp_path: Path) -> Config:
 
 def _generate_response_with_locked_callback(
     response_event_id: str | None,
-) -> Callable[..., Awaitable[str | None]]:
+) -> Callable[..., Awaitable[TurnDeliveryResolution]]:
     """Execute locked edit cleanup in mocked response generation paths."""
 
-    async def _generate_response(*_args: object, **kwargs: object) -> str | None:
+    async def _generate_response(*_args: object, **kwargs: object) -> TurnDeliveryResolution:
         locked_callback = kwargs.get("on_lifecycle_lock_acquired")
         if locked_callback is not None:
             locked_callback()
-        return response_event_id
+        if response_event_id is None:
+            return TurnDeliveryResolution.from_outcome(
+                FinalDeliveryOutcome.error_without_visible_response(
+                    failure_reason="test_mock_no_visible_response",
+                ),
+            )
+        delivery_kind = "edited" if kwargs.get("existing_event_id") is not None else "sent"
+        return TurnDeliveryResolution.from_outcome(
+            FinalDeliveryOutcome.final_visible_delivery(
+                final_visible_event_id=response_event_id,
+                final_visible_body="",
+                delivery_kind=delivery_kind,
+            ),
+        )
 
     return _generate_response
+
+
+def _delivery_resolution(response_event_id: str | None) -> TurnDeliveryResolution:
+    """Build one typed delivery resolution for test-side response mocks."""
+    if response_event_id is None:
+        return TurnDeliveryResolution.from_outcome(
+            FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason="test_mock_no_visible_response",
+            ),
+        )
+    return TurnDeliveryResolution.from_outcome(
+        FinalDeliveryOutcome.final_visible_delivery(
+            final_visible_event_id=response_event_id,
+            final_visible_body="",
+            delivery_kind="sent",
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -1940,7 +1972,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             bot,
             "_generate_response",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=_delivery_resolution(None),
         ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
@@ -2066,7 +2098,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             bot,
             "_generate_response",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=_delivery_resolution(None),
         ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
@@ -2213,7 +2245,7 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
             bot,
             "_generate_response",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=_delivery_resolution(None),
         ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
@@ -2323,7 +2355,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
             ),
         ],
     )
-    generate_response = AsyncMock(return_value="$response-new:example.com")
+    generate_response = AsyncMock(return_value=_delivery_resolution("$response-new:example.com"))
     replace_edit_regenerator_deps(bot, generate_response=generate_response)
 
     with (
@@ -2450,7 +2482,13 @@ async def test_edit_regenerator_backfill_preserves_interactive_selection_anchor_
             ),
         ],
     )
-    generate_response = AsyncMock(return_value=None)
+    generate_response = AsyncMock(
+        return_value=TurnDeliveryResolution.from_outcome(
+            FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason="test_mock_no_visible_response",
+            ),
+        ),
+    )
     replace_edit_regenerator_deps(bot, generate_response=generate_response)
 
     with (
@@ -2721,13 +2759,13 @@ async def test_handle_message_edit_uses_fallback_cleanup_when_turn_context_was_r
     }
     cleanup_called = False
 
-    async def generate_response_with_locked_cleanup(*_args: object, **kwargs: object) -> str:
+    async def generate_response_with_locked_cleanup(*_args: object, **kwargs: object) -> TurnDeliveryResolution:
         nonlocal cleanup_called
         locked_cleanup = kwargs["on_lifecycle_lock_acquired"]
         assert locked_cleanup is not None
         locked_cleanup()
         cleanup_called = True
-        return "$response:example.com"
+        return _delivery_resolution("$response:example.com")
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
@@ -2879,7 +2917,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             should_use_streaming=AsyncMock(return_value=False),
         ),
     ):
-        response_event_id = await bot._generate_response(
+        resolution = await bot._generate_response(
             room_id="!test:example.com",
             prompt="primary",
             reply_to_event_id="$primary:example.com",
@@ -2895,7 +2933,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             },
         )
 
-    assert response_event_id == "$response:example.com"
+    assert resolution.response_identity_event_id == "$response:example.com"
     assert storage.upserted_session is not None
     persisted_metadata = storage.upserted_session.runs[0].metadata
     assert persisted_metadata is not None
@@ -2909,7 +2947,12 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             return_value=storage,
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
-        patch.object(bot, "_generate_response", new_callable=AsyncMock, return_value=None) as mock_generate_response,
+        patch.object(
+            bot,
+            "_generate_response",
+            new_callable=AsyncMock,
+            return_value=_delivery_resolution(None),
+        ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -3048,7 +3091,12 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
             side_effect=[threaded_storage, room_storage],
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
-        patch.object(bot, "_generate_response", new_callable=AsyncMock, return_value=None) as mock_generate_response,
+        patch.object(
+            bot,
+            "_generate_response",
+            new_callable=AsyncMock,
+            return_value=_delivery_resolution(None),
+        ) as mock_generate_response,
     ):
         await bot._edit_regenerator.handle_message_edit(
             room,
@@ -3281,7 +3329,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         patch("mindroom.response_runner.mark_auto_flush_dirty_session"),
         patch.object(Config, "get_agent_memory_backend", return_value="none"),
     ):
-        response_event_id = await bot._generate_response(
+        resolution = await bot._generate_response(
             room_id="!test:example.com",
             prompt="original",
             reply_to_event_id="$original:example.com",
@@ -3296,7 +3344,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             },
         )
 
-    assert response_event_id == "$response-new:example.com"
+    assert resolution.response_identity_event_id == "$response-new:example.com"
     storage = bot._conversation_state_writer.create_storage(None)
     try:
         persisted_session = get_agent_session(storage, session_id)
@@ -3368,7 +3416,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             restarted_bot,
             "_generate_response",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=_delivery_resolution(None),
         ) as mock_generate_response,
     ):
         mock_context.return_value = MagicMock(
@@ -3470,7 +3518,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
             thread_id="thread_id",
         )
         mock_send_text.return_value = "$ack_event:example.com"
-        mock_generate_response.return_value = "$response_event:example.com"
+        mock_generate_response.return_value = _delivery_resolution("$response_event:example.com")
         mock_fetch_history.return_value = []
 
         # Process the reaction event
@@ -3557,7 +3605,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
             thread_id="thread_id",
         )
         mock_send_text.return_value = "$ack_event:example.com"
-        mock_generate_response.return_value = None
+        mock_generate_response.return_value = _delivery_resolution(None)
         mock_fetch_history.return_value = []
 
         await bot._on_reaction(room, reaction_event)
@@ -3651,7 +3699,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
             bot._response_runner,
             "generate_response",
             new_callable=AsyncMock,
-            return_value="$response:example.com",
+            return_value=_delivery_resolution("$response:example.com"),
         ) as mock_generate_response,
         patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock, return_value=[]),
         patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
@@ -3772,7 +3820,7 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
         patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
     ):
         mock_send_text.return_value = "$ack_event:example.com"
-        mock_generate_response.return_value = "$response_event:example.com"
+        mock_generate_response.return_value = _delivery_resolution("$response_event:example.com")
 
         await bot._on_reaction(room, disallowed_reaction)
         mock_send_text.assert_not_called()

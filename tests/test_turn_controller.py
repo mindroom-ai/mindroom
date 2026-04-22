@@ -114,7 +114,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
             "mindroom.streaming.edit_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit:localhost")),
         ) as mock_edit:
-            event_id, accumulated = await send_streaming_response(
+            outcome = await send_streaming_response(
                 client=bot.client,
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,
@@ -129,8 +129,8 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
             )
 
         mock_edit.assert_awaited()
-        assert accumulated == "Processed selection"
-        return event_id
+        assert outcome.rendered_body == "Processed selection"
+        return outcome.last_physical_stream_event_id
 
     generate_response_mock = AsyncMock(side_effect=generate_response)
     install_generate_response_mock(bot, generate_response_mock)

@@ -18,13 +18,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
-from mindroom.constants import (
-    STREAM_STATUS_COMPLETED,
-    STREAM_STATUS_ERROR,
-    STREAM_STATUS_KEY,
-    STREAM_STATUS_STREAMING,
-    STREAM_VISIBLE_BODY_KEY,
-)
+from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -728,7 +722,7 @@ class TestStreamingBehavior:
 
         assert mock_edit.await_count == 1
         final_body = mock_edit.await_args.args[3]["body"]
-        assert final_body == PROGRESS_PLACEHOLDER
+        assert final_body == "**[Model emitted no visible text content after thinking. Please retry.]**"
         assert IN_PROGRESS_MARKER not in final_body
 
     @pytest.mark.asyncio
@@ -782,7 +776,7 @@ class TestStreamingBehavior:
             return
 
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
-            event_id, accumulated = await send_streaming_response(
+            outcome = await send_streaming_response(
                 client=mock_client,
                 room_id="!test:localhost",
                 reply_to_event_id="$original_123",
@@ -796,13 +790,15 @@ class TestStreamingBehavior:
                 room_mode=True,
             )
 
+        event_id = outcome.last_physical_stream_event_id
+        accumulated = outcome.rendered_body
         assert event_id == "$thinking_123"
-        assert accumulated == ""
+        assert accumulated is not None
         assert len(edited_contents) == 1
         final_content, final_text = edited_contents[0]
-        assert final_text == PROGRESS_PLACEHOLDER
-        assert final_content["body"] == PROGRESS_PLACEHOLDER
-        assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+        assert final_text == "**[Model emitted no visible text content after thinking. Please retry.]**"
+        assert final_content["body"] == "**[Model emitted no visible text content after thinking. Please retry.]**"
+        assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
         assert final_content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$original_123"}}
 
     @pytest.mark.asyncio
@@ -842,7 +838,7 @@ class TestStreamingBehavior:
             patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
         ):
-            event_id, accumulated = await send_streaming_response(
+            outcome = await send_streaming_response(
                 client=mock_client,
                 room_id="!test:localhost",
                 reply_to_event_id="$original_123",
@@ -855,7 +851,10 @@ class TestStreamingBehavior:
                 latest_thread_event_id="$original_123",
             )
 
+        event_id = outcome.last_physical_stream_event_id
+        accumulated = outcome.rendered_body
         assert event_id == "$stream-send"
+        assert accumulated is not None
         assert accumulated == "Hello from stream"
         assert conversation_cache.notify_outbound_message.call_count == 2
         first_call = conversation_cache.notify_outbound_message.call_args_list[0].args
@@ -2578,7 +2577,7 @@ class TestStreamingConfig:
                 super().__init__(**kwargs)
                 captured.append(self)
 
-        event_id, text = await send_streaming_response(
+        outcome = await send_streaming_response(
             client=mock_client,
             room_id="!r:localhost",
             reply_to_event_id="$orig",
@@ -2591,7 +2590,10 @@ class TestStreamingConfig:
             room_mode=True,
         )
 
+        event_id = outcome.last_physical_stream_event_id
+        text = outcome.rendered_body
         assert event_id == "$cfg_test"
+        assert text is not None
         assert text == "hello"
         assert len(captured) == 1
         sr = captured[0]

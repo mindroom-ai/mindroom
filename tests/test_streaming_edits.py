@@ -12,6 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -38,6 +39,21 @@ def _make_matrix_client_mock() -> AsyncMock:
     client = make_matrix_client_mock(user_id="@mindroom_calculator:localhost")
     client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _empty_event_iterator())
     return client
+
+
+def _delivery_resolution(response_event_id: str | None) -> TurnDeliveryResolution:
+    if response_event_id is None:
+        return TurnDeliveryResolution.from_outcome(
+            FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason="test_no_visible_response",
+            ),
+        )
+    return TurnDeliveryResolution.from_outcome(
+        FinalDeliveryOutcome.final_visible_delivery(
+            final_visible_event_id=response_event_id,
+            final_visible_body="test response",
+        ),
+    )
 
 
 def setup_test_bot(
@@ -184,7 +200,7 @@ class TestStreamingEdits:
         with patch.object(
             bot,
             "_generate_response",
-            new=AsyncMock(return_value="$response123"),
+            new=AsyncMock(return_value=_delivery_resolution("$response123")),
         ) as mock_generate_response:
             await bot._on_message(mock_room, edit_event1)
         assert mock_generate_response.await_count == 1
@@ -217,7 +233,7 @@ class TestStreamingEdits:
         with patch.object(
             bot,
             "_generate_response",
-            new=AsyncMock(return_value="$response123"),
+            new=AsyncMock(return_value=_delivery_resolution("$response123")),
         ) as mock_generate_response:
             await bot._on_message(mock_room, edit_event2)
         assert mock_generate_response.await_count == 1

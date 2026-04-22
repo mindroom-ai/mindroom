@@ -16,6 +16,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -27,7 +28,6 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_edit_message_mock,
     install_runtime_cache_support,
     patch_response_runner_module,
     runtime_paths_for,
@@ -178,9 +178,6 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         raise asyncio.CancelledError
 
-    bot._edit_message = AsyncMock()
-    install_edit_message_mock(bot, bot._edit_message)
-
     with (
         patch.object(
             ResponseRunner,
@@ -188,6 +185,15 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
+        patch(
+            "mindroom.delivery_gateway.edit_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$thinking",
+                    content_sent={"body": "**[Response cancelled by user]**"},
+                ),
+            ),
+        ) as mock_edit,
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             team_response=fake_team_response,
@@ -206,14 +212,9 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
             correlation_id="corr-team-cancelled",
         )
 
-    bot._edit_message.assert_awaited_once_with(
-        "!team:localhost",
-        "$thinking",
-        "**[Response cancelled by user]**",
-        "$thread_root",
-        tool_trace=None,
-        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED},
-    )
+    assert mock_edit.await_args.args[2] == "$thinking"
+    assert mock_edit.await_args.args[4] == "**[Response cancelled by user]**"
+    assert mock_edit.await_args.args[3][STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
 
 
 @pytest.mark.asyncio
@@ -241,9 +242,6 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
 
-    bot._edit_message = AsyncMock()
-    install_edit_message_mock(bot, bot._edit_message)
-
     with (
         patch.object(
             ResponseRunner,
@@ -251,6 +249,15 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
+        patch(
+            "mindroom.delivery_gateway.edit_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$thinking",
+                    content_sent={"body": build_restart_interrupted_body("")},
+                ),
+            ),
+        ) as mock_edit,
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             team_response=fake_team_response,
@@ -269,14 +276,9 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
             correlation_id="corr-team-restart",
         )
 
-    bot._edit_message.assert_awaited_once_with(
-        "!team:localhost",
-        "$thinking",
-        build_restart_interrupted_body(""),
-        "$thread_root",
-        tool_trace=None,
-        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
-    )
+    assert mock_edit.await_args.args[2] == "$thinking"
+    assert mock_edit.await_args.args[4] == build_restart_interrupted_body("")
+    assert mock_edit.await_args.args[3][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
 
 @pytest.mark.asyncio

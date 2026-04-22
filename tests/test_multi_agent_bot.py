@@ -52,7 +52,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.conversation_resolver import MessageContext
-from mindroom.delivery_gateway import DeliveryResult, FinalDeliveryRequest
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryResult, FinalDeliveryRequest
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome, TurnDeliveryResolution
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionOutcome
@@ -236,6 +236,7 @@ def _agent_response_handled_turn(
     return HandledTurnState.from_source_event_id(
         event_id,
         response_event_id=response_event_id,
+        visible_echo_event_id=response_event_id,
         source_event_prompts=source_event_prompts,
     ).with_response_context(
         response_owner=agent_name,
@@ -4207,9 +4208,9 @@ class TestAgentBot:
             await started.wait()
             task.cancel()
             release.set()
-            event_id = await task
+            resolution = await task
 
-        assert event_id == "$response"
+        assert resolution.response_identity_event_id == "$response"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_queues_memory_before_helper_failure(
@@ -7370,35 +7371,43 @@ class TestAgentBot:
             rejection_message="Team request includes private agent 'mind'; private agents cannot participate in teams yet",
         )
 
-        mock_send_response = AsyncMock(return_value="$reply")
-        install_send_response_mock(bot, mock_send_response)
-        _replace_turn_policy_deps(
-            bot,
-            delivery_gateway=bot._delivery_gateway,
-        )
+        bot.client = AsyncMock(spec=nio.AsyncClient)
 
         async def unused_payload_builder(_context: MessageContext) -> DispatchPayload:
             return DispatchPayload(prompt="help me")
 
-        await bot._turn_controller._execute_response_action(
-            room,
-            event,
-            dispatch,
-            action,
-            unused_payload_builder,
-            processing_log="processing",
-            dispatch_started_at=0.0,
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-        )
+        with patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(
+                return_value=FinalDeliveryOutcome.final_visible_delivery(
+                    final_visible_event_id="$reply",
+                    final_visible_body=action.rejection_message,
+                    delivery_kind="sent",
+                ),
+            ),
+        ) as deliver_final:
+            await bot._turn_controller._execute_response_action(
+                room,
+                event,
+                dispatch,
+                action,
+                unused_payload_builder,
+                processing_log="processing",
+                dispatch_started_at=0.0,
+                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+            )
 
-        mock_send_response.assert_awaited_once()
-        assert mock_send_response.await_args.args[2].endswith(
+        deliver_final.assert_awaited_once()
+        delivered_request = deliver_final.await_args.args[0]
+        assert delivered_request.response_text.endswith(
             "private agents cannot participate in teams yet",
         )
         tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$reply",
+                visible_echo_event_id="$reply",
             ),
         )
 
@@ -8295,7 +8304,15 @@ class TestAgentBot:
         )
 
         mock_send_response = AsyncMock()
-        mock_generate_team_response = AsyncMock(return_value="$team-response")
+        mock_generate_team_response = AsyncMock(
+            return_value=TurnDeliveryResolution.from_outcome(
+                FinalDeliveryOutcome.final_visible_delivery(
+                    final_visible_event_id="$team-response",
+                    final_visible_body="",
+                    delivery_kind="sent",
+                ),
+            ),
+        )
         install_send_response_mock(bot, mock_send_response)
         bot._response_runner.generate_team_response_helper = mock_generate_team_response
         _replace_turn_policy_deps(
@@ -8328,6 +8345,7 @@ class TestAgentBot:
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$team-response",
+                visible_echo_event_id="$team-response",
             ),
         )
 
@@ -8403,6 +8421,7 @@ class TestAgentBot:
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$response",
+                visible_echo_event_id="$response",
             ),
         )
 
@@ -8485,6 +8504,7 @@ class TestAgentBot:
         )
         expected_handled_turn = replace(
             expected_handled_turn,
+            visible_echo_event_id=None,
             conversation_target=MessageTarget.resolve(
                 room_id=room.room_id,
                 thread_id=None,

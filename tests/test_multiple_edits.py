@@ -12,6 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -26,6 +27,23 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _delivery_resolution(response_event_id: str | None) -> TurnDeliveryResolution:
+    """Build one typed delivery resolution for edit-regeneration tests."""
+    if response_event_id is None:
+        return TurnDeliveryResolution.from_outcome(
+            FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason="test_mock_no_visible_response",
+            ),
+        )
+    return TurnDeliveryResolution.from_outcome(
+        FinalDeliveryOutcome.final_visible_delivery(
+            final_visible_event_id=response_event_id,
+            final_visible_body="",
+            delivery_kind="sent",
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -150,7 +168,11 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit1_event.source = edit1_event.__dict__["source"]
 
     # Process first edit and verify regeneration happens through the shared response helper.
-    with patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response123")) as mock_generate_response:
+    with patch.object(
+        bot,
+        "_generate_response",
+        new=AsyncMock(return_value=_delivery_resolution("$response123")),
+    ) as mock_generate_response:
         await bot._on_message(room, edit1_event)
 
     assert mock_generate_response.await_count == 1
@@ -185,7 +207,11 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit2_event.source = edit2_event.__dict__["source"]
 
     # Process second edit and verify regeneration happens again.
-    with patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response123")) as mock_generate_response:
+    with patch.object(
+        bot,
+        "_generate_response",
+        new=AsyncMock(return_value=_delivery_resolution("$response123")),
+    ) as mock_generate_response:
         await bot._on_message(room, edit2_event)
 
     assert mock_generate_response.await_count == 1
@@ -220,7 +246,11 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     bot.client.room_send.reset_mock()
 
     # Process third edit and verify regeneration still happens.
-    with patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response123")) as mock_generate_response:
+    with patch.object(
+        bot,
+        "_generate_response",
+        new=AsyncMock(return_value=_delivery_resolution("$response123")),
+    ) as mock_generate_response:
         await bot._on_message(room, edit3_event)
 
     assert mock_generate_response.await_count == 1
