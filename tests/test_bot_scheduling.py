@@ -1155,10 +1155,8 @@ class TestCommandHandling:
             patch("mindroom.response_runner.team_response") as mock_team,
         ):
             mock_interactive.handle_text_response = AsyncMock(return_value=None)
-            mock_extract.side_effect = (
-                lambda x, config, runtime_paths: "router"  # noqa: ARG005
-                if "router" in x
-                else ("news" if "news" in x else ("research" if "research" in x else None))
+            mock_extract.side_effect = lambda x, _config, _runtime_paths: (
+                "router" if "router" in x else ("news" if "news" in x else ("research" if "research" in x else None))
             )
 
             await bot._on_message(room, event)

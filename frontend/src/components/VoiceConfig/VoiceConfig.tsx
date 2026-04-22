@@ -1,36 +1,43 @@
-import { useState, useEffect } from 'react';
-import { Mic, Settings, Volume2, Info } from 'lucide-react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
-import { Input } from '@/components/ui/input';
+import { useState, useEffect } from "react";
+import { Mic, Settings, Volume2, Info } from "lucide-react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { Button } from '@/components/ui/button';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
-import { useToast } from '@/components/ui/use-toast';
-import { showSaveFailureToastIfNeeded } from '@/components/shared';
-import { useConfigStore } from '@/store/configStore';
-import { VoiceConfig as VoiceConfigType } from '@/types/config';
+} from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/components/ui/use-toast";
+import { showSaveFailureToastIfNeeded } from "@/components/shared";
+import { useConfigStore } from "@/store/configStore";
+import { VoiceConfig as VoiceConfigType } from "@/types/config";
 
-const OPENAI_TRANSCRIPTION_ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions';
+const OPENAI_TRANSCRIPTION_ENDPOINT =
+  "https://api.openai.com/v1/audio/transcriptions";
 
 const DEFAULT_VOICE_CONFIG: VoiceConfigType = {
   enabled: false,
   visible_router_echo: false,
   stt: {
-    provider: 'openai',
-    model: 'whisper-1',
-    api_key: '',
-    host: '',
+    provider: "openai",
+    model: "whisper-1",
+    api_key: "",
+    host: "",
   },
   intelligence: {
-    model: 'default',
+    model: "default",
   },
 };
 
@@ -41,7 +48,7 @@ function mergeVoiceConfig(config?: Partial<VoiceConfigType>): VoiceConfigType {
     stt: {
       ...DEFAULT_VOICE_CONFIG.stt,
       ...(config?.stt || {}),
-      provider: 'openai',
+      provider: "openai",
     },
     intelligence: {
       ...DEFAULT_VOICE_CONFIG.intelligence,
@@ -51,8 +58,8 @@ function mergeVoiceConfig(config?: Partial<VoiceConfigType>): VoiceConfigType {
 }
 
 function normalizeHost(host?: string): string {
-  if (!host) return '';
-  return host.trim().replace(/\/+$/, '');
+  if (!host) return "";
+  return host.trim().replace(/\/+$/, "");
 }
 
 export function VoiceConfig() {
@@ -61,7 +68,7 @@ export function VoiceConfig() {
 
   // Initialize local state with default values if voice config doesn't exist
   const [voiceConfig, setVoiceConfig] = useState<VoiceConfigType>(() =>
-    mergeVoiceConfig(config?.voice)
+    mergeVoiceConfig(config?.voice),
   );
 
   // Update local state when config changes
@@ -76,13 +83,15 @@ export function VoiceConfig() {
     updateVoiceConfig(newConfig);
   };
 
-  const handleSTTChange = (updates: Partial<VoiceConfigType['stt']>) => {
+  const handleSTTChange = (updates: Partial<VoiceConfigType["stt"]>) => {
     handleVoiceConfigChange({
-      stt: { ...voiceConfig.stt, ...updates, provider: 'openai' },
+      stt: { ...voiceConfig.stt, ...updates, provider: "openai" },
     });
   };
 
-  const handleIntelligenceChange = (updates: Partial<VoiceConfigType['intelligence']>) => {
+  const handleIntelligenceChange = (
+    updates: Partial<VoiceConfigType["intelligence"]>,
+  ) => {
     handleVoiceConfigChange({
       intelligence: { ...voiceConfig.intelligence, ...updates },
     });
@@ -94,33 +103,33 @@ export function VoiceConfig() {
   const effectiveEndpoint = normalizedHost
     ? `${normalizedHost}/v1/audio/transcriptions`
     : OPENAI_TRANSCRIPTION_ENDPOINT;
-  const effectiveMode = normalizedHost ? 'OpenAI-compatible API' : 'OpenAI API';
+  const effectiveMode = normalizedHost ? "OpenAI-compatible API" : "OpenAI API";
   const keySource = voiceConfig.stt.api_key?.trim()
-    ? 'Stored in voice settings'
-    : 'OPENAI_API_KEY environment variable';
-  const providerLabel = 'OpenAI';
+    ? "Stored in voice settings"
+    : "OPENAI_API_KEY environment variable";
+  const providerLabel = "OpenAI";
 
   const handleSave = async () => {
     updateVoiceConfig({
       ...voiceConfig,
       stt: {
         ...voiceConfig.stt,
-        provider: 'openai',
+        provider: "openai",
         host: normalizeHost(voiceConfig.stt.host),
       },
     });
     const result = await saveConfig();
     if (
       showSaveFailureToastIfNeeded(result, {
-        staleMessage: 'Save was superseded by newer voice configuration edits.',
-        fallbackMessage: 'Failed to save voice configuration.',
+        staleMessage: "Save was superseded by newer voice configuration edits.",
+        fallbackMessage: "Failed to save voice configuration.",
       })
     ) {
       return;
     }
     toast({
-      title: 'Voice Configuration Saved',
-      description: 'Your voice settings have been updated successfully.',
+      title: "Voice Configuration Saved",
+      description: "Your voice settings have been updated successfully.",
     });
   };
 
@@ -137,7 +146,9 @@ export function VoiceConfig() {
             <input
               type="checkbox"
               checked={voiceConfig.enabled}
-              onChange={e => handleVoiceConfigChange({ enabled: e.target.checked })}
+              onChange={(e) =>
+                handleVoiceConfigChange({ enabled: e.target.checked })
+              }
               className="h-5 w-5 rounded"
             />
           </div>
@@ -152,27 +163,33 @@ export function VoiceConfig() {
             <Info className="h-4 w-4" />
             <AlertDescription>
               {voiceConfig.enabled
-                ? 'Voice messages will be automatically transcribed and processed. The router agent handles all voice messages to avoid duplicates.'
-                : 'Voice message handling is currently disabled. You can still review and edit settings below.'}
+                ? "Voice messages will be automatically transcribed and processed. The router agent handles all voice messages to avoid duplicates."
+                : "Voice message handling is currently disabled. You can still review and edit settings below."}
             </AlertDescription>
           </Alert>
 
           {/* Current Settings Summary */}
           <div className="rounded-lg border border-border bg-muted/40 p-4 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold">Current Effective Settings</h3>
-              <Badge variant={voiceConfig.enabled ? 'default' : 'secondary'}>
-                {voiceConfig.enabled ? 'Enabled' : 'Disabled'}
+              <h3 className="text-sm font-semibold">
+                Current Effective Settings
+              </h3>
+              <Badge variant={voiceConfig.enabled ? "default" : "secondary"}>
+                {voiceConfig.enabled ? "Enabled" : "Disabled"}
               </Badge>
             </div>
             <div className="mt-3 space-y-2 text-sm">
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Mode:</span>
-                <span className="font-mono text-right text-foreground">{effectiveMode}</span>
+                <span className="font-mono text-right text-foreground">
+                  {effectiveMode}
+                </span>
               </div>
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Provider:</span>
-                <span className="font-mono text-right text-foreground">{providerLabel}</span>
+                <span className="font-mono text-right text-foreground">
+                  {providerLabel}
+                </span>
               </div>
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">STT Model:</span>
@@ -188,7 +205,9 @@ export function VoiceConfig() {
               </div>
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">API Key Source:</span>
-                <span className="font-mono text-right text-foreground">{keySource}</span>
+                <span className="font-mono text-right text-foreground">
+                  {keySource}
+                </span>
               </div>
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Command Model:</span>
@@ -197,9 +216,11 @@ export function VoiceConfig() {
                 </span>
               </div>
               <div className="flex items-start justify-between gap-4">
-                <span className="text-muted-foreground">Visible Router Echo:</span>
+                <span className="text-muted-foreground">
+                  Visible Router Echo:
+                </span>
                 <span className="font-mono text-right text-foreground">
-                  {voiceConfig.visible_router_echo ? 'Enabled' : 'Disabled'}
+                  {voiceConfig.visible_router_echo ? "Enabled" : "Disabled"}
                 </span>
               </div>
             </div>
@@ -208,19 +229,26 @@ export function VoiceConfig() {
           <div className="rounded-lg border border-border bg-background p-4 shadow-sm">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1">
-                <Label htmlFor="visible-router-echo" className="text-base font-semibold">
+                <Label
+                  htmlFor="visible-router-echo"
+                  className="text-base font-semibold"
+                >
                   Visible Router Echo
                 </Label>
                 <p className="text-sm text-muted-foreground">
-                  Post the normalized transcript or fallback text as a display-only router message
-                  before any router handoff.
+                  Post the normalized transcript or fallback text as a
+                  display-only router message before any router handoff.
                 </p>
               </div>
               <input
                 id="visible-router-echo"
                 type="checkbox"
                 checked={voiceConfig.visible_router_echo}
-                onChange={e => handleVoiceConfigChange({ visible_router_echo: e.target.checked })}
+                onChange={(e) =>
+                  handleVoiceConfigChange({
+                    visible_router_echo: e.target.checked,
+                  })
+                }
                 className="mt-1 h-5 w-5 rounded"
               />
             </div>
@@ -230,7 +258,9 @@ export function VoiceConfig() {
           <div className="space-y-4">
             <div className="flex items-center gap-2">
               <Mic className="h-4 w-4" />
-              <Label className="text-base font-semibold">Speech-to-Text (STT)</Label>
+              <Label className="text-base font-semibold">
+                Speech-to-Text (STT)
+              </Label>
             </div>
 
             <div className="grid gap-4">
@@ -239,7 +269,7 @@ export function VoiceConfig() {
                 <Input
                   id="stt-model"
                   value={voiceConfig.stt.model}
-                  onChange={e => handleSTTChange({ model: e.target.value })}
+                  onChange={(e) => handleSTTChange({ model: e.target.value })}
                   placeholder="whisper-1"
                 />
               </div>
@@ -249,8 +279,8 @@ export function VoiceConfig() {
                 <Input
                   id="stt-api-key"
                   type="password"
-                  value={voiceConfig.stt.api_key || ''}
-                  onChange={e => handleSTTChange({ api_key: e.target.value })}
+                  value={voiceConfig.stt.api_key || ""}
+                  onChange={(e) => handleSTTChange({ api_key: e.target.value })}
                   placeholder="Uses OPENAI_API_KEY env var if not set"
                 />
                 <p className="text-xs text-muted-foreground">
@@ -262,13 +292,14 @@ export function VoiceConfig() {
                 <Label htmlFor="stt-base-url">Base URL (Optional)</Label>
                 <Input
                   id="stt-base-url"
-                  value={voiceConfig.stt.host || ''}
-                  onChange={e => handleSTTChange({ host: e.target.value })}
+                  value={voiceConfig.stt.host || ""}
+                  onChange={(e) => handleSTTChange({ host: e.target.value })}
                   placeholder="https://api.openai.com"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Leave empty to use the default OpenAI endpoint. For self-hosted OpenAI-compatible
-                  services, provide the base host URL without <code>/v1</code>.
+                  Leave empty to use the default OpenAI endpoint. For
+                  self-hosted OpenAI-compatible services, provide the base host
+                  URL without <code>/v1</code>.
                 </p>
               </div>
             </div>
@@ -278,21 +309,27 @@ export function VoiceConfig() {
           <div className="space-y-4">
             <div className="flex items-center gap-2">
               <Settings className="h-4 w-4" />
-              <Label className="text-base font-semibold">Command Intelligence</Label>
+              <Label className="text-base font-semibold">
+                Command Intelligence
+              </Label>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="intelligence-model">AI Model for Processing</Label>
+              <Label htmlFor="intelligence-model">
+                AI Model for Processing
+              </Label>
               <Select
                 value={voiceConfig.intelligence.model}
-                onValueChange={value => handleIntelligenceChange({ model: value })}
+                onValueChange={(value) =>
+                  handleIntelligenceChange({ model: value })
+                }
               >
                 <SelectTrigger id="intelligence-model">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   {availableModels.length > 0 ? (
-                    availableModels.map(model => (
+                    availableModels.map((model) => (
                       <SelectItem key={model} value={model}>
                         {model}
                       </SelectItem>
@@ -303,7 +340,8 @@ export function VoiceConfig() {
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Model used to process transcriptions into commands and agent mentions
+                Model used to process transcriptions into commands and agent
+                mentions
               </p>
             </div>
           </div>
@@ -329,17 +367,24 @@ export function VoiceConfig() {
           <ul className="space-y-2 text-sm">
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">🎤</span>
-              <span>Automatic transcription of voice messages from all Matrix clients</span>
+              <span>
+                Automatic transcription of voice messages from all Matrix
+                clients
+              </span>
             </li>
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">🤖</span>
               <span>
-                {'Smart command recognition (e.g., "schedule a meeting" -> "!schedule meeting")'}
+                {
+                  'Smart command recognition (e.g., "schedule a meeting" -> "!schedule meeting")'
+                }
               </span>
             </li>
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">👥</span>
-              <span>{'Agent name detection (e.g., "ask research" -> "@research")'}</span>
+              <span>
+                {'Agent name detection (e.g., "ask research" -> "@research")'}
+              </span>
             </li>
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">🔒</span>

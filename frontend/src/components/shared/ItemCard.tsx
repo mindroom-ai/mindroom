@@ -1,8 +1,8 @@
-import React, { ReactNode } from 'react';
-import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { cn } from '@/lib/utils';
-import { sharedStyles, getSelectionStyles } from './styles';
+import React, { ReactNode } from "react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
+import { sharedStyles, getSelectionStyles } from "./styles";
 
 export interface ItemCardBadge {
   /**
@@ -12,7 +12,7 @@ export interface ItemCardBadge {
   /**
    * Badge variant
    */
-  variant?: 'secondary' | 'outline' | 'default';
+  variant?: "secondary" | "outline" | "default";
   /**
    * Icon for the badge (will be rendered before content)
    */
@@ -69,7 +69,7 @@ export function ItemCard({
   onClick,
   badges = [],
   children,
-  className = '',
+  className = "",
   clickable = true,
 }: ItemCardProps) {
   const handleClick = () => {
@@ -82,16 +82,16 @@ export function ItemCard({
     <Card
       className={cn(
         clickable && sharedStyles.item.containerCard,
-        getSelectionStyles(isSelected, 'card'),
-        className
+        getSelectionStyles(isSelected, "card"),
+        className,
       )}
       onClick={handleClick}
-      role={clickable ? 'button' : undefined}
+      role={clickable ? "button" : undefined}
       tabIndex={clickable ? 0 : undefined}
       onKeyDown={
         clickable
-          ? e => {
-              if (e.key === 'Enter' || e.key === ' ') {
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
                 handleClick();
               }
@@ -103,23 +103,27 @@ export function ItemCard({
         <div className="flex items-start justify-between">
           <div className="flex-1">
             <h3 className={sharedStyles.item.cardTitle}>{title}</h3>
-            {description && <p className={sharedStyles.item.cardDescription}>{description}</p>}
+            {description && (
+              <p className={sharedStyles.item.cardDescription}>{description}</p>
+            )}
             {badges.length > 0 && (
               <div className={sharedStyles.item.badgeContainer}>
                 {badges.map((badge, index) => (
                   <Badge
                     key={index}
-                    variant={badge.variant || 'secondary'}
+                    variant={badge.variant || "secondary"}
                     className={cn(
-                      'text-xs',
-                      badge.variant === 'secondary'
+                      "text-xs",
+                      badge.variant === "secondary"
                         ? sharedStyles.badge.secondary
-                        : badge.variant === 'outline'
+                        : badge.variant === "outline"
                           ? sharedStyles.badge.outline
-                          : 'text-xs'
+                          : "text-xs",
                     )}
                   >
-                    {badge.icon && <badge.icon className={sharedStyles.badge.withIcon} />}
+                    {badge.icon && (
+                      <badge.icon className={sharedStyles.badge.withIcon} />
+                    )}
                     {badge.content}
                   </Badge>
                 ))}

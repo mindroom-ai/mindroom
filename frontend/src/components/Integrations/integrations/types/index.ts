@@ -1,4 +1,4 @@
-import type { WorkerScope } from '@/types/config';
+import type { WorkerScope } from "@/types/config";
 
 /**
  * Core type definitions for all integrations
@@ -11,8 +11,8 @@ export interface Integration {
   category: string;
   icon: React.ReactNode;
   iconColor?: string | null;
-  status: 'connected' | 'not_connected' | 'available';
-  setup_type: 'oauth' | 'api_key' | 'special' | 'none';
+  status: "connected" | "not_connected" | "available";
+  setup_type: "oauth" | "api_key" | "special" | "none";
   connected?: boolean;
   details?: any;
   docs_url?: string | null;

@@ -1,7 +1,17 @@
-import { Agent, Room, Team } from '@/types/config';
-import { pluralize } from '@/lib/utils';
-import { Bot, Home, Users, Link, Activity, Trophy, Zap, BarChart3, X } from 'lucide-react';
-import { getSelectionStyles } from '@/components/shared/styles';
+import { Agent, Room, Team } from "@/types/config";
+import { pluralize } from "@/lib/utils";
+import {
+  Bot,
+  Home,
+  Users,
+  Link,
+  Activity,
+  Trophy,
+  Zap,
+  BarChart3,
+  X,
+} from "lucide-react";
+import { getSelectionStyles } from "@/components/shared/styles";
 
 interface NetworkGraphProps {
   agents: Agent[];
@@ -25,27 +35,34 @@ export function NetworkGraph({
   onSelectRoom,
 }: NetworkGraphProps) {
   // Calculate relationship stats
-  const totalConnections = agents.reduce((sum, agent) => sum + agent.rooms.length, 0);
+  const totalConnections = agents.reduce(
+    (sum, agent) => sum + agent.rooms.length,
+    0,
+  );
   const averageToolsPerAgent =
     agents.length > 0
-      ? agents.reduce((sum, agent) => sum + agent.tools.length, 0) / agents.length
+      ? agents.reduce((sum, agent) => sum + agent.tools.length, 0) /
+        agents.length
       : 0;
-  const teamMembership = teams.reduce((sum, team) => sum + team.agents.length, 0);
+  const teamMembership = teams.reduce(
+    (sum, team) => sum + team.agents.length,
+    0,
+  );
 
   // Most connected room
-  const roomConnections = rooms.map(room => ({
+  const roomConnections = rooms.map((room) => ({
     room,
     connections: room.agents.length,
   }));
   const mostConnectedRoom = roomConnections.reduce(
     (max, curr) => (curr.connections > max.connections ? curr : max),
-    roomConnections[0]
+    roomConnections[0],
   );
 
   // Most active agent (most tools)
   const mostActiveAgent = agents.reduce(
     (max, curr) => (curr.tools.length > max.tools.length ? curr : max),
-    agents[0]
+    agents[0],
   );
 
   return (
@@ -62,7 +79,9 @@ export function NetworkGraph({
             <div className="text-2xl font-bold text-amber-900 dark:text-amber-100">
               {agents.length}
             </div>
-            <div className="text-sm text-amber-700 dark:text-amber-300">Agents</div>
+            <div className="text-sm text-amber-700 dark:text-amber-300">
+              Agents
+            </div>
           </div>
 
           <div className="text-center p-4 bg-amber-50 dark:bg-amber-900/30 rounded-lg">
@@ -74,7 +93,9 @@ export function NetworkGraph({
             <div className="text-2xl font-bold text-amber-900 dark:text-amber-100">
               {rooms.length}
             </div>
-            <div className="text-sm text-amber-700 dark:text-amber-300">Rooms</div>
+            <div className="text-sm text-amber-700 dark:text-amber-300">
+              Rooms
+            </div>
           </div>
 
           <div className="text-center p-4 bg-amber-50 dark:bg-amber-900/30 rounded-lg">
@@ -86,7 +107,9 @@ export function NetworkGraph({
             <div className="text-2xl font-bold text-amber-900 dark:text-amber-100">
               {teams.length}
             </div>
-            <div className="text-sm text-amber-700 dark:text-amber-300">Teams</div>
+            <div className="text-sm text-amber-700 dark:text-amber-300">
+              Teams
+            </div>
           </div>
         </div>
 
@@ -102,7 +125,9 @@ export function NetworkGraph({
               <div className="text-2xl font-bold text-amber-900 dark:text-amber-100">
                 {totalConnections}
               </div>
-              <div className="text-sm text-amber-700 dark:text-amber-300">Total Connections</div>
+              <div className="text-sm text-amber-700 dark:text-amber-300">
+                Total Connections
+              </div>
             </div>
           </div>
 
@@ -110,11 +135,11 @@ export function NetworkGraph({
             <div
               className={`p-4 rounded-lg cursor-pointer transition-all hover:shadow-md ${getSelectionStyles(
                 selectedRoomId === mostConnectedRoom.room.id,
-                'card'
+                "card",
               )} ${
                 selectedRoomId !== mostConnectedRoom.room.id
-                  ? 'bg-amber-50 dark:bg-amber-900/30'
-                  : ''
+                  ? "bg-amber-50 dark:bg-amber-900/30"
+                  : ""
               }`}
               onClick={() => onSelectRoom(mostConnectedRoom.room.id)}
             >
@@ -136,9 +161,11 @@ export function NetworkGraph({
             <div
               className={`p-4 rounded-lg cursor-pointer transition-all hover:shadow-md ${getSelectionStyles(
                 selectedAgentId === mostActiveAgent.id,
-                'card'
+                "card",
               )} ${
-                selectedAgentId !== mostActiveAgent.id ? 'bg-amber-50 dark:bg-amber-900/30' : ''
+                selectedAgentId !== mostActiveAgent.id
+                  ? "bg-amber-50 dark:bg-amber-900/30"
+                  : ""
               }`}
               onClick={() => onSelectAgent(mostActiveAgent.id)}
             >
@@ -150,7 +177,7 @@ export function NetworkGraph({
                   {mostActiveAgent.display_name}
                 </div>
                 <div className="text-sm text-amber-700 dark:text-amber-300">
-                  {pluralize(mostActiveAgent.tools.length, 'tool')}
+                  {pluralize(mostActiveAgent.tools.length, "tool")}
                 </div>
               </div>
             </div>
@@ -161,25 +188,34 @@ export function NetworkGraph({
         <div className="space-y-4">
           <div className="p-4 bg-amber-50 dark:bg-amber-900/30 rounded-lg">
             <h4 className="font-semibold mb-3 text-center flex items-center justify-center gap-1 text-amber-900 dark:text-amber-100">
-              <BarChart3 className="w-4 h-4 text-amber-700 dark:text-amber-300" /> System Metrics
+              <BarChart3 className="w-4 h-4 text-amber-700 dark:text-amber-300" />{" "}
+              System Metrics
             </h4>
             <div className="space-y-3 text-sm">
               <div className="flex justify-between">
-                <span className="text-amber-700 dark:text-amber-300">Avg. Tools/Agent:</span>
+                <span className="text-amber-700 dark:text-amber-300">
+                  Avg. Tools/Agent:
+                </span>
                 <span className="font-semibold text-amber-900 dark:text-amber-100">
                   {averageToolsPerAgent.toFixed(1)}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-amber-700 dark:text-amber-300">Team Members:</span>
+                <span className="text-amber-700 dark:text-amber-300">
+                  Team Members:
+                </span>
                 <span className="font-semibold text-amber-900 dark:text-amber-100">
                   {teamMembership}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-amber-700 dark:text-amber-300">Avg. Agents/Room:</span>
+                <span className="text-amber-700 dark:text-amber-300">
+                  Avg. Agents/Room:
+                </span>
                 <span className="font-semibold text-amber-900 dark:text-amber-100">
-                  {rooms.length > 0 ? (totalConnections / rooms.length).toFixed(1) : '0'}
+                  {rooms.length > 0
+                    ? (totalConnections / rooms.length).toFixed(1)
+                    : "0"}
                 </span>
               </div>
             </div>
@@ -187,7 +223,8 @@ export function NetworkGraph({
 
           <div className="p-4 bg-amber-50 dark:bg-amber-900/30 rounded-lg">
             <h4 className="font-semibold mb-3 text-center text-amber-900 dark:text-amber-100 flex items-center justify-center gap-1">
-              <Activity className="w-4 h-4 text-amber-700 dark:text-amber-300" /> Quick Actions
+              <Activity className="w-4 h-4 text-amber-700 dark:text-amber-300" />{" "}
+              Quick Actions
             </h4>
             <div className="space-y-2 text-sm">
               <button

@@ -1,5 +1,5 @@
-import React from 'react';
-import { Label } from '@/components/ui/label';
+import React from "react";
+import { Label } from "@/components/ui/label";
 
 export interface FieldGroupProps {
   /** The label text for the field */
@@ -31,7 +31,7 @@ export function FieldGroup({
   htmlFor,
   actions,
   children,
-  className = '',
+  className = "",
 }: FieldGroupProps) {
   return (
     <div className={`space-y-2 ${className}`}>
@@ -41,7 +41,9 @@ export function FieldGroup({
             {label}
             {required && <span className="text-destructive ml-1">*</span>}
           </Label>
-          {helperText && <p className="text-xs text-muted-foreground mt-1">{helperText}</p>}
+          {helperText && (
+            <p className="text-xs text-muted-foreground mt-1">{helperText}</p>
+          )}
         </div>
         {actions && <div className="flex items-center gap-1">{actions}</div>}
       </div>

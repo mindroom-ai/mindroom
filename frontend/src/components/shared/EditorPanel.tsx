@@ -1,17 +1,21 @@
-import React from 'react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { toast } from '@/components/ui/toaster';
-import type { SaveConfigResult } from '@/store/configStore';
-import { Save, Trash2, LucideIcon, ArrowLeft } from 'lucide-react';
+import React from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/toaster";
+import type { SaveConfigResult } from "@/store/configStore";
+import { Save, Trash2, LucideIcon, ArrowLeft } from "lucide-react";
 
-const DEFAULT_STALE_SAVE_MESSAGE = 'Save was superseded by newer draft edits.';
+const DEFAULT_STALE_SAVE_MESSAGE = "Save was superseded by newer draft edits.";
 
 function isSaveConfigResult(value: unknown): value is SaveConfigResult {
-  if (typeof value !== 'object' || value === null || !('status' in value)) {
+  if (typeof value !== "object" || value === null || !("status" in value)) {
     return false;
   }
-  return value.status === 'saved' || value.status === 'stale' || value.status === 'error';
+  return (
+    value.status === "saved" ||
+    value.status === "stale" ||
+    value.status === "error"
+  );
 }
 
 export function showSaveFailureToastIfNeeded(
@@ -20,24 +24,25 @@ export function showSaveFailureToastIfNeeded(
     title?: string;
     staleMessage?: string;
     fallbackMessage?: string;
-  } = {}
+  } = {},
 ): boolean {
-  if (!isSaveConfigResult(result) || result.status === 'saved') {
+  if (!isSaveConfigResult(result) || result.status === "saved") {
     return false;
   }
 
   const description =
-    result.status === 'stale'
-      ? options.staleMessage ?? DEFAULT_STALE_SAVE_MESSAGE
-      : result.diagnostics.find(diagnostic => diagnostic.kind === 'global')?.message ??
+    result.status === "stale"
+      ? (options.staleMessage ?? DEFAULT_STALE_SAVE_MESSAGE)
+      : (result.diagnostics.find((diagnostic) => diagnostic.kind === "global")
+          ?.message ??
         result.message ??
         options.fallbackMessage ??
-        'Failed to save changes.';
+        "Failed to save changes.");
 
   toast({
-    title: options.title ?? 'Save Failed',
+    title: options.title ?? "Save Failed",
     description,
-    variant: 'destructive',
+    variant: "destructive",
   });
   return true;
 }
@@ -82,7 +87,7 @@ export interface EditorPanelEmptyStateProps {
 export function EditorPanelEmptyState({
   icon: Icon,
   message,
-  className = '',
+  className = "",
 }: EditorPanelEmptyStateProps) {
   return (
     <Card className={`h-full flex items-center justify-center ${className}`}>
@@ -107,7 +112,7 @@ export function EditorPanel({
   disableSave = false,
   disableDelete = false,
   children,
-  className = '',
+  className = "",
   onBack,
 }: EditorPanelProps) {
   const handleSave = async () => {
@@ -115,13 +120,14 @@ export function EditorPanel({
       const result = await onSave();
       showSaveFailureToastIfNeeded(result);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to save changes.';
+      const message =
+        error instanceof Error ? error.message : "Failed to save changes.";
       toast({
-        title: 'Save Failed',
+        title: "Save Failed",
         description: message,
-        variant: 'destructive',
+        variant: "destructive",
       });
-      console.error('Save failed:', error);
+      console.error("Save failed:", error);
     }
   };
 
@@ -135,7 +141,12 @@ export function EditorPanel({
         <div className="flex items-center justify-between">
           <CardTitle className="flex items-center gap-2">
             {onBack && (
-              <Button variant="ghost" size="sm" onClick={onBack} className="lg:hidden -ml-2 mr-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onBack}
+                className="lg:hidden -ml-2 mr-1"
+              >
                 <ArrowLeft className="h-4 w-4" />
               </Button>
             )}

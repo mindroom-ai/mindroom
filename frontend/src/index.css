@@ -1,5 +1,5 @@
-@import './styles/tokens.css';
-@import './styles/animations.css';
+@import "./styles/tokens.css";
+@import "./styles/animations.css";
 
 @tailwind base;
 @tailwind components;
@@ -16,13 +16,27 @@
     @apply backdrop-blur-xl bg-white/60 dark:bg-stone-900/60 border border-white/20 dark:border-white/10 shadow-xl;
   }
   .gradient-mesh {
-    background-image: radial-gradient(at 27% 37%, hsla(35, 90%, 48%, 0.25) 0px, transparent 50%),
+    background-image:
+      radial-gradient(
+        at 27% 37%,
+        hsla(35, 90%, 48%, 0.25) 0px,
+        transparent 50%
+      ),
       radial-gradient(at 97% 21%, hsla(30, 50%, 60%, 0.2) 0px, transparent 50%),
       radial-gradient(at 52% 99%, hsla(35, 90%, 48%, 0.15) 0px, transparent 50%);
   }
   .gradient-mesh-dark {
-    background-image: radial-gradient(at 27% 37%, hsla(35, 90%, 48%, 0.15) 0px, transparent 50%),
-      radial-gradient(at 97% 21%, hsla(30, 50%, 60%, 0.12) 0px, transparent 50%),
+    background-image:
+      radial-gradient(
+        at 27% 37%,
+        hsla(35, 90%, 48%, 0.15) 0px,
+        transparent 50%
+      ),
+      radial-gradient(
+        at 97% 21%,
+        hsla(30, 50%, 60%, 0.12) 0px,
+        transparent 50%
+      ),
       radial-gradient(at 52% 99%, hsla(35, 90%, 48%, 0.1) 0px, transparent 50%);
   }
 }
@@ -83,9 +97,9 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-feature-settings:
-      'kern' 1,
-      'liga' 1,
-      'calt' 1;
+      "kern" 1,
+      "liga" 1,
+      "calt" 1;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;

@@ -1,4 +1,4 @@
-export type SkillOrigin = 'bundled' | 'plugin' | 'user' | 'custom';
+export type SkillOrigin = "bundled" | "plugin" | "user" | "custom";
 
 export interface SkillSummary {
   name: string;

@@ -420,7 +420,7 @@ def _normalize_extractor_line(line: str, no_reply_token: str) -> str | None:
     if stripped.startswith(("- ", "* ")):
         stripped = stripped[2:].strip()
     stripped = re.sub(r"^\d+\.\s+", "", stripped)
-    return stripped if stripped else None
+    return stripped or None
 
 
 def _sanitize_extractor_output(raw_output: str, no_reply_token: str) -> str | None:

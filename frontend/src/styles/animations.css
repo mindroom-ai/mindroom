@@ -60,27 +60,32 @@
 
 /* Fade animations */
 .animate-fade-in {
-  animation: fadeIn var(--animation-duration-medium) var(--animation-ease-in-out);
+  animation: fadeIn var(--animation-duration-medium)
+    var(--animation-ease-in-out);
 }
 
 .animate-fade-out {
-  animation: fadeOut var(--animation-duration-medium) var(--animation-ease-in-out);
+  animation: fadeOut var(--animation-duration-medium)
+    var(--animation-ease-in-out);
 }
 
 /* Slide animations */
 .animate-slide-up {
-  animation: slideUp var(--animation-duration-medium) var(--animation-ease-in-out);
+  animation: slideUp var(--animation-duration-medium)
+    var(--animation-ease-in-out);
 }
 
 .animate-slide-down {
-  animation: slideDown var(--animation-duration-medium) var(--animation-ease-in-out);
+  animation: slideDown var(--animation-duration-medium)
+    var(--animation-ease-in-out);
 }
 
 /* === UTILITY CLASSES === */
 
 /* Basic hover effects that complement Tailwind */
 .hover-lift {
-  transition: transform var(--animation-duration-short) var(--animation-ease-out);
+  transition: transform var(--animation-duration-short)
+    var(--animation-ease-out);
 }
 
 .hover-lift:hover {
@@ -101,5 +106,6 @@
 /* Basic interaction feedback */
 .click-feedback:active {
   transform: scale(0.98);
-  transition: transform var(--animation-duration-short) var(--animation-ease-in-out);
+  transition: transform var(--animation-duration-short)
+    var(--animation-ease-in-out);
 }

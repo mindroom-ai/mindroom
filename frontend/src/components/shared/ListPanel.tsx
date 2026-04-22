@@ -1,13 +1,13 @@
-import React, { ReactNode, useRef, useState } from 'react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Plus, Search, Check, X, LucideIcon } from 'lucide-react';
-import { cn } from '@/lib/utils';
-import { sharedStyles } from './styles';
-import { EmptyState } from './EmptyState';
+import React, { ReactNode, useRef, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Plus, Search, Check, X, LucideIcon } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { sharedStyles } from "./styles";
+import { EmptyState } from "./EmptyState";
 
-export type CreationMode = 'instant' | 'inline-form' | 'dialog';
+export type CreationMode = "instant" | "inline-form" | "dialog";
 
 export interface ListItem {
   /**
@@ -100,18 +100,22 @@ export interface ListPanelProps<T extends ListItem> {
   /**
    * Creation form border color variant
    */
-  creationBorderVariant?: 'blue' | 'orange';
+  creationBorderVariant?: "blue" | "orange";
 }
 
 /**
  * Default search filter function
  */
-function defaultSearchFilter<T extends ListItem>(item: T, searchTerm: string): boolean {
+function defaultSearchFilter<T extends ListItem>(
+  item: T,
+  searchTerm: string,
+): boolean {
   const term = searchTerm.toLowerCase();
   return (
     item.display_name.toLowerCase().includes(term) ||
-    (typeof item.description === 'string' && item.description.toLowerCase().includes(term)) ||
-    (typeof item.role === 'string' && item.role.toLowerCase().includes(term))
+    (typeof item.description === "string" &&
+      item.description.toLowerCase().includes(term)) ||
+    (typeof item.role === "string" && item.role.toLowerCase().includes(term))
   );
 }
 
@@ -129,51 +133,54 @@ export function ListPanel<T extends ListItem>({
   showSearch = false,
   searchFilter = defaultSearchFilter,
   searchPlaceholder,
-  creationMode = 'instant',
-  createButtonText = 'Add',
+  creationMode = "instant",
+  createButtonText = "Add",
   createPlaceholder,
   emptyIcon: EmptyIcon,
-  emptyMessage = 'No items found',
+  emptyMessage = "No items found",
   emptySubtitle,
-  className = '',
+  className = "",
   showCreateButton = true,
-  creationBorderVariant = 'blue',
+  creationBorderVariant = "blue",
 }: ListPanelProps<T>) {
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState("");
   const [isCreating, setIsCreating] = useState(false);
-  const [newItemName, setNewItemName] = useState('');
+  const [newItemName, setNewItemName] = useState("");
   const [isSubmittingCreate, setIsSubmittingCreate] = useState(false);
   const createInFlightRef = useRef(false);
 
   // Filter items based on search term
-  const filteredItems = showSearch ? items.filter(item => searchFilter(item, searchTerm)) : items;
+  const filteredItems = showSearch
+    ? items.filter((item) => searchFilter(item, searchTerm))
+    : items;
 
   const handleCreateItem = async () => {
     if (createInFlightRef.current) return;
-    if (creationMode === 'inline-form' && !newItemName.trim()) return;
+    if (creationMode === "inline-form" && !newItemName.trim()) return;
 
     createInFlightRef.current = true;
     setIsSubmittingCreate(true);
 
-    if (creationMode === 'instant') {
+    if (creationMode === "instant") {
       try {
         await onCreateItem?.();
       } finally {
         createInFlightRef.current = false;
         setIsSubmittingCreate(false);
       }
-    } else if (creationMode === 'inline-form') {
+    } else if (creationMode === "inline-form") {
       try {
-        const shouldClose = (await onCreateItem?.(newItemName.trim())) !== false;
+        const shouldClose =
+          (await onCreateItem?.(newItemName.trim())) !== false;
         if (shouldClose) {
-          setNewItemName('');
+          setNewItemName("");
           setIsCreating(false);
         }
       } finally {
         createInFlightRef.current = false;
         setIsSubmittingCreate(false);
       }
-    } else if (creationMode === 'dialog') {
+    } else if (creationMode === "dialog") {
       try {
         await onCreateItem?.();
       } finally {
@@ -186,11 +193,11 @@ export function ListPanel<T extends ListItem>({
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (isSubmittingCreate) return;
 
-    if (e.key === 'Enter') {
+    if (e.key === "Enter") {
       void handleCreateItem();
-    } else if (e.key === 'Escape') {
+    } else if (e.key === "Escape") {
       setIsCreating(false);
-      setNewItemName('');
+      setNewItemName("");
     }
   };
 
@@ -199,12 +206,16 @@ export function ListPanel<T extends ListItem>({
   const contentClass = sharedStyles.panel.content;
 
   const creationBorderClass =
-    creationBorderVariant === 'orange' ? 'border-2 border-orange-500' : 'border-2 border-blue-500';
+    creationBorderVariant === "orange"
+      ? "border-2 border-orange-500"
+      : "border-2 border-blue-500";
 
   const headerContent = (
     <>
       <div className={sharedStyles.header.titleContainer}>
-        <CardTitle className={Icon ? sharedStyles.header.titleWithIcon : undefined}>
+        <CardTitle
+          className={Icon ? sharedStyles.header.titleWithIcon : undefined}
+        >
           {Icon && <Icon className="h-5 w-5" />}
           {title}
         </CardTitle>
@@ -214,7 +225,7 @@ export function ListPanel<T extends ListItem>({
             variant="default"
             disabled={isSubmittingCreate}
             onClick={() => {
-              if (creationMode === 'inline-form') {
+              if (creationMode === "inline-form") {
                 setIsCreating(true);
               } else {
                 void handleCreateItem();
@@ -232,9 +243,11 @@ export function ListPanel<T extends ListItem>({
         <div className={`${sharedStyles.search.container} mt-3`}>
           <Search className={sharedStyles.search.icon} />
           <Input
-            placeholder={searchPlaceholder || `Search ${title.toLowerCase()}...`}
+            placeholder={
+              searchPlaceholder || `Search ${title.toLowerCase()}...`
+            }
             value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
+            onChange={(e) => setSearchTerm(e.target.value)}
             className={sharedStyles.search.input}
           />
         </div>
@@ -245,14 +258,16 @@ export function ListPanel<T extends ListItem>({
   const contentArea = (
     <div className={contentClass}>
       {/* Inline creation form */}
-      {isCreating && creationMode === 'inline-form' && (
+      {isCreating && creationMode === "inline-form" && (
         <Card className={creationBorderClass}>
           <CardContent className={sharedStyles.creation.content}>
             <div className={sharedStyles.creation.inputContainer}>
               <Input
-                placeholder={createPlaceholder || `${title.slice(0, -1)} name...`}
+                placeholder={
+                  createPlaceholder || `${title.slice(0, -1)} name...`
+                }
                 value={newItemName}
-                onChange={e => setNewItemName(e.target.value)}
+                onChange={(e) => setNewItemName(e.target.value)}
                 onKeyDown={handleKeyDown}
                 disabled={isSubmittingCreate}
                 autoFocus
@@ -271,7 +286,7 @@ export function ListPanel<T extends ListItem>({
                 size="sm"
                 onClick={() => {
                   setIsCreating(false);
-                  setNewItemName('');
+                  setNewItemName("");
                 }}
                 variant="ghost"
                 disabled={isSubmittingCreate}
@@ -289,14 +304,16 @@ export function ListPanel<T extends ListItem>({
         <EmptyState
           icon={EmptyIcon}
           title={emptyMessage}
-          subtitle={emptySubtitle || `Click "${createButtonText}" to create one`}
+          subtitle={
+            emptySubtitle || `Click "${createButtonText}" to create one`
+          }
         />
       )}
 
       {/* Items list */}
       {filteredItems.length > 0 && (
         <div className={sharedStyles.list.containerWithSpacing}>
-          {filteredItems.map(item => (
+          {filteredItems.map((item) => (
             <div key={item.id}>{renderItem(item, selectedId === item.id)}</div>
           ))}
         </div>

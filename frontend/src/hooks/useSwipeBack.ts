@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef } from "react";
 
 interface SwipeBackOptions {
   onSwipeBack: () => void;
@@ -9,7 +9,11 @@ interface SwipeBackOptions {
 /**
  * Hook to detect swipe-right gesture for back navigation on mobile
  */
-export function useSwipeBack({ onSwipeBack, threshold = 50, enabled = true }: SwipeBackOptions) {
+export function useSwipeBack({
+  onSwipeBack,
+  threshold = 50,
+  enabled = true,
+}: SwipeBackOptions) {
   const touchStartX = useRef<number | null>(null);
   const touchStartY = useRef<number | null>(null);
 
@@ -40,12 +44,12 @@ export function useSwipeBack({ onSwipeBack, threshold = 50, enabled = true }: Sw
       touchStartY.current = null;
     };
 
-    document.addEventListener('touchstart', handleTouchStart);
-    document.addEventListener('touchend', handleTouchEnd);
+    document.addEventListener("touchstart", handleTouchStart);
+    document.addEventListener("touchend", handleTouchEnd);
 
     return () => {
-      document.removeEventListener('touchstart', handleTouchStart);
-      document.removeEventListener('touchend', handleTouchEnd);
+      document.removeEventListener("touchstart", handleTouchStart);
+      document.removeEventListener("touchend", handleTouchEnd);
     };
   }, [onSwipeBack, threshold, enabled]);
 }

@@ -20,13 +20,13 @@ A reusable list sidebar component that provides consistent header, search, item 
 #### Usage
 
 ```tsx
-import { ListPanel } from '@/components/shared';
-import { Bot } from 'lucide-react';
+import { ListPanel } from "@/components/shared";
+import { Bot } from "lucide-react";
 
 const AgentListExample = () => {
   const agents = [
-    { id: '1', display_name: 'Agent 1', description: 'First agent' },
-    { id: '2', display_name: 'Agent 2', description: 'Second agent' },
+    { id: "1", display_name: "Agent 1", description: "First agent" },
+    { id: "2", display_name: "Agent 2", description: "Second agent" },
   ];
 
   return (
@@ -35,10 +35,10 @@ const AgentListExample = () => {
       icon={Bot}
       items={agents}
       selectedId="1"
-      onItemSelect={id => console.log('Selected:', id)}
-      onCreateItem={() => console.log('Create agent')}
+      onItemSelect={(id) => console.log("Selected:", id)}
+      onCreateItem={() => console.log("Create agent")}
       renderItem={(agent, isSelected) => (
-        <div className={isSelected ? 'bg-blue-100' : ''}>
+        <div className={isSelected ? "bg-blue-100" : ""}>
           <h3>{agent.display_name}</h3>
           <p>{agent.description}</p>
         </div>
@@ -59,8 +59,8 @@ A standardized card component for displaying list items with consistent selectio
 #### Usage
 
 ```tsx
-import { ItemCard } from '@/components/shared';
-import { Users } from 'lucide-react';
+import { ItemCard } from "@/components/shared";
+import { Users } from "lucide-react";
 
 const TeamCardExample = () => (
   <ItemCard
@@ -68,10 +68,10 @@ const TeamCardExample = () => (
     title="Development Team"
     description="Frontend and backend developers"
     isSelected={true}
-    onClick={id => console.log('Selected team:', id)}
+    onClick={(id) => console.log("Selected team:", id)}
     badges={[
-      { content: '5 agents', icon: Users, variant: 'secondary' },
-      { content: 'Mode: coordinate', variant: 'outline' },
+      { content: "5 agents", icon: Users, variant: "secondary" },
+      { content: "Mode: coordinate", variant: "outline" },
     ]}
   />
 );
@@ -84,11 +84,15 @@ A consistent empty state component for when lists or sections have no content.
 #### Usage
 
 ```tsx
-import { EmptyState } from '@/components/shared';
-import { Settings2 } from 'lucide-react';
+import { EmptyState } from "@/components/shared";
+import { Settings2 } from "lucide-react";
 
 const EmptyRoomsExample = () => (
-  <EmptyState icon={Settings2} title="No rooms found" subtitle='Click "New Room" to create one' />
+  <EmptyState
+    icon={Settings2}
+    title="No rooms found"
+    subtitle='Click "New Room" to create one'
+  />
 );
 ```
 

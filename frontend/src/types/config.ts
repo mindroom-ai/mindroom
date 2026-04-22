@@ -1,17 +1,17 @@
-import type { PROVIDERS } from '@/lib/providers';
+import type { PROVIDERS } from "@/lib/providers";
 
 export type ProviderType = keyof typeof PROVIDERS;
-export type MemoryBackend = 'mem0' | 'file';
-export type WorkerScope = 'shared' | 'user' | 'user_agent';
-export type PrivateWorkerScope = Exclude<WorkerScope, 'shared'>;
+export type MemoryBackend = "mem0" | "file";
+export type WorkerScope = "shared" | "user" | "user_agent";
+export type PrivateWorkerScope = Exclude<WorkerScope, "shared">;
 export type AgentPolicySource =
-  | 'private.per'
-  | 'agent.worker_scope'
-  | 'defaults.worker_scope'
-  | 'unscoped';
+  | "private.per"
+  | "agent.worker_scope"
+  | "defaults.worker_scope"
+  | "unscoped";
 export type AgentPoliciesByAgent = Record<string, AgentPolicy>;
-export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = 'memory';
-export const SHARED_CONTEXT_FILE_PLACEHOLDER = 'SOUL.md';
+export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory";
+export const SHARED_CONTEXT_FILE_PLACEHOLDER = "SOUL.md";
 
 export interface ModelConfig {
   provider: ProviderType;
@@ -68,7 +68,7 @@ export interface KnowledgeGitConfig {
   poll_interval_seconds?: number;
   credentials_service?: string;
   lfs?: boolean;
-  startup_behavior?: 'blocking' | 'background';
+  startup_behavior?: "blocking" | "background";
   sync_timeout_seconds?: number;
   skip_hidden?: boolean;
   include_patterns?: string[];
@@ -100,10 +100,10 @@ export interface AgentPrivateConfig {
   knowledge?: AgentPrivateKnowledgeConfig | null;
 }
 
-export type LearningMode = 'always' | 'agentic';
-export type CultureMode = 'automatic' | 'agentic' | 'manual';
+export type LearningMode = "always" | "agentic";
+export type CultureMode = "automatic" | "agentic" | "manual";
 
-export type ThreadMode = 'thread' | 'room';
+export type ThreadMode = "thread" | "room";
 
 export interface CompactionConfig {
   enabled?: boolean;
@@ -114,7 +114,7 @@ export interface CompactionConfig {
   notify?: boolean;
 }
 
-const DEFAULT_INHERITED_TOOLS = ['scheduler'] as const;
+const DEFAULT_INHERITED_TOOLS = ["scheduler"] as const;
 
 function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
   return (
@@ -139,7 +139,7 @@ function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
 }
 
 function resolveAuthoredCompactionEnabled(
-  compaction: CompactionConfig | null | undefined
+  compaction: CompactionConfig | null | undefined,
 ): boolean {
   if (compaction == null) {
     return false;
@@ -152,7 +152,7 @@ function resolveAuthoredCompactionEnabled(
 
 export function resolveEffectiveCompactionEnabled(
   compaction: CompactionConfig | null | undefined,
-  defaultCompaction: CompactionConfig | null | undefined
+  defaultCompaction: CompactionConfig | null | undefined,
 ): boolean {
   const defaultEnabled = resolveAuthoredCompactionEnabled(defaultCompaction);
   if (compaction == null) {
@@ -161,14 +161,17 @@ export function resolveEffectiveCompactionEnabled(
   if (compaction.enabled !== undefined) {
     return compaction.enabled;
   }
-  if (isEmptyCompactionOverride(compaction) || isPureCompactionModelClear(compaction)) {
+  if (
+    isEmptyCompactionOverride(compaction) ||
+    isPureCompactionModelClear(compaction)
+  ) {
     return defaultEnabled;
   }
   return true;
 }
 
 export function resolveEffectiveDefaultTools(
-  defaults: Config['defaults'] | null | undefined
+  defaults: Config["defaults"] | null | undefined,
 ): string[] {
   const defaultTools = defaults?.tools;
   if (defaultTools !== undefined) {
@@ -214,7 +217,7 @@ export interface Team {
   role: string;
   agents: string[]; // List of agent IDs
   rooms: string[];
-  mode: 'coordinate' | 'collaborate';
+  mode: "coordinate" | "collaborate";
   model?: string; // Optional team-specific model
   compaction?: CompactionConfig | null; // Per-team auto-compaction overrides
   num_history_runs?: number | null; // Number of prior scoped runs to include as team history
@@ -258,9 +261,9 @@ export interface VoiceConfig {
 export interface Config {
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
-  cultures?: Record<string, Omit<Culture, 'id'>>; // Culture configurations
+  cultures?: Record<string, Omit<Culture, "id">>; // Culture configurations
   models: Record<string, ModelConfig>;
-  agents: Record<string, Omit<Agent, 'id'>>;
+  agents: Record<string, Omit<Agent, "id">>;
   defaults: {
     markdown: boolean;
     learning?: boolean;
@@ -282,7 +285,7 @@ export interface Config {
     model: string;
   };
   room_models?: Record<string, string>; // Room-specific model overrides for teams
-  teams?: Record<string, Omit<Team, 'id'>>; // Teams configuration
+  teams?: Record<string, Omit<Team, "id">>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
 }
@@ -301,7 +304,7 @@ export interface AgentPolicy {
 }
 
 function normalizePrivateKnowledgeConfig(
-  knowledge: AgentPrivateKnowledgeConfig | null | undefined
+  knowledge: AgentPrivateKnowledgeConfig | null | undefined,
 ): AgentPrivateKnowledgeConfig | null | undefined {
   if (knowledge == null) {
     return knowledge;
@@ -311,7 +314,10 @@ function normalizePrivateKnowledgeConfig(
   if (knowledge.enabled === true) {
     return {
       ...knowledge,
-      path: trimmedPath && trimmedPath.length > 0 ? trimmedPath : DEFAULT_PRIVATE_KNOWLEDGE_PATH,
+      path:
+        trimmedPath && trimmedPath.length > 0
+          ? trimmedPath
+          : DEFAULT_PRIVATE_KNOWLEDGE_PATH,
     };
   }
 
@@ -322,7 +328,7 @@ function normalizePrivateKnowledgeConfig(
 }
 
 function normalizePrivateConfig(
-  privateConfig: AgentPrivateConfig | null | undefined
+  privateConfig: AgentPrivateConfig | null | undefined,
 ): AgentPrivateConfig | null | undefined {
   if (privateConfig == null) {
     return privateConfig;
@@ -330,13 +336,13 @@ function normalizePrivateConfig(
 
   return {
     ...privateConfig,
-    per: privateConfig.per ?? 'user',
+    per: privateConfig.per ?? "user",
     knowledge: normalizePrivateKnowledgeConfig(privateConfig.knowledge),
   };
 }
 
 function normalizeCompactionConfig(
-  compaction: CompactionConfig | null | undefined
+  compaction: CompactionConfig | null | undefined,
 ): CompactionConfig | null | undefined {
   if (compaction == null) {
     return compaction;
@@ -348,13 +354,18 @@ function normalizeCompactionConfig(
       : compaction.model?.trim()
         ? compaction.model.trim()
         : undefined;
-  const hasExplicitNullClear = Object.values(compaction).some(value => value === null);
+  const hasExplicitNullClear = Object.values(compaction).some(
+    (value) => value === null,
+  );
   const normalizedCompaction: CompactionConfig = {
     ...compaction,
     model: normalizedModel,
   };
 
-  if (Object.values(normalizedCompaction).every(value => value == null) && !hasExplicitNullClear) {
+  if (
+    Object.values(normalizedCompaction).every((value) => value == null) &&
+    !hasExplicitNullClear
+  ) {
     return undefined;
   }
 
@@ -368,34 +379,39 @@ function normalizeCompactionConfig(
   return normalizedCompaction;
 }
 
-function normalizeCompactionUpdates<T extends { compaction?: CompactionConfig | null }>(
-  entity: T,
-  updates: Partial<T>
-): Partial<T> {
+function normalizeCompactionUpdates<
+  T extends { compaction?: CompactionConfig | null },
+>(entity: T, updates: Partial<T>): Partial<T> {
   const normalizedUpdates: Partial<T> = { ...updates };
-  const nextCompaction = 'compaction' in updates ? updates.compaction : entity.compaction;
+  const nextCompaction =
+    "compaction" in updates ? updates.compaction : entity.compaction;
 
-  if ('compaction' in updates || nextCompaction != null) {
+  if ("compaction" in updates || nextCompaction != null) {
     normalizedUpdates.compaction = normalizeCompactionConfig(
-      nextCompaction
-    ) as Partial<T>['compaction'];
+      nextCompaction,
+    ) as Partial<T>["compaction"];
   }
 
   return normalizedUpdates;
 }
 
-export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPrivateConfig {
+export function getDefaultPrivateConfig(
+  agent: Pick<Agent, "private">,
+): AgentPrivateConfig {
   if (agent.private != null) {
     return agent.private;
   }
   return {
-    per: 'user',
+    per: "user",
   };
 }
 
-export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Partial<Agent> {
+export function normalizeAgentUpdates(
+  agent: Agent,
+  updates: Partial<Agent>,
+): Partial<Agent> {
   const normalizedUpdates = normalizeCompactionUpdates(agent, updates);
-  const nextPrivate = 'private' in updates ? updates.private : agent.private;
+  const nextPrivate = "private" in updates ? updates.private : agent.private;
 
   if (nextPrivate != null) {
     normalizedUpdates.private = normalizePrivateConfig(nextPrivate);
@@ -405,6 +421,9 @@ export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Pa
   return normalizedUpdates;
 }
 
-export function normalizeTeamUpdates(team: Team, updates: Partial<Team>): Partial<Team> {
+export function normalizeTeamUpdates(
+  team: Team,
+  updates: Partial<Team>,
+): Partial<Team> {
   return normalizeCompactionUpdates(team, updates);
 }

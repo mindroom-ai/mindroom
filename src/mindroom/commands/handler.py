@@ -215,7 +215,7 @@ def _generate_welcome_message(room_id: str, config: Config, runtime_paths: Runti
 
 def _build_skill_command_prompt(skill_name: str, args_text: str) -> str:
     args = args_text.strip()
-    args_section = args if args else "(no arguments provided)"
+    args_section = args or "(no arguments provided)"
     return (
         "You were invoked via the !skill command.\n"
         f"Skill: {skill_name}\n"

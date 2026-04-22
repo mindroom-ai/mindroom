@@ -451,7 +451,7 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
             "MINDROOM_LOCAL_CLIENT_SECRET": "client-secret",
         },
     )
-    backend, apps_api, _core_api = _backend(
+    backend, _apps_api, _core_api = _backend(
         runtime_paths=runtime_paths,
         storage_mount_path=str(storage_mount_path),
     )
@@ -521,7 +521,7 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
         config_path=config_path,
         process_env={"GOOGLE_APPLICATION_CREDENTIALS": "/host/path/adc.json"},
     )
-    backend, apps_api, _core_api = _backend(
+    backend, _apps_api, _core_api = _backend(
         runtime_paths=runtime_paths,
         storage_mount_path=str(tmp_path / "not-mounted-storage"),
     )
@@ -569,7 +569,7 @@ def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, config_map_name=None)
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths, config_map_name=None)
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 

@@ -1,17 +1,22 @@
-import { FaGoogle } from 'react-icons/fa';
-import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope } from '../types';
-import { GoogleIntegration as GoogleIntegrationComponent } from '@/components/GoogleIntegration/GoogleIntegration';
-import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
+import { FaGoogle } from "react-icons/fa";
+import {
+  Integration,
+  IntegrationProvider,
+  IntegrationConfig,
+  IntegrationScope,
+} from "../types";
+import { GoogleIntegration as GoogleIntegrationComponent } from "@/components/GoogleIntegration/GoogleIntegration";
+import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 
 class GoogleIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
-    id: 'google',
-    name: 'Google Services',
-    description: 'Gmail, Calendar, and Drive integration',
-    category: 'email',
+    id: "google",
+    name: "Google Services",
+    description: "Gmail, Calendar, and Drive integration",
+    category: "email",
     icon: <FaGoogle className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'special',
+    status: "available",
+    setup_type: "special",
     connected: false,
   };
 
@@ -25,17 +30,17 @@ class GoogleIntegrationProvider implements IntegrationProvider {
           withAgentExecutionScope(
             `${API_BASE_URL}/api/google/disconnect`,
             agentName,
-            executionScope
+            executionScope,
           ),
           {
-            method: 'POST',
-          }
+            method: "POST",
+          },
         );
         if (!response.ok) {
-          throw new Error('Failed to disconnect Google services');
+          throw new Error("Failed to disconnect Google services");
         }
       },
-      ConfigComponent: props => (
+      ConfigComponent: (props) => (
         <GoogleIntegrationComponent
           onSuccess={props.onSuccess}
           agentName={agentName}
@@ -50,22 +55,26 @@ class GoogleIntegrationProvider implements IntegrationProvider {
     const executionScope = scope?.executionScope;
     try {
       const response = await fetch(
-        withAgentExecutionScope(`${API_BASE_URL}/api/google/status`, agentName, executionScope)
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/google/status`,
+          agentName,
+          executionScope,
+        ),
       );
       if (response.ok) {
         const data = await response.json();
         if (data.connected) {
           return {
-            status: 'connected',
+            status: "connected",
             connected: true,
           };
         }
       }
     } catch (error) {
-      console.error('Failed to load Google status:', error);
+      console.error("Failed to load Google status:", error);
     }
     return {
-      status: 'available',
+      status: "available",
       connected: false,
     };
   }

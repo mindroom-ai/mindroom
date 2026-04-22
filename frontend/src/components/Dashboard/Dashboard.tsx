@@ -1,16 +1,22 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
-import { useConfigStore } from '@/store/configStore';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Skeleton } from '@/components/ui/skeleton';
-import { NetworkGraph } from './NetworkGraph';
-import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
-import { sharedStyles } from '@/components/shared/styles';
-import { pluralize } from '@/lib/utils';
-import { FilterSelector } from '@/components/shared/FilterSelector';
+import { useState, useMemo, useEffect, useCallback } from "react";
+import { useConfigStore } from "@/store/configStore";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { NetworkGraph } from "./NetworkGraph";
+import { ItemCard, ItemCardBadge } from "@/components/shared/ItemCard";
+import { sharedStyles } from "@/components/shared/styles";
+import { pluralize } from "@/lib/utils";
+import { FilterSelector } from "@/components/shared/FilterSelector";
 import {
   Bot,
   Home,
@@ -22,7 +28,7 @@ import {
   User,
   Mic,
   MicOff,
-} from 'lucide-react';
+} from "lucide-react";
 
 function DashboardSkeleton() {
   return (
@@ -94,50 +100,62 @@ function DashboardSkeleton() {
 }
 
 export function Dashboard() {
-  const { agents, rooms, teams, config, selectedRoomId, selectedAgentId, selectRoom, selectAgent } =
-    useConfigStore();
+  const {
+    agents,
+    rooms,
+    teams,
+    config,
+    selectedRoomId,
+    selectedAgentId,
+    selectRoom,
+    selectAgent,
+  } = useConfigStore();
 
   // Search and filter state
-  const [searchTerm, setSearchTerm] = useState('');
-  const [showTypes, setShowTypes] = useState<string[]>(['agents', 'rooms', 'teams']);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [showTypes, setShowTypes] = useState<string[]>([
+    "agents",
+    "rooms",
+    "teams",
+  ]);
 
   // Real-time status simulation (replace with actual WebSocket connection)
   const [lastUpdated, setLastUpdated] = useState(new Date());
 
   // Memoized status functions for performance
   const getAgentStatus = useCallback((agentId: string) => {
-    const hash = agentId.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-    const statusOptions = ['online', 'busy', 'idle', 'offline'] as const;
+    const hash = agentId.split("").reduce((a, b) => a + b.charCodeAt(0), 0);
+    const statusOptions = ["online", "busy", "idle", "offline"] as const;
     return statusOptions[hash % statusOptions.length];
   }, []);
 
   const getStatusColor = useCallback((status: string) => {
     switch (status) {
-      case 'online':
-        return 'bg-green-500';
-      case 'busy':
-        return 'bg-orange-500';
-      case 'idle':
-        return 'bg-yellow-500';
-      case 'offline':
-        return 'bg-gray-400';
+      case "online":
+        return "bg-green-500";
+      case "busy":
+        return "bg-orange-500";
+      case "idle":
+        return "bg-yellow-500";
+      case "offline":
+        return "bg-gray-400";
       default:
-        return 'bg-gray-400';
+        return "bg-gray-400";
     }
   }, []);
 
   const getStatusLabel = useCallback((status: string) => {
     switch (status) {
-      case 'online':
-        return 'Online';
-      case 'busy':
-        return 'Busy';
-      case 'idle':
-        return 'Idle';
-      case 'offline':
-        return 'Offline';
+      case "online":
+        return "Online";
+      case "busy":
+        return "Busy";
+      case "idle":
+        return "Idle";
+      case "offline":
+        return "Offline";
       default:
-        return 'Unknown';
+        return "Unknown";
     }
   }, []);
 
@@ -152,16 +170,18 @@ export function Dashboard() {
 
   // Calculate system stats with real-time status
   const stats = useMemo(() => {
-    const agentStatuses = agents.map(agent => getAgentStatus(agent.id));
+    const agentStatuses = agents.map((agent) => getAgentStatus(agent.id));
     return {
       totalAgents: agents.length,
       totalRooms: rooms.length,
       totalTeams: teams.length,
       modelsInUse: config ? Object.keys(config.models).length : 0,
-      agentsOnline: agentStatuses.filter(status => status === 'online').length,
-      agentsBusy: agentStatuses.filter(status => status === 'busy').length,
-      agentsIdle: agentStatuses.filter(status => status === 'idle').length,
-      agentsOffline: agentStatuses.filter(status => status === 'offline').length,
+      agentsOnline: agentStatuses.filter((status) => status === "online")
+        .length,
+      agentsBusy: agentStatuses.filter((status) => status === "busy").length,
+      agentsIdle: agentStatuses.filter((status) => status === "idle").length,
+      agentsOffline: agentStatuses.filter((status) => status === "offline")
+        .length,
       activeConnections: rooms.length,
       voiceEnabled: config?.voice?.enabled || false,
     };
@@ -172,28 +192,32 @@ export function Dashboard() {
     const searchLower = searchTerm.toLowerCase();
 
     return {
-      agents: showTypes.includes('agents')
+      agents: showTypes.includes("agents")
         ? agents.filter(
-            agent =>
+            (agent) =>
               agent.display_name.toLowerCase().includes(searchLower) ||
               agent.role.toLowerCase().includes(searchLower) ||
-              agent.tools.some(tool => tool.toLowerCase().includes(searchLower)) ||
-              agent.rooms.some(room => room.toLowerCase().includes(searchLower))
+              agent.tools.some((tool) =>
+                tool.toLowerCase().includes(searchLower),
+              ) ||
+              agent.rooms.some((room) =>
+                room.toLowerCase().includes(searchLower),
+              ),
           )
         : [],
-      rooms: showTypes.includes('rooms')
+      rooms: showTypes.includes("rooms")
         ? rooms.filter(
-            room =>
+            (room) =>
               room.display_name.toLowerCase().includes(searchLower) ||
-              room.id.toLowerCase().includes(searchLower)
+              room.id.toLowerCase().includes(searchLower),
           )
         : [],
-      teams: showTypes.includes('teams')
+      teams: showTypes.includes("teams")
         ? teams.filter(
-            team =>
+            (team) =>
               team.display_name.toLowerCase().includes(searchLower) ||
               team.role.toLowerCase().includes(searchLower) ||
-              team.mode.toLowerCase().includes(searchLower)
+              team.mode.toLowerCase().includes(searchLower),
           )
         : [],
     };
@@ -204,27 +228,29 @@ export function Dashboard() {
     const exportData = {
       timestamp: new Date().toISOString(),
       stats,
-      agents: agents.map(agent => ({
+      agents: agents.map((agent) => ({
         ...agent,
         teamMemberships: teams
-          .filter(team => team.agents.includes(agent.id))
-          .map(team => team.display_name),
+          .filter((team) => team.agents.includes(agent.id))
+          .map((team) => team.display_name),
       })),
-      rooms: rooms.map(room => ({
+      rooms: rooms.map((room) => ({
         ...room,
         teamsInRoom: teams
-          .filter(team => team.rooms.includes(room.id))
-          .map(team => team.display_name),
+          .filter((team) => team.rooms.includes(room.id))
+          .map((team) => team.display_name),
       })),
       teams,
       modelConfigurations: config?.models || {},
     };
 
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+      type: "application/json",
+    });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    const a = document.createElement("a");
     a.href = url;
-    a.download = `mindroom-config-${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `mindroom-config-${new Date().toISOString().split("T")[0]}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -237,8 +263,12 @@ export function Dashboard() {
   }
 
   // Get selected room details
-  const selectedRoom = selectedRoomId ? rooms.find(r => r.id === selectedRoomId) : null;
-  const selectedAgent = selectedAgentId ? agents.find(a => a.id === selectedAgentId) : null;
+  const selectedRoom = selectedRoomId
+    ? rooms.find((r) => r.id === selectedRoomId)
+    : null;
+  const selectedAgent = selectedAgentId
+    ? agents.find((a) => a.id === selectedAgentId)
+    : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -250,20 +280,21 @@ export function Dashboard() {
             Monitor your MindRoom configuration and status
           </p>
           <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
-            <RefreshCw className="w-3 h-3" /> Last updated: {lastUpdated.toLocaleTimeString()}
+            <RefreshCw className="w-3 h-3" /> Last updated:{" "}
+            {lastUpdated.toLocaleTimeString()}
           </p>
         </div>
         <div className="flex flex-wrap gap-2 items-center">
           <Input
             placeholder="Search..."
             value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
+            onChange={(e) => setSearchTerm(e.target.value)}
             className="w-32 sm:w-48 md:w-64"
           />
           <FilterSelector
             options={[
               {
-                value: 'agents',
+                value: "agents",
                 label: (
                   <>
                     <Bot className="w-4 h-4" />
@@ -272,7 +303,7 @@ export function Dashboard() {
                 ),
               },
               {
-                value: 'rooms',
+                value: "rooms",
                 label: (
                   <>
                     <Home className="w-4 h-4" />
@@ -281,7 +312,7 @@ export function Dashboard() {
                 ),
               },
               {
-                value: 'teams',
+                value: "teams",
                 label: (
                   <>
                     <Users className="w-4 h-4" />
@@ -291,7 +322,7 @@ export function Dashboard() {
               },
             ]}
             value={showTypes}
-            onChange={value => setShowTypes(value as string[])}
+            onChange={(value) => setShowTypes(value as string[])}
             multiple
             className="hidden md:inline-flex"
           />
@@ -312,7 +343,8 @@ export function Dashboard() {
             onClick={exportConfiguration}
             className="flex items-center gap-1"
           >
-            <FileText className="w-4 h-4" /> <span className="hidden sm:inline">Export Config</span>
+            <FileText className="w-4 h-4" />{" "}
+            <span className="hidden sm:inline">Export Config</span>
           </Button>
         </div>
       </div>
@@ -338,16 +370,20 @@ export function Dashboard() {
           <CardContent>
             <div className="flex items-center gap-3 text-xs text-amber-700 dark:text-amber-300">
               <span className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-green-500"></div> {stats.agentsOnline}
+                <div className="w-2 h-2 rounded-full bg-green-500"></div>{" "}
+                {stats.agentsOnline}
               </span>
               <span className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-orange-500"></div> {stats.agentsBusy}
+                <div className="w-2 h-2 rounded-full bg-orange-500"></div>{" "}
+                {stats.agentsBusy}
               </span>
               <span className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-yellow-500"></div> {stats.agentsIdle}
+                <div className="w-2 h-2 rounded-full bg-yellow-500"></div>{" "}
+                {stats.agentsIdle}
               </span>
               <span className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-gray-400"></div> {stats.agentsOffline}
+                <div className="w-2 h-2 rounded-full bg-gray-400"></div>{" "}
+                {stats.agentsOffline}
               </span>
             </div>
           </CardContent>
@@ -416,7 +452,9 @@ export function Dashboard() {
             </div>
           </CardHeader>
           <CardContent>
-            <p className="text-xs text-stone-700 dark:text-stone-300">in configuration</p>
+            <p className="text-xs text-stone-700 dark:text-stone-300">
+              in configuration
+            </p>
           </CardContent>
         </Card>
 
@@ -426,8 +464,8 @@ export function Dashboard() {
               <div
                 className={`p-2 rounded-lg ${
                   stats.voiceEnabled
-                    ? 'bg-purple-100 dark:bg-purple-900/30'
-                    : 'bg-gray-100 dark:bg-gray-900/30'
+                    ? "bg-purple-100 dark:bg-purple-900/30"
+                    : "bg-gray-100 dark:bg-gray-900/30"
                 }`}
               >
                 {stats.voiceEnabled ? (
@@ -443,11 +481,11 @@ export function Dashboard() {
                 <CardDescription
                   className={
                     stats.voiceEnabled
-                      ? 'text-purple-700 dark:text-purple-300'
-                      : 'text-gray-500 dark:text-gray-400'
+                      ? "text-purple-700 dark:text-purple-300"
+                      : "text-gray-500 dark:text-gray-400"
                   }
                 >
-                  {stats.voiceEnabled ? 'Enabled' : 'Disabled'}
+                  {stats.voiceEnabled ? "Enabled" : "Disabled"}
                 </CardDescription>
               </div>
             </div>
@@ -456,11 +494,13 @@ export function Dashboard() {
             <p
               className={`text-xs ${
                 stats.voiceEnabled
-                  ? 'text-purple-700 dark:text-purple-300'
-                  : 'text-gray-500 dark:text-gray-400'
+                  ? "text-purple-700 dark:text-purple-300"
+                  : "text-gray-500 dark:text-gray-400"
               }`}
             >
-              {stats.voiceEnabled ? 'Transcription active' : 'Configure in Voice tab'}
+              {stats.voiceEnabled
+                ? "Transcription active"
+                : "Configure in Voice tab"}
             </p>
           </CardContent>
         </Card>
@@ -475,7 +515,8 @@ export function Dashboard() {
               System Insights
             </CardTitle>
             <CardDescription className="text-amber-700 dark:text-amber-300">
-              Key metrics and actionable insights about your MindRoom configuration
+              Key metrics and actionable insights about your MindRoom
+              configuration
             </CardDescription>
           </CardHeader>
           <CardContent className="p-2">
@@ -518,15 +559,19 @@ export function Dashboard() {
             </CardHeader>
             <CardContent className="p-0 flex-1 overflow-y-auto min-h-0">
               <ScrollArea className="h-96">
-                <div className={`${sharedStyles.list.containerWithSpacing} p-3 sm:p-4`}>
-                  {filteredData.agents.map(agent => {
+                <div
+                  className={`${sharedStyles.list.containerWithSpacing} p-3 sm:p-4`}
+                >
+                  {filteredData.agents.map((agent) => {
                     const badges: ItemCardBadge[] = [];
-                    const agentTeams = teams.filter(team => team.agents.includes(agent.id));
+                    const agentTeams = teams.filter((team) =>
+                      team.agents.includes(agent.id),
+                    );
 
                     if (agentTeams.length > 0) {
                       badges.push({
-                        content: pluralize(agentTeams.length, 'team'),
-                        variant: 'secondary' as const,
+                        content: pluralize(agentTeams.length, "team"),
+                        variant: "secondary" as const,
                         icon: Users,
                       });
                     }
@@ -536,12 +581,12 @@ export function Dashboard() {
                         key={agent.id}
                         id={agent.id}
                         title={agent.display_name}
-                        description={`Model: ${agent.model || 'Default'} • ${pluralize(
+                        description={`Model: ${agent.model || "Default"} • ${pluralize(
                           agent.rooms.length,
-                          'room'
-                        )} • ${pluralize(agent.tools.length, 'tool')}`}
+                          "room",
+                        )} • ${pluralize(agent.tools.length, "tool")}`}
                         isSelected={selectedAgentId === agent.id}
-                        onClick={id => {
+                        onClick={(id) => {
                           selectAgent(id);
                           selectRoom(null);
                         }}
@@ -549,7 +594,7 @@ export function Dashboard() {
                       >
                         <div className="flex items-center justify-between mt-2">
                           <div className="flex flex-wrap gap-1">
-                            {agent.rooms.slice(0, 2).map(room => (
+                            {agent.rooms.slice(0, 2).map((room) => (
                               <Badge
                                 key={room}
                                 variant="secondary"
@@ -559,14 +604,17 @@ export function Dashboard() {
                               </Badge>
                             ))}
                             {agent.rooms.length > 2 && (
-                              <Badge variant="outline" className={sharedStyles.badge.outline}>
+                              <Badge
+                                variant="outline"
+                                className={sharedStyles.badge.outline}
+                              >
                                 +{agent.rooms.length - 2}
                               </Badge>
                             )}
                           </div>
                           <div
                             className={`w-2 h-2 rounded-full ${getStatusColor(
-                              getAgentStatus(agent.id)
+                              getAgentStatus(agent.id),
                             )}`}
                             title={getStatusLabel(getAgentStatus(agent.id))}
                           />
@@ -594,12 +642,14 @@ export function Dashboard() {
             </CardHeader>
             <CardContent className="p-0 flex-1 overflow-y-auto min-h-0">
               <ScrollArea className="h-96">
-                <div className={`${sharedStyles.list.containerWithSpacing} p-3 sm:p-4`}>
-                  {filteredData.rooms.map(room => {
+                <div
+                  className={`${sharedStyles.list.containerWithSpacing} p-3 sm:p-4`}
+                >
+                  {filteredData.rooms.map((room) => {
                     const badges: ItemCardBadge[] = [
                       {
-                        content: pluralize(room.agents.length, 'agent'),
-                        variant: 'outline' as const,
+                        content: pluralize(room.agents.length, "agent"),
+                        variant: "outline" as const,
                         icon: Bot,
                       },
                     ];
@@ -607,15 +657,17 @@ export function Dashboard() {
                     if (room.model) {
                       badges.push({
                         content: `Model: ${room.model}`,
-                        variant: 'secondary' as const,
+                        variant: "secondary" as const,
                       });
                     }
 
-                    const roomTeams = teams.filter(team => team.rooms.includes(room.id));
+                    const roomTeams = teams.filter((team) =>
+                      team.rooms.includes(room.id),
+                    );
                     if (roomTeams.length > 0) {
                       badges.push({
-                        content: pluralize(roomTeams.length, 'team'),
-                        variant: 'outline' as const,
+                        content: pluralize(roomTeams.length, "team"),
+                        variant: "outline" as const,
                         icon: Users,
                       });
                     }
@@ -627,19 +679,19 @@ export function Dashboard() {
                         title={room.display_name}
                         description={
                           room.model
-                            ? `Model: ${room.model} • ${pluralize(room.agents.length, 'agent')}`
-                            : pluralize(room.agents.length, 'agent')
+                            ? `Model: ${room.model} • ${pluralize(room.agents.length, "agent")}`
+                            : pluralize(room.agents.length, "agent")
                         }
                         isSelected={selectedRoomId === room.id}
-                        onClick={id => {
+                        onClick={(id) => {
                           selectRoom(id);
                           selectAgent(null);
                         }}
                         badges={badges}
                       >
                         <div className="flex flex-wrap gap-1 mt-2">
-                          {room.agents.slice(0, 3).map(agentId => {
-                            const agent = agents.find(a => a.id === agentId);
+                          {room.agents.slice(0, 3).map((agentId) => {
+                            const agent = agents.find((a) => a.id === agentId);
                             return (
                               <Badge
                                 key={agentId}
@@ -651,7 +703,10 @@ export function Dashboard() {
                             );
                           })}
                           {room.agents.length > 3 && (
-                            <Badge variant="outline" className={sharedStyles.badge.outline}>
+                            <Badge
+                              variant="outline"
+                              className={sharedStyles.badge.outline}
+                            >
                               +{room.agents.length - 3}
                             </Badge>
                           )}
@@ -663,13 +718,14 @@ export function Dashboard() {
                               Teams:
                             </div>
                             <div className="flex flex-wrap gap-1">
-                              {roomTeams.map(team => (
+                              {roomTeams.map((team) => (
                                 <Badge
                                   key={team.id}
                                   variant="outline"
                                   className="text-xs px-1 py-0 bg-purple-50 dark:bg-purple-950 flex items-center gap-1"
                                 >
-                                  <Users className="w-3 h-3" /> {team.display_name}
+                                  <Users className="w-3 h-3" />{" "}
+                                  {team.display_name}
                                 </Badge>
                               ))}
                             </div>
@@ -697,7 +753,9 @@ export function Dashboard() {
               {selectedRoom ? (
                 <div className="space-y-4">
                   <div>
-                    <h3 className="font-semibold text-lg mb-2">{selectedRoom.display_name}</h3>
+                    <h3 className="font-semibold text-lg mb-2">
+                      {selectedRoom.display_name}
+                    </h3>
                     {selectedRoom.description && (
                       <p className="text-sm text-amber-700 dark:text-amber-300 mb-3">
                         {selectedRoom.description}
@@ -713,10 +771,12 @@ export function Dashboard() {
                   )}
 
                   <div>
-                    <h4 className="font-medium mb-2">Agents ({selectedRoom.agents.length}):</h4>
+                    <h4 className="font-medium mb-2">
+                      Agents ({selectedRoom.agents.length}):
+                    </h4>
                     <div className="space-y-2">
-                      {selectedRoom.agents.map(agentId => {
-                        const agent = agents.find(a => a.id === agentId);
+                      {selectedRoom.agents.map((agentId) => {
+                        const agent = agents.find((a) => a.id === agentId);
                         if (!agent) return null;
                         return (
                           <div
@@ -726,11 +786,11 @@ export function Dashboard() {
                             <span>{agent.display_name}</span>
                             <div className="flex items-center gap-2">
                               <Badge variant="outline" className="text-xs">
-                                {pluralize(agent.tools.length, 'tool')}
+                                {pluralize(agent.tools.length, "tool")}
                               </Badge>
                               <div
                                 className={`w-2 h-2 rounded-full ${getStatusColor(
-                                  getAgentStatus(agent.id)
+                                  getAgentStatus(agent.id),
                                 )}`}
                                 title={getStatusLabel(getAgentStatus(agent.id))}
                               />
@@ -742,21 +802,27 @@ export function Dashboard() {
                   </div>
 
                   {(() => {
-                    const roomTeams = teams.filter(team => team.rooms.includes(selectedRoom.id));
+                    const roomTeams = teams.filter((team) =>
+                      team.rooms.includes(selectedRoom.id),
+                    );
                     return roomTeams.length > 0 ? (
                       <div>
-                        <h4 className="font-medium mb-2">Teams ({roomTeams.length}):</h4>
+                        <h4 className="font-medium mb-2">
+                          Teams ({roomTeams.length}):
+                        </h4>
                         <div className="space-y-2">
-                          {roomTeams.map(team => (
+                          {roomTeams.map((team) => (
                             <div
                               key={team.id}
                               className="p-2 bg-purple-50 dark:bg-purple-950 rounded text-sm"
                             >
                               <div className="font-medium flex items-center gap-1">
-                                <Users className="w-4 h-4" /> {team.display_name}
+                                <Users className="w-4 h-4" />{" "}
+                                {team.display_name}
                               </div>
                               <div className="text-xs text-amber-700 dark:text-amber-300">
-                                {team.mode} mode • {pluralize(team.agents.length, 'member')}
+                                {team.mode} mode •{" "}
+                                {pluralize(team.agents.length, "member")}
                               </div>
                             </div>
                           ))}
@@ -768,7 +834,9 @@ export function Dashboard() {
               ) : selectedAgent ? (
                 <div className="space-y-4">
                   <div>
-                    <h3 className="font-semibold text-lg mb-2">{selectedAgent.display_name}</h3>
+                    <h3 className="font-semibold text-lg mb-2">
+                      {selectedAgent.display_name}
+                    </h3>
                     <p className="text-sm text-amber-700 dark:text-amber-300 mb-3">
                       {selectedAgent.role}
                     </p>
@@ -776,14 +844,22 @@ export function Dashboard() {
 
                   <div>
                     <h4 className="font-medium mb-1">Model:</h4>
-                    <Badge variant="secondary">{selectedAgent.model || 'Default'}</Badge>
+                    <Badge variant="secondary">
+                      {selectedAgent.model || "Default"}
+                    </Badge>
                   </div>
 
                   <div>
-                    <h4 className="font-medium mb-2">Rooms ({selectedAgent.rooms.length}):</h4>
+                    <h4 className="font-medium mb-2">
+                      Rooms ({selectedAgent.rooms.length}):
+                    </h4>
                     <div className="flex flex-wrap gap-1">
-                      {selectedAgent.rooms.map(roomId => (
-                        <Badge key={roomId} variant="outline" className="text-xs">
+                      {selectedAgent.rooms.map((roomId) => (
+                        <Badge
+                          key={roomId}
+                          variant="outline"
+                          className="text-xs"
+                        >
                           {roomId}
                         </Badge>
                       ))}
@@ -791,10 +867,16 @@ export function Dashboard() {
                   </div>
 
                   <div>
-                    <h4 className="font-medium mb-2">Tools ({selectedAgent.tools.length}):</h4>
+                    <h4 className="font-medium mb-2">
+                      Tools ({selectedAgent.tools.length}):
+                    </h4>
                     <div className="flex flex-wrap gap-1">
-                      {selectedAgent.tools.slice(0, 8).map(tool => (
-                        <Badge key={tool} variant="secondary" className="text-xs">
+                      {selectedAgent.tools.slice(0, 8).map((tool) => (
+                        <Badge
+                          key={tool}
+                          variant="secondary"
+                          className="text-xs"
+                        >
                           {tool}
                         </Badge>
                       ))}
@@ -807,12 +889,14 @@ export function Dashboard() {
                   </div>
 
                   {(() => {
-                    const agentTeams = teams.filter(team => team.agents.includes(selectedAgent.id));
+                    const agentTeams = teams.filter((team) =>
+                      team.agents.includes(selectedAgent.id),
+                    );
                     return agentTeams.length > 0 ? (
                       <div>
                         <h4 className="font-medium mb-2">Team Memberships:</h4>
                         <div className="space-y-1">
-                          {agentTeams.map(team => (
+                          {agentTeams.map((team) => (
                             <Badge
                               key={team.id}
                               variant="outline"

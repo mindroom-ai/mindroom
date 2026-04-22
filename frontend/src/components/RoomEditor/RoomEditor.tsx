@@ -1,18 +1,22 @@
-import { useEffect, useState } from 'react';
-import { useConfigStore } from '@/store/configStore';
-import { useSwipeBack } from '@/hooks/useSwipeBack';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-import { Home, Bot } from 'lucide-react';
-import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
-import { Checkbox } from '@/components/ui/checkbox';
+import { useEffect, useState } from "react";
+import { useConfigStore } from "@/store/configStore";
+import { useSwipeBack } from "@/hooks/useSwipeBack";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Home, Bot } from "lucide-react";
+import {
+  EditorPanel,
+  EditorPanelEmptyState,
+  FieldGroup,
+} from "@/components/shared";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
+} from "@/components/ui/select";
 
 export function RoomEditor() {
   const {
@@ -28,7 +32,7 @@ export function RoomEditor() {
     selectRoom,
   } = useConfigStore();
 
-  const selectedRoom = rooms.find(r => r.id === selectedRoomId);
+  const selectedRoom = rooms.find((r) => r.id === selectedRoomId);
   const [localRoom, setLocalRoom] = useState(selectedRoom);
 
   // Enable swipe back on mobile
@@ -42,7 +46,9 @@ export function RoomEditor() {
   }, [selectedRoom]);
 
   if (!selectedRoom || !localRoom) {
-    return <EditorPanelEmptyState icon={Home} message="Select a room to edit" />;
+    return (
+      <EditorPanelEmptyState icon={Home} message="Select a room to edit" />
+    );
   }
 
   const handleFieldChange = (field: string, value: any) => {
@@ -53,14 +59,14 @@ export function RoomEditor() {
   const handleAgentToggle = (agentId: string, checked: boolean) => {
     const newAgents = checked
       ? [...localRoom.agents, agentId]
-      : localRoom.agents.filter(id => id !== agentId);
+      : localRoom.agents.filter((id) => id !== agentId);
 
     setLocalRoom({ ...localRoom, agents: newAgents });
     updateRoom(selectedRoom.id, { agents: newAgents });
   };
 
   const handleDelete = () => {
-    if (confirm('Are you sure you want to delete this room?')) {
+    if (confirm("Are you sure you want to delete this room?")) {
       deleteRoom(selectedRoom.id);
     }
   };
@@ -86,7 +92,7 @@ export function RoomEditor() {
         <Input
           id="display-name"
           value={localRoom.display_name}
-          onChange={e => handleFieldChange('display_name', e.target.value)}
+          onChange={(e) => handleFieldChange("display_name", e.target.value)}
           placeholder="Room name"
         />
       </FieldGroup>
@@ -99,8 +105,8 @@ export function RoomEditor() {
       >
         <Textarea
           id="description"
-          value={localRoom.description || ''}
-          onChange={e => handleFieldChange('description', e.target.value)}
+          value={localRoom.description || ""}
+          onChange={(e) => handleFieldChange("description", e.target.value)}
           placeholder="Describe this room's purpose..."
           rows={3}
         />
@@ -113,10 +119,10 @@ export function RoomEditor() {
         htmlFor="room-model"
       >
         <Select
-          value={localRoom.model || 'default_model'}
-          onValueChange={value => {
-            const newValue = value === 'default_model' ? undefined : value;
-            handleFieldChange('model', newValue);
+          value={localRoom.model || "default_model"}
+          onValueChange={(value) => {
+            const newValue = value === "default_model" ? undefined : value;
+            handleFieldChange("model", newValue);
           }}
         >
           <SelectTrigger id="room-model">
@@ -124,7 +130,7 @@ export function RoomEditor() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="default_model">Use default model</SelectItem>
-            {modelOptions.map(modelId => (
+            {modelOptions.map((modelId) => (
               <SelectItem key={modelId} value={modelId}>
                 {modelId}
               </SelectItem>
@@ -140,9 +146,11 @@ export function RoomEditor() {
       >
         <div className="space-y-2 max-h-[300px] overflow-y-auto border rounded-lg p-2">
           {agents.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-4">No agents available</p>
+            <p className="text-sm text-muted-foreground text-center py-4">
+              No agents available
+            </p>
           ) : (
-            agents.map(agent => (
+            agents.map((agent) => (
               <div
                 key={agent.id}
                 className="flex items-center space-x-3 p-3 sm:p-2 rounded-lg hover:bg-muted/50"
@@ -150,15 +158,24 @@ export function RoomEditor() {
                 <Checkbox
                   id={`agent-${agent.id}`}
                   checked={localRoom.agents.includes(agent.id)}
-                  onCheckedChange={checked => handleAgentToggle(agent.id, checked as boolean)}
+                  onCheckedChange={(checked) =>
+                    handleAgentToggle(agent.id, checked as boolean)
+                  }
                   className="h-5 w-5 sm:h-4 sm:w-4"
                 />
-                <label htmlFor={`agent-${agent.id}`} className="flex-1 cursor-pointer select-none">
+                <label
+                  htmlFor={`agent-${agent.id}`}
+                  className="flex-1 cursor-pointer select-none"
+                >
                   <div className="flex items-center gap-2">
                     <Bot className="h-4 w-4 text-muted-foreground" />
                     <div>
-                      <div className="font-medium text-sm">{agent.display_name}</div>
-                      <div className="text-xs text-muted-foreground">{agent.role}</div>
+                      <div className="font-medium text-sm">
+                        {agent.display_name}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {agent.role}
+                      </div>
                     </div>
                   </div>
                 </label>

@@ -1,29 +1,29 @@
-import { useEffect, useCallback, useMemo } from 'react';
-import { useConfigStore } from '@/store/configStore';
-import { useSwipeBack } from '@/hooks/useSwipeBack';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
+import { useEffect, useCallback, useMemo } from "react";
+import { useConfigStore } from "@/store/configStore";
+import { useSwipeBack } from "@/hooks/useSwipeBack";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { Users } from 'lucide-react';
+} from "@/components/ui/select";
+import { Users } from "lucide-react";
 import {
   EditorPanel,
   EditorPanelEmptyState,
   FieldGroup,
   HistoryContextSection,
-} from '@/components/shared';
-import { useForm, Controller } from 'react-hook-form';
-import { Team } from '@/types/config';
-import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
+} from "@/components/shared";
+import { useForm, Controller } from "react-hook-form";
+import { Team } from "@/types/config";
+import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
 
 const AGENT_POLICY_UNAVAILABLE_REASON =
-  'Agent policy preview is unavailable. Save or refresh to validate team eligibility.';
+  "Agent policy preview is unavailable. Save or refresh to validate team eligibility.";
 
 export function TeamEditor() {
   const {
@@ -41,26 +41,32 @@ export function TeamEditor() {
     selectTeam,
   } = useConfigStore();
 
-  const selectedTeam = teams.find(t => t.id === selectedTeamId);
+  const selectedTeam = teams.find((t) => t.id === selectedTeamId);
   const validationPrefix = useMemo<Array<string | number> | null>(
-    () => (selectedTeamId == null ? null : ['teams', selectedTeamId]),
-    [selectedTeamId]
+    () => (selectedTeamId == null ? null : ["teams", selectedTeamId]),
+    [selectedTeamId],
   );
   const validationErrorForPath = useScopedConfigValidation(validationPrefix);
   const teamRootError = validationErrorForPath([], true);
-  const displayNameError = validationErrorForPath(['display_name'], true);
-  const roleError = validationErrorForPath(['role'], true);
-  const modeError = validationErrorForPath(['mode'], true);
-  const modelError = validationErrorForPath(['model'], true);
-  const numHistoryRunsError = validationErrorForPath(['num_history_runs'], true);
-  const numHistoryMessagesError = validationErrorForPath(['num_history_messages'], true);
-  const maxToolCallsFromHistoryError = validationErrorForPath(
-    ['max_tool_calls_from_history'],
-    true
+  const displayNameError = validationErrorForPath(["display_name"], true);
+  const roleError = validationErrorForPath(["role"], true);
+  const modeError = validationErrorForPath(["mode"], true);
+  const modelError = validationErrorForPath(["model"], true);
+  const numHistoryRunsError = validationErrorForPath(
+    ["num_history_runs"],
+    true,
   );
-  const compactionError = validationErrorForPath(['compaction'], true);
-  const membersError = validationErrorForPath(['agents']);
-  const roomsError = validationErrorForPath(['rooms']);
+  const numHistoryMessagesError = validationErrorForPath(
+    ["num_history_messages"],
+    true,
+  );
+  const maxToolCallsFromHistoryError = validationErrorForPath(
+    ["max_tool_calls_from_history"],
+    true,
+  );
+  const compactionError = validationErrorForPath(["compaction"], true);
+  const membersError = validationErrorForPath(["agents"]);
+  const roomsError = validationErrorForPath(["rooms"]);
 
   // Enable swipe back on mobile
   useSwipeBack({
@@ -70,12 +76,12 @@ export function TeamEditor() {
 
   const { control, reset, setValue, getValues } = useForm<Team>({
     defaultValues: selectedTeam || {
-      id: '',
-      display_name: '',
-      role: '',
+      id: "",
+      display_name: "",
+      role: "",
       agents: [],
       rooms: [],
-      mode: 'coordinate',
+      mode: "coordinate",
       compaction: undefined,
     },
   });
@@ -97,26 +103,29 @@ export function TeamEditor() {
         updateTeam(selectedTeamId, { [fieldName]: value });
       }
     },
-    [selectedTeamId, updateTeam]
+    [selectedTeamId, updateTeam],
   );
 
   const updateCompaction = useCallback(
-    (nextCompaction: Team['compaction']) => {
-      setValue('compaction', nextCompaction);
-      handleFieldChange('compaction', nextCompaction);
+    (nextCompaction: Team["compaction"]) => {
+      setValue("compaction", nextCompaction);
+      handleFieldChange("compaction", nextCompaction);
     },
-    [handleFieldChange, setValue]
+    [handleFieldChange, setValue],
   );
 
   const mutateCompaction = useCallback(
-    (mutator: (current: Team['compaction']) => Team['compaction']) => {
-      updateCompaction(mutator(getValues('compaction')));
+    (mutator: (current: Team["compaction"]) => Team["compaction"]) => {
+      updateCompaction(mutator(getValues("compaction")));
     },
-    [getValues, updateCompaction]
+    [getValues, updateCompaction],
   );
 
   const handleDelete = () => {
-    if (selectedTeamId && confirm('Are you sure you want to delete this team?')) {
+    if (
+      selectedTeamId &&
+      confirm("Are you sure you want to delete this team?")
+    ) {
       deleteTeam(selectedTeamId);
     }
   };
@@ -126,7 +135,9 @@ export function TeamEditor() {
   };
 
   if (!selectedTeam) {
-    return <EditorPanelEmptyState icon={Users} message="Select a team to edit" />;
+    return (
+      <EditorPanelEmptyState icon={Users} message="Select a team to edit" />
+    );
   }
 
   return (
@@ -160,9 +171,9 @@ export function TeamEditor() {
               {...field}
               id="display_name"
               placeholder="Team display name"
-              onChange={e => {
+              onChange={(e) => {
                 field.onChange(e);
-                handleFieldChange('display_name', e.target.value);
+                handleFieldChange("display_name", e.target.value);
               }}
             />
           )}
@@ -185,9 +196,9 @@ export function TeamEditor() {
               id="role"
               placeholder="What this team does..."
               rows={2}
-              onChange={e => {
+              onChange={(e) => {
                 field.onChange(e);
-                handleFieldChange('role', e.target.value);
+                handleFieldChange("role", e.target.value);
               }}
             />
           )}
@@ -207,9 +218,12 @@ export function TeamEditor() {
           render={({ field }) => (
             <Select
               value={field.value}
-              onValueChange={value => {
+              onValueChange={(value) => {
                 field.onChange(value);
-                handleFieldChange('mode', value as 'coordinate' | 'collaborate');
+                handleFieldChange(
+                  "mode",
+                  value as "coordinate" | "collaborate",
+                );
               }}
             >
               <SelectTrigger id="mode">
@@ -240,11 +254,11 @@ export function TeamEditor() {
           control={control}
           render={({ field }) => (
             <Select
-              value={field.value || 'default_model'}
-              onValueChange={value => {
-                const newValue = value === 'default_model' ? undefined : value;
+              value={field.value || "default_model"}
+              onValueChange={(value) => {
+                const newValue = value === "default_model" ? undefined : value;
                 field.onChange(newValue);
-                handleFieldChange('model', newValue);
+                handleFieldChange("model", newValue);
               }}
             >
               <SelectTrigger id="model">
@@ -253,7 +267,7 @@ export function TeamEditor() {
               <SelectContent>
                 <SelectItem value="default_model">Use default model</SelectItem>
                 {config &&
-                  Object.keys(config.models).map(modelId => (
+                  Object.keys(config.models).map((modelId) => (
                     <SelectItem key={modelId} value={modelId}>
                       {modelId}
                     </SelectItem>
@@ -276,21 +290,23 @@ export function TeamEditor() {
         historyRunsHelperText={`Number of prior team-scoped runs to include as replay. Leave empty to use default${
           config?.defaults.num_history_runs != null
             ? ` (${config.defaults.num_history_runs})`
-            : ' (all)'
+            : " (all)"
         }.`}
         historyMessagesHelperText={`Max replay messages from team-scoped history. Leave empty to use default${
           config?.defaults.num_history_messages != null
             ? ` (${config.defaults.num_history_messages})`
-            : ' (all)'
+            : " (all)"
         }.`}
         maxToolCallsHelperText={`Max tool call messages replayed from team history. Leave empty to use default${
           config?.defaults.max_tool_calls_from_history != null
             ? ` (${config.defaults.max_tool_calls_from_history})`
-            : ' (no limit)'
+            : " (no limit)"
         }.`}
         autoCompactionHelperText="Automatically compact older team-scoped history before the next run when the context budget gets tight."
         thresholdTokensHelperText="Absolute token threshold that triggers compaction."
-        compactionModelPlaceholder={config?.defaults.compaction?.model ?? 'Default: team run model'}
+        compactionModelPlaceholder={
+          config?.defaults.compaction?.model ?? "Default: team run model"
+        }
         numHistoryRunsError={numHistoryRunsError}
         numHistoryMessagesError={numHistoryMessagesError}
         maxToolCallsFromHistoryError={maxToolCallsFromHistoryError}
@@ -304,7 +320,7 @@ export function TeamEditor() {
         error={membersError}
       >
         <div className="space-y-2">
-          {agents.map(agent => (
+          {agents.map((agent) => (
             <Controller
               key={agent.id}
               name="agents"
@@ -314,23 +330,26 @@ export function TeamEditor() {
                 const agentPolicy = agentPoliciesByAgent[agent.id];
                 const eligibilityReason =
                   agentPolicy?.team_eligibility_reason ??
-                  (agentPolicy == null ? AGENT_POLICY_UNAVAILABLE_REASON : null);
-                const isSelectable = agentPolicy != null && eligibilityReason == null;
+                  (agentPolicy == null
+                    ? AGENT_POLICY_UNAVAILABLE_REASON
+                    : null);
+                const isSelectable =
+                  agentPolicy != null && eligibilityReason == null;
                 return (
                   <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
                     <Checkbox
                       id={`agent-${agent.id}`}
                       checked={isChecked}
                       disabled={!isSelectable && !isChecked}
-                      onCheckedChange={checked => {
+                      onCheckedChange={(checked) => {
                         if (!isSelectable && checked === true) {
                           return;
                         }
                         const newAgents = checked
                           ? [...field.value, agent.id]
-                          : field.value.filter(a => a !== agent.id);
+                          : field.value.filter((a) => a !== agent.id);
                         field.onChange(newAgents);
-                        handleFieldChange('agents', newAgents);
+                        handleFieldChange("agents", newAgents);
                       }}
                       className="h-5 w-5 sm:h-4 sm:w-4"
                     />
@@ -339,7 +358,9 @@ export function TeamEditor() {
                       className="flex-1 cursor-pointer select-none"
                     >
                       <div className="font-medium">{agent.display_name}</div>
-                      <div className="text-sm text-gray-500 dark:text-gray-400">{agent.role}</div>
+                      <div className="text-sm text-gray-500 dark:text-gray-400">
+                        {agent.role}
+                      </div>
                       {eligibilityReason != null && (
                         <div className="text-xs text-amber-600 dark:text-amber-400">
                           {eligibilityReason}
@@ -370,7 +391,7 @@ export function TeamEditor() {
                   No rooms available. Create rooms in the Rooms tab.
                 </p>
               ) : (
-                rooms.map(room => {
+                rooms.map((room) => {
                   const isChecked = field.value.includes(room.id);
                   return (
                     <div
@@ -380,12 +401,12 @@ export function TeamEditor() {
                       <Checkbox
                         id={`room-${room.id}`}
                         checked={isChecked}
-                        onCheckedChange={checked => {
+                        onCheckedChange={(checked) => {
                           const newRooms = checked
                             ? [...field.value, room.id]
-                            : field.value.filter(r => r !== room.id);
+                            : field.value.filter((r) => r !== room.id);
                           field.onChange(newRooms);
-                          handleFieldChange('rooms', newRooms);
+                          handleFieldChange("rooms", newRooms);
                         }}
                         className="h-5 w-5 sm:h-4 sm:w-4"
                       />
@@ -393,7 +414,9 @@ export function TeamEditor() {
                         htmlFor={`room-${room.id}`}
                         className="flex-1 cursor-pointer select-none"
                       >
-                        <div className="font-medium text-sm">{room.display_name}</div>
+                        <div className="font-medium text-sm">
+                          {room.display_name}
+                        </div>
                         {room.description && (
                           <div className="text-xs text-gray-500 dark:text-gray-400">
                             {room.description}

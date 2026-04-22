@@ -1,19 +1,19 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { spotifyIntegration } from './index';
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { spotifyIntegration } from "./index";
 
-vi.mock('@/lib/api', () => ({
-  API_BASE_URL: '',
+vi.mock("@/lib/api", () => ({
+  API_BASE_URL: "",
   withAgentExecutionScope: (
     url: string,
     agentName?: string | null,
-    executionScope?: string | null
+    executionScope?: string | null,
   ) => {
-    const parsed = new URL(url, 'https://frontend.example.test');
+    const parsed = new URL(url, "https://frontend.example.test");
     if (agentName) {
-      parsed.searchParams.set('agent_name', agentName);
+      parsed.searchParams.set("agent_name", agentName);
     }
     if (executionScope) {
-      parsed.searchParams.set('execution_scope', executionScope);
+      parsed.searchParams.set("execution_scope", executionScope);
     }
     return `${parsed.pathname}${parsed.search}`;
   },
@@ -30,9 +30,9 @@ const localStorageMock = {
   removeItem: vi.fn(),
   clear: vi.fn(),
 };
-Object.defineProperty(window, 'localStorage', { value: localStorageMock });
+Object.defineProperty(window, "localStorage", { value: localStorageMock });
 
-describe('SpotifyIntegrationProvider', () => {
+describe("SpotifyIntegrationProvider", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (global.fetch as any).mockReset();
@@ -41,43 +41,45 @@ describe('SpotifyIntegrationProvider', () => {
     localStorageMock.removeItem.mockReset();
   });
 
-  describe('getConfig', () => {
-    it('should return correct integration configuration', () => {
+  describe("getConfig", () => {
+    it("should return correct integration configuration", () => {
       const config = spotifyIntegration.getConfig();
 
-      expect(config.integration.id).toBe('spotify');
-      expect(config.integration.name).toBe('Spotify');
-      expect(config.integration.description).toBe('Music streaming service integration');
-      expect(config.integration.category).toBe('entertainment');
-      expect(config.integration.setup_type).toBe('oauth');
-      expect(config.integration.status).toBe('available');
+      expect(config.integration.id).toBe("spotify");
+      expect(config.integration.name).toBe("Spotify");
+      expect(config.integration.description).toBe(
+        "Music streaming service integration",
+      );
+      expect(config.integration.category).toBe("entertainment");
+      expect(config.integration.setup_type).toBe("oauth");
+      expect(config.integration.status).toBe("available");
       expect(config.integration.connected).toBe(false);
     });
 
-    it('should provide onAction handler', () => {
+    it("should provide onAction handler", () => {
       const config = spotifyIntegration.getConfig();
       expect(config.onAction).toBeDefined();
-      expect(typeof config.onAction).toBe('function');
+      expect(typeof config.onAction).toBe("function");
     });
 
-    it('should provide onDisconnect handler', () => {
+    it("should provide onDisconnect handler", () => {
       const config = spotifyIntegration.getConfig();
       expect(config.onDisconnect).toBeDefined();
-      expect(typeof config.onDisconnect).toBe('function');
+      expect(typeof config.onDisconnect).toBe("function");
     });
   });
 
-  describe('loadStatus', () => {
-    it('should return connected status when configured', async () => {
-      localStorageMock.getItem.mockReturnValue('true');
+  describe("loadStatus", () => {
+    it("should return connected status when configured", async () => {
+      localStorageMock.getItem.mockReturnValue("true");
 
       const status = await spotifyIntegration.loadStatus();
 
-      expect(status.status).toBe('connected');
+      expect(status.status).toBe("connected");
       expect(status.connected).toBe(true);
     });
 
-    it('should return available status when not configured', async () => {
+    it("should return available status when not configured", async () => {
       localStorageMock.getItem.mockReturnValue(null);
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
@@ -86,28 +88,33 @@ describe('SpotifyIntegrationProvider', () => {
 
       const status = await spotifyIntegration.loadStatus();
 
-      expect(status.status).toBe('available');
+      expect(status.status).toBe("available");
       expect(status.connected).toBe(false);
     });
 
-    it('appends agent_name and execution_scope when checking scoped status', async () => {
+    it("appends agent_name and execution_scope when checking scoped status", async () => {
       localStorageMock.getItem.mockReturnValue(null);
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({ connected: false }),
       });
 
-      await spotifyIntegration.loadStatus({ agentName: 'code', executionScope: 'shared' });
+      await spotifyIntegration.loadStatus({
+        agentName: "code",
+        executionScope: "shared",
+      });
 
-      expect(localStorageMock.getItem).toHaveBeenCalledWith('spotify_configured:code:shared');
+      expect(localStorageMock.getItem).toHaveBeenCalledWith(
+        "spotify_configured:code:shared",
+      );
       expect(global.fetch).toHaveBeenCalledWith(
-        '/api/integrations/spotify/status?agent_name=code&execution_scope=shared'
+        "/api/integrations/spotify/status?agent_name=code&execution_scope=shared",
       );
     });
 
-    it('does not reuse optimistic scoped cache entries across execution scopes', async () => {
+    it("does not reuse optimistic scoped cache entries across execution scopes", async () => {
       localStorageMock.getItem.mockImplementation((key: string) =>
-        key === 'spotify_configured:code:user' ? 'true' : null
+        key === "spotify_configured:code:user" ? "true" : null,
       );
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
@@ -115,25 +122,27 @@ describe('SpotifyIntegrationProvider', () => {
       });
 
       const status = await spotifyIntegration.loadStatus({
-        agentName: 'code',
-        executionScope: 'shared',
+        agentName: "code",
+        executionScope: "shared",
       });
 
       expect(status.connected).toBe(false);
-      expect(localStorageMock.getItem).toHaveBeenCalledWith('spotify_configured:code:shared');
+      expect(localStorageMock.getItem).toHaveBeenCalledWith(
+        "spotify_configured:code:shared",
+      );
       expect(global.fetch).toHaveBeenCalledWith(
-        '/api/integrations/spotify/status?agent_name=code&execution_scope=shared'
+        "/api/integrations/spotify/status?agent_name=code&execution_scope=shared",
       );
     });
   });
 
-  describe('onAction (connect)', () => {
-    it('should initiate OAuth flow', async () => {
+  describe("onAction (connect)", () => {
+    it("should initiate OAuth flow", async () => {
       const mockAuthWindow = { closed: false };
       (global.window.open as any).mockReturnValue(mockAuthWindow);
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ auth_url: 'https://spotify.com/auth' }),
+        json: async () => ({ auth_url: "https://spotify.com/auth" }),
       });
 
       const config = spotifyIntegration.getConfig();
@@ -148,79 +157,93 @@ describe('SpotifyIntegrationProvider', () => {
       await connectPromise;
 
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/integrations/spotify/connect'),
-        expect.objectContaining({ method: 'POST' })
+        expect.stringContaining("/api/integrations/spotify/connect"),
+        expect.objectContaining({ method: "POST" }),
       );
       expect(global.window.open).toHaveBeenCalledWith(
-        'https://spotify.com/auth',
-        '_blank',
-        'width=500,height=600'
+        "https://spotify.com/auth",
+        "_blank",
+        "width=500,height=600",
       );
     });
 
-    it('should handle connection errors', async () => {
+    it("should handle connection errors", async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: false,
-        json: async () => ({ detail: 'Connection failed' }),
+        json: async () => ({ detail: "Connection failed" }),
       });
 
       const config = spotifyIntegration.getConfig();
 
-      await expect(config.onAction!(config.integration)).rejects.toThrow('Connection failed');
+      await expect(config.onAction!(config.integration)).rejects.toThrow(
+        "Connection failed",
+      );
     });
 
-    it('appends agent_name and execution_scope for scoped OAuth connect', async () => {
+    it("appends agent_name and execution_scope for scoped OAuth connect", async () => {
       const mockAuthWindow = { closed: true };
       (global.window.open as any).mockReturnValue(mockAuthWindow);
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ auth_url: 'https://spotify.com/auth' }),
+        json: async () => ({ auth_url: "https://spotify.com/auth" }),
       });
 
-      const config = spotifyIntegration.getConfig({ agentName: 'code', executionScope: 'shared' });
+      const config = spotifyIntegration.getConfig({
+        agentName: "code",
+        executionScope: "shared",
+      });
       await config.onAction!(config.integration);
 
       expect(global.fetch).toHaveBeenCalledWith(
-        '/api/integrations/spotify/connect?agent_name=code&execution_scope=shared',
-        expect.objectContaining({ method: 'POST' })
+        "/api/integrations/spotify/connect?agent_name=code&execution_scope=shared",
+        expect.objectContaining({ method: "POST" }),
       );
     });
   });
 
-  describe('onDisconnect', () => {
-    it('should remove localStorage and call disconnect endpoint', async () => {
+  describe("onDisconnect", () => {
+    it("should remove localStorage and call disconnect endpoint", async () => {
       (global.fetch as any).mockResolvedValueOnce({ ok: true });
 
       const config = spotifyIntegration.getConfig();
-      await config.onDisconnect!('spotify');
+      await config.onDisconnect!("spotify");
 
-      expect(localStorageMock.removeItem).toHaveBeenCalledWith('spotify_configured:unscoped');
+      expect(localStorageMock.removeItem).toHaveBeenCalledWith(
+        "spotify_configured:unscoped",
+      );
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/integrations/spotify/disconnect'),
-        expect.objectContaining({ method: 'POST' })
+        expect.stringContaining("/api/integrations/spotify/disconnect"),
+        expect.objectContaining({ method: "POST" }),
       );
     });
 
-    it('should handle disconnect errors gracefully', async () => {
-      (global.fetch as any).mockRejectedValueOnce(new Error('Network error'));
+    it("should handle disconnect errors gracefully", async () => {
+      (global.fetch as any).mockRejectedValueOnce(new Error("Network error"));
 
       const config = spotifyIntegration.getConfig();
 
       // Should not throw, just log error
-      await expect(config.onDisconnect!('spotify')).resolves.not.toThrow();
-      expect(localStorageMock.removeItem).toHaveBeenCalledWith('spotify_configured:unscoped');
+      await expect(config.onDisconnect!("spotify")).resolves.not.toThrow();
+      expect(localStorageMock.removeItem).toHaveBeenCalledWith(
+        "spotify_configured:unscoped",
+      );
     });
 
-    it('appends agent_name and execution_scope for scoped disconnect', async () => {
+    it("appends agent_name and execution_scope for scoped disconnect", async () => {
       (global.fetch as any).mockResolvedValueOnce({ ok: true });
 
-      const config = spotifyIntegration.getConfig({ agentName: 'code', executionScope: 'shared' });
-      await config.onDisconnect!('spotify');
+      const config = spotifyIntegration.getConfig({
+        agentName: "code",
+        executionScope: "shared",
+      });
+      await config.onDisconnect!("spotify");
 
-      expect(localStorageMock.removeItem).toHaveBeenCalledWith('spotify_configured:code:shared');
+      expect(localStorageMock.removeItem).toHaveBeenCalledWith(
+        "spotify_configured:code:shared",
+      );
       expect(global.fetch).toHaveBeenCalledWith(
-        '/api/integrations/spotify/disconnect?agent_name=code&execution_scope=shared',
-        expect.objectContaining({ method: 'POST' })
+        "/api/integrations/spotify/disconnect?agent_name=code&execution_scope=shared",
+        expect.objectContaining({ method: "POST" }),
       );
     });
   });

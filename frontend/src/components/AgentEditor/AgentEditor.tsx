@@ -1,18 +1,18 @@
-import { useEffect, useCallback, useState, useMemo } from 'react';
-import { useConfigStore } from '@/store/configStore';
-import { useSwipeBack } from '@/hooks/useSwipeBack';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
+import { useEffect, useCallback, useState, useMemo } from "react";
+import { useConfigStore } from "@/store/configStore";
+import { useSwipeBack } from "@/hooks/useSwipeBack";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { Plus, X, Bot, Settings } from 'lucide-react';
+} from "@/components/ui/select";
+import { Plus, X, Bot, Settings } from "lucide-react";
 import {
   EditorPanel,
   EditorPanelEmptyState,
@@ -20,8 +20,8 @@ import {
   CheckboxListField,
   CheckboxListItem,
   HistoryContextSection,
-} from '@/components/shared';
-import { useForm, useWatch, Controller } from 'react-hook-form';
+} from "@/components/shared";
+import { useForm, useWatch, Controller } from "react-hook-form";
 import {
   Agent,
   AgentPrivateConfig,
@@ -29,16 +29,16 @@ import {
   getDefaultPrivateConfig,
   resolveEffectiveDefaultTools,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
-} from '@/types/config';
-import { Badge } from '@/components/ui/badge';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { useTools } from '@/hooks/useTools';
-import { useSkills } from '@/hooks/useSkills';
-import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
-import { ToolConfigPanel } from './ToolConfigPanel';
+} from "@/types/config";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { useTools } from "@/hooks/useTools";
+import { useSkills } from "@/hooks/useSkills";
+import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
+import { ToolConfigPanel } from "./ToolConfigPanel";
 
 const TOOL_VALIDATION_UNAVAILABLE_MESSAGE =
-  'Tool availability preview is unavailable while agent policy preview is unavailable. Save or refresh to validate tool assignments.';
+  "Tool availability preview is unavailable while agent policy preview is unavailable. Save or refresh to validate tool assignments.";
 
 export function AgentEditor() {
   const {
@@ -58,32 +58,36 @@ export function AgentEditor() {
   } = useConfigStore();
 
   const [activeToolName, setActiveToolName] = useState<string | null>(null);
-  const selectedAgent = agents.find(a => a.id === selectedAgentId);
+  const selectedAgent = agents.find((a) => a.id === selectedAgentId);
   const defaultLearning = config?.defaults.learning ?? true;
-  const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
+  const defaultLearningMode = config?.defaults.learning_mode ?? "always";
   const defaultShowToolCalls = config?.defaults.show_tool_calls ?? true;
   const defaultMarkdown = config?.defaults.markdown ?? true;
-  const defaultCompressToolResults = config?.defaults.compress_tool_results ?? true;
-  const globalMemoryBackend = config?.memory?.backend ?? 'mem0';
+  const defaultCompressToolResults =
+    config?.defaults.compress_tool_results ?? true;
+  const globalMemoryBackend = config?.memory?.backend ?? "mem0";
   const knowledgeBaseNames = useMemo(
     () => Object.keys(config?.knowledge_bases || {}).sort(),
-    [config?.knowledge_bases]
+    [config?.knowledge_bases],
   );
 
   // Fetch tools and skills from backend
-  const selectedAgentPolicy = selectedAgent ? agentPoliciesByAgent[selectedAgent.id] ?? null : null;
+  const selectedAgentPolicy = selectedAgent
+    ? (agentPoliciesByAgent[selectedAgent.id] ?? null)
+    : null;
   const selectedExecutionScope = useMemo(
     () => selectedAgentPolicy?.effective_execution_scope ?? null,
-    [selectedAgentPolicy]
+    [selectedAgentPolicy],
   );
-  const policyPreviewAvailable = selectedAgent == null || selectedAgentPolicy != null;
+  const policyPreviewAvailable =
+    selectedAgent == null || selectedAgentPolicy != null;
   const {
     tools: backendTools,
     loading: toolsLoading,
     statusAuthoritative,
   } = useTools(
     policyPreviewAvailable ? selectedAgentId : null,
-    policyPreviewAvailable ? selectedExecutionScope : undefined
+    policyPreviewAvailable ? selectedExecutionScope : undefined,
   );
   const { skills: availableSkills, loading: skillsLoading } = useSkills();
 
@@ -95,9 +99,9 @@ export function AgentEditor() {
 
   const { control, reset, setValue, getValues } = useForm<Agent>({
     defaultValues: selectedAgent || {
-      id: '',
-      display_name: '',
-      role: '',
+      id: "",
+      display_name: "",
+      role: "",
       tools: [],
       skills: [],
       instructions: [],
@@ -112,99 +116,129 @@ export function AgentEditor() {
       memory_backend: undefined,
     },
   });
-  const learningEnabled = useWatch({ name: 'learning', control });
+  const learningEnabled = useWatch({ name: "learning", control });
   const effectiveLearningEnabled = learningEnabled ?? defaultLearning;
-  const agentTools = useWatch({ name: 'tools', control });
-  const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
-  const privateConfig = useWatch({ name: 'private', control });
+  const agentTools = useWatch({ name: "tools", control });
+  const includeDefaultTools = useWatch({
+    name: "include_default_tools",
+    control,
+  });
+  const privateConfig = useWatch({ name: "private", control });
   const privateKnowledge = privateConfig?.knowledge;
   const policyAwareBackendTools = policyPreviewAvailable ? backendTools : [];
   const toolInfoByName = useMemo(
-    () => new Map(policyAwareBackendTools.map(tool => [tool.name, tool])),
-    [policyAwareBackendTools]
+    () => new Map(policyAwareBackendTools.map((tool) => [tool.name, tool])),
+    [policyAwareBackendTools],
   );
   const validationPrefix = useMemo<Array<string | number> | null>(
-    () => (selectedAgentId == null ? null : ['agents', selectedAgentId]),
-    [selectedAgentId]
+    () => (selectedAgentId == null ? null : ["agents", selectedAgentId]),
+    [selectedAgentId],
   );
   const validationErrorForPath = useScopedConfigValidation(validationPrefix);
   const agentRootError = validationErrorForPath([], true);
-  const numHistoryRunsError = validationErrorForPath(['num_history_runs'], true);
-  const numHistoryMessagesError = validationErrorForPath(['num_history_messages'], true);
-  const maxToolCallsFromHistoryError = validationErrorForPath(
-    ['max_tool_calls_from_history'],
-    true
+  const numHistoryRunsError = validationErrorForPath(
+    ["num_history_runs"],
+    true,
   );
-  const compactionError = validationErrorForPath(['compaction'], true);
-  const privateScopeError = validationErrorForPath(['private', 'per'], true);
-  const privateRootError = validationErrorForPath(['private', 'root'], true);
-  const privateTemplateDirError = validationErrorForPath(['private', 'template_dir'], true);
-  const privateContextFilesError = validationErrorForPath(['private', 'context_files']);
-  const privateKnowledgeError = validationErrorForPath(['private', 'knowledge'], true);
-  const privateKnowledgePathError = validationErrorForPath(['private', 'knowledge', 'path'], true);
+  const numHistoryMessagesError = validationErrorForPath(
+    ["num_history_messages"],
+    true,
+  );
+  const maxToolCallsFromHistoryError = validationErrorForPath(
+    ["max_tool_calls_from_history"],
+    true,
+  );
+  const compactionError = validationErrorForPath(["compaction"], true);
+  const privateScopeError = validationErrorForPath(["private", "per"], true);
+  const privateRootError = validationErrorForPath(["private", "root"], true);
+  const privateTemplateDirError = validationErrorForPath(
+    ["private", "template_dir"],
+    true,
+  );
+  const privateContextFilesError = validationErrorForPath([
+    "private",
+    "context_files",
+  ]);
+  const privateKnowledgeError = validationErrorForPath(
+    ["private", "knowledge"],
+    true,
+  );
+  const privateKnowledgePathError = validationErrorForPath(
+    ["private", "knowledge", "path"],
+    true,
+  );
   // Split tools into configured, default, and setup-required categories.
-  const { configuredTools, defaultTools, setupRequiredTools, selectedUnavailableTools } =
-    useMemo(() => {
-      const configured: typeof policyAwareBackendTools = [];
-      const defaults: typeof policyAwareBackendTools = [];
-      const setupRequired: typeof policyAwareBackendTools = [];
-      const selectedUnavailable: Array<{
-        name: string;
-        display_name: string;
-        reason: string;
-      }> = [];
-      const selectedToolNames = agentTools ?? [];
-      const backendToolNames = new Set<string>();
+  const {
+    configuredTools,
+    defaultTools,
+    setupRequiredTools,
+    selectedUnavailableTools,
+  } = useMemo(() => {
+    const configured: typeof policyAwareBackendTools = [];
+    const defaults: typeof policyAwareBackendTools = [];
+    const setupRequired: typeof policyAwareBackendTools = [];
+    const selectedUnavailable: Array<{
+      name: string;
+      display_name: string;
+      reason: string;
+    }> = [];
+    const selectedToolNames = agentTools ?? [];
+    const backendToolNames = new Set<string>();
 
-      policyAwareBackendTools.forEach(tool => {
-        backendToolNames.add(tool.name);
-        // delegate is managed via delegate_to, not the tools picker
-        if (tool.name === 'delegate') return;
-        if (tool.execution_scope_supported === false) {
-          if (selectedToolNames.includes(tool.name)) {
-            selectedUnavailable.push({
-              name: tool.name,
-              display_name: tool.display_name,
-              reason: 'Not supported for this execution scope. Uncheck it to remove it.',
-            });
-          }
-          return;
-        }
-        // Tools that do not require configuration are default tools.
-        if (tool.setup_type === 'none') {
-          defaults.push(tool);
-        } else if (tool.status === 'available') {
-          configured.push(tool);
-        } else {
-          setupRequired.push(tool);
-        }
-      });
-
-      if (policyPreviewAvailable) {
-        for (const toolName of selectedToolNames) {
-          if (toolName === 'delegate' || backendToolNames.has(toolName)) {
-            continue;
-          }
+    policyAwareBackendTools.forEach((tool) => {
+      backendToolNames.add(tool.name);
+      // delegate is managed via delegate_to, not the tools picker
+      if (tool.name === "delegate") return;
+      if (tool.execution_scope_supported === false) {
+        if (selectedToolNames.includes(tool.name)) {
           selectedUnavailable.push({
-            name: toolName,
-            display_name: toolName,
+            name: tool.name,
+            display_name: tool.display_name,
             reason:
-              'This tool is no longer available in the current registry. Uncheck it to remove it.',
+              "Not supported for this execution scope. Uncheck it to remove it.",
           });
         }
+        return;
       }
+      // Tools that do not require configuration are default tools.
+      if (tool.setup_type === "none") {
+        defaults.push(tool);
+      } else if (tool.status === "available") {
+        configured.push(tool);
+      } else {
+        setupRequired.push(tool);
+      }
+    });
 
-      return {
-        configuredTools: configured.sort((a, b) => a.display_name.localeCompare(b.display_name)),
-        defaultTools: defaults.sort((a, b) => a.display_name.localeCompare(b.display_name)),
-        setupRequiredTools: setupRequired.sort((a, b) =>
-          a.display_name.localeCompare(b.display_name)
-        ),
-        selectedUnavailableTools: selectedUnavailable.sort((a, b) =>
-          a.display_name.localeCompare(b.display_name)
-        ),
-      };
-    }, [agentTools, policyAwareBackendTools, policyPreviewAvailable]);
+    if (policyPreviewAvailable) {
+      for (const toolName of selectedToolNames) {
+        if (toolName === "delegate" || backendToolNames.has(toolName)) {
+          continue;
+        }
+        selectedUnavailable.push({
+          name: toolName,
+          display_name: toolName,
+          reason:
+            "This tool is no longer available in the current registry. Uncheck it to remove it.",
+        });
+      }
+    }
+
+    return {
+      configuredTools: configured.sort((a, b) =>
+        a.display_name.localeCompare(b.display_name),
+      ),
+      defaultTools: defaults.sort((a, b) =>
+        a.display_name.localeCompare(b.display_name),
+      ),
+      setupRequiredTools: setupRequired.sort((a, b) =>
+        a.display_name.localeCompare(b.display_name),
+      ),
+      selectedUnavailableTools: selectedUnavailable.sort((a, b) =>
+        a.display_name.localeCompare(b.display_name),
+      ),
+    };
+  }, [agentTools, policyAwareBackendTools, policyPreviewAvailable]);
   // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
   const effectiveTools = useMemo(() => {
     const tools = new Set(agentTools);
@@ -219,49 +253,50 @@ export function AgentEditor() {
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {
     const selected = selectedAgent?.skills ?? [];
-    const availableByName = new Map(availableSkills.map(s => [s.name, s]));
+    const availableByName = new Map(availableSkills.map((s) => [s.name, s]));
     const allNames = [
-      ...availableSkills.map(s => s.name),
-      ...selected.filter(name => !availableByName.has(name)),
+      ...availableSkills.map((s) => s.name),
+      ...selected.filter((name) => !availableByName.has(name)),
     ];
-    return allNames.map(name => ({
+    return allNames.map((name) => ({
       value: name,
       label: name,
       description:
-        availableByName.get(name)?.description || 'Skill not available; uncheck to remove',
+        availableByName.get(name)?.description ||
+        "Skill not available; uncheck to remove",
     }));
   }, [availableSkills, selectedAgent?.skills]);
 
   // Prepare checkbox items for rooms
   const roomItems: CheckboxListItem[] = useMemo(
     () =>
-      rooms.map(room => ({
+      rooms.map((room) => ({
         value: room.id,
         label: room.display_name,
         description: room.description,
       })),
-    [rooms]
+    [rooms],
   );
   const knowledgeBaseItems: CheckboxListItem[] = useMemo(
     () =>
-      knowledgeBaseNames.map(baseName => ({
+      knowledgeBaseNames.map((baseName) => ({
         value: baseName,
         label: baseName,
       })),
-    [knowledgeBaseNames]
+    [knowledgeBaseNames],
   );
 
   // Prepare checkbox items for delegation targets (all agents except current)
   const delegateItems: CheckboxListItem[] = useMemo(
     () =>
       agents
-        .filter(a => a.id !== selectedAgentId)
-        .map(a => ({
+        .filter((a) => a.id !== selectedAgentId)
+        .map((a) => ({
           value: a.id,
           label: a.display_name,
           description: a.role,
         })),
-    [agents, selectedAgentId]
+    [agents, selectedAgentId],
   );
 
   // Reset form when selected agent changes
@@ -286,8 +321,11 @@ export function AgentEditor() {
       setActiveToolName(null);
       return;
     }
-    setActiveToolName(currentActiveToolName => {
-      if (currentActiveToolName != null && selectedToolNames.includes(currentActiveToolName)) {
+    setActiveToolName((currentActiveToolName) => {
+      if (
+        currentActiveToolName != null &&
+        selectedToolNames.includes(currentActiveToolName)
+      ) {
         return currentActiveToolName;
       }
       return null;
@@ -302,31 +340,37 @@ export function AgentEditor() {
         updateAgent(selectedAgentId, { [fieldName]: value });
       }
     },
-    [selectedAgentId, updateAgent]
+    [selectedAgentId, updateAgent],
   );
 
   const updateSelectedTools = useCallback(
     (currentTools: string[], toolName: string, checked: boolean) => {
       const nextTools = checked
         ? [...new Set([...currentTools, toolName])]
-        : currentTools.filter(tool => tool !== toolName);
-      handleFieldChange('tools', nextTools);
-      setActiveToolName(currentActiveToolName => {
+        : currentTools.filter((tool) => tool !== toolName);
+      handleFieldChange("tools", nextTools);
+      setActiveToolName((currentActiveToolName) => {
         if (checked) {
           return toolName;
         }
-        if (currentActiveToolName != null && nextTools.includes(currentActiveToolName)) {
+        if (
+          currentActiveToolName != null &&
+          nextTools.includes(currentActiveToolName)
+        ) {
           return currentActiveToolName;
         }
         return null;
       });
       return nextTools;
     },
-    [handleFieldChange, toolInfoByName]
+    [handleFieldChange, toolInfoByName],
   );
 
   const handleDelete = () => {
-    if (selectedAgentId && confirm('Are you sure you want to delete this agent?')) {
+    if (
+      selectedAgentId &&
+      confirm("Are you sure you want to delete this agent?")
+    ) {
       deleteAgent(selectedAgentId);
     }
   };
@@ -336,49 +380,49 @@ export function AgentEditor() {
   };
 
   const handleAddInstruction = () => {
-    const current = getValues('instructions');
-    const updated = [...current, ''];
-    setValue('instructions', updated);
-    handleFieldChange('instructions', updated);
+    const current = getValues("instructions");
+    const updated = [...current, ""];
+    setValue("instructions", updated);
+    handleFieldChange("instructions", updated);
   };
 
   const handleRemoveInstruction = (index: number) => {
-    const current = getValues('instructions');
+    const current = getValues("instructions");
     const updated = current.filter((_, i) => i !== index);
-    setValue('instructions', updated);
-    handleFieldChange('instructions', updated);
+    setValue("instructions", updated);
+    handleFieldChange("instructions", updated);
   };
 
   const handleAddContextFile = () => {
-    const current = getValues('context_files') ?? [];
-    const updated = [...current, ''];
-    setValue('context_files', updated);
-    handleFieldChange('context_files', updated);
+    const current = getValues("context_files") ?? [];
+    const updated = [...current, ""];
+    setValue("context_files", updated);
+    handleFieldChange("context_files", updated);
   };
 
   const handleRemoveContextFile = (index: number) => {
-    const current = getValues('context_files') ?? [];
+    const current = getValues("context_files") ?? [];
     const updated = current.filter((_, i) => i !== index);
-    setValue('context_files', updated);
-    handleFieldChange('context_files', updated);
+    setValue("context_files", updated);
+    handleFieldChange("context_files", updated);
   };
 
   const updatePrivate = useCallback(
-    (nextPrivate: Agent['private']) => {
-      setValue('private', nextPrivate);
-      handleFieldChange('private', nextPrivate);
+    (nextPrivate: Agent["private"]) => {
+      setValue("private", nextPrivate);
+      handleFieldChange("private", nextPrivate);
     },
-    [handleFieldChange, setValue]
+    [handleFieldChange, setValue],
   );
 
   const mutatePrivate = useCallback(
-    (mutator: (current: Agent['private']) => Agent['private']) => {
-      updatePrivate(mutator(getValues('private')));
+    (mutator: (current: Agent["private"]) => Agent["private"]) => {
+      updatePrivate(mutator(getValues("private")));
     },
-    [getValues, updatePrivate]
+    [getValues, updatePrivate],
   );
 
-  const ensurePrivateConfig = (value: Agent['private']): AgentPrivateConfig =>
+  const ensurePrivateConfig = (value: Agent["private"]): AgentPrivateConfig =>
     value ?? getDefaultPrivateConfig(selectedAgent ?? { private: undefined });
 
   const handleEnablePrivate = (enabled: boolean) => {
@@ -388,63 +432,65 @@ export function AgentEditor() {
   };
 
   const updateCompaction = useCallback(
-    (nextCompaction: Agent['compaction']) => {
-      setValue('compaction', nextCompaction);
-      handleFieldChange('compaction', nextCompaction);
+    (nextCompaction: Agent["compaction"]) => {
+      setValue("compaction", nextCompaction);
+      handleFieldChange("compaction", nextCompaction);
     },
-    [handleFieldChange, setValue]
+    [handleFieldChange, setValue],
   );
 
   const mutateCompaction = useCallback(
-    (mutator: (current: Agent['compaction']) => Agent['compaction']) => {
-      updateCompaction(mutator(getValues('compaction')));
+    (mutator: (current: Agent["compaction"]) => Agent["compaction"]) => {
+      updateCompaction(mutator(getValues("compaction")));
     },
-    [getValues, updateCompaction]
+    [getValues, updateCompaction],
   );
 
-  const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {
-    mutatePrivate(current => ({
+  const handlePrivateScopeChange = (per: AgentPrivateConfig["per"]) => {
+    mutatePrivate((current) => ({
       ...ensurePrivateConfig(current),
       per,
     }));
   };
 
   const handlePrivateRootChange = (root: string) => {
-    mutatePrivate(current => ({
+    mutatePrivate((current) => ({
       ...ensurePrivateConfig(current),
-      root: root.trim() === '' ? undefined : root,
+      root: root.trim() === "" ? undefined : root,
     }));
   };
 
   const handlePrivateTemplateDirChange = (templateDir: string) => {
-    mutatePrivate(current => ({
+    mutatePrivate((current) => ({
       ...ensurePrivateConfig(current),
-      template_dir: templateDir.trim() === '' ? undefined : templateDir,
+      template_dir: templateDir.trim() === "" ? undefined : templateDir,
     }));
   };
 
   const handleAddPrivateContextFile = () => {
-    mutatePrivate(current => {
+    mutatePrivate((current) => {
       const privateState = ensurePrivateConfig(current);
       return {
         ...privateState,
-        context_files: [...(privateState.context_files ?? []), ''],
+        context_files: [...(privateState.context_files ?? []), ""],
       };
     });
   };
 
   const handleRemovePrivateContextFile = (index: number) => {
-    mutatePrivate(current => {
+    mutatePrivate((current) => {
       const privateState = ensurePrivateConfig(current);
       return {
         ...privateState,
-        context_files: (privateState.context_files ?? []).filter((_, i) => i !== index),
+        context_files: (privateState.context_files ?? []).filter(
+          (_, i) => i !== index,
+        ),
       };
     });
   };
 
   const handleEnablePrivateKnowledge = (enabled: boolean) => {
-    mutatePrivate(current => {
+    mutatePrivate((current) => {
       const privateState = ensurePrivateConfig(current);
       const currentKnowledge = privateState.knowledge;
       const nextKnowledge: AgentPrivateKnowledgeConfig | undefined = enabled
@@ -464,9 +510,11 @@ export function AgentEditor() {
   };
 
   const mutatePrivateKnowledge = (
-    mutator: (current: AgentPrivateKnowledgeConfig | undefined) => AgentPrivateKnowledgeConfig
+    mutator: (
+      current: AgentPrivateKnowledgeConfig | undefined,
+    ) => AgentPrivateKnowledgeConfig,
   ) => {
-    mutatePrivate(current => {
+    mutatePrivate((current) => {
       const privateState = ensurePrivateConfig(current);
       return {
         ...privateState,
@@ -476,14 +524,14 @@ export function AgentEditor() {
   };
 
   const handlePrivateKnowledgePathChange = (path: string) => {
-    mutatePrivateKnowledge(current => ({
+    mutatePrivateKnowledge((current) => ({
       ...(current ?? { enabled: true, watch: true }),
-      path: path.trim() === '' ? undefined : path,
+      path: path.trim() === "" ? undefined : path,
     }));
   };
 
   const handlePrivateKnowledgeWatchChange = (watch: boolean) => {
-    mutatePrivateKnowledge(current => ({
+    mutatePrivateKnowledge((current) => ({
       ...(current ?? { enabled: true }),
       watch,
     }));
@@ -497,7 +545,9 @@ export function AgentEditor() {
   };
 
   if (!selectedAgent) {
-    return <EditorPanelEmptyState icon={Bot} message="Select an agent to edit" />;
+    return (
+      <EditorPanelEmptyState icon={Bot} message="Select an agent to edit" />
+    );
   }
 
   return (
@@ -530,9 +580,9 @@ export function AgentEditor() {
               {...field}
               id="display_name"
               placeholder="Agent display name"
-              onChange={e => {
+              onChange={(e) => {
                 field.onChange(e);
-                handleFieldChange('display_name', e.target.value);
+                handleFieldChange("display_name", e.target.value);
               }}
             />
           )}
@@ -554,9 +604,9 @@ export function AgentEditor() {
               id="role"
               placeholder="What this agent does..."
               rows={2}
-              onChange={e => {
+              onChange={(e) => {
                 field.onChange(e);
-                handleFieldChange('role', e.target.value);
+                handleFieldChange("role", e.target.value);
               }}
             />
           )}
@@ -574,10 +624,10 @@ export function AgentEditor() {
           control={control}
           render={({ field }) => (
             <Select
-              value={field.value || 'default'}
-              onValueChange={value => {
+              value={field.value || "default"}
+              onValueChange={(value) => {
                 field.onChange(value);
-                handleFieldChange('model', value);
+                handleFieldChange("model", value);
               }}
             >
               <SelectTrigger id="model">
@@ -585,7 +635,7 @@ export function AgentEditor() {
               </SelectTrigger>
               <SelectContent>
                 {config &&
-                  Object.keys(config.models).map(modelId => (
+                  Object.keys(config.models).map((modelId) => (
                     <SelectItem key={modelId} value={modelId}>
                       {modelId}
                     </SelectItem>
@@ -607,18 +657,21 @@ export function AgentEditor() {
           control={control}
           render={({ field }) => (
             <Select
-              value={field.value ?? 'inherit'}
-              onValueChange={value => {
-                const resolved = value === 'inherit' ? undefined : (value as 'mem0' | 'file');
+              value={field.value ?? "inherit"}
+              onValueChange={(value) => {
+                const resolved =
+                  value === "inherit" ? undefined : (value as "mem0" | "file");
                 field.onChange(resolved);
-                handleFieldChange('memory_backend', resolved);
+                handleFieldChange("memory_backend", resolved);
               }}
             >
               <SelectTrigger id="memory_backend">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="inherit">Inherit global ({globalMemoryBackend})</SelectItem>
+                <SelectItem value="inherit">
+                  Inherit global ({globalMemoryBackend})
+                </SelectItem>
                 <SelectItem value="mem0">Mem0 (vector memory)</SelectItem>
                 <SelectItem value="file">File (markdown memory)</SelectItem>
               </SelectContent>
@@ -638,10 +691,10 @@ export function AgentEditor() {
           control={control}
           render={({ field }) => (
             <Select
-              value={field.value ?? 'thread'}
-              onValueChange={value => {
+              value={field.value ?? "thread"}
+              onValueChange={(value) => {
                 field.onChange(value);
-                handleFieldChange('thread_mode', value);
+                handleFieldChange("thread_mode", value);
               }}
             >
               <SelectTrigger id="thread_mode">
@@ -695,8 +748,8 @@ export function AgentEditor() {
         label="Context Files"
         helperText={
           privateConfig != null
-            ? 'Shared workspace-relative files loaded into each agent instance. Use Private Context Files below for requester-local files.'
-            : 'Workspace-relative files loaded into each freshly built agent instance and prepended to its role context.'
+            ? "Shared workspace-relative files loaded into each agent instance. Use Private Context Files below for requester-local files."
+            : "Workspace-relative files loaded into each freshly built agent instance and prepended to its role context."
         }
         actions={
           <Button
@@ -720,11 +773,11 @@ export function AgentEditor() {
                 <div key={index} className="flex gap-2">
                   <Input
                     value={filePath}
-                    onChange={e => {
+                    onChange={(e) => {
                       const updated = [...(field.value ?? [])];
                       updated[index] = e.target.value;
                       field.onChange(updated);
-                      handleFieldChange('context_files', updated);
+                      handleFieldChange("context_files", updated);
                     }}
                     placeholder={SHARED_CONTEXT_FILE_PLACEHOLDER}
                     className="min-h-[40px]"
@@ -758,7 +811,9 @@ export function AgentEditor() {
             <Checkbox
               id="private_enabled"
               checked={privateConfig != null}
-              onCheckedChange={checked => handleEnablePrivate(checked === true)}
+              onCheckedChange={(checked) =>
+                handleEnablePrivate(checked === true)
+              }
             />
             <label
               htmlFor="private_enabled"
@@ -779,8 +834,8 @@ export function AgentEditor() {
             >
               <Select
                 value={privateConfig.per}
-                onValueChange={value =>
-                  handlePrivateScopeChange(value as AgentPrivateConfig['per'])
+                onValueChange={(value) =>
+                  handlePrivateScopeChange(value as AgentPrivateConfig["per"])
                 }
               >
                 <SelectTrigger id="private_per">
@@ -801,9 +856,9 @@ export function AgentEditor() {
             >
               <Input
                 id="private_root"
-                value={privateConfig.root ?? ''}
+                value={privateConfig.root ?? ""}
                 placeholder="mind_data"
-                onChange={e => handlePrivateRootChange(e.target.value)}
+                onChange={(e) => handlePrivateRootChange(e.target.value)}
               />
             </FieldGroup>
 
@@ -815,9 +870,9 @@ export function AgentEditor() {
             >
               <Input
                 id="private_template_dir"
-                value={privateConfig.template_dir ?? ''}
+                value={privateConfig.template_dir ?? ""}
                 placeholder="./mind_template"
-                onChange={e => handlePrivateTemplateDirChange(e.target.value)}
+                onChange={(e) => handlePrivateTemplateDirChange(e.target.value)}
               />
             </FieldGroup>
 
@@ -842,10 +897,12 @@ export function AgentEditor() {
                   <div key={index} className="flex gap-2">
                     <Input
                       value={filePath}
-                      onChange={e => {
-                        const updated = [...(privateConfig.context_files ?? [])];
+                      onChange={(e) => {
+                        const updated = [
+                          ...(privateConfig.context_files ?? []),
+                        ];
                         updated[index] = e.target.value;
-                        mutatePrivate(current => ({
+                        mutatePrivate((current) => ({
                           ...ensurePrivateConfig(current),
                           context_files: updated,
                         }));
@@ -876,7 +933,9 @@ export function AgentEditor() {
                 <Checkbox
                   id="private_knowledge_enabled"
                   checked={privateKnowledge?.enabled ?? false}
-                  onCheckedChange={checked => handleEnablePrivateKnowledge(checked === true)}
+                  onCheckedChange={(checked) =>
+                    handleEnablePrivateKnowledge(checked === true)
+                  }
                 />
                 <label
                   htmlFor="private_knowledge_enabled"
@@ -897,9 +956,11 @@ export function AgentEditor() {
                 >
                   <Input
                     id="private_knowledge_path"
-                    value={privateKnowledge.path ?? ''}
+                    value={privateKnowledge.path ?? ""}
                     placeholder="memory"
-                    onChange={e => handlePrivateKnowledgePathChange(e.target.value)}
+                    onChange={(e) =>
+                      handlePrivateKnowledgePathChange(e.target.value)
+                    }
                   />
                 </FieldGroup>
 
@@ -912,7 +973,7 @@ export function AgentEditor() {
                     <Checkbox
                       id="private_knowledge_watch"
                       checked={privateKnowledge.watch ?? true}
-                      onCheckedChange={checked =>
+                      onCheckedChange={(checked) =>
                         handlePrivateKnowledgeWatchChange(checked === true)
                       }
                     />
@@ -944,10 +1005,10 @@ export function AgentEditor() {
               <Checkbox
                 id="include_default_tools"
                 checked={field.value ?? true}
-                onCheckedChange={checked => {
+                onCheckedChange={(checked) => {
                   const value = checked === true;
                   field.onChange(value);
-                  handleFieldChange('include_default_tools', value);
+                  handleFieldChange("include_default_tools", value);
                 }}
               />
               <label
@@ -967,17 +1028,17 @@ export function AgentEditor() {
           {selectedAgent != null && selectedAgentPolicy == null && (
             <Alert>
               <AlertDescription>
-                Agent policy preview is unavailable. Save or refresh to re-validate tool scope
-                support for this draft.
+                Agent policy preview is unavailable. Save or refresh to
+                re-validate tool scope support for this draft.
               </AlertDescription>
             </Alert>
           )}
           {selectedExecutionScope != null && statusAuthoritative === false && (
             <Alert>
               <AlertDescription>
-                Requester-scoped tool status is preview only. The dashboard can show scope support
-                rules and shared env-backed availability, but it cannot inspect live requester-owned
-                scoped credentials.
+                Requester-scoped tool status is preview only. The dashboard can
+                show scope support rules and shared env-backed availability, but
+                it cannot inspect live requester-owned scoped credentials.
               </AlertDescription>
             </Alert>
           )}
@@ -994,7 +1055,8 @@ export function AgentEditor() {
             setupRequiredTools.length === 0 &&
             selectedUnavailableTools.length === 0 ? (
             <div className="text-sm text-muted-foreground text-center py-4">
-              No tools are available. Please configure tools in the Tools tab first.
+              No tools are available. Please configure tools in the Tools tab
+              first.
             </div>
           ) : (
             <>
@@ -1012,7 +1074,7 @@ export function AgentEditor() {
                     </span>
                   </div>
                   <div className="pl-2 space-y-1">
-                    {selectedUnavailableTools.map(tool => (
+                    {selectedUnavailableTools.map((tool) => (
                       <Controller
                         key={tool.name}
                         name="tools"
@@ -1024,9 +1086,13 @@ export function AgentEditor() {
                                 <Checkbox
                                   id={`unavailable-${tool.name}`}
                                   checked={field.value.includes(tool.name)}
-                                  onCheckedChange={checked => {
+                                  onCheckedChange={(checked) => {
                                     field.onChange(
-                                      updateSelectedTools(field.value, tool.name, checked === true)
+                                      updateSelectedTools(
+                                        field.value,
+                                        tool.name,
+                                        checked === true,
+                                      ),
                                     );
                                   }}
                                   className="h-5 w-5 sm:h-4 sm:w-4"
@@ -1042,7 +1108,9 @@ export function AgentEditor() {
                                 Remove
                               </Badge>
                             </div>
-                            <p className="pl-8 pt-1 text-xs text-muted-foreground">{tool.reason}</p>
+                            <p className="pl-8 pt-1 text-xs text-muted-foreground">
+                              {tool.reason}
+                            </p>
                           </div>
                         )}
                       />
@@ -1073,7 +1141,7 @@ export function AgentEditor() {
                     </Badge>
                   </div>
                   <div className="pl-2 space-y-1">
-                    {configuredTools.map(tool => (
+                    {configuredTools.map((tool) => (
                       <Controller
                         key={tool.name}
                         name="tools"
@@ -1092,22 +1160,24 @@ export function AgentEditor() {
                               <div
                                 className={`flex items-center justify-between rounded-lg p-2 transition-colors ${
                                   isActive && showSettings
-                                    ? 'bg-blue-50 dark:bg-blue-500/10'
-                                    : 'hover:bg-gray-50 dark:hover:bg-white/5'
+                                    ? "bg-blue-50 dark:bg-blue-500/10"
+                                    : "hover:bg-gray-50 dark:hover:bg-white/5"
                                 }`}
                               >
                                 <div className="flex items-center space-x-3 sm:space-x-2">
                                   <Checkbox
                                     id={`configured-${tool.name}`}
                                     checked={isChecked}
-                                    aria-label={isChecked ? tool.display_name : undefined}
-                                    onCheckedChange={checked => {
+                                    aria-label={
+                                      isChecked ? tool.display_name : undefined
+                                    }
+                                    onCheckedChange={(checked) => {
                                       field.onChange(
                                         updateSelectedTools(
                                           field.value,
                                           tool.name,
-                                          checked === true
-                                        )
+                                          checked === true,
+                                        ),
                                       );
                                     }}
                                     className="h-5 w-5 sm:h-4 sm:w-4"
@@ -1116,8 +1186,8 @@ export function AgentEditor() {
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        setActiveToolName(prev =>
-                                          prev === tool.name ? null : tool.name
+                                        setActiveToolName((prev) =>
+                                          prev === tool.name ? null : tool.name,
                                         )
                                       }
                                       className="text-sm font-medium leading-none text-left"
@@ -1144,18 +1214,18 @@ export function AgentEditor() {
                                 {isChecked && showSettings && (
                                   <Button
                                     type="button"
-                                    variant={isActive ? 'secondary' : 'ghost'}
+                                    variant={isActive ? "secondary" : "ghost"}
                                     size="sm"
                                     onClick={() =>
-                                      setActiveToolName(prev =>
-                                        prev === tool.name ? null : tool.name
+                                      setActiveToolName((prev) =>
+                                        prev === tool.name ? null : tool.name,
                                       )
                                     }
                                     className="h-8 px-2"
                                   >
                                     <Settings className="h-4 w-4 sm:mr-1" />
                                     <span className="hidden sm:inline">
-                                      {hasOverrides ? 'Edit' : 'Settings'}
+                                      {hasOverrides ? "Edit" : "Settings"}
                                     </span>
                                   </Button>
                                 )}
@@ -1165,7 +1235,9 @@ export function AgentEditor() {
                                   agentId={selectedAgent.id}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
-                                  overrideFields={tool.agent_override_fields ?? null}
+                                  overrideFields={
+                                    tool.agent_override_fields ?? null
+                                  }
                                   configFields={tool.config_fields ?? null}
                                 />
                               )}
@@ -1199,7 +1271,7 @@ export function AgentEditor() {
                     </span>
                   </div>
                   <div className="pl-2 space-y-1">
-                    {defaultTools.map(tool => (
+                    {defaultTools.map((tool) => (
                       <Controller
                         key={tool.name}
                         name="tools"
@@ -1218,22 +1290,24 @@ export function AgentEditor() {
                               <div
                                 className={`flex items-center justify-between rounded-lg p-2 transition-colors ${
                                   isActive && showSettings
-                                    ? 'bg-blue-50 dark:bg-blue-500/10'
-                                    : 'hover:bg-gray-50 dark:hover:bg-white/5'
+                                    ? "bg-blue-50 dark:bg-blue-500/10"
+                                    : "hover:bg-gray-50 dark:hover:bg-white/5"
                                 }`}
                               >
                                 <div className="flex items-center space-x-3 sm:space-x-2">
                                   <Checkbox
                                     id={`default-${tool.name}`}
                                     checked={isChecked}
-                                    aria-label={isChecked ? tool.display_name : undefined}
-                                    onCheckedChange={checked => {
+                                    aria-label={
+                                      isChecked ? tool.display_name : undefined
+                                    }
+                                    onCheckedChange={(checked) => {
                                       field.onChange(
                                         updateSelectedTools(
                                           field.value,
                                           tool.name,
-                                          checked === true
-                                        )
+                                          checked === true,
+                                        ),
                                       );
                                     }}
                                     className="h-5 w-5 sm:h-4 sm:w-4"
@@ -1242,8 +1316,8 @@ export function AgentEditor() {
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        setActiveToolName(prev =>
-                                          prev === tool.name ? null : tool.name
+                                        setActiveToolName((prev) =>
+                                          prev === tool.name ? null : tool.name,
                                         )
                                       }
                                       className="text-sm font-medium leading-none text-left"
@@ -1270,18 +1344,18 @@ export function AgentEditor() {
                                 {isChecked && showSettings && (
                                   <Button
                                     type="button"
-                                    variant={isActive ? 'secondary' : 'ghost'}
+                                    variant={isActive ? "secondary" : "ghost"}
                                     size="sm"
                                     onClick={() =>
-                                      setActiveToolName(prev =>
-                                        prev === tool.name ? null : tool.name
+                                      setActiveToolName((prev) =>
+                                        prev === tool.name ? null : tool.name,
                                       )
                                     }
                                     className="h-8 px-2"
                                   >
                                     <Settings className="h-4 w-4 sm:mr-1" />
                                     <span className="hidden sm:inline">
-                                      {hasOverrides ? 'Edit' : 'Settings'}
+                                      {hasOverrides ? "Edit" : "Settings"}
                                     </span>
                                   </Button>
                                 )}
@@ -1291,7 +1365,9 @@ export function AgentEditor() {
                                   agentId={selectedAgent.id}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
-                                  overrideFields={tool.agent_override_fields ?? null}
+                                  overrideFields={
+                                    tool.agent_override_fields ?? null
+                                  }
                                   configFields={tool.config_fields ?? null}
                                 />
                               )}
@@ -1325,14 +1401,15 @@ export function AgentEditor() {
                     </span>
                   </div>
                   <div className="pl-2 space-y-1">
-                    {setupRequiredTools.map(tool => (
+                    {setupRequiredTools.map((tool) => (
                       <Controller
                         key={tool.name}
                         name="tools"
                         control={control}
                         render={({ field }) => {
                           const isChecked = field.value.includes(tool.name);
-                          const setupBlocked = tool.dashboard_configuration_supported === false;
+                          const setupBlocked =
+                            tool.dashboard_configuration_supported === false;
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
                           const hasSettings =
@@ -1345,8 +1422,8 @@ export function AgentEditor() {
                               <div
                                 className={`rounded-lg p-2 transition-colors ${
                                   isActive && showSettings
-                                    ? 'bg-blue-50 dark:bg-blue-500/10'
-                                    : 'hover:bg-gray-50 dark:hover:bg-white/5'
+                                    ? "bg-blue-50 dark:bg-blue-500/10"
+                                    : "hover:bg-gray-50 dark:hover:bg-white/5"
                                 }`}
                               >
                                 <div className="flex items-center justify-between">
@@ -1354,14 +1431,18 @@ export function AgentEditor() {
                                     <Checkbox
                                       id={`setup-${tool.name}`}
                                       checked={isChecked}
-                                      aria-label={isChecked ? tool.display_name : undefined}
-                                      onCheckedChange={checked => {
+                                      aria-label={
+                                        isChecked
+                                          ? tool.display_name
+                                          : undefined
+                                      }
+                                      onCheckedChange={(checked) => {
                                         field.onChange(
                                           updateSelectedTools(
                                             field.value,
                                             tool.name,
-                                            checked === true
-                                          )
+                                            checked === true,
+                                          ),
                                         );
                                       }}
                                       className="h-5 w-5 sm:h-4 sm:w-4"
@@ -1370,8 +1451,10 @@ export function AgentEditor() {
                                       <button
                                         type="button"
                                         onClick={() =>
-                                          setActiveToolName(prev =>
-                                            prev === tool.name ? null : tool.name
+                                          setActiveToolName((prev) =>
+                                            prev === tool.name
+                                              ? null
+                                              : tool.name,
                                           )
                                         }
                                         className="text-sm font-medium leading-none text-left"
@@ -1396,24 +1479,31 @@ export function AgentEditor() {
                                     )}
                                   </div>
                                   <div className="flex items-center gap-2">
-                                    <Badge variant="secondary" className="text-xs">
+                                    <Badge
+                                      variant="secondary"
+                                      className="text-xs"
+                                    >
                                       Setup required
                                     </Badge>
                                     {isChecked && showSettings && (
                                       <Button
                                         type="button"
-                                        variant={isActive ? 'secondary' : 'ghost'}
+                                        variant={
+                                          isActive ? "secondary" : "ghost"
+                                        }
                                         size="sm"
                                         onClick={() =>
-                                          setActiveToolName(prev =>
-                                            prev === tool.name ? null : tool.name
+                                          setActiveToolName((prev) =>
+                                            prev === tool.name
+                                              ? null
+                                              : tool.name,
                                           )
                                         }
                                         className="h-8 px-2"
                                       >
                                         <Settings className="h-4 w-4 sm:mr-1" />
                                         <span className="hidden sm:inline">
-                                          {hasOverrides ? 'Edit' : 'Settings'}
+                                          {hasOverrides ? "Edit" : "Settings"}
                                         </span>
                                       </Button>
                                     )}
@@ -1421,9 +1511,9 @@ export function AgentEditor() {
                                 </div>
                                 {setupBlocked && (
                                   <p className="pl-8 pt-1 text-xs text-muted-foreground">
-                                    This scope can use runtime env credentials, but dashboard
-                                    credential setup is only supported for shared deployment
-                                    credentials.
+                                    This scope can use runtime env credentials,
+                                    but dashboard credential setup is only
+                                    supported for shared deployment credentials.
                                   </p>
                                 )}
                               </div>
@@ -1432,7 +1522,9 @@ export function AgentEditor() {
                                   agentId={selectedAgent.id}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
-                                  overrideFields={tool.agent_override_fields ?? null}
+                                  overrideFields={
+                                    tool.agent_override_fields ?? null
+                                  }
                                   configFields={tool.config_fields ?? null}
                                 />
                               )}
@@ -1450,9 +1542,14 @@ export function AgentEditor() {
       </FieldGroup>
 
       {/* Skills */}
-      <FieldGroup label="Skills" helperText="Select skills this agent can invoke">
+      <FieldGroup
+        label="Skills"
+        helperText="Select skills this agent can invoke"
+      >
         {skillsLoading ? (
-          <div className="text-sm text-muted-foreground text-center py-2">Loading skills...</div>
+          <div className="text-sm text-muted-foreground text-center py-2">
+            Loading skills...
+          </div>
         ) : (
           <CheckboxListField
             name="skills"
@@ -1492,11 +1589,11 @@ export function AgentEditor() {
                 <div key={index} className="flex gap-2">
                   <Input
                     value={instruction}
-                    onChange={e => {
+                    onChange={(e) => {
                       const updated = [...field.value];
                       updated[index] = e.target.value;
                       field.onChange(updated);
-                      handleFieldChange('instructions', updated);
+                      handleFieldChange("instructions", updated);
                     }}
                     placeholder="Instruction..."
                     className="min-h-[40px]"
@@ -1517,7 +1614,10 @@ export function AgentEditor() {
       </FieldGroup>
 
       {/* Rooms */}
-      <FieldGroup label="Agent Rooms" helperText="Select rooms where this agent can operate">
+      <FieldGroup
+        label="Agent Rooms"
+        helperText="Select rooms where this agent can operate"
+      >
         <CheckboxListField
           name="rooms"
           control={control}
@@ -1534,7 +1634,7 @@ export function AgentEditor() {
       <FieldGroup
         label="Markdown"
         helperText={`Use markdown formatting in responses (global default: ${
-          defaultMarkdown ? 'on' : 'off'
+          defaultMarkdown ? "on" : "off"
         })`}
         htmlFor="markdown"
       >
@@ -1546,13 +1646,16 @@ export function AgentEditor() {
               <Checkbox
                 id="markdown"
                 checked={field.value ?? defaultMarkdown}
-                onCheckedChange={checked => {
+                onCheckedChange={(checked) => {
                   const value = checked === true;
                   field.onChange(value);
-                  handleFieldChange('markdown', value);
+                  handleFieldChange("markdown", value);
                 }}
               />
-              <label htmlFor="markdown" className="text-sm font-medium cursor-pointer select-none">
+              <label
+                htmlFor="markdown"
+                className="text-sm font-medium cursor-pointer select-none"
+              >
                 Enable markdown
               </label>
             </div>
@@ -1574,13 +1677,16 @@ export function AgentEditor() {
               <Checkbox
                 id="learning"
                 checked={field.value ?? defaultLearning}
-                onCheckedChange={checked => {
+                onCheckedChange={(checked) => {
                   const value = checked === true;
                   field.onChange(value);
-                  handleFieldChange('learning', value);
+                  handleFieldChange("learning", value);
                 }}
               />
-              <label htmlFor="learning" className="text-sm font-medium cursor-pointer select-none">
+              <label
+                htmlFor="learning"
+                className="text-sm font-medium cursor-pointer select-none"
+              >
                 Enable learning
               </label>
             </div>
@@ -1599,9 +1705,9 @@ export function AgentEditor() {
           render={({ field }) => (
             <Select
               value={field.value ?? defaultLearningMode}
-              onValueChange={value => {
+              onValueChange={(value) => {
                 field.onChange(value);
-                handleFieldChange('learning_mode', value);
+                handleFieldChange("learning_mode", value);
               }}
               disabled={effectiveLearningEnabled === false}
             >
@@ -1631,10 +1737,10 @@ export function AgentEditor() {
               <Checkbox
                 id="show_tool_calls"
                 checked={field.value ?? defaultShowToolCalls}
-                onCheckedChange={checked => {
+                onCheckedChange={(checked) => {
                   const value = checked === true;
                   field.onChange(value);
-                  handleFieldChange('show_tool_calls', value);
+                  handleFieldChange("show_tool_calls", value);
                 }}
               />
               <label
@@ -1656,10 +1762,10 @@ export function AgentEditor() {
             config?.defaults.worker_tools != null
               ? ` (default: ${
                   config.defaults.worker_tools.length > 0
-                    ? config.defaults.worker_tools.join(', ')
-                    : 'none'
+                    ? config.defaults.worker_tools.join(", ")
+                    : "none"
                 })`
-              : ''
+              : ""
           }`}
         >
           <Controller
@@ -1667,18 +1773,22 @@ export function AgentEditor() {
             control={control}
             render={({ field }) => (
               <div className="space-y-1 max-h-48 overflow-y-auto border rounded-lg p-2">
-                {effectiveTools.map(toolName => {
-                  const effective = field.value ?? config?.defaults.worker_tools ?? [];
+                {effectiveTools.map((toolName) => {
+                  const effective =
+                    field.value ?? config?.defaults.worker_tools ?? [];
                   const isChecked = effective.includes(toolName);
-                  const isInherited = field.value == null && config?.defaults.worker_tools != null;
+                  const isInherited =
+                    field.value == null &&
+                    config?.defaults.worker_tools != null;
                   const toggle = () => {
                     // On first interaction when inheriting, seed from defaults
-                    const current = field.value ?? config?.defaults.worker_tools ?? [];
+                    const current =
+                      field.value ?? config?.defaults.worker_tools ?? [];
                     const updated = isChecked
-                      ? current.filter(t => t !== toolName)
+                      ? current.filter((t) => t !== toolName)
                       : [...current, toolName];
                     field.onChange(updated);
-                    handleFieldChange('worker_tools', updated);
+                    handleFieldChange("worker_tools", updated);
                   };
                   return (
                     <div
@@ -1695,11 +1805,13 @@ export function AgentEditor() {
                         role="none"
                         onClick={toggle}
                         className={`text-sm font-medium leading-none cursor-pointer select-none${
-                          isInherited && isChecked ? ' text-gray-400 dark:text-gray-500 italic' : ''
+                          isInherited && isChecked
+                            ? " text-gray-400 dark:text-gray-500 italic"
+                            : ""
                         }`}
                       >
                         {toolName}
-                        {isInherited && isChecked ? ' (default)' : ''}
+                        {isInherited && isChecked ? " (default)" : ""}
                       </span>
                     </div>
                   );
@@ -1723,11 +1835,13 @@ export function AgentEditor() {
             <div className="flex items-center gap-2">
               <Checkbox
                 id="allow_self_config"
-                checked={field.value ?? config?.defaults.allow_self_config ?? false}
-                onCheckedChange={checked => {
+                checked={
+                  field.value ?? config?.defaults.allow_self_config ?? false
+                }
+                onCheckedChange={(checked) => {
                   const value = checked === true;
                   field.onChange(value);
-                  handleFieldChange('allow_self_config', value);
+                  handleFieldChange("allow_self_config", value);
                 }}
               />
               <label
@@ -1746,28 +1860,33 @@ export function AgentEditor() {
         resetKey={selectedAgentId}
         defaults={config?.defaults}
         onFieldChange={(fieldName, value) =>
-          handleFieldChange(fieldName as keyof Agent, value as Agent[keyof Agent])
+          handleFieldChange(
+            fieldName as keyof Agent,
+            value as Agent[keyof Agent],
+          )
         }
         updateCompaction={updateCompaction}
         mutateCompaction={mutateCompaction}
         historyRunsHelperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
           config?.defaults.num_history_runs != null
             ? ` (${config.defaults.num_history_runs})`
-            : ' (all)'
+            : " (all)"
         }.`}
         historyMessagesHelperText={`Max messages from history (mutually exclusive with History Runs). Leave empty to use default${
           config?.defaults.num_history_messages != null
             ? ` (${config.defaults.num_history_messages})`
-            : ' (all)'
+            : " (all)"
         }.`}
         maxToolCallsHelperText={`Max tool call messages replayed from history. Leave empty to use default${
           config?.defaults.max_tool_calls_from_history != null
             ? ` (${config.defaults.max_tool_calls_from_history})`
-            : ' (no limit)'
+            : " (no limit)"
         }.`}
         autoCompactionHelperText="Automatically compact older session history before a run when the context budget gets tight."
         thresholdTokensHelperText="Absolute token threshold that triggers compaction. Leave empty to use threshold percent or the runtime fallback."
-        compactionModelPlaceholder={config?.defaults.compaction?.model ?? 'Default: agent model'}
+        compactionModelPlaceholder={
+          config?.defaults.compaction?.model ?? "Default: agent model"
+        }
         numHistoryRunsError={numHistoryRunsError}
         numHistoryMessagesError={numHistoryMessagesError}
         maxToolCallsFromHistoryError={maxToolCallsFromHistoryError}
@@ -1775,9 +1894,10 @@ export function AgentEditor() {
         compressToolResults={{
           defaultValue: defaultCompressToolResults,
           helperText: `Compress tool results in history to save context (global default: ${
-            defaultCompressToolResults ? 'on' : 'off'
+            defaultCompressToolResults ? "on" : "off"
           })`,
-          onChange: value => handleFieldChange('compress_tool_results', value),
+          onChange: (value) =>
+            handleFieldChange("compress_tool_results", value),
         }}
       />
     </EditorPanel>

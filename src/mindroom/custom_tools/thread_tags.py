@@ -235,12 +235,13 @@ class ThreadTagsTools(Toolkit):
                 context,
                 room_id=resolved_room_id,
                 thread_id=effective_thread_id,
-                normalize_thread_id=lambda normalize_room_id,
-                normalize_event_id: resolve_thread_root_event_id_for_client(
-                    context.client,
-                    normalize_room_id,
-                    normalize_event_id,
-                    conversation_cache=context.conversation_cache,
+                normalize_thread_id=lambda normalize_room_id, normalize_event_id: (
+                    resolve_thread_root_event_id_for_client(
+                        context.client,
+                        normalize_room_id,
+                        normalize_event_id,
+                        conversation_cache=context.conversation_cache,
+                    )
                 ),
                 allow_context_fallback=False,
             )

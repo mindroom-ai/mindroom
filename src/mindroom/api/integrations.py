@@ -88,7 +88,7 @@ def _get_spotify_credentials(request: Request, agent_name: str | None = None) ->
     """Get stored Spotify credentials."""
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
     credentials = load_credentials_for_target("spotify", target)
-    return credentials if credentials else {}
+    return credentials or {}
 
 
 def _save_spotify_credentials(

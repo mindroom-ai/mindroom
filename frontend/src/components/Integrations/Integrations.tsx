@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   ArrowRight,
   Settings,
@@ -7,42 +7,52 @@ import {
   Loader2,
   Key,
   ExternalLink,
-} from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Input } from '@/components/ui/input';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog';
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { useToast } from '@/components/ui/use-toast';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useTools, mapToolToIntegration } from '@/hooks/useTools';
-import { useConfigStore } from '@/store/configStore';
-import { getIconForTool } from './iconMapping';
-import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
+} from "@/components/ui/select";
+import { useToast } from "@/components/ui/use-toast";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useTools, mapToolToIntegration } from "@/hooks/useTools";
+import { useConfigStore } from "@/store/configStore";
+import { getIconForTool } from "./iconMapping";
+import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 import {
   Integration,
   IntegrationConfig,
   integrationProviders,
   getAllIntegrations,
-} from './integrations/index';
-import { EnhancedConfigDialog } from './EnhancedConfigDialog';
-import { FilterSelector } from '@/components/shared/FilterSelector';
+} from "./integrations/index";
+import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
+import { FilterSelector } from "@/components/shared/FilterSelector";
 
-const SHARED_ONLY_PROVIDER_IDS = new Set(['google', 'spotify', 'homeassistant']);
+const SHARED_ONLY_PROVIDER_IDS = new Set([
+  "google",
+  "spotify",
+  "homeassistant",
+]);
 
 export function Integrations() {
   const { agents, agentPoliciesByAgent } = useConfigStore();
@@ -50,25 +60,32 @@ export function Integrations() {
   const scopedAgents = useMemo(
     () =>
       agents
-        .filter(agent => agentPoliciesByAgent[agent.id]?.effective_execution_scope != null)
+        .filter(
+          (agent) =>
+            agentPoliciesByAgent[agent.id]?.effective_execution_scope != null,
+        )
         .sort((a, b) => a.display_name.localeCompare(b.display_name)),
-    [agentPoliciesByAgent, agents]
+    [agentPoliciesByAgent, agents],
   );
   const selectedScopeAgent = useMemo(
-    () => scopedAgents.find(agent => agent.id === scopeAgentName) ?? null,
-    [scopedAgents, scopeAgentName]
+    () => scopedAgents.find((agent) => agent.id === scopeAgentName) ?? null,
+    [scopedAgents, scopeAgentName],
   );
   const effectiveScopeAgentName = selectedScopeAgent?.id ?? null;
   const selectedScopePolicy =
-    selectedScopeAgent != null ? agentPoliciesByAgent[selectedScopeAgent.id] ?? null : null;
-  const selectedExecutionScope = selectedScopePolicy?.effective_execution_scope ?? null;
+    selectedScopeAgent != null
+      ? (agentPoliciesByAgent[selectedScopeAgent.id] ?? null)
+      : null;
+  const selectedExecutionScope =
+    selectedScopePolicy?.effective_execution_scope ?? null;
   const selectedScopeLabel = selectedScopePolicy?.scope_label ?? null;
   const hidesSharedOnlyIntegrations =
     selectedScopeAgent !== null &&
     selectedExecutionScope !== null &&
-    selectedExecutionScope !== 'shared';
+    selectedExecutionScope !== "shared";
   const disablesDashboardCredentialManagement =
-    selectedScopeAgent !== null && selectedScopePolicy?.dashboard_credentials_supported === false;
+    selectedScopeAgent !== null &&
+    selectedScopePolicy?.dashboard_credentials_supported === false;
 
   // Fetch tools from backend
   const {
@@ -80,11 +97,15 @@ export function Integrations() {
   const currentScopeKey = useMemo(
     () =>
       [
-        effectiveScopeAgentName ?? 'shared',
-        selectedExecutionScope ?? 'unscoped',
-        hidesSharedOnlyIntegrations ? 'isolated' : 'shared',
-      ].join(':'),
-    [effectiveScopeAgentName, hidesSharedOnlyIntegrations, selectedExecutionScope]
+        effectiveScopeAgentName ?? "shared",
+        selectedExecutionScope ?? "unscoped",
+        hidesSharedOnlyIntegrations ? "isolated" : "shared",
+      ].join(":"),
+    [
+      effectiveScopeAgentName,
+      hidesSharedOnlyIntegrations,
+      selectedExecutionScope,
+    ],
   );
 
   // State
@@ -92,14 +113,15 @@ export function Integrations() {
     scopeKey: string;
     integrations: Integration[];
   }>({
-    scopeKey: '',
+    scopeKey: "",
     integrations: [],
   });
   const [loading, setLoading] = useState(false);
   const loadRequestIdRef = useRef(0);
   const currentScopeKeyRef = useRef(currentScopeKey);
   currentScopeKeyRef.current = currentScopeKey;
-  const isCurrentScope = (scopeKey: string) => currentScopeKeyRef.current === scopeKey;
+  const isCurrentScope = (scopeKey: string) =>
+    currentScopeKeyRef.current === scopeKey;
   const isCurrentLoadRequest = (requestId: number, scopeKey: string) =>
     requestId === loadRequestIdRef.current && isCurrentScope(scopeKey);
   const [activeDialog, setActiveDialog] = useState<{
@@ -117,14 +139,17 @@ export function Integrations() {
     icon?: any;
     iconColor?: string;
   } | null>(null);
-  const [filterMode, setFilterMode] = useState<'all' | 'available' | 'unconfigured' | 'configured'>(
-    'all'
-  );
-  const [searchTerm, setSearchTerm] = useState('');
+  const [filterMode, setFilterMode] = useState<
+    "all" | "available" | "unconfigured" | "configured"
+  >("all");
+  const [searchTerm, setSearchTerm] = useState("");
   const { toast } = useToast();
 
   useEffect(() => {
-    if (scopeAgentName && !scopedAgents.some(agent => agent.id === scopeAgentName)) {
+    if (
+      scopeAgentName &&
+      !scopedAgents.some((agent) => agent.id === scopeAgentName)
+    ) {
       setScopeAgentName(null);
     }
   }, [scopeAgentName, scopedAgents]);
@@ -152,15 +177,23 @@ export function Integrations() {
       }
 
       const loadedIntegrations: Integration[] = [];
-      const scope = { agentName: effectiveScopeAgentName, executionScope: selectedExecutionScope };
+      const scope = {
+        agentName: effectiveScopeAgentName,
+        executionScope: selectedExecutionScope,
+      };
 
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
         const config = provider.getConfig(scope);
-        if (hidesSharedOnlyIntegrations && SHARED_ONLY_PROVIDER_IDS.has(config.integration.id)) {
+        if (
+          hidesSharedOnlyIntegrations &&
+          SHARED_ONLY_PROVIDER_IDS.has(config.integration.id)
+        ) {
           continue;
         }
-        const status = provider.loadStatus ? await provider.loadStatus(scope) : {};
+        const status = provider.loadStatus
+          ? await provider.loadStatus(scope)
+          : {};
         loadedIntegrations.push({
           ...config.integration,
           ...status,
@@ -172,16 +205,23 @@ export function Integrations() {
       const providerIds = Object.keys(integrationProviders);
 
       const backendIntegrations = backendTools
-        .filter(tool => !providerIds.includes(tool.name))
-        .filter(tool => !hidesSharedOnlyIntegrations || tool.execution_scope_supported !== false)
-        .map(tool => {
+        .filter((tool) => !providerIds.includes(tool.name))
+        .filter(
+          (tool) =>
+            !hidesSharedOnlyIntegrations ||
+            tool.execution_scope_supported !== false,
+        )
+        .map((tool) => {
           const mapped = mapToolToIntegration(tool);
           return {
             ...mapped,
             icon: getIconForTool(tool.icon, tool.icon_color),
             connected: false,
             // Tools with auth_provider show as connected if their status is 'available'
-            status: tool.auth_provider && tool.status === 'available' ? 'connected' : mapped.status,
+            status:
+              tool.auth_provider && tool.status === "available"
+                ? "connected"
+                : mapped.status,
             auth_provider: tool.auth_provider, // Pass through auth_provider
           } as Integration & { auth_provider?: string };
         });
@@ -198,11 +238,11 @@ export function Integrations() {
       if (!isCurrentLoadRequest(requestId, scopeKey)) {
         return;
       }
-      console.error('Failed to load integrations:', error);
+      console.error("Failed to load integrations:", error);
       toast({
-        title: 'Error',
-        description: 'Failed to load integrations',
-        variant: 'destructive',
+        title: "Error",
+        description: "Failed to load integrations",
+        variant: "destructive",
       });
     } finally {
       if (isCurrentLoadRequest(requestId, scopeKey)) {
@@ -212,11 +252,11 @@ export function Integrations() {
   };
 
   const integrationNeedsDashboardCredentials = (
-    integration: Integration & { auth_provider?: string }
+    integration: Integration & { auth_provider?: string },
   ) => {
     const tool = integration as any;
     return (
-      integration.setup_type !== 'none' ||
+      integration.setup_type !== "none" ||
       Boolean(tool.auth_provider) ||
       Boolean(tool.config_fields && tool.config_fields.length > 0)
     );
@@ -228,17 +268,20 @@ export function Integrations() {
       integrationNeedsDashboardCredentials(integration)
     ) {
       toast({
-        title: 'Shared-only dashboard configuration',
+        title: "Shared-only dashboard configuration",
         description:
-          'Dashboard credential setup is only supported for shared deployment credentials.',
-        variant: 'destructive',
+          "Dashboard credential setup is only supported for shared deployment credentials.",
+        variant: "destructive",
       });
       return;
     }
 
     // Check if we have a provider for this integration
     const provider = integrationProviders[integration.id];
-    const scope = { agentName: effectiveScopeAgentName, executionScope: selectedExecutionScope };
+    const scope = {
+      agentName: effectiveScopeAgentName,
+      executionScope: selectedExecutionScope,
+    };
 
     if (provider) {
       const config = provider.getConfig(scope);
@@ -257,19 +300,22 @@ export function Integrations() {
           await loadIntegrations(); // Reload status
         } catch (error) {
           toast({
-            title: 'Action Failed',
-            description: error instanceof Error ? error.message : 'Failed to perform action',
-            variant: 'destructive',
+            title: "Action Failed",
+            description:
+              error instanceof Error
+                ? error.message
+                : "Failed to perform action",
+            variant: "destructive",
           });
         } finally {
           setLoading(false);
         }
       }
     } else if (
-      integration.setup_type === 'api_key' ||
-      integration.setup_type === 'oauth' ||
-      integration.setup_type === 'special' ||
-      integration.setup_type === 'none'
+      integration.setup_type === "api_key" ||
+      integration.setup_type === "oauth" ||
+      integration.setup_type === "special" ||
+      integration.setup_type === "none"
     ) {
       // Show generic config dialog for tools with config_fields
       const tool = integration as any; // Cast to access config_fields
@@ -279,7 +325,7 @@ export function Integrations() {
           displayName: integration.name,
           description: integration.description,
           configFields: tool.config_fields,
-          isEditing: integration.status === 'connected',
+          isEditing: integration.status === "connected",
           docsUrl: tool.docs_url || null,
           helperText: tool.helper_text || null,
           icon: null, // Icon loaded from integration object or backend
@@ -287,17 +333,17 @@ export function Integrations() {
         });
       } else {
         toast({
-          title: 'Configuration Error',
+          title: "Configuration Error",
           description: `${integration.name} requires configuration but no fields are specified.`,
-          variant: 'destructive',
+          variant: "destructive",
         });
       }
     } else {
       // Fallback for integrations without providers yet
       toast({
-        title: 'Not Implemented',
+        title: "Not Implemented",
         description: `${integration.name} integration is not yet implemented.`,
-        variant: 'destructive',
+        variant: "destructive",
       });
     }
   };
@@ -308,16 +354,19 @@ export function Integrations() {
       integrationNeedsDashboardCredentials(integration)
     ) {
       toast({
-        title: 'Shared-only dashboard configuration',
+        title: "Shared-only dashboard configuration",
         description:
-          'Dashboard credential editing is only supported for shared deployment credentials.',
-        variant: 'destructive',
+          "Dashboard credential editing is only supported for shared deployment credentials.",
+        variant: "destructive",
       });
       return;
     }
 
     const provider = integrationProviders[integration.id];
-    const scope = { agentName: effectiveScopeAgentName, executionScope: selectedExecutionScope };
+    const scope = {
+      agentName: effectiveScopeAgentName,
+      executionScope: selectedExecutionScope,
+    };
 
     setLoading(true);
     try {
@@ -330,15 +379,15 @@ export function Integrations() {
           withAgentExecutionScope(
             `${API_BASE_URL}/api/credentials/${integration.id}`,
             effectiveScopeAgentName,
-            selectedExecutionScope
+            selectedExecutionScope,
           ),
           {
-            method: 'DELETE',
-          }
+            method: "DELETE",
+          },
         );
 
         if (!response.ok) {
-          throw new Error('Failed to disconnect');
+          throw new Error("Failed to disconnect");
         }
       }
 
@@ -346,14 +395,15 @@ export function Integrations() {
       await refetchTools();
 
       toast({
-        title: 'Disconnected',
+        title: "Disconnected",
         description: `${integration.name} has been disconnected.`,
       });
     } catch (error) {
       toast({
-        title: 'Disconnect Failed',
-        description: error instanceof Error ? error.message : 'Failed to disconnect',
-        variant: 'destructive',
+        title: "Disconnect Failed",
+        description:
+          error instanceof Error ? error.message : "Failed to disconnect",
+        variant: "destructive",
       });
     } finally {
       setLoading(false);
@@ -394,9 +444,14 @@ export function Integrations() {
     const tool = integration as any;
     if (tool.auth_provider) {
       // Check if the auth provider is connected
-      const authProvider = integrations.find(i => i.id === tool.auth_provider);
+      const authProvider = integrations.find(
+        (i) => i.id === tool.auth_provider,
+      );
 
-      if (integration.status === 'connected' || integration.status === 'available') {
+      if (
+        integration.status === "connected" ||
+        integration.status === "available"
+      ) {
         // Auth provider is connected
         if (tool.config_fields && tool.config_fields.length > 0) {
           return (
@@ -456,12 +511,12 @@ export function Integrations() {
     }
 
     // Tools with no setup required
-    if (integration.setup_type === 'none') {
+    if (integration.setup_type === "none") {
       const tool = integration as any;
       // Check if there are optional config fields
       if (tool.config_fields && tool.config_fields.length > 0) {
         // Check if any configuration has been saved
-        const hasConfig = integration.status === 'connected';
+        const hasConfig = integration.status === "connected";
 
         if (hasConfig) {
           // Show edit/reset buttons for configured tools
@@ -518,7 +573,7 @@ export function Integrations() {
     }
 
     // For other connected tools, show Edit/Disconnect
-    if (integration.status === 'connected') {
+    if (integration.status === "connected") {
       return (
         <div className="flex gap-2">
           <Button
@@ -542,16 +597,16 @@ export function Integrations() {
     }
 
     const buttonText =
-      integration.setup_type === 'special'
-        ? 'Setup'
-        : integration.setup_type === 'oauth'
-          ? 'Connect'
-          : 'Configure';
+      integration.setup_type === "special"
+        ? "Setup"
+        : integration.setup_type === "oauth"
+          ? "Connect"
+          : "Configure";
 
     const icon =
-      integration.setup_type === 'special' ? (
+      integration.setup_type === "special" ? (
         <Settings className="h-4 w-4" />
-      ) : integration.setup_type === 'oauth' ? (
+      ) : integration.setup_type === "oauth" ? (
         <ExternalLink className="h-4 w-4" />
       ) : (
         <Key className="h-4 w-4" />
@@ -582,7 +637,7 @@ export function Integrations() {
             {integration.icon}
             <CardTitle className="text-lg">{integration.name}</CardTitle>
           </div>
-          {integration.status === 'connected' ? (
+          {integration.status === "connected" ? (
             <Badge className="bg-gradient-to-r from-green-500 to-emerald-500 text-white border-0">
               <CheckCircle2 className="h-3 w-3 mr-1" />
               Connected
@@ -601,7 +656,7 @@ export function Integrations() {
         <div className="space-y-3">
           <div className="flex gap-2">
             {getActionButton(integration)}
-            {integration.id === 'google' && (
+            {integration.id === "google" && (
               <Button
                 variant="outline"
                 size="sm"
@@ -620,21 +675,27 @@ export function Integrations() {
 
   // Filter integrations
   const integrations =
-    integrationsState.scopeKey === currentScopeKey ? integrationsState.integrations : [];
+    integrationsState.scopeKey === currentScopeKey
+      ? integrationsState.integrations
+      : [];
 
   const filteredIntegrations = useMemo(() => {
     let filtered = integrations;
 
     // Filter by mode
     switch (filterMode) {
-      case 'available':
-        filtered = filtered.filter(i => i.status === 'available' || i.status === 'connected');
+      case "available":
+        filtered = filtered.filter(
+          (i) => i.status === "available" || i.status === "connected",
+        );
         break;
-      case 'unconfigured':
-        filtered = filtered.filter(i => i.status !== 'connected' && i.setup_type !== 'none');
+      case "unconfigured":
+        filtered = filtered.filter(
+          (i) => i.status !== "connected" && i.setup_type !== "none",
+        );
         break;
-      case 'configured':
-        filtered = filtered.filter(i => i.status === 'connected');
+      case "configured":
+        filtered = filtered.filter((i) => i.status === "connected");
         break;
       // 'all' - no filtering needed
     }
@@ -642,9 +703,9 @@ export function Integrations() {
     // Filter by search term
     if (searchTerm) {
       filtered = filtered.filter(
-        i =>
+        (i) =>
           i.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          i.description.toLowerCase().includes(searchTerm.toLowerCase())
+          i.description.toLowerCase().includes(searchTerm.toLowerCase()),
       );
     }
 
@@ -653,60 +714,73 @@ export function Integrations() {
 
   const categories = useMemo(() => {
     const allCategories = [
-      { id: 'all', name: 'All', count: filteredIntegrations.length },
+      { id: "all", name: "All", count: filteredIntegrations.length },
       {
-        id: 'email',
-        name: 'Email & Calendar',
-        count: filteredIntegrations.filter(i => i.category === 'email').length,
+        id: "email",
+        name: "Email & Calendar",
+        count: filteredIntegrations.filter((i) => i.category === "email")
+          .length,
       },
       {
-        id: 'communication',
-        name: 'Communication',
-        count: filteredIntegrations.filter(i => i.category === 'communication').length,
+        id: "communication",
+        name: "Communication",
+        count: filteredIntegrations.filter(
+          (i) => i.category === "communication",
+        ).length,
       },
       {
-        id: 'shopping',
-        name: 'Shopping',
-        count: filteredIntegrations.filter(i => i.category === 'shopping').length,
+        id: "shopping",
+        name: "Shopping",
+        count: filteredIntegrations.filter((i) => i.category === "shopping")
+          .length,
       },
       {
-        id: 'entertainment',
-        name: 'Entertainment',
-        count: filteredIntegrations.filter(i => i.category === 'entertainment').length,
+        id: "entertainment",
+        name: "Entertainment",
+        count: filteredIntegrations.filter(
+          (i) => i.category === "entertainment",
+        ).length,
       },
       {
-        id: 'social',
-        name: 'Social',
-        count: filteredIntegrations.filter(i => i.category === 'social').length,
+        id: "social",
+        name: "Social",
+        count: filteredIntegrations.filter((i) => i.category === "social")
+          .length,
       },
       {
-        id: 'development',
-        name: 'Development',
-        count: filteredIntegrations.filter(i => i.category === 'development').length,
+        id: "development",
+        name: "Development",
+        count: filteredIntegrations.filter((i) => i.category === "development")
+          .length,
       },
       {
-        id: 'research',
-        name: 'Research',
-        count: filteredIntegrations.filter(i => i.category === 'research').length,
+        id: "research",
+        name: "Research",
+        count: filteredIntegrations.filter((i) => i.category === "research")
+          .length,
       },
       {
-        id: 'smart_home',
-        name: 'Smart Home',
-        count: filteredIntegrations.filter(i => i.category === 'smart_home').length,
+        id: "smart_home",
+        name: "Smart Home",
+        count: filteredIntegrations.filter((i) => i.category === "smart_home")
+          .length,
       },
       {
-        id: 'information',
-        name: 'Information',
-        count: filteredIntegrations.filter(i => i.category === 'information').length,
+        id: "information",
+        name: "Information",
+        count: filteredIntegrations.filter((i) => i.category === "information")
+          .length,
       },
     ];
 
-    return filterMode !== 'all' ? allCategories.filter(cat => cat.count > 0) : allCategories;
+    return filterMode !== "all"
+      ? allCategories.filter((cat) => cat.count > 0)
+      : allCategories;
   }, [filteredIntegrations, filterMode]);
 
   const getIntegrationsForCategory = (categoryId: string) => {
-    if (categoryId === 'all') return filteredIntegrations;
-    return filteredIntegrations.filter(i => i.category === categoryId);
+    if (categoryId === "all") return filteredIntegrations;
+    return filteredIntegrations.filter((i) => i.category === categoryId);
   };
 
   // Show loading state while fetching tools
@@ -715,7 +789,9 @@ export function Integrations() {
       <div className="h-full flex items-center justify-center">
         <div className="text-center">
           <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4" />
-          <p className="text-gray-600 dark:text-gray-400">Loading available tools...</p>
+          <p className="text-gray-600 dark:text-gray-400">
+            Loading available tools...
+          </p>
         </div>
       </div>
     );
@@ -729,15 +805,19 @@ export function Integrations() {
             <h2 className="text-2xl font-bold">Tools</h2>
             <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
               <Select
-                value={scopeAgentName ?? 'shared'}
-                onValueChange={value => setScopeAgentName(value === 'shared' ? null : value)}
+                value={scopeAgentName ?? "shared"}
+                onValueChange={(value) =>
+                  setScopeAgentName(value === "shared" ? null : value)
+                }
               >
                 <SelectTrigger className="w-full sm:w-72">
                   <SelectValue placeholder="Shared deployment credentials" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="shared">Shared deployment credentials</SelectItem>
-                  {scopedAgents.map(agent => (
+                  <SelectItem value="shared">
+                    Shared deployment credentials
+                  </SelectItem>
+                  {scopedAgents.map((agent) => (
                     <SelectItem key={agent.id} value={agent.id}>
                       {agent.display_name}
                     </SelectItem>
@@ -748,19 +828,25 @@ export function Integrations() {
                 type="search"
                 placeholder="Search tools..."
                 value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
+                onChange={(e) => setSearchTerm(e.target.value)}
                 className="w-full sm:w-64"
               />
               <FilterSelector
                 options={[
-                  { value: 'all', label: 'Show All' },
-                  { value: 'available', label: 'Available' },
-                  { value: 'unconfigured', label: 'Unconfigured' },
-                  { value: 'configured', label: 'Configured' },
+                  { value: "all", label: "Show All" },
+                  { value: "available", label: "Available" },
+                  { value: "unconfigured", label: "Unconfigured" },
+                  { value: "configured", label: "Configured" },
                 ]}
                 value={filterMode}
-                onChange={value =>
-                  setFilterMode(value as 'all' | 'available' | 'unconfigured' | 'configured')
+                onChange={(value) =>
+                  setFilterMode(
+                    value as
+                      | "all"
+                      | "available"
+                      | "unconfigured"
+                      | "configured",
+                  )
                 }
                 size="sm"
               />
@@ -769,29 +855,30 @@ export function Integrations() {
           <p className="text-gray-600 dark:text-gray-400">
             {selectedScopeAgent
               ? `Configuring tools for ${selectedScopeAgent.display_name} (${
-                  selectedScopeLabel ?? 'unscoped'
+                  selectedScopeLabel ?? "unscoped"
                 }).`
-              : 'Connect external services to enable agent capabilities'}
+              : "Connect external services to enable agent capabilities"}
           </p>
           {hidesSharedOnlyIntegrations && (
             <Alert className="mt-3">
               <AlertDescription>
-                Dashboard credential setup, editing, and disconnect are only supported for shared
-                deployment credentials.
+                Dashboard credential setup, editing, and disconnect are only
+                supported for shared deployment credentials.
               </AlertDescription>
               <AlertDescription className="mt-2">
-                Google Services, Home Assistant, Spotify, Gmail, Google Calendar, and Google Sheets
-                are only supported for shared deployment credentials or agents with an effective
-                shared runtime scope (<code>worker_scope=shared</code>).
+                Google Services, Home Assistant, Spotify, Gmail, Google
+                Calendar, and Google Sheets are only supported for shared
+                deployment credentials or agents with an effective shared
+                runtime scope (<code>worker_scope=shared</code>).
               </AlertDescription>
             </Alert>
           )}
           {selectedScopeAgent && statusAuthoritative === false && (
             <Alert className="mt-3">
               <AlertDescription>
-                Requester-scoped tool status is preview only. The dashboard can show scope support
-                rules and shared env-backed availability, but it cannot inspect live requester-owned
-                scoped credentials.
+                Requester-scoped tool status is preview only. The dashboard can
+                show scope support rules and shared env-backed availability, but
+                it cannot inspect live requester-owned scoped credentials.
               </AlertDescription>
             </Alert>
           )}
@@ -800,7 +887,7 @@ export function Integrations() {
         <div className="">
           <Tabs defaultValue="all" className="h-full">
             <TabsList className="flex flex-wrap h-auto gap-1 overflow-visible">
-              {categories.map(category => (
+              {categories.map((category) => (
                 <TabsTrigger
                   key={category.id}
                   value={category.id}
@@ -816,12 +903,21 @@ export function Integrations() {
               ))}
             </TabsList>
 
-            {categories.map(category => (
-              <TabsContent key={category.id} value={category.id} className="mt-4">
+            {categories.map((category) => (
+              <TabsContent
+                key={category.id}
+                value={category.id}
+                className="mt-4"
+              >
                 <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {getIntegrationsForCategory(category.id).map(integration => (
-                    <IntegrationCard key={integration.id} integration={integration} />
-                  ))}
+                  {getIntegrationsForCategory(category.id).map(
+                    (integration) => (
+                      <IntegrationCard
+                        key={integration.id}
+                        integration={integration}
+                      />
+                    ),
+                  )}
                 </div>
               </TabsContent>
             ))}
@@ -831,14 +927,19 @@ export function Integrations() {
 
       {/* Dynamic Configuration Dialog */}
       {activeDialog && (
-        <Dialog open={true} onOpenChange={open => !open && setActiveDialog(null)}>
+        <Dialog
+          open={true}
+          onOpenChange={(open) => !open && setActiveDialog(null)}
+        >
           <DialogContent className="max-w-4xl max-h-[90vh] overflow-auto">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 {activeDialog.config.integration.icon}
                 {activeDialog.config.integration.name} Setup
               </DialogTitle>
-              <DialogDescription>{activeDialog.config.integration.description}</DialogDescription>
+              <DialogDescription>
+                {activeDialog.config.integration.description}
+              </DialogDescription>
             </DialogHeader>
             {activeDialog.config.ConfigComponent && (
               <activeDialog.config.ConfigComponent

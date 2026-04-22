@@ -601,14 +601,13 @@ class _EventCache:
                 room_id,
                 operation="store_events_batch",
                 disabled_result=None,
-                writer=lambda db,
-                room_id=room_id,
-                room_events=room_events,
-                cached_at=cached_at: event_cache_events.persist_lookup_events(
-                    db,
-                    room_id=room_id,
-                    room_events=room_events,
-                    cached_at=cached_at,
+                writer=lambda db, room_id=room_id, room_events=room_events, cached_at=cached_at: (
+                    event_cache_events.persist_lookup_events(
+                        db,
+                        room_id=room_id,
+                        room_events=room_events,
+                        cached_at=cached_at,
+                    )
                 ),
             )
 

@@ -1,12 +1,12 @@
-import { useEffect, useState } from 'react';
-import { X } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { useEffect, useState } from "react";
+import { X } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 interface Toast {
   id: string;
   title?: string;
   description?: string;
-  variant?: 'default' | 'destructive';
+  variant?: "default" | "destructive";
 }
 
 let toastCount = 0;
@@ -14,19 +14,19 @@ const toasts: Toast[] = [];
 const listeners: Array<(toasts: Toast[]) => void> = [];
 
 function notify() {
-  listeners.forEach(listener => {
+  listeners.forEach((listener) => {
     listener(toasts);
   });
 }
 
-export function toast(props: Omit<Toast, 'id'>) {
+export function toast(props: Omit<Toast, "id">) {
   const id = String(toastCount++);
   const toast = { id, ...props };
   toasts.push(toast);
   notify();
 
   setTimeout(() => {
-    const index = toasts.findIndex(t => t.id === id);
+    const index = toasts.findIndex((t) => t.id === id);
     if (index > -1) {
       toasts.splice(index, 1);
       notify();
@@ -48,7 +48,7 @@ export function Toaster() {
   }, []);
 
   const dismiss = (id: string) => {
-    const index = toasts.findIndex(t => t.id === id);
+    const index = toasts.findIndex((t) => t.id === id);
     if (index > -1) {
       toasts.splice(index, 1);
       notify();
@@ -57,19 +57,23 @@ export function Toaster() {
 
   return (
     <div className="fixed bottom-0 right-0 z-50 p-4 space-y-2">
-      {toasts.map(toast => (
+      {toasts.map((toast) => (
         <div
           key={toast.id}
           className={cn(
-            'relative flex items-start gap-3 rounded-lg border p-4 pr-8 shadow-lg',
-            'bg-background text-foreground',
-            toast.variant === 'destructive' &&
-              'border-destructive bg-destructive text-destructive-foreground'
+            "relative flex items-start gap-3 rounded-lg border p-4 pr-8 shadow-lg",
+            "bg-background text-foreground",
+            toast.variant === "destructive" &&
+              "border-destructive bg-destructive text-destructive-foreground",
           )}
         >
           <div className="flex-1">
-            {toast.title && <p className="text-sm font-semibold">{toast.title}</p>}
-            {toast.description && <p className="text-sm opacity-90">{toast.description}</p>}
+            {toast.title && (
+              <p className="text-sm font-semibold">{toast.title}</p>
+            )}
+            {toast.description && (
+              <p className="text-sm opacity-90">{toast.description}</p>
+            )}
           </div>
           <button
             onClick={() => dismiss(toast.id)}

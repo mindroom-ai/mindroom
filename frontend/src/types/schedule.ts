@@ -1,4 +1,4 @@
-export type ScheduleType = 'once' | 'cron';
+export type ScheduleType = "once" | "cron";
 
 export interface ScheduleTask {
   task_id: string;

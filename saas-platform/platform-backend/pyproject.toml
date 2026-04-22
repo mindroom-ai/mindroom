@@ -1,6 +1,5 @@
 [build-system]
 build-backend = "hatchling.build"
-
 requires = [ "hatchling" ]
 
 [project]
@@ -33,7 +32,7 @@ dev = [
 ]
 
 [tool.hatch.build]
-sources = { "src" = "" }
+sources = { src = "" }
 include = [
   "src/backend/**/*.py",
   "src/main.py",
@@ -42,7 +41,6 @@ include = [
 [tool.ruff]
 target-version = "py313"
 line-length = 120
-
 extend-exclude = [ "tests/conftest.py" ]
 
 [tool.pytest.ini_options]

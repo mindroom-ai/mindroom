@@ -1,6 +1,6 @@
-import { Controller, Control } from 'react-hook-form';
-import { Checkbox } from '@/components/ui/checkbox';
-import { Agent } from '@/types/config';
+import { Controller, Control } from "react-hook-form";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Agent } from "@/types/config";
 
 export interface CheckboxListItem {
   value: string;
@@ -9,7 +9,7 @@ export interface CheckboxListItem {
 }
 
 export interface CheckboxListFieldProps {
-  name: 'skills' | 'rooms' | 'tools' | 'knowledge_bases' | 'delegate_to';
+  name: "skills" | "rooms" | "tools" | "knowledge_bases" | "delegate_to";
   control: Control<Agent>;
   items: CheckboxListItem[];
   fieldName: keyof Agent;
@@ -27,7 +27,7 @@ export function CheckboxListField({
   onFieldChange,
   idPrefix,
   emptyMessage,
-  className = 'space-y-2 max-h-56 overflow-y-auto border rounded-lg p-2',
+  className = "space-y-2 max-h-56 overflow-y-auto border rounded-lg p-2",
 }: CheckboxListFieldProps) {
   return (
     <Controller
@@ -39,9 +39,11 @@ export function CheckboxListField({
         return (
           <div className={className}>
             {items.length === 0 && emptyMessage ? (
-              <p className="text-sm text-muted-foreground text-center py-2">{emptyMessage}</p>
+              <p className="text-sm text-muted-foreground text-center py-2">
+                {emptyMessage}
+              </p>
             ) : (
-              items.map(item => {
+              items.map((item) => {
                 const isChecked = selected.includes(item.value);
                 const checkboxId = `${idPrefix}-${item.value}`;
                 return (
@@ -52,15 +54,18 @@ export function CheckboxListField({
                     <Checkbox
                       id={checkboxId}
                       checked={isChecked}
-                      onCheckedChange={checked => {
+                      onCheckedChange={(checked) => {
                         const updated = checked
                           ? [...selected, item.value]
-                          : selected.filter(v => v !== item.value);
+                          : selected.filter((v) => v !== item.value);
                         field.onChange(updated);
                         onFieldChange(fieldName, updated);
                       }}
                     />
-                    <label htmlFor={checkboxId} className="flex-1 cursor-pointer">
+                    <label
+                      htmlFor={checkboxId}
+                      className="flex-1 cursor-pointer"
+                    >
                       <div className="font-medium text-sm">{item.label}</div>
                       {item.description && (
                         <div className="text-xs text-gray-500 dark:text-gray-400">

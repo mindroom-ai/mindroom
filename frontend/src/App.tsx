@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { BrowserRouter, useNavigate, useLocation } from 'react-router-dom';
+import { useEffect, useRef, useState } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter, useNavigate, useLocation } from "react-router-dom";
 import {
   BookOpen,
   Bot,
@@ -19,47 +19,47 @@ import {
   Sparkles,
   type LucideIcon,
   Users,
-} from 'lucide-react';
-import { useConfigStore } from '@/store/configStore';
-import { AgentList } from '@/components/AgentList/AgentList';
-import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
-import { TeamList } from '@/components/TeamList/TeamList';
-import { TeamEditor } from '@/components/TeamEditor/TeamEditor';
-import { CultureList } from '@/components/CultureList/CultureList';
-import { CultureEditor } from '@/components/CultureEditor/CultureEditor';
-import { RoomList } from '@/components/RoomList/RoomList';
-import { RoomEditor } from '@/components/RoomEditor/RoomEditor';
-import { ModelConfig } from '@/components/ModelConfig/ModelConfig';
-import { MemoryConfig } from '@/components/MemoryConfig/MemoryConfig';
-import { Knowledge } from '@/components/Knowledge/Knowledge';
-import { VoiceConfig } from '@/components/VoiceConfig/VoiceConfig';
-import { Integrations } from '@/components/Integrations/Integrations';
-import { UnconfiguredRooms } from '@/components/UnconfiguredRooms/UnconfiguredRooms';
-import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
-import { Dashboard } from '@/components/Dashboard/Dashboard';
-import { Skills } from '@/components/Skills/Skills';
-import { Schedules } from '@/components/Schedules/Schedules';
-import { Credentials } from '@/components/Credentials/Credentials';
-import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+} from "lucide-react";
+import { useConfigStore } from "@/store/configStore";
+import { AgentList } from "@/components/AgentList/AgentList";
+import { AgentEditor } from "@/components/AgentEditor/AgentEditor";
+import { TeamList } from "@/components/TeamList/TeamList";
+import { TeamEditor } from "@/components/TeamEditor/TeamEditor";
+import { CultureList } from "@/components/CultureList/CultureList";
+import { CultureEditor } from "@/components/CultureEditor/CultureEditor";
+import { RoomList } from "@/components/RoomList/RoomList";
+import { RoomEditor } from "@/components/RoomEditor/RoomEditor";
+import { ModelConfig } from "@/components/ModelConfig/ModelConfig";
+import { MemoryConfig } from "@/components/MemoryConfig/MemoryConfig";
+import { Knowledge } from "@/components/Knowledge/Knowledge";
+import { VoiceConfig } from "@/components/VoiceConfig/VoiceConfig";
+import { Integrations } from "@/components/Integrations/Integrations";
+import { UnconfiguredRooms } from "@/components/UnconfiguredRooms/UnconfiguredRooms";
+import { SyncStatus } from "@/components/SyncStatus/SyncStatus";
+import { Dashboard } from "@/components/Dashboard/Dashboard";
+import { Skills } from "@/components/Skills/Skills";
+import { Schedules } from "@/components/Schedules/Schedules";
+import { Credentials } from "@/components/Credentials/Credentials";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog';
-import { Toaster } from '@/components/ui/toaster';
-import { ThemeProvider } from '@/contexts/ThemeContext';
-import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
-import { showSaveFailureToastIfNeeded } from '@/components/shared';
+} from "@/components/ui/dialog";
+import { Toaster } from "@/components/ui/toaster";
+import { ThemeProvider } from "@/contexts/ThemeContext";
+import { ThemeToggle } from "@/components/ThemeToggle/ThemeToggle";
+import { showSaveFailureToastIfNeeded } from "@/components/shared";
 import {
   getConfigValidationIssues,
   getGlobalConfigDiagnostics,
   type GlobalConfigDiagnostic,
-} from '@/lib/configValidation';
-import { cn } from '@/lib/utils';
+} from "@/lib/configValidation";
+import { cn } from "@/lib/utils";
 
 const queryClient = new QueryClient();
 
@@ -67,37 +67,62 @@ type NavItem = {
   value: string;
   label: string;
   icon: LucideIcon;
-  group: 'Workspace' | 'Configuration';
+  group: "Workspace" | "Configuration";
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { value: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, group: 'Workspace' },
-  { value: 'agents', label: 'Agents', icon: Bot, group: 'Workspace' },
-  { value: 'teams', label: 'Teams', icon: Users, group: 'Workspace' },
-  { value: 'cultures', label: 'Culture', icon: Sparkles, group: 'Workspace' },
-  { value: 'rooms', label: 'Rooms', icon: Home, group: 'Workspace' },
-  { value: 'schedules', label: 'Schedules', icon: CalendarClock, group: 'Workspace' },
-  { value: 'unconfigured-rooms', label: 'External', icon: DoorOpen, group: 'Workspace' },
-  { value: 'models', label: 'Models', icon: Settings2, group: 'Configuration' },
-  { value: 'memory', label: 'Memory', icon: Brain, group: 'Configuration' },
-  { value: 'knowledge', label: 'Knowledge', icon: BookOpen, group: 'Configuration' },
-  { value: 'credentials', label: 'Credentials', icon: KeyRound, group: 'Configuration' },
-  { value: 'voice', label: 'Voice', icon: Mic, group: 'Configuration' },
-  { value: 'integrations', label: 'Tools', icon: Plug, group: 'Configuration' },
-  { value: 'skills', label: 'Skills', icon: Puzzle, group: 'Configuration' },
+  {
+    value: "dashboard",
+    label: "Dashboard",
+    icon: LayoutDashboard,
+    group: "Workspace",
+  },
+  { value: "agents", label: "Agents", icon: Bot, group: "Workspace" },
+  { value: "teams", label: "Teams", icon: Users, group: "Workspace" },
+  { value: "cultures", label: "Culture", icon: Sparkles, group: "Workspace" },
+  { value: "rooms", label: "Rooms", icon: Home, group: "Workspace" },
+  {
+    value: "schedules",
+    label: "Schedules",
+    icon: CalendarClock,
+    group: "Workspace",
+  },
+  {
+    value: "unconfigured-rooms",
+    label: "External",
+    icon: DoorOpen,
+    group: "Workspace",
+  },
+  { value: "models", label: "Models", icon: Settings2, group: "Configuration" },
+  { value: "memory", label: "Memory", icon: Brain, group: "Configuration" },
+  {
+    value: "knowledge",
+    label: "Knowledge",
+    icon: BookOpen,
+    group: "Configuration",
+  },
+  {
+    value: "credentials",
+    label: "Credentials",
+    icon: KeyRound,
+    group: "Configuration",
+  },
+  { value: "voice", label: "Voice", icon: Mic, group: "Configuration" },
+  { value: "integrations", label: "Tools", icon: Plug, group: "Configuration" },
+  { value: "skills", label: "Skills", icon: Puzzle, group: "Configuration" },
 ];
 
-const NAV_GROUPS: NavItem['group'][] = ['Workspace', 'Configuration'];
+const NAV_GROUPS: NavItem["group"][] = ["Workspace", "Configuration"];
 const DEFAULT_TAB = NAV_ITEMS[0].value;
-const NAV_VALUES = new Set(NAV_ITEMS.map(item => item.value));
+const NAV_VALUES = new Set(NAV_ITEMS.map((item) => item.value));
 
 const TAB_TRIGGER_CLASS =
-  'inline-flex items-center gap-1.5 rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap';
+  "inline-flex items-center gap-1.5 rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap";
 const NAV_OVERFLOW_ENTER_PX = 1;
 const NAV_OVERFLOW_EXIT_BUFFER_PX = 24;
 
 export function resolveCurrentTab(pathname: string): string {
-  const [firstSegment] = pathname.split('/').filter(Boolean);
+  const [firstSegment] = pathname.split("/").filter(Boolean);
   if (firstSegment && NAV_VALUES.has(firstSegment)) {
     return firstSegment;
   }
@@ -105,7 +130,10 @@ export function resolveCurrentTab(pathname: string): string {
 }
 
 function isAuthDiagnosticMessage(message: string): boolean {
-  return message.includes('Authentication required') || message.includes('Access denied');
+  return (
+    message.includes("Authentication required") ||
+    message.includes("Access denied")
+  );
 }
 
 export function shouldShowBlockingDiagnosticOverlay(
@@ -116,7 +144,7 @@ export function shouldShowBlockingDiagnosticOverlay(
   }: {
     hasLoadedConfig: boolean;
     hasRecoveryConfig: boolean;
-  }
+  },
 ): boolean {
   if (blockingDiagnostic == null) {
     return false;
@@ -152,27 +180,34 @@ function AppContent() {
 
   // Get the current tab from URL or default to 'dashboard'
   const currentTab = resolveCurrentTab(location.pathname);
-  const currentNavItem = NAV_ITEMS.find(item => item.value === currentTab) || NAV_ITEMS[0];
+  const currentNavItem =
+    NAV_ITEMS.find((item) => item.value === currentTab) || NAV_ITEMS[0];
   const CurrentNavIcon = currentNavItem.icon;
   const validationIssues = getConfigValidationIssues(diagnostics);
   const globalDiagnostics = getGlobalConfigDiagnostics(diagnostics);
-  const blockingDiagnostic = globalDiagnostics.find(diagnostic => diagnostic.blocking) ?? null;
-  const showBlockingDiagnosticOverlay = shouldShowBlockingDiagnosticOverlay(blockingDiagnostic, {
-    hasLoadedConfig: config != null,
-    hasRecoveryConfig: recoveryConfigSource != null,
-  });
+  const blockingDiagnostic =
+    globalDiagnostics.find((diagnostic) => diagnostic.blocking) ?? null;
+  const showBlockingDiagnosticOverlay = shouldShowBlockingDiagnosticOverlay(
+    blockingDiagnostic,
+    {
+      hasLoadedConfig: config != null,
+      hasRecoveryConfig: recoveryConfigSource != null,
+    },
+  );
   const canRecoverInvalidConfig =
-    !isAuthDiagnosticMessage(blockingDiagnostic?.message ?? '') && recoveryConfigSource != null;
-  const recoveryConfigIsDirty = recoveryConfigSource !== recoveryConfigSourceOriginal;
+    !isAuthDiagnosticMessage(blockingDiagnostic?.message ?? "") &&
+    recoveryConfigSource != null;
+  const recoveryConfigIsDirty =
+    recoveryConfigSource !== recoveryConfigSourceOriginal;
   const visibleGlobalDiagnostics = showBlockingDiagnosticOverlay
-    ? globalDiagnostics.filter(diagnostic => !diagnostic.blocking)
+    ? globalDiagnostics.filter((diagnostic) => !diagnostic.blocking)
     : globalDiagnostics;
 
   const handleRecoverySave = async () => {
     const result = await saveRecoveryConfigSource();
     showSaveFailureToastIfNeeded(result, {
-      staleMessage: 'Save was superseded by newer recovery edits.',
-      fallbackMessage: 'Failed to save replacement configuration.',
+      staleMessage: "Save was superseded by newer recovery edits.",
+      fallbackMessage: "Failed to save replacement configuration.",
     });
   };
 
@@ -196,8 +231,9 @@ function AppContent() {
       }
       frameId = requestAnimationFrame(() => {
         const clientWidth = tabsList.clientWidth;
-        const hasHorizontalOverflow = tabsList.scrollWidth > clientWidth + NAV_OVERFLOW_ENTER_PX;
-        setDesktopCompactNav(prevCompact => {
+        const hasHorizontalOverflow =
+          tabsList.scrollWidth > clientWidth + NAV_OVERFLOW_ENTER_PX;
+        setDesktopCompactNav((prevCompact) => {
           if (!prevCompact) {
             if (hasHorizontalOverflow) {
               compactNavEnteredWidthRef.current = clientWidth;
@@ -206,7 +242,8 @@ function AppContent() {
             return false;
           }
           const enteredWidth = compactNavEnteredWidthRef.current ?? clientWidth;
-          const hasGrownEnoughToExit = clientWidth >= enteredWidth + NAV_OVERFLOW_EXIT_BUFFER_PX;
+          const hasGrownEnoughToExit =
+            clientWidth >= enteredWidth + NAV_OVERFLOW_EXIT_BUFFER_PX;
           if (!hasHorizontalOverflow && hasGrownEnoughToExit) {
             compactNavEnteredWidthRef.current = null;
             return false;
@@ -220,11 +257,11 @@ function AppContent() {
 
     const resizeObserver = new ResizeObserver(updateDesktopNavMode);
     resizeObserver.observe(tabsList);
-    window.addEventListener('resize', updateDesktopNavMode);
+    window.addEventListener("resize", updateDesktopNavMode);
 
     return () => {
       resizeObserver.disconnect();
-      window.removeEventListener('resize', updateDesktopNavMode);
+      window.removeEventListener("resize", updateDesktopNavMode);
       if (frameId !== null) {
         cancelAnimationFrame(frameId);
       }
@@ -237,21 +274,23 @@ function AppContent() {
   };
 
   const getPlatformUrl = () => {
-    const configured = (import.meta as any).env?.VITE_PLATFORM_URL as string | undefined;
+    const configured = (import.meta as any).env?.VITE_PLATFORM_URL as
+      | string
+      | undefined;
     if (configured && configured.length > 0) return configured;
-    if (typeof window !== 'undefined') {
+    if (typeof window !== "undefined") {
       const host = window.location.host;
-      const firstDot = host.indexOf('.');
+      const firstDot = host.indexOf(".");
       const base = firstDot > 0 ? host.slice(firstDot + 1) : host; // 1.staging.mindroom.chat -> staging.mindroom.chat
       return `https://app.${base}`;
     }
-    return 'https://app.mindroom.chat';
+    return "https://app.mindroom.chat";
   };
 
   if (showBlockingDiagnosticOverlay && blockingDiagnostic) {
     const error = blockingDiagnostic.message;
     const isAuthError = isAuthDiagnosticMessage(error);
-    const isDifferentInstance = error.includes('Access denied');
+    const isDifferentInstance = error.includes("Access denied");
 
     if (!isAuthError && canRecoverInvalidConfig) {
       return (
@@ -260,12 +299,12 @@ function AppContent() {
             <div className="space-y-2">
               <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
                 {validationIssues.length > 0
-                  ? 'Configuration Validation Failed'
-                  : 'Configuration Recovery'}
+                  ? "Configuration Validation Failed"
+                  : "Configuration Recovery"}
               </h2>
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                The current <code>config.yaml</code> could not be loaded. Edit the raw configuration
-                below and save it as a full replacement.
+                The current <code>config.yaml</code> could not be loaded. Edit
+                the raw configuration below and save it as a full replacement.
               </p>
             </div>
 
@@ -274,9 +313,11 @@ function AppContent() {
                 <p className="font-medium">Current configuration is invalid.</p>
                 <ul className="mt-3 list-disc space-y-1 pl-5">
                   {validationIssues.map((issue, index) => (
-                    <li key={`${issue.loc.join('.')}-${issue.msg}-${index}`}>
-                      <span className="font-medium">{issue.loc.join(' → ') || 'config'}</span>
-                      {': '}
+                    <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
+                      <span className="font-medium">
+                        {issue.loc.join(" → ") || "config"}
+                      </span>
+                      {": "}
                       {issue.msg}
                     </li>
                   ))}
@@ -290,7 +331,9 @@ function AppContent() {
 
             <Textarea
               value={recoveryConfigSource}
-              onChange={event => updateRecoveryConfigSource(event.target.value)}
+              onChange={(event) =>
+                updateRecoveryConfigSource(event.target.value)
+              }
               className="min-h-[420px] font-mono text-sm"
               spellCheck={false}
               disabled={isLoading}
@@ -298,10 +341,15 @@ function AppContent() {
 
             <div className="flex items-center justify-between gap-3">
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                Saving here replaces the entire <code>config.yaml</code> with the edited source.
+                Saving here replaces the entire <code>config.yaml</code> with
+                the edited source.
               </p>
               <div className="flex gap-2">
-                <Button variant="outline" onClick={() => void loadConfig()} disabled={isLoading}>
+                <Button
+                  variant="outline"
+                  onClick={() => void loadConfig()}
+                  disabled={isLoading}
+                >
                   Retry
                 </Button>
                 <Button
@@ -323,7 +371,7 @@ function AppContent() {
           <div className="flex items-center mb-4">
             <span className="text-3xl mr-3">🔒</span>
             <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-              {isAuthError ? 'Access Required' : 'Configuration Error'}
+              {isAuthError ? "Access Required" : "Configuration Error"}
             </h2>
           </div>
           <p className="text-gray-600 dark:text-gray-300 mb-6">{error}</p>
@@ -332,14 +380,16 @@ function AppContent() {
             <div className="mb-6 rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
               <p className="font-medium">Current configuration is invalid.</p>
               <p className="mt-1 text-destructive/80">
-                Fix the reported issues in <code>config.yaml</code> or the referenced plugin
-                manifests, then retry loading the dashboard.
+                Fix the reported issues in <code>config.yaml</code> or the
+                referenced plugin manifests, then retry loading the dashboard.
               </p>
               <ul className="mt-3 list-disc space-y-1 pl-5">
                 {validationIssues.map((issue, index) => (
-                  <li key={`${issue.loc.join('.')}-${issue.msg}-${index}`}>
-                    <span className="font-medium">{issue.loc.join(' → ') || 'config'}</span>
-                    {': '}
+                  <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
+                    <span className="font-medium">
+                      {issue.loc.join(" → ") || "config"}
+                    </span>
+                    {": "}
                     {issue.msg}
                   </li>
                 ))}
@@ -352,7 +402,8 @@ function AppContent() {
               {isDifferentInstance ? (
                 <>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
-                    You are logged in but do not have access to this instance. You may need to:
+                    You are logged in but do not have access to this instance.
+                    You may need to:
                   </p>
                   <ul className="text-sm text-gray-500 dark:text-gray-400 list-disc ml-5 space-y-1">
                     <li>Switch to an instance you have access to</li>
@@ -435,8 +486,8 @@ function AppContent() {
                 aria-haspopup="dialog"
                 aria-expanded={mobileMenuOpen}
                 className={cn(
-                  'h-[30px] max-w-[8.5rem] sm:max-w-[11rem] rounded-lg border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-2 py-1.5 items-center gap-1.5 min-w-0 text-left shadow-sm',
-                  desktopCompactNav ? 'flex' : 'flex sm:hidden'
+                  "h-[30px] max-w-[8.5rem] sm:max-w-[11rem] rounded-lg border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-2 py-1.5 items-center gap-1.5 min-w-0 text-left shadow-sm",
+                  desktopCompactNav ? "flex" : "flex sm:hidden",
                 )}
               >
                 <CurrentNavIcon className="h-4 w-4 shrink-0 text-gray-700 dark:text-gray-200" />
@@ -447,8 +498,10 @@ function AppContent() {
               </button>
               <ThemeToggle
                 className={cn(
-                  'h-[30px] w-[30px] rounded-lg border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl shadow-sm hover:bg-white/90 dark:hover:bg-stone-900/80',
-                  desktopCompactNav ? 'sm:h-[30px] sm:w-[30px]' : 'sm:h-9 sm:w-9'
+                  "h-[30px] w-[30px] rounded-lg border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl shadow-sm hover:bg-white/90 dark:hover:bg-stone-900/80",
+                  desktopCompactNav
+                    ? "sm:h-[30px] sm:w-[30px]"
+                    : "sm:h-9 sm:w-9",
                 )}
               />
               <SyncStatus status={syncStatus} compact className="sm:hidden" />
@@ -469,16 +522,20 @@ function AppContent() {
         {config != null && validationIssues.length > 0 && (
           <div className="border-b border-destructive/20 bg-destructive/5 px-3 py-4 text-sm text-destructive sm:px-6">
             <div className="space-y-2">
-              <p className="font-medium">This draft still has configuration validation issues.</p>
+              <p className="font-medium">
+                This draft still has configuration validation issues.
+              </p>
               <p className="text-destructive/80">
-                Resolve the reported issues in the draft below, then save to replace{' '}
-                <code>config.yaml</code>.
+                Resolve the reported issues in the draft below, then save to
+                replace <code>config.yaml</code>.
               </p>
               <ul className="list-disc space-y-1 pl-5">
                 {validationIssues.map((issue, index) => (
-                  <li key={`${issue.loc.join('.')}-${issue.msg}-${index}`}>
-                    <span className="font-medium">{issue.loc.join(' → ') || 'config'}</span>
-                    {': '}
+                  <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
+                    <span className="font-medium">
+                      {issue.loc.join(" → ") || "config"}
+                    </span>
+                    {": "}
                     {issue.msg}
                   </li>
                 ))}
@@ -498,15 +555,19 @@ function AppContent() {
             <TabsList
               ref={tabsListRef}
               className={cn(
-                'hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto overflow-y-hidden',
+                "hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto overflow-y-hidden",
                 desktopCompactNav &&
-                  'sm:absolute sm:inset-x-0 sm:top-0 sm:opacity-0 sm:pointer-events-none sm:overflow-hidden'
+                  "sm:absolute sm:inset-x-0 sm:top-0 sm:opacity-0 sm:pointer-events-none sm:overflow-hidden",
               )}
             >
-              {NAV_ITEMS.map(item => {
+              {NAV_ITEMS.map((item) => {
                 const ItemIcon = item.icon;
                 return (
-                  <TabsTrigger key={item.value} value={item.value} className={TAB_TRIGGER_CLASS}>
+                  <TabsTrigger
+                    key={item.value}
+                    value={item.value}
+                    className={TAB_TRIGGER_CLASS}
+                  >
                     <ItemIcon className="h-4 w-4" aria-hidden="true" />
                     <span>{item.label}</span>
                   </TabsTrigger>
@@ -525,35 +586,42 @@ function AppContent() {
                   </DialogDescription>
                 </DialogHeader>
                 <div className="max-h-[70vh] overflow-y-auto px-2 pb-3">
-                  {NAV_GROUPS.map(group => (
+                  {NAV_GROUPS.map((group) => (
                     <div key={group} className="mb-3 last:mb-0">
                       <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
                         {group}
                       </p>
                       <div className="space-y-1">
-                        {NAV_ITEMS.filter(item => item.group === group).map(item => {
-                          const isActive = item.value === currentTab;
-                          const ItemIcon = item.icon;
-                          return (
-                            <button
-                              key={item.value}
-                              type="button"
-                              onClick={() => handleTabChange(item.value)}
-                              aria-current={isActive ? 'page' : undefined}
-                              className={`w-full rounded-lg px-3 py-2 text-sm flex items-center justify-between transition-colors ${
-                                isActive
-                                  ? 'bg-primary/10 dark:bg-primary/20 text-primary'
-                                  : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100/80 dark:hover:bg-white/10'
-                              }`}
-                            >
-                              <span className="flex items-center gap-2">
-                                <ItemIcon className="h-4 w-4" aria-hidden="true" />
-                                <span>{item.label}</span>
-                              </span>
-                              {isActive ? <Check className="h-4 w-4" /> : null}
-                            </button>
-                          );
-                        })}
+                        {NAV_ITEMS.filter((item) => item.group === group).map(
+                          (item) => {
+                            const isActive = item.value === currentTab;
+                            const ItemIcon = item.icon;
+                            return (
+                              <button
+                                key={item.value}
+                                type="button"
+                                onClick={() => handleTabChange(item.value)}
+                                aria-current={isActive ? "page" : undefined}
+                                className={`w-full rounded-lg px-3 py-2 text-sm flex items-center justify-between transition-colors ${
+                                  isActive
+                                    ? "bg-primary/10 dark:bg-primary/20 text-primary"
+                                    : "text-gray-700 dark:text-gray-200 hover:bg-gray-100/80 dark:hover:bg-white/10"
+                                }`}
+                              >
+                                <span className="flex items-center gap-2">
+                                  <ItemIcon
+                                    className="h-4 w-4"
+                                    aria-hidden="true"
+                                  />
+                                  <span>{item.label}</span>
+                                </span>
+                                {isActive ? (
+                                  <Check className="h-4 w-4" />
+                                ) : null}
+                              </button>
+                            );
+                          },
+                        )}
                       </div>
                     </div>
                   ))}
@@ -561,24 +629,30 @@ function AppContent() {
               </DialogContent>
             </Dialog>
 
-            <TabsContent value="dashboard" className="flex-1 p-2 sm:p-4 overflow-auto min-h-0">
+            <TabsContent
+              value="dashboard"
+              className="flex-1 p-2 sm:p-4 overflow-auto min-h-0"
+            >
               <div className="min-h-full">
                 <Dashboard />
               </div>
             </TabsContent>
 
-            <TabsContent value="agents" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="agents"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
                 <div
                   className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedAgentId ? 'hidden lg:block' : 'block'
+                    selectedAgentId ? "hidden lg:block" : "block"
                   }`}
                 >
                   <AgentList />
                 </div>
                 <div
                   className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedAgentId ? 'block' : 'hidden lg:block'
+                    selectedAgentId ? "block" : "hidden lg:block"
                   }`}
                 >
                   <AgentEditor />
@@ -586,18 +660,21 @@ function AppContent() {
               </div>
             </TabsContent>
 
-            <TabsContent value="teams" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="teams"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
                 <div
                   className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedTeamId ? 'hidden lg:block' : 'block'
+                    selectedTeamId ? "hidden lg:block" : "block"
                   }`}
                 >
                   <TeamList />
                 </div>
                 <div
                   className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedTeamId ? 'block' : 'hidden lg:block'
+                    selectedTeamId ? "block" : "hidden lg:block"
                   }`}
                 >
                   <TeamEditor />
@@ -605,18 +682,21 @@ function AppContent() {
               </div>
             </TabsContent>
 
-            <TabsContent value="cultures" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="cultures"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
                 <div
                   className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedCultureId ? 'hidden lg:block' : 'block'
+                    selectedCultureId ? "hidden lg:block" : "block"
                   }`}
                 >
                   <CultureList />
                 </div>
                 <div
                   className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedCultureId ? 'block' : 'hidden lg:block'
+                    selectedCultureId ? "block" : "hidden lg:block"
                   }`}
                 >
                   <CultureEditor />
@@ -624,18 +704,21 @@ function AppContent() {
               </div>
             </TabsContent>
 
-            <TabsContent value="rooms" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="rooms"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
                 <div
                   className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedRoomId ? 'hidden lg:block' : 'block'
+                    selectedRoomId ? "hidden lg:block" : "block"
                   }`}
                 >
                   <RoomList />
                 </div>
                 <div
                   className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedRoomId ? 'block' : 'hidden lg:block'
+                    selectedRoomId ? "block" : "hidden lg:block"
                   }`}
                 >
                   <RoomEditor />
@@ -643,7 +726,10 @@ function AppContent() {
               </div>
             </TabsContent>
 
-            <TabsContent value="schedules" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="schedules"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="h-full overflow-hidden">
                 <Schedules />
               </div>
@@ -658,43 +744,64 @@ function AppContent() {
               </div>
             </TabsContent>
 
-            <TabsContent value="models" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="models"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="h-full overflow-hidden">
                 <ModelConfig />
               </div>
             </TabsContent>
 
-            <TabsContent value="memory" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="memory"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="h-full overflow-hidden">
                 <MemoryConfig />
               </div>
             </TabsContent>
 
-            <TabsContent value="knowledge" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="knowledge"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="h-full overflow-hidden">
                 <Knowledge />
               </div>
             </TabsContent>
 
-            <TabsContent value="credentials" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="credentials"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="h-full overflow-hidden">
                 <Credentials />
               </div>
             </TabsContent>
 
-            <TabsContent value="voice" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="voice"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="h-full overflow-auto">
                 <VoiceConfig />
               </div>
             </TabsContent>
 
-            <TabsContent value="integrations" className="flex-1 p-2 sm:p-4 overflow-auto min-h-0">
+            <TabsContent
+              value="integrations"
+              className="flex-1 p-2 sm:p-4 overflow-auto min-h-0"
+            >
               <div className="h-full overflow-auto">
                 <Integrations />
               </div>
             </TabsContent>
 
-            <TabsContent value="skills" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="skills"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="h-full overflow-hidden">
                 <Skills />
               </div>

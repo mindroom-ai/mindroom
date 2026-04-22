@@ -557,11 +557,13 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
 
         mock_ai.side_effect = fake_ai_response
         coordinator.deps.delivery_gateway.deliver_final.side_effect = AsyncMock(
-            side_effect=lambda *_args, **_kwargs: sequence.append(("deliver", None, None, None))
-            or MagicMock(
-                event_id="$response_id",
-                response_text="Hello!",
-                delivery_kind="sent",
+            side_effect=lambda *_args, **_kwargs: (
+                sequence.append(("deliver", None, None, None))
+                or MagicMock(
+                    event_id="$response_id",
+                    response_text="Hello!",
+                    delivery_kind="sent",
+                )
             ),
         )
 
@@ -1146,11 +1148,13 @@ async def test_session_started_hooks_continue_after_runtime_error(tmp_path: Path
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
         coordinator.deps.delivery_gateway.deliver_final.side_effect = AsyncMock(
-            side_effect=lambda *_args, **_kwargs: sequence.append("deliver")
-            or MagicMock(
-                event_id="$response_id",
-                response_text="Hello!",
-                delivery_kind="sent",
+            side_effect=lambda *_args, **_kwargs: (
+                sequence.append("deliver")
+                or MagicMock(
+                    event_id="$response_id",
+                    response_text="Hello!",
+                    delivery_kind="sent",
+                )
             ),
         )
 

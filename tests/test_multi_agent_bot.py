@@ -7832,8 +7832,8 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
-        tracker.visible_echo_event_id_for_sources.side_effect = (
-            lambda source_event_ids: "$voice_echo" if tuple(source_event_ids) == ("$voice", "$text") else None
+        tracker.visible_echo_event_id_for_sources.side_effect = lambda source_event_ids: (
+            "$voice_echo" if tuple(source_event_ids) == ("$voice", "$text") else None
         )
         tracker.has_responded.return_value = False
 

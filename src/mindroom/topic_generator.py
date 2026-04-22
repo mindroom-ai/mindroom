@@ -66,7 +66,7 @@ MindRoom is a platform that frees AI agents from being trapped in single apps. K
 Room details:
 - Room key/alias: {room_key}
 - Room name: {room_name}
-- Configured agents: {agent_list if agent_list else "No specific agents configured yet"}
+- Configured agents: {agent_list or "No specific agents configured yet"}
 
 Create a topic that:
 1. Describes the room's purpose based on its name

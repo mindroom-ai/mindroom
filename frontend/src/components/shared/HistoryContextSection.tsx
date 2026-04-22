@@ -1,16 +1,19 @@
-import { useEffect, useState } from 'react';
-import { Controller, type Control, type Path, useWatch } from 'react-hook-form';
-import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
-import { Input } from '@/components/ui/input';
-import { FieldGroup } from './FieldGroup';
+import { useEffect, useState } from "react";
+import { Controller, type Control, type Path, useWatch } from "react-hook-form";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { FieldGroup } from "./FieldGroup";
 import {
   resolveEffectiveCompactionEnabled,
   type CompactionConfig,
   type Config,
-} from '@/types/config';
+} from "@/types/config";
 
-type HistoryFieldName = 'num_history_runs' | 'num_history_messages' | 'max_tool_calls_from_history';
+type HistoryFieldName =
+  | "num_history_runs"
+  | "num_history_messages"
+  | "max_tool_calls_from_history";
 
 type HistoryContextFormValues = {
   num_history_runs?: number | null;
@@ -23,11 +26,18 @@ type HistoryContextFormValues = {
 interface HistoryContextSectionProps<T extends HistoryContextFormValues> {
   control: Control<T>;
   resetKey: string | null | undefined;
-  defaults?: Config['defaults'];
-  onFieldChange: (fieldName: HistoryFieldName, value: number | boolean | null) => void;
-  updateCompaction: (nextCompaction: CompactionConfig | null | undefined) => void;
+  defaults?: Config["defaults"];
+  onFieldChange: (
+    fieldName: HistoryFieldName,
+    value: number | boolean | null,
+  ) => void;
+  updateCompaction: (
+    nextCompaction: CompactionConfig | null | undefined,
+  ) => void;
   mutateCompaction: (
-    mutator: (current: CompactionConfig | null | undefined) => CompactionConfig | null | undefined
+    mutator: (
+      current: CompactionConfig | null | undefined,
+    ) => CompactionConfig | null | undefined,
   ) => void;
   historyRunsHelperText: string;
   historyMessagesHelperText: string;
@@ -48,7 +58,7 @@ interface HistoryContextSectionProps<T extends HistoryContextFormValues> {
 
 function parseOptionalInt(raw: string, min: number): number | null {
   const trimmed = raw.trim();
-  if (trimmed === '') {
+  if (trimmed === "") {
     return null;
   }
   if (!/^-?\d+$/.test(trimmed)) {
@@ -63,7 +73,7 @@ function parseOptionalInt(raw: string, min: number): number | null {
 
 function parseOptionalUnitFloat(raw: string): number | null {
   const trimmed = raw.trim();
-  if (trimmed === '') {
+  if (trimmed === "") {
     return null;
   }
   const value = Number.parseFloat(trimmed);
@@ -92,28 +102,31 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
   compactionError,
   compressToolResults,
 }: HistoryContextSectionProps<T>) {
-  const numHistoryRuns = useWatch({ name: 'num_history_runs' as Path<T>, control }) as
-    | number
-    | null
-    | undefined;
-  const numHistoryMessages = useWatch({
-    name: 'num_history_messages' as Path<T>,
+  const numHistoryRuns = useWatch({
+    name: "num_history_runs" as Path<T>,
     control,
   }) as number | null | undefined;
-  const compactionConfig = useWatch({ name: 'compaction' as Path<T>, control }) as
-    | CompactionConfig
-    | null
-    | undefined;
-  const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] = useState('');
+  const numHistoryMessages = useWatch({
+    name: "num_history_messages" as Path<T>,
+    control,
+  }) as number | null | undefined;
+  const compactionConfig = useWatch({
+    name: "compaction" as Path<T>,
+    control,
+  }) as CompactionConfig | null | undefined;
+  const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] =
+    useState("");
   const defaultCompaction = defaults?.compaction ?? null;
   const effectiveCompactionEnabled = resolveEffectiveCompactionEnabled(
     compactionConfig,
-    defaultCompaction
+    defaultCompaction,
   );
 
   useEffect(() => {
     setCompactionThresholdPercentInput(
-      compactionConfig?.threshold_percent != null ? String(compactionConfig.threshold_percent) : ''
+      compactionConfig?.threshold_percent != null
+        ? String(compactionConfig.threshold_percent)
+        : "",
     );
   }, [compactionConfig?.threshold_percent, resetKey]);
 
@@ -131,7 +144,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
           error={numHistoryRunsError}
         >
           <Controller
-            name={'num_history_runs' as Path<T>}
+            name={"num_history_runs" as Path<T>}
             control={control}
             render={({ field }) => {
               const fieldValue = field.value as number | null | undefined;
@@ -140,17 +153,17 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   id="num_history_runs"
                   type="number"
                   min={1}
-                  value={fieldValue ?? ''}
+                  value={fieldValue ?? ""}
                   placeholder={
                     defaults?.num_history_runs != null
                       ? `Default: ${defaults.num_history_runs}`
-                      : 'Default: all'
+                      : "Default: all"
                   }
                   disabled={numHistoryMessages != null}
-                  onChange={e => {
+                  onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 1);
                     field.onChange(value);
-                    onFieldChange('num_history_runs', value);
+                    onFieldChange("num_history_runs", value);
                   }}
                 />
               );
@@ -170,7 +183,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
           error={numHistoryMessagesError}
         >
           <Controller
-            name={'num_history_messages' as Path<T>}
+            name={"num_history_messages" as Path<T>}
             control={control}
             render={({ field }) => {
               const fieldValue = field.value as number | null | undefined;
@@ -179,17 +192,17 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   id="num_history_messages"
                   type="number"
                   min={1}
-                  value={fieldValue ?? ''}
+                  value={fieldValue ?? ""}
                   placeholder={
                     defaults?.num_history_messages != null
                       ? `Default: ${defaults.num_history_messages}`
-                      : 'Default: all'
+                      : "Default: all"
                   }
                   disabled={numHistoryRuns != null}
-                  onChange={e => {
+                  onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 1);
                     field.onChange(value);
-                    onFieldChange('num_history_messages', value);
+                    onFieldChange("num_history_messages", value);
                   }}
                 />
               );
@@ -209,7 +222,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
           error={maxToolCallsFromHistoryError}
         >
           <Controller
-            name={'max_tool_calls_from_history' as Path<T>}
+            name={"max_tool_calls_from_history" as Path<T>}
             control={control}
             render={({ field }) => {
               const fieldValue = field.value as number | null | undefined;
@@ -218,16 +231,16 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   id="max_tool_calls_from_history"
                   type="number"
                   min={0}
-                  value={fieldValue ?? ''}
+                  value={fieldValue ?? ""}
                   placeholder={
                     defaults?.max_tool_calls_from_history != null
                       ? `Default: ${defaults.max_tool_calls_from_history}`
-                      : 'Default: no limit'
+                      : "Default: no limit"
                   }
-                  onChange={e => {
+                  onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 0);
                     field.onChange(value);
-                    onFieldChange('max_tool_calls_from_history', value);
+                    onFieldChange("max_tool_calls_from_history", value);
                   }}
                 />
               );
@@ -242,7 +255,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
             htmlFor="compress_tool_results"
           >
             <Controller
-              name={'compress_tool_results' as Path<T>}
+              name={"compress_tool_results" as Path<T>}
               control={control}
               render={({ field }) => {
                 const fieldValue = field.value as boolean | undefined;
@@ -251,7 +264,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                     <Checkbox
                       id="compress_tool_results"
                       checked={fieldValue ?? compressToolResults.defaultValue}
-                      onCheckedChange={checked => {
+                      onCheckedChange={(checked) => {
                         const value = checked === true;
                         field.onChange(value);
                         compressToolResults.onChange(value);
@@ -281,8 +294,8 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
               <Checkbox
                 id="compaction_enabled"
                 checked={effectiveCompactionEnabled}
-                onCheckedChange={checked => {
-                  mutateCompaction(current => ({
+                onCheckedChange={(checked) => {
+                  mutateCompaction((current) => ({
                     ...(current ?? {}),
                     enabled: checked === true,
                   }));
@@ -316,19 +329,21 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   id="compaction_threshold_tokens"
                   type="number"
                   min={1}
-                  value={compactionConfig?.threshold_tokens ?? ''}
+                  value={compactionConfig?.threshold_tokens ?? ""}
                   placeholder={
                     defaultCompaction?.threshold_tokens != null
                       ? `Default: ${defaultCompaction.threshold_tokens}`
-                      : 'Default: derived from context window'
+                      : "Default: derived from context window"
                   }
-                  onChange={e => {
+                  onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 1);
-                    mutateCompaction(current => ({
+                    mutateCompaction((current) => ({
                       ...(current ?? {}),
                       threshold_tokens: value ?? undefined,
                       threshold_percent:
-                        value != null ? null : current?.threshold_percent ?? undefined,
+                        value != null
+                          ? null
+                          : (current?.threshold_percent ?? undefined),
                     }));
                   }}
                 />
@@ -349,29 +364,36 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   placeholder={
                     defaultCompaction?.threshold_percent != null
                       ? `Default: ${defaultCompaction.threshold_percent}`
-                      : 'Default: 0.8'
+                      : "Default: 0.8"
                   }
-                  onChange={e => {
+                  onChange={(e) => {
                     const raw = e.target.value;
                     setCompactionThresholdPercentInput(raw);
                     const value = parseOptionalUnitFloat(raw);
-                    if (raw.trim() !== '' && value == null) {
+                    if (raw.trim() !== "" && value == null) {
                       return;
                     }
-                    mutateCompaction(current => ({
+                    mutateCompaction((current) => ({
                       ...(current ?? {}),
                       threshold_percent: value ?? undefined,
                       threshold_tokens:
-                        value != null ? null : current?.threshold_tokens ?? undefined,
+                        value != null
+                          ? null
+                          : (current?.threshold_tokens ?? undefined),
                     }));
                   }}
                   onBlur={() => {
-                    const value = parseOptionalUnitFloat(compactionThresholdPercentInput);
-                    if (compactionThresholdPercentInput.trim() !== '' && value == null) {
+                    const value = parseOptionalUnitFloat(
+                      compactionThresholdPercentInput,
+                    );
+                    if (
+                      compactionThresholdPercentInput.trim() !== "" &&
+                      value == null
+                    ) {
                       setCompactionThresholdPercentInput(
                         compactionConfig?.threshold_percent != null
                           ? String(compactionConfig.threshold_percent)
-                          : ''
+                          : "",
                       );
                     }
                   }}
@@ -387,11 +409,11 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   id="compaction_reserve_tokens"
                   type="number"
                   min={0}
-                  value={compactionConfig?.reserve_tokens ?? ''}
+                  value={compactionConfig?.reserve_tokens ?? ""}
                   placeholder={`Default: ${defaultCompaction?.reserve_tokens ?? 16384}`}
-                  onChange={e => {
+                  onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 0);
-                    mutateCompaction(current => ({
+                    mutateCompaction((current) => ({
                       ...(current ?? {}),
                       reserve_tokens: value ?? undefined,
                     }));
@@ -406,13 +428,13 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
               >
                 <Input
                   id="compaction_model"
-                  value={compactionConfig?.model ?? ''}
+                  value={compactionConfig?.model ?? ""}
                   placeholder={compactionModelPlaceholder}
-                  onChange={e => {
+                  onChange={(e) => {
                     const value = e.target.value.trim();
-                    mutateCompaction(current => ({
+                    mutateCompaction((current) => ({
                       ...(current ?? {}),
-                      model: value === '' ? null : value,
+                      model: value === "" ? null : value,
                     }));
                   }}
                 />
@@ -421,16 +443,20 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
               <FieldGroup
                 label="Notify Room"
                 helperText={`Post a room notice after compaction completes (default: ${
-                  defaultCompaction?.notify ? 'on' : 'off'
+                  defaultCompaction?.notify ? "on" : "off"
                 }).`}
                 htmlFor="compaction_notify"
               >
                 <div className="flex items-center gap-2">
                   <Checkbox
                     id="compaction_notify"
-                    checked={compactionConfig?.notify ?? defaultCompaction?.notify ?? false}
-                    onCheckedChange={checked => {
-                      mutateCompaction(current => ({
+                    checked={
+                      compactionConfig?.notify ??
+                      defaultCompaction?.notify ??
+                      false
+                    }
+                    onCheckedChange={(checked) => {
+                      mutateCompaction((current) => ({
                         ...(current ?? {}),
                         notify: checked === true,
                       }));

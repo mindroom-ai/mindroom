@@ -6,7 +6,7 @@ import {
   useEffect,
   useMemo,
   useState,
-} from 'react';
+} from "react";
 import {
   type Column,
   type ColumnDef,
@@ -14,26 +14,35 @@ import {
   getCoreRowModel,
   getSortedRowModel,
   useReactTable,
-} from '@tanstack/react-table';
-import { useConfigStore } from '@/store/configStore';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+} from "@tanstack/react-table";
+import { useConfigStore } from "@/store/configStore";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { EditorPanel } from '@/components/shared/EditorPanel';
-import { showSaveFailureToastIfNeeded } from '@/components/shared';
-import { ArrowUpDown, Copy, Pencil, Plus, Save, Settings, Trash2, X } from 'lucide-react';
-import { toast } from '@/components/ui/toaster';
-import { Badge } from '@/components/ui/badge';
-import { cn } from '@/lib/utils';
-import { ProviderLogo } from './ProviderLogos';
-import { getProviderInfo, getProviderList } from '@/lib/providers';
-import type { ProviderType } from '@/types/config';
+} from "@/components/ui/select";
+import { EditorPanel } from "@/components/shared/EditorPanel";
+import { showSaveFailureToastIfNeeded } from "@/components/shared";
+import {
+  ArrowUpDown,
+  Copy,
+  Pencil,
+  Plus,
+  Save,
+  Settings,
+  Trash2,
+  X,
+} from "lucide-react";
+import { toast } from "@/components/ui/toaster";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
+import { ProviderLogo } from "./ProviderLogos";
+import { getProviderInfo, getProviderList } from "@/lib/providers";
+import type { ProviderType } from "@/types/config";
 
 interface RowDraft {
   modelName: string;
@@ -71,32 +80,33 @@ interface ModelRowData {
 }
 
 const EMPTY_DRAFT: RowDraft = {
-  modelName: '',
-  provider: 'openrouter',
-  modelId: '',
-  baseUrl: '',
-  contextWindow: '',
-  apiKey: '',
-  selectedKeySourceModel: '',
+  modelName: "",
+  provider: "openrouter",
+  modelId: "",
+  baseUrl: "",
+  contextWindow: "",
+  apiKey: "",
+  selectedKeySourceModel: "",
   clearCustomKey: false,
 };
 
-const NONE_OPTION_VALUE = '__none__';
+const NONE_OPTION_VALUE = "__none__";
 
 const KEY_BADGE_COLORS = [
-  'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/25',
-  'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25',
-  'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25',
-  'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25',
-  'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/25',
-  'bg-lime-500/10 text-lime-700 dark:text-lime-300 border-lime-500/25',
-  'bg-orange-500/10 text-orange-700 dark:text-orange-300 border-orange-500/25',
-  'bg-teal-500/10 text-teal-700 dark:text-teal-300 border-teal-500/25',
-  'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/25',
+  "bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/25",
+  "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25",
+  "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25",
+  "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25",
+  "bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/25",
+  "bg-lime-500/10 text-lime-700 dark:text-lime-300 border-lime-500/25",
+  "bg-orange-500/10 text-orange-700 dark:text-orange-300 border-orange-500/25",
+  "bg-teal-500/10 text-teal-700 dark:text-teal-300 border-teal-500/25",
+  "bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/25",
 ];
 
-const NO_KEY_BADGE_COLOR = 'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/25';
-const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+const NO_KEY_BADGE_COLOR =
+  "bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/25";
+const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 
 function hashString(value: string): number {
   let hash = 0;
@@ -114,32 +124,34 @@ function getKeyBadgeColorClass(keyId: string | null): string {
 }
 
 function providerToService(provider: string): string {
-  return provider === 'gemini' ? 'google' : provider;
+  return provider === "gemini" ? "google" : provider;
 }
 
 function sourceToLabel(source: string | null, hasKey: boolean): string {
   if (!hasKey) {
-    return 'Not set';
+    return "Not set";
   }
-  if (source === 'env') {
-    return '.env';
+  if (source === "env") {
+    return ".env";
   }
-  if (source === 'ui') {
-    return 'UI';
+  if (source === "ui") {
+    return "UI";
   }
   if (source) {
     return source;
   }
-  return '.env';
+  return ".env";
 }
 
-function getOpenAIBaseUrl(modelConfig: { extra_kwargs?: Record<string, unknown> }): string | null {
+function getOpenAIBaseUrl(modelConfig: {
+  extra_kwargs?: Record<string, unknown>;
+}): string | null {
   const extraKwargs = modelConfig.extra_kwargs;
   if (!extraKwargs) {
     return null;
   }
   const baseUrl = extraKwargs.base_url;
-  if (typeof baseUrl !== 'string') {
+  if (typeof baseUrl !== "string") {
     return null;
   }
   const trimmed = baseUrl.trim();
@@ -149,7 +161,7 @@ function getOpenAIBaseUrl(modelConfig: { extra_kwargs?: Record<string, unknown> 
 function isValidHttpUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
   } catch {
     return false;
   }
@@ -172,7 +184,9 @@ function parseOptionalPositiveInteger(value: string): number | null {
 
 async function fetchKeyStatus(service: string): Promise<KeyStatus> {
   try {
-    const res = await fetch(`/api/credentials/${service}/api-key?key_name=api_key`);
+    const res = await fetch(
+      `/api/credentials/${service}/api-key?key_name=api_key`,
+    );
     if (!res.ok) {
       return { hasKey: false, source: null, maskedKey: null };
     }
@@ -191,7 +205,7 @@ async function fetchKeyStatus(service: string): Promise<KeyStatus> {
 async function fetchApiKeyValue(service: string): Promise<string | null> {
   try {
     const res = await fetch(
-      `/api/credentials/${service}/api-key?key_name=api_key&include_value=true`
+      `/api/credentials/${service}/api-key?key_name=api_key&include_value=true`,
     );
     if (!res.ok) {
       return null;
@@ -205,7 +219,7 @@ async function fetchApiKeyValue(service: string): Promise<string | null> {
 }
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
-  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(text);
       return true;
@@ -214,18 +228,18 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
     }
   }
 
-  if (typeof document === 'undefined') {
+  if (typeof document === "undefined") {
     return false;
   }
 
-  const textarea = document.createElement('textarea');
+  const textarea = document.createElement("textarea");
   textarea.value = text;
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
   document.body.appendChild(textarea);
   textarea.focus();
   textarea.select();
-  const copied = document.execCommand('copy');
+  const copied = document.execCommand("copy");
   document.body.removeChild(textarea);
   return copied;
 }
@@ -234,9 +248,9 @@ function getKeyStatusDisplay(
   modelName: string,
   provider: string,
   modelKeys: Record<string, KeyStatus>,
-  providerKeys: Record<string, KeyStatus>
+  providerKeys: Record<string, KeyStatus>,
 ): KeyDisplayInfo | null {
-  if (provider === 'ollama') {
+  if (provider === "ollama") {
     return null;
   }
 
@@ -244,9 +258,11 @@ function getKeyStatusDisplay(
   if (modelKey?.hasKey) {
     return {
       hasKey: true,
-      label: 'Custom key',
+      label: "Custom key",
       maskedKey: modelKey.maskedKey,
-      keyId: modelKey.maskedKey ? `key:${modelKey.maskedKey}` : `model:${modelName}`,
+      keyId: modelKey.maskedKey
+        ? `key:${modelKey.maskedKey}`
+        : `model:${modelName}`,
       sourceLabel: sourceToLabel(modelKey.source, true),
     };
   }
@@ -255,16 +271,18 @@ function getKeyStatusDisplay(
   if (providerKey?.hasKey) {
     return {
       hasKey: true,
-      label: 'Provider key',
+      label: "Provider key",
       maskedKey: providerKey.maskedKey,
-      keyId: providerKey.maskedKey ? `key:${providerKey.maskedKey}` : `provider:${provider}`,
+      keyId: providerKey.maskedKey
+        ? `key:${providerKey.maskedKey}`
+        : `provider:${provider}`,
       sourceLabel: sourceToLabel(providerKey.source, true),
     };
   }
 
   return {
     hasKey: false,
-    label: 'No API key',
+    label: "No API key",
     maskedKey: null,
     keyId: null,
     sourceLabel: sourceToLabel(null, false),
@@ -282,7 +300,7 @@ function SortableHeader({
     <Button
       variant="ghost"
       className="h-auto px-0 py-0 font-medium hover:bg-transparent"
-      onClick={() => column.toggleSorting(column.getIsSorted() === 'asc')}
+      onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
     >
       <span>{label}</span>
       <ArrowUpDown className="ml-1.5 h-3.5 w-3.5 opacity-60" />
@@ -292,22 +310,25 @@ function SortableHeader({
 
 function renderTableValue<TContext>(
   renderer: ((context: TContext) => ReactNode) | ReactNode,
-  context: TContext
+  context: TContext,
 ): ReactNode {
-  if (typeof renderer === 'function') {
+  if (typeof renderer === "function") {
     return renderer(context);
   }
   return renderer;
 }
 
 export function ModelConfig() {
-  const { config, updateModel, deleteModel, saveConfig, isLoading } = useConfigStore();
+  const { config, updateModel, deleteModel, saveConfig, isLoading } =
+    useConfigStore();
 
-  const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>({});
+  const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>(
+    {},
+  );
   const [modelKeys, setModelKeys] = useState<Record<string, KeyStatus>>({});
   const [sorting, setSorting] = useState<SortingState>([
-    { id: 'provider', desc: false },
-    { id: 'modelName', desc: false },
+    { id: "provider", desc: false },
+    { id: "modelName", desc: false },
   ]);
 
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
@@ -326,22 +347,28 @@ export function ModelConfig() {
     }
 
     const modelEntries = Object.entries(config.models);
-    const uniqueProviders = [...new Set(modelEntries.map(([_, model]) => model.provider))].filter(
-      provider => provider !== 'ollama'
-    );
+    const uniqueProviders = [
+      ...new Set(modelEntries.map(([_, model]) => model.provider)),
+    ].filter((provider) => provider !== "ollama");
 
     const [providerResults, modelResults] = await Promise.all([
       Promise.all(
-        uniqueProviders.map(async provider => {
-          return [provider, await fetchKeyStatus(providerToService(provider))] as const;
-        })
+        uniqueProviders.map(async (provider) => {
+          return [
+            provider,
+            await fetchKeyStatus(providerToService(provider)),
+          ] as const;
+        }),
       ),
       Promise.all(
         modelEntries
-          .filter(([_, model]) => model.provider !== 'ollama')
+          .filter(([_, model]) => model.provider !== "ollama")
           .map(async ([modelName]) => {
-            return [modelName, await fetchKeyStatus(`model:${modelName}`)] as const;
-          })
+            return [
+              modelName,
+              await fetchKeyStatus(`model:${modelName}`),
+            ] as const;
+          }),
       ),
     ]);
 
@@ -355,73 +382,96 @@ export function ModelConfig() {
     fetchAllKeyStatuses();
   }, [fetchAllKeyStatuses]);
 
-  const saveModelApiKey = async (modelName: string, apiKey: string): Promise<boolean> => {
+  const saveModelApiKey = async (
+    modelName: string,
+    apiKey: string,
+  ): Promise<boolean> => {
     try {
       const res = await fetch(`/api/credentials/model:${modelName}/api-key`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           service: `model:${modelName}`,
           api_key: apiKey,
-          key_name: 'api_key',
+          key_name: "api_key",
         }),
       });
 
       if (!res.ok) {
-        throw new Error('Failed to save API key');
+        throw new Error("Failed to save API key");
       }
 
       return true;
     } catch {
-      toast({ title: 'Error', description: 'Failed to save API key', variant: 'destructive' });
+      toast({
+        title: "Error",
+        description: "Failed to save API key",
+        variant: "destructive",
+      });
       return false;
     }
   };
 
   const copyModelApiKey = async (
     targetModelName: string,
-    sourceModelName: string
+    sourceModelName: string,
   ): Promise<boolean> => {
     try {
       const res = await fetch(
         `/api/credentials/model:${targetModelName}/copy-from/model:${sourceModelName}`,
-        { method: 'POST' }
+        { method: "POST" },
       );
 
       if (!res.ok) {
-        throw new Error('Failed to copy API key');
+        throw new Error("Failed to copy API key");
       }
 
       return true;
     } catch {
-      toast({ title: 'Error', description: 'Failed to copy API key', variant: 'destructive' });
+      toast({
+        title: "Error",
+        description: "Failed to copy API key",
+        variant: "destructive",
+      });
       return false;
     }
   };
 
   const deleteModelApiKey = async (modelName: string): Promise<boolean> => {
     try {
-      const res = await fetch(`/api/credentials/model:${modelName}`, { method: 'DELETE' });
+      const res = await fetch(`/api/credentials/model:${modelName}`, {
+        method: "DELETE",
+      });
       if (!res.ok) {
-        throw new Error('Failed to clear API key');
+        throw new Error("Failed to clear API key");
       }
 
       return true;
     } catch {
-      toast({ title: 'Error', description: 'Failed to clear API key', variant: 'destructive' });
+      toast({
+        title: "Error",
+        description: "Failed to clear API key",
+        variant: "destructive",
+      });
       return false;
     }
   };
 
-  const getProviderScopedKeyModels = (provider: string, excludedModelNames: string[] = []) => {
+  const getProviderScopedKeyModels = (
+    provider: string,
+    excludedModelNames: string[] = [],
+  ) => {
     return Object.entries(models)
       .filter(
         ([modelName, modelConfig]) =>
           !excludedModelNames.includes(modelName) &&
           modelConfig.provider === provider &&
-          modelKeys[modelName]?.hasKey
+          modelKeys[modelName]?.hasKey,
       )
-      .map(([modelName]) => ({ modelName, maskedKey: modelKeys[modelName]?.maskedKey || null }));
+      .map(([modelName]) => ({
+        modelName,
+        maskedKey: modelKeys[modelName]?.maskedKey || null,
+      }));
   };
 
   const copyApiKeyForRow = async (modelName: string, provider: string) => {
@@ -432,9 +482,9 @@ export function ModelConfig() {
     const apiKey = await fetchApiKeyValue(service);
     if (!apiKey) {
       toast({
-        title: 'Error',
-        description: 'API key is not available for copying',
-        variant: 'destructive',
+        title: "Error",
+        description: "API key is not available for copying",
+        variant: "destructive",
       });
       return;
     }
@@ -442,14 +492,14 @@ export function ModelConfig() {
     const copied = await copyTextToClipboard(apiKey);
     if (!copied) {
       toast({
-        title: 'Error',
-        description: 'Failed to copy API key',
-        variant: 'destructive',
+        title: "Error",
+        description: "Failed to copy API key",
+        variant: "destructive",
       });
       return;
     }
 
-    toast({ title: 'Copied', description: `API key copied from ${service}` });
+    toast({ title: "Copied", description: `API key copied from ${service}` });
   };
 
   const startEditingRow = (row: ModelRowData) => {
@@ -458,10 +508,10 @@ export function ModelConfig() {
       modelName: row.modelName,
       provider: row.provider,
       modelId: row.modelId,
-      baseUrl: row.openAIBaseUrl || '',
-      contextWindow: row.contextWindow != null ? String(row.contextWindow) : '',
-      apiKey: '',
-      selectedKeySourceModel: '',
+      baseUrl: row.openAIBaseUrl || "",
+      contextWindow: row.contextWindow != null ? String(row.contextWindow) : "",
+      apiKey: "",
+      selectedKeySourceModel: "",
       clearCustomKey: false,
     });
   };
@@ -474,8 +524,8 @@ export function ModelConfig() {
   const startAddingRow = () => {
     if (editingRowId) {
       toast({
-        title: 'Finish current edit first',
-        description: 'Save or cancel the active row before adding a new model.',
+        title: "Finish current edit first",
+        description: "Save or cancel the active row before adding a new model.",
       });
       return;
     }
@@ -490,9 +540,9 @@ export function ModelConfig() {
   };
 
   const validateOpenAIBaseUrl = (
-    draft: Pick<RowDraft, 'provider' | 'baseUrl'>
+    draft: Pick<RowDraft, "provider" | "baseUrl">,
   ): { valid: true; value: string | null } | { valid: false } => {
-    if (draft.provider !== 'openai') {
+    if (draft.provider !== "openai") {
       return { valid: true, value: null };
     }
 
@@ -503,9 +553,9 @@ export function ModelConfig() {
 
     if (!isValidHttpUrl(normalizedBaseUrl)) {
       toast({
-        title: 'Error',
-        description: 'Base URL must be a valid http(s) URL',
-        variant: 'destructive',
+        title: "Error",
+        description: "Base URL must be a valid http(s) URL",
+        variant: "destructive",
       });
       return { valid: false };
     }
@@ -514,14 +564,14 @@ export function ModelConfig() {
   };
 
   const validateContextWindow = (
-    rawContextWindow: string
+    rawContextWindow: string,
   ): { valid: true; value: number | null } | { valid: false } => {
     const contextWindow = parseOptionalPositiveInteger(rawContextWindow);
     if (contextWindow !== null && Number.isNaN(contextWindow)) {
       toast({
-        title: 'Error',
-        description: 'Context window must be a positive integer',
-        variant: 'destructive',
+        title: "Error",
+        description: "Context window must be a positive integer",
+        variant: "destructive",
       });
       return { valid: false };
     }
@@ -544,27 +594,27 @@ export function ModelConfig() {
 
     if (!targetModelName || !targetModelId) {
       toast({
-        title: 'Error',
-        description: 'Model name and model ID are required',
-        variant: 'destructive',
+        title: "Error",
+        description: "Model name and model ID are required",
+        variant: "destructive",
       });
       return;
     }
 
-    if (originalModelName === 'default' && targetModelName !== 'default') {
+    if (originalModelName === "default" && targetModelName !== "default") {
       toast({
-        title: 'Error',
-        description: 'The default model name cannot be changed',
-        variant: 'destructive',
+        title: "Error",
+        description: "The default model name cannot be changed",
+        variant: "destructive",
       });
       return;
     }
 
     if (targetModelName !== originalModelName && models[targetModelName]) {
       toast({
-        title: 'Error',
-        description: 'A model with this name already exists',
-        variant: 'destructive',
+        title: "Error",
+        description: "A model with this name already exists",
+        variant: "destructive",
       });
       return;
     }
@@ -574,7 +624,9 @@ export function ModelConfig() {
       return;
     }
     const normalizedBaseUrl = baseUrlValidation.value;
-    const contextWindowValidation = validateContextWindow(rowDraft.contextWindow);
+    const contextWindowValidation = validateContextWindow(
+      rowDraft.contextWindow,
+    );
     if (!contextWindowValidation.valid) {
       return;
     }
@@ -589,15 +641,24 @@ export function ModelConfig() {
 
     let keyOperationOk = true;
 
-    if (rowDraft.provider !== 'ollama') {
+    if (rowDraft.provider !== "ollama") {
       if (hasKeyReuseSource) {
-        keyOperationOk = await copyModelApiKey(targetModelName, rowDraft.selectedKeySourceModel);
+        keyOperationOk = await copyModelApiKey(
+          targetModelName,
+          rowDraft.selectedKeySourceModel,
+        );
       } else if (hasManualApiKey) {
-        keyOperationOk = await saveModelApiKey(targetModelName, rowDraft.apiKey.trim());
+        keyOperationOk = await saveModelApiKey(
+          targetModelName,
+          rowDraft.apiKey.trim(),
+        );
       } else if (rowDraft.clearCustomKey && hadCustomKey) {
         keyOperationOk = await deleteModelApiKey(originalModelName);
       } else if (renamed && hadCustomKey) {
-        keyOperationOk = await copyModelApiKey(targetModelName, originalModelName);
+        keyOperationOk = await copyModelApiKey(
+          targetModelName,
+          originalModelName,
+        );
       }
     } else if (hadCustomKey) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
@@ -619,7 +680,7 @@ export function ModelConfig() {
     };
 
     const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
-    if (rowDraft.provider === 'openai') {
+    if (rowDraft.provider === "openai") {
       if (normalizedBaseUrl) {
         nextExtraKwargs.base_url = normalizedBaseUrl;
       } else {
@@ -639,7 +700,7 @@ export function ModelConfig() {
       delete nextModelConfig.context_window;
     }
 
-    if (rowDraft.provider !== 'ollama') {
+    if (rowDraft.provider !== "ollama") {
       delete nextModelConfig.host;
     }
 
@@ -653,7 +714,7 @@ export function ModelConfig() {
     cancelEditingRow();
 
     toast({
-      title: 'Model Updated',
+      title: "Model Updated",
       description: renamed
         ? `Model ${originalModelName} renamed to ${targetModelName}`
         : `Model ${targetModelName} updated`,
@@ -666,18 +727,18 @@ export function ModelConfig() {
 
     if (!modelName || !modelId) {
       toast({
-        title: 'Error',
-        description: 'Model name and model ID are required',
-        variant: 'destructive',
+        title: "Error",
+        description: "Model name and model ID are required",
+        variant: "destructive",
       });
       return;
     }
 
     if (models[modelName]) {
       toast({
-        title: 'Error',
-        description: 'A model with this name already exists',
-        variant: 'destructive',
+        title: "Error",
+        description: "A model with this name already exists",
+        variant: "destructive",
       });
       return;
     }
@@ -687,7 +748,9 @@ export function ModelConfig() {
       return;
     }
     const normalizedBaseUrl = baseUrlValidation.value;
-    const contextWindowValidation = validateContextWindow(newRowDraft.contextWindow);
+    const contextWindowValidation = validateContextWindow(
+      newRowDraft.contextWindow,
+    );
     if (!contextWindowValidation.valid) {
       return;
     }
@@ -696,11 +759,17 @@ export function ModelConfig() {
     setIsSavingNewRow(true);
 
     let keyOperationOk = true;
-    if (newRowDraft.provider !== 'ollama') {
+    if (newRowDraft.provider !== "ollama") {
       if (newRowDraft.selectedKeySourceModel) {
-        keyOperationOk = await copyModelApiKey(modelName, newRowDraft.selectedKeySourceModel);
+        keyOperationOk = await copyModelApiKey(
+          modelName,
+          newRowDraft.selectedKeySourceModel,
+        );
       } else if (newRowDraft.apiKey.trim()) {
-        keyOperationOk = await saveModelApiKey(modelName, newRowDraft.apiKey.trim());
+        keyOperationOk = await saveModelApiKey(
+          modelName,
+          newRowDraft.apiKey.trim(),
+        );
       }
     }
 
@@ -718,7 +787,7 @@ export function ModelConfig() {
       provider: newRowDraft.provider as ProviderType,
       id: modelId,
     };
-    if (newRowDraft.provider === 'openai' && normalizedBaseUrl) {
+    if (newRowDraft.provider === "openai" && normalizedBaseUrl) {
       nextModelConfig.extra_kwargs = { base_url: normalizedBaseUrl };
     }
     if (normalizedContextWindow != null) {
@@ -731,22 +800,28 @@ export function ModelConfig() {
     setIsSavingNewRow(false);
     cancelAddingRow();
 
-    toast({ title: 'Model Added', description: `Model ${modelName} has been added` });
+    toast({
+      title: "Model Added",
+      description: `Model ${modelName} has been added`,
+    });
   };
 
   const handleDeleteModel = (modelName: string) => {
-    if (modelName === 'default') {
+    if (modelName === "default") {
       toast({
-        title: 'Cannot Delete',
-        description: 'The default model cannot be deleted',
-        variant: 'destructive',
+        title: "Cannot Delete",
+        description: "The default model cannot be deleted",
+        variant: "destructive",
       });
       return;
     }
 
     if (confirm(`Delete model "${modelName}"?`)) {
       deleteModel(modelName);
-      toast({ title: 'Model Deleted', description: `Model ${modelName} has been removed` });
+      toast({
+        title: "Model Deleted",
+        description: `Model ${modelName} has been removed`,
+      });
     }
   };
 
@@ -761,10 +836,12 @@ export function ModelConfig() {
         modelName,
         modelConfig.provider,
         modelKeys,
-        providerKeys
+        providerKeys,
       );
       const openAIBaseUrl =
-        modelConfig.provider === 'openai' ? getOpenAIBaseUrl(modelConfig) : null;
+        modelConfig.provider === "openai"
+          ? getOpenAIBaseUrl(modelConfig)
+          : null;
 
       return {
         modelName,
@@ -781,7 +858,7 @@ export function ModelConfig() {
   const renderReadonlyKeyStatus = (
     keyDisplay: KeyDisplayInfo | null,
     modelName?: string,
-    provider?: string
+    provider?: string,
   ) => {
     if (!keyDisplay) {
       return <span className="text-sm text-muted-foreground">N/A</span>;
@@ -793,13 +870,17 @@ export function ModelConfig() {
           <Badge
             variant="outline"
             className={cn(
-              'text-xs',
-              getKeyBadgeColorClass(keyDisplay.hasKey ? keyDisplay.keyId : null)
+              "text-xs",
+              getKeyBadgeColorClass(
+                keyDisplay.hasKey ? keyDisplay.keyId : null,
+              ),
             )}
           >
             {keyDisplay.label}
             {keyDisplay.maskedKey && (
-              <span className="ml-1 font-mono opacity-80">{keyDisplay.maskedKey}</span>
+              <span className="ml-1 font-mono opacity-80">
+                {keyDisplay.maskedKey}
+              </span>
             )}
           </Badge>
           {keyDisplay.hasKey && modelName && provider && (
@@ -808,7 +889,7 @@ export function ModelConfig() {
               variant="ghost"
               className="h-6 w-6"
               title="Copy API key"
-              onClick={event => {
+              onClick={(event) => {
                 event.stopPropagation();
                 void copyApiKeyForRow(modelName, provider);
               }}
@@ -818,9 +899,11 @@ export function ModelConfig() {
           )}
         </div>
         <p className="text-xs text-muted-foreground">
-          Source:{' '}
-          {keyDisplay.sourceLabel === '.env' ? (
-            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">.env</code>
+          Source:{" "}
+          {keyDisplay.sourceLabel === ".env" ? (
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+              .env
+            </code>
           ) : (
             keyDisplay.sourceLabel
           )}
@@ -832,54 +915,72 @@ export function ModelConfig() {
   const renderEditableApiCell = (
     draft: RowDraft,
     setDraft: Dispatch<SetStateAction<RowDraft>>,
-    currentModelName?: string
+    currentModelName?: string,
   ) => {
-    if (draft.provider === 'ollama') {
-      return <span className="text-xs text-muted-foreground">No key needed for Ollama</span>;
+    if (draft.provider === "ollama") {
+      return (
+        <span className="text-xs text-muted-foreground">
+          No key needed for Ollama
+        </span>
+      );
     }
 
     const providerKeyOptions = getProviderScopedKeyModels(
       draft.provider,
-      currentModelName ? [currentModelName] : []
+      currentModelName ? [currentModelName] : [],
     );
 
-    const hasCustomKey = Boolean(currentModelName && modelKeys[currentModelName]?.hasKey);
+    const hasCustomKey = Boolean(
+      currentModelName && modelKeys[currentModelName]?.hasKey,
+    );
     const hasManualApiKey = Boolean(draft.apiKey.trim());
     const hasReuseSource = Boolean(draft.selectedKeySourceModel);
     const isClearingCustomKey =
-      hasCustomKey && draft.clearCustomKey && !hasManualApiKey && !hasReuseSource;
+      hasCustomKey &&
+      draft.clearCustomKey &&
+      !hasManualApiKey &&
+      !hasReuseSource;
     const providerFallbackKey = providerKeys[draft.provider];
     const currentStatus = currentModelName
-      ? getKeyStatusDisplay(currentModelName, draft.provider, modelKeys, providerKeys)
+      ? getKeyStatusDisplay(
+          currentModelName,
+          draft.provider,
+          modelKeys,
+          providerKeys,
+        )
       : null;
 
     return (
-      <div className="space-y-2" onClick={event => event.stopPropagation()}>
+      <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
         {currentStatus && currentModelName && (
           <div className="space-y-1">
-            {renderReadonlyKeyStatus(currentStatus, currentModelName, draft.provider)}
+            {renderReadonlyKeyStatus(
+              currentStatus,
+              currentModelName,
+              draft.provider,
+            )}
             {hasCustomKey && (
               <>
                 <Button
                   size="sm"
-                  variant={isClearingCustomKey ? 'outline' : 'ghost'}
+                  variant={isClearingCustomKey ? "outline" : "ghost"}
                   className={cn(
-                    'h-7 px-2 text-xs',
+                    "h-7 px-2 text-xs",
                     isClearingCustomKey
-                      ? 'border-amber-500/40 text-amber-700 dark:text-amber-300'
-                      : 'text-destructive hover:text-destructive'
+                      ? "border-amber-500/40 text-amber-700 dark:text-amber-300"
+                      : "text-destructive hover:text-destructive",
                   )}
                   onClick={() => {
-                    setDraft(current => ({
+                    setDraft((current) => ({
                       ...current,
                       clearCustomKey: !isClearingCustomKey,
-                      apiKey: '',
-                      selectedKeySourceModel: '',
+                      apiKey: "",
+                      selectedKeySourceModel: "",
                     }));
                   }}
                 >
                   <X className="mr-1 h-3 w-3" />
-                  {isClearingCustomKey ? 'Undo clear key' : 'Clear custom key'}
+                  {isClearingCustomKey ? "Undo clear key" : "Clear custom key"}
                 </Button>
                 {isClearingCustomKey && (
                   <p className="text-xs text-amber-700 dark:text-amber-300">
@@ -894,12 +995,12 @@ export function ModelConfig() {
         <Input
           type="password"
           value={draft.apiKey}
-          onChange={event => {
+          onChange={(event) => {
             const apiKey = event.target.value;
-            setDraft(current => ({
+            setDraft((current) => ({
               ...current,
               apiKey,
-              selectedKeySourceModel: '',
+              selectedKeySourceModel: "",
               clearCustomKey: false,
             }));
           }}
@@ -910,16 +1011,19 @@ export function ModelConfig() {
         {providerKeyOptions.length > 0 && (
           <Select
             value={draft.selectedKeySourceModel || NONE_OPTION_VALUE}
-            onValueChange={modelName => {
+            onValueChange={(modelName) => {
               if (modelName === NONE_OPTION_VALUE) {
-                setDraft(current => ({ ...current, selectedKeySourceModel: '' }));
+                setDraft((current) => ({
+                  ...current,
+                  selectedKeySourceModel: "",
+                }));
                 return;
               }
 
-              setDraft(current => ({
+              setDraft((current) => ({
                 ...current,
                 selectedKeySourceModel: modelName,
-                apiKey: '',
+                apiKey: "",
                 clearCustomKey: false,
               }));
             }}
@@ -930,18 +1034,22 @@ export function ModelConfig() {
                 <span className="truncate">
                   {draft.selectedKeySourceModel
                     ? `Reuse key from ${draft.selectedKeySourceModel}`
-                    : 'Reuse from same provider'}
+                    : "Reuse from same provider"}
                 </span>
               </div>
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={NONE_OPTION_VALUE}>Do not reuse key</SelectItem>
-              {providerKeyOptions.map(option => (
+              <SelectItem value={NONE_OPTION_VALUE}>
+                Do not reuse key
+              </SelectItem>
+              {providerKeyOptions.map((option) => (
                 <SelectItem key={option.modelName} value={option.modelName}>
                   <div className="flex items-center gap-2">
                     <span>{option.modelName}</span>
                     {option.maskedKey && (
-                      <span className="text-xs text-muted-foreground">({option.maskedKey})</span>
+                      <span className="text-xs text-muted-foreground">
+                        ({option.maskedKey})
+                      </span>
                     )}
                   </div>
                 </SelectItem>
@@ -955,9 +1063,9 @@ export function ModelConfig() {
             {providerFallbackKey?.hasKey
               ? `No custom key provided. This model will use the provider key (${sourceToLabel(
                   providerFallbackKey.source,
-                  true
-                )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ''}).`
-              : 'No custom key provided. This model will use the provider key (for example from .env) when available.'}
+                  true,
+                )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ""}).`
+              : "No custom key provided. This model will use the provider key (for example from .env) when available."}
           </p>
         )}
       </div>
@@ -966,26 +1074,26 @@ export function ModelConfig() {
 
   const renderOpenAIEndpointEditor = (
     draft: RowDraft,
-    setDraft: Dispatch<SetStateAction<RowDraft>>
+    setDraft: Dispatch<SetStateAction<RowDraft>>,
   ) => {
-    if (draft.provider !== 'openai') {
+    if (draft.provider !== "openai") {
       return null;
     }
 
     return (
-      <div className="space-y-2" onClick={event => event.stopPropagation()}>
+      <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
         <Input
           value={draft.baseUrl}
-          onChange={event => {
+          onChange={(event) => {
             const baseUrl = event.target.value;
-            setDraft(current => ({ ...current, baseUrl }));
+            setDraft((current) => ({ ...current, baseUrl }));
           }}
-          onClick={event => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
           placeholder={DEFAULT_OPENAI_BASE_URL}
           className="h-8 text-xs"
         />
         <p className="text-xs text-muted-foreground">
-          Leave empty to use{' '}
+          Leave empty to use{" "}
           <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
             {DEFAULT_OPENAI_BASE_URL}
           </code>
@@ -997,23 +1105,24 @@ export function ModelConfig() {
 
   const renderContextWindowEditor = (
     draft: RowDraft,
-    setDraft: Dispatch<SetStateAction<RowDraft>>
+    setDraft: Dispatch<SetStateAction<RowDraft>>,
   ) => {
     return (
-      <div className="space-y-2" onClick={event => event.stopPropagation()}>
+      <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
         <Input
           value={draft.contextWindow}
-          onChange={event => {
+          onChange={(event) => {
             const contextWindow = event.target.value;
-            setDraft(current => ({ ...current, contextWindow }));
+            setDraft((current) => ({ ...current, contextWindow }));
           }}
-          onClick={event => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
           placeholder="optional context window"
           inputMode="numeric"
           className="h-8 text-xs"
         />
         <p className="text-xs text-muted-foreground">
-          Required for compaction-aware budgeting when the provider does not report it elsewhere.
+          Required for compaction-aware budgeting when the provider does not
+          report it elsewhere.
         </p>
       </div>
     );
@@ -1021,7 +1130,7 @@ export function ModelConfig() {
 
   const columns: ColumnDef<ModelRowData>[] = [
     {
-      accessorKey: 'modelName',
+      accessorKey: "modelName",
       header: ({ column }) => <SortableHeader label="Name" column={column} />,
       cell: ({ row }) => {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
@@ -1032,48 +1141,56 @@ export function ModelConfig() {
         return (
           <Input
             value={rowDraft.modelName}
-            onChange={event => {
+            onChange={(event) => {
               const modelName = event.target.value;
-              setRowDraft(current => (current ? { ...current, modelName } : current));
+              setRowDraft((current) =>
+                current ? { ...current, modelName } : current,
+              );
             }}
-            onClick={event => event.stopPropagation()}
-            disabled={row.original.modelName === 'default'}
+            onClick={(event) => event.stopPropagation()}
+            disabled={row.original.modelName === "default"}
             className="h-8 text-xs"
           />
         );
       },
     },
     {
-      id: 'provider',
-      accessorFn: row => row.providerName,
-      header: ({ column }) => <SortableHeader label="Provider" column={column} />,
+      id: "provider",
+      accessorFn: (row) => row.providerName,
+      header: ({ column }) => (
+        <SortableHeader label="Provider" column={column} />
+      ),
       cell: ({ row }) => {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
         if (!isEditing) {
           return (
             <div className="flex items-center gap-1.5">
-              <ProviderLogo provider={row.original.provider} className="h-4 w-4" />
+              <ProviderLogo
+                provider={row.original.provider}
+                className="h-4 w-4"
+              />
               <span>{row.original.providerName}</span>
             </div>
           );
         }
 
         return (
-          <div onClick={event => event.stopPropagation()}>
+          <div onClick={(event) => event.stopPropagation()}>
             <Select
               value={rowDraft.provider}
-              onValueChange={provider => {
-                setRowDraft(current =>
+              onValueChange={(provider) => {
+                setRowDraft((current) =>
                   current
                     ? {
                         ...current,
                         provider,
-                        baseUrl: provider === 'openai' ? current.baseUrl : '',
-                        apiKey: '',
-                        selectedKeySourceModel: '',
-                        clearCustomKey: provider === 'ollama' ? true : current.clearCustomKey,
+                        baseUrl: provider === "openai" ? current.baseUrl : "",
+                        apiKey: "",
+                        selectedKeySourceModel: "",
+                        clearCustomKey:
+                          provider === "ollama" ? true : current.clearCustomKey,
                       }
-                    : current
+                    : current,
                 );
               }}
             >
@@ -1081,10 +1198,13 @@ export function ModelConfig() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {getProviderList().map(provider => (
+                {getProviderList().map((provider) => (
                   <SelectItem key={provider.id} value={provider.id}>
                     <div className="flex items-center gap-2">
-                      <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                      <ProviderLogo
+                        provider={provider.id}
+                        className="h-4 w-4"
+                      />
                       <span>{provider.name}</span>
                     </div>
                   </SelectItem>
@@ -1096,25 +1216,30 @@ export function ModelConfig() {
       },
     },
     {
-      accessorKey: 'modelId',
-      header: ({ column }) => <SortableHeader label="Model ID" column={column} />,
+      accessorKey: "modelId",
+      header: ({ column }) => (
+        <SortableHeader label="Model ID" column={column} />
+      ),
       cell: ({ row }) => {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
         if (!isEditing) {
           return (
             <div className="space-y-1">
-              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{row.original.modelId}</code>
-              {row.original.provider === 'openai' && row.original.openAIBaseUrl && (
-                <p className="text-xs text-muted-foreground">
-                  Endpoint:{' '}
-                  <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
-                    {row.original.openAIBaseUrl}
-                  </code>
-                </p>
-              )}
+              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                {row.original.modelId}
+              </code>
+              {row.original.provider === "openai" &&
+                row.original.openAIBaseUrl && (
+                  <p className="text-xs text-muted-foreground">
+                    Endpoint:{" "}
+                    <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+                      {row.original.openAIBaseUrl}
+                    </code>
+                  </p>
+                )}
               {row.original.contextWindow != null && (
                 <p className="text-xs text-muted-foreground">
-                  Context window:{' '}
+                  Context window:{" "}
                   <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
                     {row.original.contextWindow.toLocaleString()}
                   </code>
@@ -1128,45 +1253,52 @@ export function ModelConfig() {
           <div className="space-y-2">
             <Input
               value={rowDraft.modelId}
-              onChange={event => {
+              onChange={(event) => {
                 const modelId = event.target.value;
-                setRowDraft(current => (current ? { ...current, modelId } : current));
+                setRowDraft((current) =>
+                  current ? { ...current, modelId } : current,
+                );
               }}
-              onClick={event => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
               className="h-8 text-xs"
             />
             {renderOpenAIEndpointEditor(
               rowDraft,
-              setRowDraft as Dispatch<SetStateAction<RowDraft>>
+              setRowDraft as Dispatch<SetStateAction<RowDraft>>,
             )}
-            {renderContextWindowEditor(rowDraft, setRowDraft as Dispatch<SetStateAction<RowDraft>>)}
+            {renderContextWindowEditor(
+              rowDraft,
+              setRowDraft as Dispatch<SetStateAction<RowDraft>>,
+            )}
           </div>
         );
       },
     },
     {
-      id: 'apiKey',
-      accessorFn: row => row.keyDisplay?.keyId || '',
-      header: ({ column }) => <SortableHeader label="API Key" column={column} />,
+      id: "apiKey",
+      accessorFn: (row) => row.keyDisplay?.keyId || "",
+      header: ({ column }) => (
+        <SortableHeader label="API Key" column={column} />
+      ),
       cell: ({ row }) => {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
         if (!isEditing) {
           return renderReadonlyKeyStatus(
             row.original.keyDisplay,
             row.original.modelName,
-            row.original.provider
+            row.original.provider,
           );
         }
 
         return renderEditableApiCell(
           rowDraft,
           setRowDraft as Dispatch<SetStateAction<RowDraft>>,
-          row.original.modelName
+          row.original.modelName,
         );
       },
     },
     {
-      id: 'actions',
+      id: "actions",
       header: () => <span className="font-medium">Actions</span>,
       enableSorting: false,
       cell: ({ row }) => {
@@ -1174,7 +1306,10 @@ export function ModelConfig() {
 
         if (isEditing) {
           return (
-            <div className="flex justify-end gap-1" onClick={event => event.stopPropagation()}>
+            <div
+              className="flex justify-end gap-1"
+              onClick={(event) => event.stopPropagation()}
+            >
               <Button
                 size="sm"
                 onClick={handleSaveRow}
@@ -1197,7 +1332,10 @@ export function ModelConfig() {
         }
 
         return (
-          <div className="flex justify-end gap-1" onClick={event => event.stopPropagation()}>
+          <div
+            className="flex justify-end gap-1"
+            onClick={(event) => event.stopPropagation()}
+          >
             <Button
               size="icon"
               variant="ghost"
@@ -1207,7 +1345,7 @@ export function ModelConfig() {
             >
               <Pencil className="h-3.5 w-3.5" />
             </Button>
-            {row.original.modelName !== 'default' && (
+            {row.original.modelName !== "default" && (
               <Button
                 size="icon"
                 variant="ghost"
@@ -1250,29 +1388,42 @@ export function ModelConfig() {
     >
       <div className="space-y-4">
         <div className="flex justify-end">
-          <Button onClick={startAddingRow} variant="outline" size="sm" disabled={isAddingRow}>
+          <Button
+            onClick={startAddingRow}
+            variant="outline"
+            size="sm"
+            disabled={isAddingRow}
+          >
             <Plus className="mr-1.5 h-4 w-4" />
             Add Model
           </Button>
         </div>
 
         <div className="rounded-lg border">
-          <div className="overflow-x-auto" data-testid="models-table-scroll-container">
+          <div
+            className="overflow-x-auto"
+            data-testid="models-table-scroll-container"
+          >
             <table className="w-full min-w-[840px] text-sm">
               <thead>
-                {table.getHeaderGroups().map(headerGroup => (
+                {table.getHeaderGroups().map((headerGroup) => (
                   <tr key={headerGroup.id} className="border-b bg-muted/50">
-                    {headerGroup.headers.map(header => (
+                    {headerGroup.headers.map((header) => (
                       <th
                         key={header.id}
                         className={cn(
-                          'px-4 py-2.5 text-left align-middle',
-                          header.column.id === 'actions' ? 'w-40 text-right' : ''
+                          "px-4 py-2.5 text-left align-middle",
+                          header.column.id === "actions"
+                            ? "w-40 text-right"
+                            : "",
                         )}
                       >
                         {header.isPlaceholder
                           ? null
-                          : renderTableValue(header.column.columnDef.header, header.getContext())}
+                          : renderTableValue(
+                              header.column.columnDef.header,
+                              header.getContext(),
+                            )}
                       </th>
                     ))}
                   </tr>
@@ -1285,9 +1436,12 @@ export function ModelConfig() {
                     <td className="px-4 py-2.5 align-middle">
                       <Input
                         value={newRowDraft.modelName}
-                        onChange={event => {
+                        onChange={(event) => {
                           const modelName = event.target.value;
-                          setNewRowDraft(current => ({ ...current, modelName }));
+                          setNewRowDraft((current) => ({
+                            ...current,
+                            modelName,
+                          }));
                         }}
                         className="h-8 text-xs"
                         placeholder="model name"
@@ -1296,13 +1450,14 @@ export function ModelConfig() {
                     <td className="px-4 py-2.5 align-middle">
                       <Select
                         value={newRowDraft.provider}
-                        onValueChange={provider => {
-                          setNewRowDraft(current => ({
+                        onValueChange={(provider) => {
+                          setNewRowDraft((current) => ({
                             ...current,
                             provider,
-                            apiKey: '',
-                            selectedKeySourceModel: '',
-                            baseUrl: provider === 'openai' ? current.baseUrl : '',
+                            apiKey: "",
+                            selectedKeySourceModel: "",
+                            baseUrl:
+                              provider === "openai" ? current.baseUrl : "",
                           }));
                         }}
                       >
@@ -1310,10 +1465,13 @@ export function ModelConfig() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {getProviderList().map(provider => (
+                          {getProviderList().map((provider) => (
                             <SelectItem key={provider.id} value={provider.id}>
                               <div className="flex items-center gap-2">
-                                <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                                <ProviderLogo
+                                  provider={provider.id}
+                                  className="h-4 w-4"
+                                />
                                 <span>{provider.name}</span>
                               </div>
                             </SelectItem>
@@ -1325,14 +1483,20 @@ export function ModelConfig() {
                       <div className="space-y-2">
                         <Input
                           value={newRowDraft.modelId}
-                          onChange={event => {
+                          onChange={(event) => {
                             const modelId = event.target.value;
-                            setNewRowDraft(current => ({ ...current, modelId }));
+                            setNewRowDraft((current) => ({
+                              ...current,
+                              modelId,
+                            }));
                           }}
                           className="h-8 text-xs"
                           placeholder="provider model id"
                         />
-                        {renderOpenAIEndpointEditor(newRowDraft, setNewRowDraft)}
+                        {renderOpenAIEndpointEditor(
+                          newRowDraft,
+                          setNewRowDraft,
+                        )}
                         {renderContextWindowEditor(newRowDraft, setNewRowDraft)}
                       </div>
                     </td>
@@ -1365,12 +1529,15 @@ export function ModelConfig() {
 
                 {table.getRowModel().rows.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-4 py-6 text-center text-sm text-muted-foreground">
+                    <td
+                      colSpan={5}
+                      className="px-4 py-6 text-center text-sm text-muted-foreground"
+                    >
                       No models configured.
                     </td>
                   </tr>
                 ) : (
-                  table.getRowModel().rows.map(row => {
+                  table.getRowModel().rows.map((row) => {
                     const isEditing = editingRowId === row.original.modelName;
                     return (
                       <tr
@@ -1378,18 +1545,21 @@ export function ModelConfig() {
                         onClick={() => {
                           if (isAddingRow) {
                             toast({
-                              title: 'Finish adding first',
+                              title: "Finish adding first",
                               description:
-                                'Save or cancel the new model row before editing another row.',
+                                "Save or cancel the new model row before editing another row.",
                             });
                             return;
                           }
 
-                          if (editingRowId && editingRowId !== row.original.modelName) {
+                          if (
+                            editingRowId &&
+                            editingRowId !== row.original.modelName
+                          ) {
                             toast({
-                              title: 'Finish current edit first',
+                              title: "Finish current edit first",
                               description:
-                                'Save or cancel the active row before editing another one.',
+                                "Save or cancel the active row before editing another one.",
                             });
                             return;
                           }
@@ -1399,19 +1569,24 @@ export function ModelConfig() {
                           }
                         }}
                         className={cn(
-                          'border-b transition-colors last:border-b-0',
-                          isEditing ? 'bg-muted/20' : 'cursor-pointer hover:bg-muted/30'
+                          "border-b transition-colors last:border-b-0",
+                          isEditing
+                            ? "bg-muted/20"
+                            : "cursor-pointer hover:bg-muted/30",
                         )}
                       >
-                        {row.getVisibleCells().map(cell => (
+                        {row.getVisibleCells().map((cell) => (
                           <td
                             key={cell.id}
                             className={cn(
-                              'px-4 py-2.5 align-middle',
-                              cell.column.id === 'actions' ? 'text-right' : ''
+                              "px-4 py-2.5 align-middle",
+                              cell.column.id === "actions" ? "text-right" : "",
                             )}
                           >
-                            {renderTableValue(cell.column.columnDef.cell, cell.getContext())}
+                            {renderTableValue(
+                              cell.column.columnDef.cell,
+                              cell.getContext(),
+                            )}
                           </td>
                         ))}
                       </tr>

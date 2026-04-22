@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from "react";
 
 type FetchState<T> = {
   data: T;
@@ -36,8 +36,8 @@ export function useFetchData<T>(fetcher: () => Promise<T>, defaultValue: T) {
       if (requestId !== requestIdRef.current || !isCurrentFetcher()) {
         return;
       }
-      console.error('Fetch failed:', err);
-      setError(err instanceof Error ? err.message : 'Fetch failed');
+      console.error("Fetch failed:", err);
+      setError(err instanceof Error ? err.message : "Fetch failed");
       setState({ data: defaultValue, fetcher });
     } finally {
       if (requestId === requestIdRef.current && isCurrentFetcher()) {
