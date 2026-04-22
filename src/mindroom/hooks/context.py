@@ -192,7 +192,7 @@ class HookContextSupport:
             "runtime_paths": self.runtime_paths,
             "logger": self.logger.bind(event_name=event_name),
             "correlation_id": correlation_id,
-            "runtime_started_at": getattr(self.runtime, "runtime_started_at", None),
+            "runtime_started_at": self.runtime.runtime_started_at,
             "message_sender": self.message_sender(),
             "matrix_admin": self.matrix_admin(),
             "room_state_querier": self.room_state_querier(),

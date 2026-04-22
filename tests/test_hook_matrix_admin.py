@@ -141,6 +141,7 @@ def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path:
         client=AsyncMock(spec=nio.AsyncClient),
         orchestrator=orchestrator,
         config=config,
+        runtime_started_at=0.0,
     )
     support = HookContextSupport(
         runtime=runtime,
@@ -167,6 +168,7 @@ def test_hook_context_support_builds_router_matrix_admin_without_orchestrator(tm
         client=AsyncMock(spec=nio.AsyncClient),
         orchestrator=None,
         config=config,
+        runtime_started_at=0.0,
     )
     support = HookContextSupport(
         runtime=runtime,
@@ -196,6 +198,7 @@ def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp
         client=AsyncMock(spec=nio.AsyncClient),
         orchestrator=orchestrator,
         config=config,
+        runtime_started_at=0.0,
     )
     support = HookContextSupport(
         runtime=runtime,
@@ -220,6 +223,7 @@ def test_hook_context_support_returns_none_without_router_matrix_admin(tmp_path:
         client=None,
         orchestrator=None,
         config=config,
+        runtime_started_at=0.0,
     )
     support = HookContextSupport(
         runtime=runtime,

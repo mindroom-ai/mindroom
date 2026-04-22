@@ -341,6 +341,7 @@ def _build_response_runner(
         enable_streaming=bot.enable_streaming,
         orchestrator=bot.orchestrator,
         event_cache=make_event_cache_mock(),
+        runtime_started_at=0.0,
     )
     hook_context = HookContextSupport(
         runtime=runtime,

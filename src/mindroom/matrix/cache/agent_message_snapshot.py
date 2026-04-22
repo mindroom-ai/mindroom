@@ -36,6 +36,14 @@ class _ThreadCacheStateSnapshot:
     room_invalidation_reason: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _CachedEventRow:
+    """One cached event payload plus the write timestamp for its visible version."""
+
+    event: dict[str, Any]
+    cached_at: float | None
+
+
 def _relation_type(event: dict[str, Any]) -> str | None:
     content = _content_dict(event.get("content"))
     relates_to = content.get("m.relates_to")
@@ -62,10 +70,10 @@ def _load_latest_edit(
     *,
     room_id: str,
     original_event_id: str,
-) -> dict[str, Any] | None:
+) -> _CachedEventRow | None:
     row = conn.execute(
         """
-        SELECT events.event_json
+        SELECT events.event_json, events.cached_at
         FROM event_edits
         JOIN events ON events.event_id = event_edits.edit_event_id
         WHERE event_edits.room_id = ? AND event_edits.original_event_id = ?
@@ -74,7 +82,12 @@ def _load_latest_edit(
         """,
         (room_id, original_event_id),
     ).fetchone()
-    return None if row is None else json.loads(row[0])
+    if row is None:
+        return None
+    return _CachedEventRow(
+        event=json.loads(row[0]),
+        cached_at=None if row[1] is None else float(row[1]),
+    )
 
 
 def _load_thread_cache_state(
@@ -142,7 +155,7 @@ def _iter_scope_events(
     if thread_id is None:
         return conn.execute(
             """
-            SELECT event_json
+            SELECT event_json, cached_at
             FROM events
             WHERE room_id = ?
             ORDER BY origin_server_ts DESC, event_id DESC
@@ -151,7 +164,7 @@ def _iter_scope_events(
         )
     return conn.execute(
         """
-        SELECT event_json
+        SELECT event_json, NULL AS cached_at
         FROM thread_events
         WHERE room_id = ? AND thread_id = ?
         ORDER BY origin_server_ts DESC, rowid DESC
@@ -178,19 +191,27 @@ def _snapshot_from_event(
     conn: sqlite3.Connection,
     *,
     room_id: str,
+    thread_id: str | None,
     event: dict[str, Any],
+    cached_at: float | None,
+    runtime_started_at: float | None,
 ) -> AgentMessageSnapshot | None:
     event_id = event.get("event_id")
     if not isinstance(event_id, str) or not event_id:
         return None
-    latest_event = (
-        _load_latest_edit(
-            conn,
-            room_id=room_id,
-            original_event_id=event_id,
-        )
-        or event
+    latest_edit = _load_latest_edit(
+        conn,
+        room_id=room_id,
+        original_event_id=event_id,
     )
+    latest_event = latest_edit.event if latest_edit is not None else event
+    visible_cached_at = latest_edit.cached_at if latest_edit is not None else cached_at
+    if (
+        thread_id is None
+        and runtime_started_at is not None
+        and (visible_cached_at is None or visible_cached_at < runtime_started_at)
+    ):
+        return None
     timestamp = latest_event.get("origin_server_ts")
     if not isinstance(timestamp, int) or isinstance(timestamp, bool):
         return None
@@ -240,13 +261,14 @@ def _load_scope_snapshot(
     room_id: str,
     thread_id: str | None,
     sender: str,
+    runtime_started_at: float | None,
 ) -> AgentMessageSnapshot | None:
     rows = _iter_scope_events(
         conn,
         room_id=room_id,
         thread_id=thread_id,
     )
-    for (event_json,) in rows:
+    for event_json, cached_at in rows:
         event = json.loads(event_json)
         if not _event_matches_scope(
             event,
@@ -257,7 +279,10 @@ def _load_scope_snapshot(
         snapshot = _snapshot_from_event(
             conn,
             room_id=room_id,
+            thread_id=thread_id,
             event=event,
+            cached_at=None if cached_at is None else float(cached_at),
+            runtime_started_at=runtime_started_at,
         )
         if snapshot is not None:
             return snapshot
@@ -300,6 +325,7 @@ def get_latest_agent_message_snapshot(
             room_id=room_id,
             thread_id=thread_id,
             sender=sender,
+            runtime_started_at=runtime_started_at,
         )
     except json.JSONDecodeError as exc:
         msg = f"Cached Matrix event JSON is corrupt in {db_path}"

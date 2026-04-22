@@ -491,6 +491,7 @@ Every hook context includes these fields:
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
+| `runtime_started_at` | `float \| None` | Unix timestamp for the current runtime freshness boundary, useful when plugin state must ignore cache rows from before the latest bot start |
 | `state_root` | `Path` | Plugin state directory (property) |
 
 Every hook context also exposes the following helpers:

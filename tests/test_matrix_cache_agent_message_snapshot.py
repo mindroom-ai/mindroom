@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -267,6 +268,107 @@ async def test_get_latest_agent_message_snapshot_returns_none_when_cache_has_no_
     )
 
     assert snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_room_scope_ignores_messages_cached_before_current_runtime(
+    tmp_path: Path,
+) -> None:
+    """Room-scope reads should ignore stale message rows from a prior runtime."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                (
+                    "$room-message",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$room-message",
+                        sender="@agent:localhost",
+                        body="Working...",
+                        origin_server_ts=2000,
+                    ),
+                ),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    snapshot = get_latest_agent_message_snapshot(
+        db_path=db_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=time.time() + 1.0,
+    )
+
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
+    tmp_path: Path,
+) -> None:
+    """Room-scope reads should keep a message whose visible edit was cached after restart."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                (
+                    "$room-message",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$room-message",
+                        sender="@agent:localhost",
+                        body="Working...",
+                        origin_server_ts=2000,
+                    ),
+                ),
+            ],
+        )
+        runtime_started_at = time.time()
+        await cache.store_events_batch(
+            [
+                (
+                    "$room-message-edit",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$room-message-edit",
+                        sender="@agent:localhost",
+                        body="* Working...",
+                        origin_server_ts=3000,
+                        relates_to={"rel_type": "m.replace", "event_id": "$room-message"},
+                        new_content={
+                            "body": "Still working",
+                            "io.mindroom.stream_status": "streaming",
+                        },
+                    ),
+                ),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    snapshot = get_latest_agent_message_snapshot(
+        db_path=db_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=runtime_started_at,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={
+            "body": "Still working",
+            "msgtype": "m.text",
+            "io.mindroom.stream_status": "streaming",
+        },
+        origin_server_ts=3000,
+    )
 
 
 def test_real_sqlite_reader_handles_missing_db_returns_none(tmp_path: Path) -> None:
