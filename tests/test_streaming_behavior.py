@@ -3154,6 +3154,49 @@ class TestStreamingBehavior:
             == "<p>Thinking...</p>\n<p>⚠️ Worker startup failed for <code>shell.run</code>: intentional example.</p>"
         )
 
+    @pytest.mark.asyncio
+    async def test_worker_warmup_failure_notice_clears_before_visible_tool_start(self) -> None:
+        """A visible tool-start marker should clear stale worker failure suffixes before sending."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$warmup_tool_start"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            show_tool_calls=True,
+        )
+        streaming.apply_worker_progress_event(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="failed",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=4.0,
+                    error="boom",
+                ),
+            ),
+        )
+
+        async def response_stream() -> AsyncIterator[object]:
+            yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+
+        await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
+        await streaming.finalize(mock_client)
+
+        assert mock_client.room_send.call_count == 2
+        first_body = mock_client.room_send.call_args_list[0].kwargs["content"]["body"]
+        assert "save_file" in first_body
+        assert "Worker startup failed" not in first_body
+
 
 class TestStreamingConfig:
     """Tests for StreamingConfig and its wiring into send_streaming_response."""

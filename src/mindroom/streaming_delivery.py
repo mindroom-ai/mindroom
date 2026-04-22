@@ -19,7 +19,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     import nio
 
@@ -130,6 +130,32 @@ async def _flush_phase_boundary_if_needed(
     await completion
 
 
+async def _apply_visible_text_chunk(
+    streaming: StreamingResponse,
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    text_chunk: str,
+    *,
+    apply_chunk: Callable[[str], None],
+    force_refresh: bool = False,
+    wait_for_delivery: bool = False,
+) -> None:
+    """Apply one visible text-like chunk and queue the matching delivery request."""
+    if not text_chunk:
+        return
+
+    streaming._warmup_state.clear_terminal_failures()
+    prior_delta_at = streaming.last_delta_at
+    apply_chunk(text_chunk)
+    completion = _queue_delivery_request(
+        delivery_queue,
+        force_refresh=force_refresh,
+        prior_delta_at=None if force_refresh else prior_delta_at,
+        wait_for_delivery=wait_for_delivery,
+    )
+    if completion is not None:
+        await completion
+
+
 async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
     response_stream: AsyncIterator[StreamInputChunk],
     streaming: StreamingResponse,
@@ -164,15 +190,14 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
                 pending_tools.append((trace_entry.tool_name, tool_index))
-            if text_chunk:
-                streaming._append_incremental_text(text_chunk)
-                completion = _queue_delivery_request(
-                    delivery_queue,
-                    force_refresh=True,
-                    wait_for_delivery=True,
-                )
-                assert completion is not None
-                await completion
+            await _apply_visible_text_chunk(
+                streaming,
+                delivery_queue,
+                text_chunk,
+                apply_chunk=streaming._append_incremental_text,
+                force_refresh=True,
+                wait_for_delivery=True,
+            )
             continue
         elif isinstance(chunk, ToolCallCompletedEvent):
             info = extract_tool_completed_info(chunk.tool)
@@ -219,11 +244,12 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             logger.debug("unhandled_streaming_event_type", event_type=type(chunk).__name__)
             continue
 
-        if text_chunk:
-            streaming._warmup_state.clear_terminal_failures()
-            prior_delta_at = streaming.last_delta_at
-            streaming._update(text_chunk)
-            _queue_delivery_request(delivery_queue, prior_delta_at=prior_delta_at)
+        await _apply_visible_text_chunk(
+            streaming,
+            delivery_queue,
+            text_chunk,
+            apply_chunk=streaming._update,
+        )
 
 
 async def _drain_worker_progress_events(
