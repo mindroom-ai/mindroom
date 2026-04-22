@@ -1607,7 +1607,7 @@ async def test_generate_response_locked_persists_interrupted_history_when_final_
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
 
-    assert resolution.state == "cancelled_with_visible_response"
+    assert resolution.state == "cancelled_without_visible_response"
     assert resolution.response_identity_event_id is None
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
@@ -1678,7 +1678,7 @@ async def test_generate_response_locked_delivery_cancel_with_visible_tools_repla
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-    assert resolution.state == "cancelled_with_visible_response"
+    assert resolution.state == "cancelled_without_visible_response"
     assert resolution.response_identity_event_id is None
     persisted_session = cast("AgentSession", history_storage.session)
     assert persisted_session is not None
@@ -2342,7 +2342,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             team_mode="coordinate",
         )
 
-    assert resolution.state == "cancelled_with_visible_response"
+    assert resolution.state == "cancelled_without_visible_response"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2483,8 +2483,11 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        on_cancelled = cast("Callable[[str], None] | None", kwargs.get("on_cancelled"))
         with suppress(asyncio.CancelledError):
             await response_function("$thinking")
+        if on_cancelled is not None:
+            on_cancelled("cancelled_by_user")
         return "$thinking"
 
     with (
@@ -2580,8 +2583,11 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        on_cancelled = cast("Callable[[str], None] | None", kwargs.get("on_cancelled"))
         with suppress(asyncio.CancelledError):
             await response_function("$thinking")
+        if on_cancelled is not None:
+            on_cancelled("cancelled_by_user")
         return "$thinking"
 
     with (
@@ -2666,8 +2672,11 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        on_cancelled = cast("Callable[[str], None] | None", kwargs.get("on_cancelled"))
         with suppress(asyncio.CancelledError):
             await response_function("$thinking")
+        if on_cancelled is not None:
+            on_cancelled("cancelled_by_user")
         return "$thinking"
 
     with (
@@ -2725,7 +2734,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             team_mode="coordinate",
         )
 
-    assert resolution.state == "error_with_visible_response"
+    assert resolution.state == "cancelled_without_visible_response"
     assert sequence == [
         "stream",
         "deliver:Team hello",

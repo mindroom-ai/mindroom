@@ -274,13 +274,10 @@ def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911, PLR0912
     if delivery is None:
         if tracked_event_id is not None and tracked_event_id == placeholder_event_id:
             if _is_cancelled_failure_reason(resolved_failure_reason):
-                return FinalDeliveryOutcome.cancelled_with_visible_response(
-                    final_visible_event_id=tracked_event_id,
+                return FinalDeliveryOutcome.cancelled_without_visible_response(
                     failure_reason=resolved_failure_reason or "delivery_result_missing_after_placeholder_cancel",
                 )
-            return FinalDeliveryOutcome.error_with_visible_response(
-                final_visible_event_id=tracked_event_id,
-                final_visible_body="",
+            return FinalDeliveryOutcome.error_without_visible_response(
                 failure_reason=resolved_failure_reason or "delivery_result_missing_after_placeholder",
             )
         if (
@@ -290,14 +287,11 @@ def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911, PLR0912
             and tracked_event_id == existing_event_id
         ):
             if _is_cancelled_failure_reason(resolved_failure_reason):
-                return FinalDeliveryOutcome.cancelled_with_visible_response(
-                    final_visible_event_id=tracked_event_id,
+                return FinalDeliveryOutcome.cancelled_without_visible_response(
                     failure_reason=resolved_failure_reason
                     or "delivery_result_missing_after_visible_placeholder_cancel",
                 )
-            return FinalDeliveryOutcome.error_with_visible_response(
-                final_visible_event_id=tracked_event_id,
-                final_visible_body="",
+            return FinalDeliveryOutcome.error_without_visible_response(
                 failure_reason=resolved_failure_reason or "delivery_result_missing_after_visible_placeholder",
             )
         if tracked_event_id is not None and (existing_event_id is None or tracked_event_id != existing_event_id):

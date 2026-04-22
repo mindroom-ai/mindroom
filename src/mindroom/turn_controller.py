@@ -40,8 +40,9 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
 )
-from mindroom.delivery_gateway import SendTextRequest
+from mindroom.delivery_gateway import FinalDeliveryRequest, SendTextRequest
 from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.final_delivery import TurnDeliveryResolution
 from mindroom.handled_turns import HandledTurnState, apply_delivery_resolution
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.hooks.ingress import (
@@ -92,7 +93,6 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.final_delivery import TurnDeliveryResolution
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -981,14 +981,25 @@ class TurnController:
 
         if action.kind == "reject":
             assert action.rejection_message is not None
-            response_event_id = await self.deps.delivery_gateway.send_text(
-                SendTextRequest(
+            final_outcome = await self.deps.delivery_gateway.deliver_final(
+                FinalDeliveryRequest(
                     target=dispatch.target,
+                    existing_event_id=None,
+                    existing_event_is_placeholder=False,
                     response_text=action.rejection_message,
+                    response_kind=("team" if self.deps.agent_name in self.deps.runtime.config.teams else "ai"),
+                    response_envelope=dispatch.envelope,
+                    correlation_id=dispatch.correlation_id,
+                    tool_trace=None,
+                    extra_content=None,
                 ),
             )
-            self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
-            if dispatch_timing is not None and response_event_id is not None:
+            response_resolution = TurnDeliveryResolution.from_outcome(final_outcome)
+            if response_resolution.should_mark_handled:
+                self._mark_source_events_responded(
+                    apply_delivery_resolution(handled_turn, response_resolution),
+                )
+            if dispatch_timing is not None and response_resolution.turn_completion_event_id is not None:
                 dispatch_timing.mark_first_visible_reply("final")
                 dispatch_timing.mark("response_complete")
                 dispatch_timing.emit_summary(self.deps.logger, outcome="reject")

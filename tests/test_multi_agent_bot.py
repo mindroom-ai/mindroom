@@ -3029,6 +3029,33 @@ class TestAgentBot:
         assert outcome.state == "kept_prior_visible_stream_after_error"
         assert outcome.visible_response_event_id == "$stream"
 
+    @pytest.mark.parametrize(
+        ("failure_reason", "expected_state"),
+        [
+            ("plain boom", "error_without_visible_response"),
+            ("cancelled_by_user", "cancelled_without_visible_response"),
+        ],
+    )
+    def test_missing_delivery_after_placeholder_does_not_promote_placeholder_to_visible_response(
+        self,
+        failure_reason: str,
+        expected_state: str,
+    ) -> None:
+        """A leaked placeholder id must not become the canonical visible terminal response."""
+        outcome = _coerce_final_delivery_outcome(
+            None,
+            tracked_event_id="$thinking",
+            existing_event_id=None,
+            existing_event_is_placeholder=False,
+            placeholder_event_id="$thinking",
+            failure_reason=failure_reason,
+        )
+
+        assert outcome.state == expected_state
+        assert outcome.visible_response_event_id is None
+        assert outcome.response_identity_event_id is None
+        assert outcome.should_mark_handled is False
+
     def test_late_stream_finalize_cancelled_outcome_uses_cancel_state(self) -> None:
         """Late streamed-finalization cancellation must preserve the cancel-specific policy row."""
         outcome = _late_stream_finalize_cancelled_outcome(
@@ -7374,6 +7401,68 @@ class TestAgentBot:
                 response_event_id="$reply",
             ),
         )
+
+    @pytest.mark.asyncio
+    async def test_execute_dispatch_action_does_not_mark_reject_handled_when_rejection_send_fails(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Reject actions must not mark the source handled when no rejection reply was delivered."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[bot.matrix_id],
+                has_non_agent_mentions=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
+            ),
+            correlation_id="$event",
+            envelope=_hook_envelope(body="help me", source_event_id="$event"),
+        )
+        action = ResponseAction(
+            kind="reject",
+            rejection_message="Rejected request",
+        )
+        bot.client = AsyncMock(spec=nio.AsyncClient)
+
+        async def unused_payload_builder(_context: MessageContext) -> DispatchPayload:
+            return DispatchPayload(prompt="help me")
+
+        with patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(return_value=None)):
+            await bot._turn_controller._execute_response_action(
+                room,
+                event,
+                dispatch,
+                action,
+                unused_payload_builder,
+                processing_log="processing",
+                dispatch_started_at=0.0,
+                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+            )
+
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_uses_thread_snapshot_without_full_history(

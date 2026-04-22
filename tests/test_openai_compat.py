@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
-from agno.run.agent import RunCompletedEvent, RunOutput
+from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
 from agno.run.team import TeamRunOutput
 from agno.team import Team as AgnoTeam
 from fastapi import Request
@@ -1358,6 +1358,39 @@ class TestStreamingCompletion:
         )
 
         assert text == "final answer"
+
+    def test_streaming_corrective_final_content_does_not_duplicate_prior_delta(
+        self,
+        app_client: TestClient,
+    ) -> None:
+        """Corrective final completion content should not duplicate already-streamed text."""
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="hel")
+            yield RunCompletedEvent(content="hello")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.strip().split("\n\n")
+            if line.startswith("data: {")
+        ]
+        contents = [
+            chunk["choices"][0]["delta"].get("content", "")
+            for chunk in chunks
+            if "content" in chunk["choices"][0]["delta"]
+        ]
+        assert "".join(contents) == "hello"
 
     def test_streaming_first_event_error_returns_500(self, app_client: TestClient) -> None:
         """If first stream event is an error string, return HTTP 500 instead of SSE."""

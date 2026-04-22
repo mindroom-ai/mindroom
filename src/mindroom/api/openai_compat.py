@@ -1057,6 +1057,34 @@ def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> 
     return _format_stream_tool_event(event, tool_state)
 
 
+def _extract_stream_delta(
+    event: AIStreamChunk,
+    tool_state: _ToolStreamState,
+    emitted_assistant_text: str,
+) -> tuple[str | None, str]:
+    """Extract one SSE delta while avoiding duplicate corrective final content."""
+    delta: str | None = None
+    next_emitted_text = emitted_assistant_text
+
+    if isinstance(event, RunContentEvent):
+        if event.content:
+            text = str(event.content)
+            delta = text
+            next_emitted_text = f"{emitted_assistant_text}{text}"
+    elif isinstance(event, RunCompletedEvent):
+        if event.content is not None:
+            final_text = str(event.content)
+            next_emitted_text = final_text
+            if not emitted_assistant_text:
+                delta = final_text
+            elif final_text.startswith(emitted_assistant_text):
+                delta = final_text[len(emitted_assistant_text) :] or None
+    else:
+        delta = _extract_stream_text(event, tool_state)
+
+    return delta, next_emitted_text
+
+
 async def _stream_completion(
     agent_name: str,
     prompt: str,
@@ -1107,12 +1135,17 @@ async def _stream_completion(
 
     async def event_generator() -> AsyncIterator[str]:
         tool_state = _ToolStreamState()
+        emitted_assistant_text = ""
         try:
             # 1. Initial role announcement
             yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
             # 2. Yield the peeked first event
-            text = _extract_stream_text(first_event, tool_state)
+            text, emitted_assistant_text = _extract_stream_delta(
+                first_event,
+                tool_state,
+                emitted_assistant_text,
+            )
             if text:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
@@ -1120,7 +1153,11 @@ async def _stream_completion(
             # Error strings after the first event are sent as content chunks
             # since we can't switch to an error HTTP status mid-stream.
             async for event in stream:
-                text = _extract_stream_text(event, tool_state)
+                text, emitted_assistant_text = _extract_stream_delta(
+                    event,
+                    tool_state,
+                    emitted_assistant_text,
+                )
                 if text:
                     yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
