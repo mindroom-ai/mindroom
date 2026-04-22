@@ -18,6 +18,7 @@ from agno.models.message import Message
 from agno.models.response import ModelResponse
 
 from mindroom.agents import create_agent
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 
@@ -171,6 +172,15 @@ def test_agent_override_can_reenable_compress_tool_results(tmp_path: Path) -> No
 
     assert agent.compress_tool_results is True
     assert agent.compression_manager is not None
+
+
+def test_agent_config_compress_tool_results_description_is_user_facing() -> None:
+    """The schema description should warn without leaking internal tracker IDs."""
+    description = AgentConfig.model_fields["compress_tool_results"].description
+
+    assert description is not None
+    assert "Anthropic/Vertex Claude" in description
+    assert "ISSUE-" not in description
 
 
 def test_disabled_compression_keeps_tool_message_bytes_stable(tmp_path: Path) -> None:
