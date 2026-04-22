@@ -1642,6 +1642,69 @@ def test_kubernetes_backend_warm_reconcile_failures_are_non_destructive(
 @pytest.mark.parametrize(
     ("failure_target", "error_message"),
     [
+        ("apply_service", "service apply failed"),
+        ("wait_for_ready", "worker never became ready"),
+    ],
+)
+def test_kubernetes_backend_existing_starting_worker_failures_record_failure(
+    tmp_path: Path,
+    failure_target: str,
+    error_message: str,
+) -> None:
+    """Existing starting workers should still be marked failed when recovery fails."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    deployment = apps_api.deployments[handle.worker_id]
+    deployment.metadata.annotations["mindroom.ai/worker-status"] = "starting"
+    deployment.metadata.annotations.pop("mindroom.ai/failure-reason", None)
+    deployment.status.ready_replicas = 0
+
+    if failure_target == "apply_service":
+
+        def apply_service_with_failure(worker_id: str) -> None:
+            _ = worker_id
+            msg = error_message
+            raise RuntimeError(msg)
+
+        backend._resources.apply_service = apply_service_with_failure
+    else:
+
+        def wait_for_ready_with_failure(
+            _worker_id: str,
+            *,
+            timeout_seconds: float,
+            deployment_ready_fn: object,
+            on_poll_tick: object | None = None,
+        ) -> object:
+            del timeout_seconds, deployment_ready_fn, on_poll_tick
+            msg = error_message
+            raise WorkerBackendError(msg)
+
+        backend._resources.wait_for_ready = wait_for_ready_with_failure
+
+    events: list[WorkerReadyProgress] = []
+    with pytest.raises(WorkerBackendError, match=error_message):
+        backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=11.0,
+            progress_sink=events.append,
+        )
+
+    deployment = apps_api.deployments[handle.worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == error_message
+    assert deployment.spec.replicas == 0
+    assert handle.worker_id not in core_api.services
+    assert events[-1].phase == "failed"
+
+
+@pytest.mark.parametrize(
+    ("failure_target", "error_message"),
+    [
         ("sync_shared_credentials", "sync credentials failed"),
         ("apply_service", "service apply failed"),
     ],

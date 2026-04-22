@@ -394,7 +394,7 @@ class KubernetesWorkerBackend:
                         private_agent_names=spec.private_agent_names,
                     )
                     startup_triggered = should_restart or deployment_apply.recreated
-                    destructive_failure_allowed = startup_triggered
+                    destructive_failure_allowed = destructive_failure_allowed or startup_triggered
                     if startup_triggered and not should_report_progress:
                         poll_reporter, finalize_progress = _build_progress_reporter(
                             worker_key=worker_key,

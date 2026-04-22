@@ -2150,6 +2150,94 @@ async def test_sync_only_worker_routed_tool_surfaces_progress_in_real_async_path
     assert result.result == "proxied"
 
 
+def test_worker_routed_tool_error_does_not_record_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ordinary proxied tool errors should fail the call without tearing down the worker."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+
+    class _FakeWorkerManager:
+        def __init__(self) -> None:
+            self.touched: list[str] = []
+            self.failures: list[tuple[str, str]] = []
+
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
+            del now, progress_sink
+            return WorkerHandle(
+                worker_id="worker-1",
+                worker_key=spec.worker_key,
+                endpoint="http://worker/api/sandbox-runner/execute",
+                auth_token=_TEST_AUTH_TOKEN,
+                status="ready",
+                backend_name="kubernetes",
+                last_used_at=0.0,
+                created_at=0.0,
+            )
+
+        def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
+            del now
+            self.touched.append(worker_key)
+            return None
+
+        def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> object:
+            del now
+            self.failures.append((worker_key, failure_reason))
+            return None
+
+    class _ToolErrorClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            del json, headers
+            assert url == "http://worker/api/sandbox-runner/execute"
+            return _FakeResponse(
+                {"ok": False, "error": "Sandbox tool execution failed: FileNotFoundError: missing.txt"},
+            )
+
+    manager = _FakeWorkerManager()
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=_worker_target(runtime_paths, "shared", "code", execution_identity),
+    )
+    entrypoint = tool.functions["read_file"].entrypoint
+    assert entrypoint is not None
+
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _ToolErrorClient),
+        pytest.raises(RuntimeError, match="FileNotFoundError: missing.txt"),
+    ):
+        entrypoint("missing.txt")
+
+    assert manager.touched == [_worker_target(runtime_paths, "shared", "code", execution_identity).worker_key]
+    assert manager.failures == []
+
+
 class TestWorkerToolsOverride:
     """Tests for per-agent worker_tools_override parameter."""
 

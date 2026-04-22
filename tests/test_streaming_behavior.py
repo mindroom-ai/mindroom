@@ -6,7 +6,7 @@ import asyncio
 import tempfile
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -38,7 +38,7 @@ from mindroom.streaming import (
     is_interrupted_partial_reply,
     send_streaming_response,
 )
-from mindroom.streaming_delivery import _shutdown_stream_delivery
+from mindroom.streaming_delivery import _shutdown_stream_delivery, _StreamDeliveryShutdownTimeoutError
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import (
@@ -1791,6 +1791,69 @@ class TestStreamingBehavior:
         assert isinstance(shutdown_error, TimeoutError)
         release_task.set()
         await delivery_task
+
+    @pytest.mark.asyncio
+    async def test_send_streaming_response_skips_terminal_finalize_when_delivery_shutdown_times_out(self) -> None:
+        """Terminal finalization must not run when the delivery owner refuses to stop."""
+        mock_client = _make_matrix_client_mock()
+        finalize_calls: list[Exception | None] = []
+
+        class TrackingStreamingResponse(StreamingResponse):
+            async def finalize(
+                self,
+                client: nio.AsyncClient,
+                *,
+                cancelled: bool = False,
+                restart_interrupted: bool = False,
+                error: Exception | None = None,
+            ) -> None:
+                del client, cancelled, restart_interrupted
+                finalize_calls.append(error)
+
+        async def fail_stream_supervision(
+            response_stream: AsyncIterator[object],
+            streaming: StreamingResponse,
+            progress_task: asyncio.Task[None] | None,
+            delivery_task: asyncio.Task[None] | None,
+            delivery_queue: asyncio.Queue[object | None],
+        ) -> None:
+            del response_stream, streaming, progress_task, delivery_task, delivery_queue
+            msg = "stream blew up"
+            raise RuntimeError(msg)
+
+        async def timeout_shutdown(
+            delivery_queue: asyncio.Queue[object | None],
+            delivery_task: asyncio.Task[None] | None,
+        ) -> Exception | None:
+            del delivery_queue
+            if delivery_task is not None:
+                delivery_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await delivery_task
+            return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
+
+        with (
+            patch("mindroom.streaming._consume_stream_with_progress_supervision", new=fail_stream_supervision),
+            patch("mindroom.streaming._shutdown_stream_delivery", new=timeout_shutdown),
+            pytest.raises(
+                StreamingDeliveryError,
+                match="Timed out shutting down stream delivery controller",
+            ) as exc_info,
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=_aiter(),
+                streaming_cls=TrackingStreamingResponse,
+            )
+
+        assert isinstance(exc_info.value.error, TimeoutError)
+        assert finalize_calls == []
 
     @pytest.mark.asyncio
     async def test_worker_progress_and_content_updates_do_not_overlap_edits(self) -> None:

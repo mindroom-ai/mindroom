@@ -41,6 +41,10 @@ class _NonTerminalDeliveryError(Exception):
         self.error = error
 
 
+class _StreamDeliveryShutdownTimeoutError(TimeoutError):
+    """Raised when the single non-terminal delivery owner refuses to stop."""
+
+
 def _longest_common_prefix_len(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> int:
     """Return the number of leading tool-trace entries shared by both lists."""
     max_len = min(len(first), len(second))
@@ -287,7 +291,7 @@ async def _shutdown_stream_delivery(
         delivery_task.cancel()
         done, _pending = await asyncio.wait({delivery_task}, timeout=0.5)
         if delivery_task not in done:
-            return TimeoutError("Timed out shutting down stream delivery controller")
+            return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
     if delivery_task.cancelled():
         return None
     task_error = delivery_task.exception()

@@ -627,7 +627,7 @@ def _call_proxy_sync(  # noqa: C901
         return data.get("result")
     error = data.get("error") or "Sandbox execution failed."
     if worker_handle is not None:
-        _get_worker_manager(runtime_paths, proxy_config).record_failure(worker_handle.worker_key, str(error))
+        _get_worker_manager(runtime_paths, proxy_config).touch_worker(worker_handle.worker_key)
     raise RuntimeError(str(error))
 
 

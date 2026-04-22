@@ -34,6 +34,7 @@ from mindroom.streaming_delivery import (
     _raise_progress_delivery_error,
     _shutdown_stream_delivery,
     _shutdown_worker_progress_drain,
+    _StreamDeliveryShutdownTimeoutError,
 )
 from mindroom.streaming_warmup import WorkerWarmupState
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
@@ -77,6 +78,23 @@ class StreamingDeliveryError(Exception):
         self.event_id = event_id
         self.accumulated_text = accumulated_text
         self.tool_trace = tool_trace.copy()
+
+
+def _build_streaming_delivery_error(
+    streaming: StreamingResponse,
+    error: Exception,
+    *,
+    tool_trace_collector: list[ToolTraceEntry] | None,
+) -> StreamingDeliveryError:
+    """Build one normalized delivery failure from the current committed stream state."""
+    if tool_trace_collector is not None:
+        tool_trace_collector[:] = streaming.tool_trace
+    return StreamingDeliveryError(
+        error,
+        event_id=streaming.event_id,
+        accumulated_text=streaming.accumulated_text,
+        tool_trace=streaming.tool_trace,
+    )
 
 
 def _raise_nonterminal_delivery_error(error: Exception) -> NoReturn:
@@ -642,18 +660,22 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 delivery_queue,
             )
             progress_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            progress_task = None
+            if progress_error is None:
+                progress_task = None
             delivery_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            delivery_task = None
+            if delivery_error is None:
+                delivery_task = None
             if progress_error is not None:
                 _raise_progress_delivery_error(progress_error)
             if delivery_error is not None:
                 _raise_nonterminal_delivery_error(delivery_error)
         except asyncio.CancelledError as exc:
             cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            progress_task = None
+            if cleanup_error is None:
+                progress_task = None
             delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            delivery_task = None
+            if delivery_cleanup_error is None:
+                delivery_task = None
             if cleanup_error is not None:
                 logger.warning(
                     "Worker progress drain raised during cancellation cleanup",
@@ -664,6 +686,13 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                     "Stream delivery controller raised during cancellation cleanup",
                     error=str(delivery_cleanup_error),
                 )
+                if isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
+                    streaming.restore_last_delivered_state()
+                    raise _build_streaming_delivery_error(
+                        streaming,
+                        delivery_cleanup_error,
+                        tool_trace_collector=tool_trace_collector,
+                    ) from delivery_cleanup_error
             if is_sync_restart_cancel(exc):
                 logger.info("Streaming response interrupted by sync restart", message_id=streaming.event_id)
                 await streaming.finalize(client, restart_interrupted=True)
@@ -679,9 +708,11 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             delivery_error = e.error if isinstance(e, _NonTerminalDeliveryError) else e
             logger.exception("Streaming response failed", error=str(delivery_error))
             cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            progress_task = None
+            if cleanup_error is None:
+                progress_task = None
             delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            delivery_task = None
+            if delivery_cleanup_error is None:
+                delivery_task = None
             if cleanup_error is not None and cleanup_error is not delivery_error:
                 logger.warning(
                     "Worker progress drain raised during error cleanup",
@@ -692,16 +723,25 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                     "Stream delivery controller raised during error cleanup",
                     error=str(delivery_cleanup_error),
                 )
+            shutdown_timeout = None
+            if isinstance(delivery_error, _StreamDeliveryShutdownTimeoutError):
+                shutdown_timeout = delivery_error
+            elif isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
+                shutdown_timeout = delivery_cleanup_error
+            if shutdown_timeout is not None:
+                streaming.restore_last_delivered_state()
+                raise _build_streaming_delivery_error(
+                    streaming,
+                    shutdown_timeout,
+                    tool_trace_collector=tool_trace_collector,
+                ) from shutdown_timeout
             if isinstance(e, _NonTerminalDeliveryError):
                 streaming.restore_last_delivered_state()
             await streaming.finalize(client, error=delivery_error)
-            if tool_trace_collector is not None:
-                tool_trace_collector[:] = streaming.tool_trace
-            raise StreamingDeliveryError(
+            raise _build_streaming_delivery_error(
+                streaming,
                 delivery_error,
-                event_id=streaming.event_id,
-                accumulated_text=streaming.accumulated_text,
-                tool_trace=streaming.tool_trace,
+                tool_trace_collector=tool_trace_collector,
             ) from delivery_error
         else:
             await streaming.finalize(client)
