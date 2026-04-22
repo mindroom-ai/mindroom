@@ -26,7 +26,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import CancelSource, classify_cancel_source
 from mindroom.streaming_delivery import (
     StreamInputChunk,
-    _consume_streaming_chunks as _consume_streaming_chunks_impl,
     _consume_stream_with_progress_supervision,
     _DeliveryRequest,
     _drain_worker_progress_events,
@@ -36,6 +35,9 @@ from mindroom.streaming_delivery import (
     _shutdown_stream_delivery,
     _shutdown_worker_progress_drain,
     _StreamDeliveryShutdownTimeoutError,
+)
+from mindroom.streaming_delivery import (
+    _consume_streaming_chunks as _consume_streaming_chunks_impl,
 )
 from mindroom.streaming_warmup import WorkerWarmupState
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
@@ -664,7 +666,7 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.last_delta_at = time.time()
 
 
-async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
+async def _consume_streaming_chunks(
     client: nio.AsyncClient,
     response_stream: AsyncIterator[_StreamInputChunk],
     streaming: StreamingResponse,

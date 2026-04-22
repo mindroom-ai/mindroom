@@ -278,7 +278,7 @@ async def _shutdown_worker_progress_drain(
     return None
 
 
-async def _drive_stream_delivery(
+async def _drive_stream_delivery(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     streaming: StreamingResponse,
     delivery_queue: asyncio.Queue[_DeliveryRequest | None],
@@ -309,9 +309,9 @@ async def _drive_stream_delivery(
                 phase_boundary_flush=merged_request.phase_boundary_flush or next_request.phase_boundary_flush,
                 allow_empty_progress=merged_request.allow_empty_progress or next_request.allow_empty_progress,
                 prior_delta_at=(
-                    merged_request.prior_delta_at
-                    if merged_request.prior_delta_at is not None
-                    else next_request.prior_delta_at
+                    next_request.prior_delta_at
+                    if next_request.prior_delta_at is not None
+                    else merged_request.prior_delta_at
                 ),
             )
 
