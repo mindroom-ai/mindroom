@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
 from unittest.mock import patch
 
+import httpx
 import pytest
 from agno.agent import Agent
 from agno.agent._tools import parse_tools
@@ -135,6 +136,69 @@ class _FakeResponse:
 
     def json(self) -> dict[str, object]:
         return self._payload
+
+
+class _TrackingWorkerManager:
+    def __init__(self) -> None:
+        self.touched: list[str] = []
+        self.failures: list[tuple[str, str]] = []
+
+    def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
+        del now, progress_sink
+        return WorkerHandle(
+            worker_id="worker-1",
+            worker_key=spec.worker_key,
+            endpoint="http://worker/api/sandbox-runner/execute",
+            auth_token=_TEST_AUTH_TOKEN,
+            status="ready",
+            backend_name="kubernetes",
+            last_used_at=0.0,
+            created_at=0.0,
+        )
+
+    def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
+        del now
+        self.touched.append(worker_key)
+        return None
+
+    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> object:
+        del now
+        self.failures.append((worker_key, failure_reason))
+        return None
+
+
+class _HttpStatusErrorResponse:
+    def __init__(self, url: str, *, status_code: int) -> None:
+        self.url = url
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        request = httpx.Request("POST", self.url)
+        response = httpx.Response(self.status_code, request=request)
+        message = f"{self.status_code} client error"
+        raise httpx.HTTPStatusError(message, request=request, response=response)
+
+    def json(self) -> dict[str, object]:
+        return {}
+
+
+def _http_status_client_class(*, status_code: int) -> type:
+    class _HttpStatusClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _HttpStatusErrorResponse:
+            del json, headers
+            assert url == "http://worker/api/sandbox-runner/execute"
+            return _HttpStatusErrorResponse(url, status_code=status_code)
+
+    return _HttpStatusClient
 
 
 def _recording_client_class(
@@ -2171,34 +2235,6 @@ def test_worker_routed_tool_error_does_not_record_worker_failure(
         execution_mode="off",
     )
 
-    class _FakeWorkerManager:
-        def __init__(self) -> None:
-            self.touched: list[str] = []
-            self.failures: list[tuple[str, str]] = []
-
-        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
-            del now, progress_sink
-            return WorkerHandle(
-                worker_id="worker-1",
-                worker_key=spec.worker_key,
-                endpoint="http://worker/api/sandbox-runner/execute",
-                auth_token=_TEST_AUTH_TOKEN,
-                status="ready",
-                backend_name="kubernetes",
-                last_used_at=0.0,
-                created_at=0.0,
-            )
-
-        def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
-            del now
-            self.touched.append(worker_key)
-            return None
-
-        def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> object:
-            del now
-            self.failures.append((worker_key, failure_reason))
-            return None
-
     class _ToolErrorClient:
         def __init__(self, *, timeout: float) -> None:
             del timeout
@@ -2216,7 +2252,7 @@ def test_worker_routed_tool_error_does_not_record_worker_failure(
                 {"ok": False, "error": "Sandbox tool execution failed: FileNotFoundError: missing.txt"},
             )
 
-    manager = _FakeWorkerManager()
+    manager = _TrackingWorkerManager()
     tool = get_tool_by_name(
         "file",
         runtime_paths,
@@ -2235,6 +2271,52 @@ def test_worker_routed_tool_error_does_not_record_worker_failure(
         entrypoint("missing.txt")
 
     assert manager.touched == [_worker_target(runtime_paths, "shared", "code", execution_identity).worker_key]
+    assert manager.failures == []
+
+
+@pytest.mark.parametrize("status_code", [400, 404])
+def test_worker_routed_http_client_error_does_not_record_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    """Client-side HTTP errors from a healthy worker should fail the call without tearing down the worker."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    assert worker_target.worker_key is not None
+    manager = _TrackingWorkerManager()
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=worker_target,
+    )
+    entrypoint = tool.functions["read_file"].entrypoint
+    assert entrypoint is not None
+
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _http_status_client_class(status_code=status_code)),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        entrypoint("missing.txt")
+
+    assert manager.touched == [worker_target.worker_key]
     assert manager.failures == []
 
 

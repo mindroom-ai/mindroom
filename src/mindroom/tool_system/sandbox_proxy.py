@@ -430,6 +430,23 @@ def _request_headers_for_handle(
     return {_SANDBOX_PROXY_TOKEN_HEADER: token}
 
 
+def _record_proxy_exception_for_worker(
+    exc: Exception,
+    *,
+    worker_handle: WorkerHandle | None,
+    runtime_paths: RuntimePaths,
+    proxy_config: SandboxProxyConfig,
+) -> None:
+    """Classify one proxy exception as either worker-health or request-level failure."""
+    if worker_handle is None:
+        return
+    manager = _get_worker_manager(runtime_paths, proxy_config)
+    if isinstance(exc, httpx.HTTPStatusError) and 400 <= exc.response.status_code < 500:
+        manager.touch_worker(worker_handle.worker_key)
+        return
+    manager.record_failure(worker_handle.worker_key, str(exc))
+
+
 def _make_progress_sink(
     pump: WorkerProgressPump,
     *,
@@ -614,8 +631,12 @@ def _call_proxy_sync(  # noqa: C901
             response.raise_for_status()
             data = response.json()
     except Exception as exc:
-        if worker_handle is not None:
-            _get_worker_manager(runtime_paths, proxy_config).record_failure(worker_handle.worker_key, str(exc))
+        _record_proxy_exception_for_worker(
+            exc,
+            worker_handle=worker_handle,
+            runtime_paths=runtime_paths,
+            proxy_config=proxy_config,
+        )
         raise
 
     if not isinstance(data, Mapping):
