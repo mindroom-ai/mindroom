@@ -17,9 +17,9 @@ from mindroom.matrix.large_messages import _NORMAL_MESSAGE_LIMIT, prepare_large_
 from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingResponse,
-    _StreamInputChunk,
     send_streaming_response,
 )
+from mindroom.streaming_delivery import StreamInputChunk
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 
 
@@ -625,7 +625,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
     client = MockClient()
     config = MockConfig()
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file", args_preview="file_name=a.py")]
         yield StructuredStreamChunk(content="🔧 `save_file` [1] ⏳", tool_trace=trace)
 
@@ -657,7 +657,7 @@ async def test_streaming_with_extra_content_metadata() -> None:
     config = MockConfig()
     extra_content: dict[str, object] = {}
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield "hello"
         extra_content[AI_RUN_METADATA_KEY] = {"version": 1, "usage": {"total_tokens": 10}}
 
@@ -692,7 +692,7 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
     ]
     trace_stale = [ToolTraceEntry(type="tool_call_started", tool_name="save_file")]
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield StructuredStreamChunk(content="🔧 `save_file` [1]", tool_trace=trace_full)
         yield StructuredStreamChunk(content="🔧 `save_file` [1]", tool_trace=trace_stale)
 
@@ -723,7 +723,7 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
 
     tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
         yield ToolCallCompletedEvent(tool=tool, content="ok")
 
@@ -754,7 +754,7 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
     client = MockClient()
     config = MockConfig()
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="first_tool", tool_args={}))
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="second_tool", tool_args={}))
         yield "Done"

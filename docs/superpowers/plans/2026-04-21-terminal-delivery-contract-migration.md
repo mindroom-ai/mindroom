@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.12, asyncio, dataclasses, Matrix nio helpers, pytest, existing MindRoom streaming and hook abstractions.
 
+**Status:** Completed on `pr-issue-178-terminal-status` at `df8dc4dbd` after the targeted terminal-delivery verification suites and scoped pre-commit checks passed.
+
 ---
 
 ## Accountability Protocol
@@ -82,7 +84,7 @@ Expected by the end:
 - Create: `src/mindroom/final_delivery.py`
 - Create: `tests/test_final_delivery.py`
 
-- [ ] **Step 1: Write failing policy-table tests for every terminal state.**
+- [x] **Step 1: Write failing policy-table tests for every terminal state.**
 
 Cover at minimum:
 - hook emission policy
@@ -95,7 +97,7 @@ Cover at minimum:
 - persistence eligibility
 - shielding eligibility
 
-- [ ] **Step 2: Run the new policy-table tests and verify they fail for missing module/types.**
+- [x] **Step 2: Run the new policy-table tests and verify they fail for missing module/types.**
 
 Run:
 ```bash
@@ -105,14 +107,14 @@ uv run pytest tests/test_final_delivery.py -q -n 0 --no-cov
 Expected:
 - FAIL because `final_delivery.py` and canonical policy types do not exist yet
 
-- [ ] **Step 3: Implement `FinalDeliveryOutcome`, per-state policy rows, and accessor helpers in `src/mindroom/final_delivery.py`.**
+- [x] **Step 3: Implement `FinalDeliveryOutcome`, per-state policy rows, and accessor helpers in `src/mindroom/final_delivery.py`.**
 
 Requirements:
 - frozen dataclasses only
 - policy rows derive all three event-id meanings
 - no hand-coded parallel conditionals outside the policy table
 
-- [ ] **Step 4: Re-run `tests/test_final_delivery.py` until green.**
+- [x] **Step 4: Re-run `tests/test_final_delivery.py` until green.**
 
 Run:
 ```bash
@@ -122,7 +124,7 @@ uv run pytest tests/test_final_delivery.py -q -n 0 --no-cov
 Expected:
 - PASS
 
-- [ ] **Step 5: Commit the canonical policy layer.**
+- [x] **Step 5: Commit the canonical policy layer.**
 
 ```bash
 git add src/mindroom/final_delivery.py tests/test_final_delivery.py
@@ -137,7 +139,7 @@ git commit -m "refactor: add canonical terminal delivery policy"
 - Test: `tests/test_final_delivery.py`
 - Test: `tests/test_cancelled_response_hook.py`
 
-- [ ] **Step 1: Write failing lifecycle tests for `TurnDeliveryResolution`.**
+- [x] **Step 1: Write failing lifecycle tests for `TurnDeliveryResolution`.**
 
 Cover at minimum:
 - lifecycle returns typed result instead of `str | None`
@@ -145,7 +147,7 @@ Cover at minimum:
 - outer repair cannot synthesize `response_identity_event_id`
 - outer repair can preserve already-known visibility without changing semantics
 
-- [ ] **Step 2: Run only the new lifecycle tests and confirm failure.**
+- [x] **Step 2: Run only the new lifecycle tests and confirm failure.**
 
 Run:
 ```bash
@@ -155,14 +157,14 @@ uv run pytest tests/test_final_delivery.py tests/test_cancelled_response_hook.py
 Expected:
 - FAIL with missing type or wrong lifecycle return shape
 
-- [ ] **Step 3: Implement `TurnDeliveryResolution` and refactor `ResponseLifecycle.finalize()` to return it.**
+- [x] **Step 3: Implement `TurnDeliveryResolution` and refactor `ResponseLifecycle.finalize()` to return it.**
 
 Requirements:
 - raw `FinalDeliveryOutcome` does not cross to outer callers
 - outer repair is transport-only
 - no hook emission in lifecycle
 
-- [ ] **Step 4: Re-run the targeted lifecycle tests until green.**
+- [x] **Step 4: Re-run the targeted lifecycle tests until green.**
 
 Run:
 ```bash
@@ -172,7 +174,7 @@ uv run pytest tests/test_final_delivery.py tests/test_cancelled_response_hook.py
 Expected:
 - PASS
 
-- [ ] **Step 5: Run the stop-the-line checks for lifecycle helpers.**
+- [x] **Step 5: Run the stop-the-line checks for lifecycle helpers.**
 
 Run:
 ```bash
@@ -182,7 +184,7 @@ rg -n "resolve_response_event_id|_is_cancelled_delivery_result" src/mindroom
 Expected:
 - these helpers still exist if later tasks need them, but any remaining hits are clearly on the deletion path and not used by migrated lifecycle code
 
-- [ ] **Step 6: Commit the lifecycle result boundary.**
+- [x] **Step 6: Commit the lifecycle result boundary.**
 
 ```bash
 git add src/mindroom/final_delivery.py src/mindroom/response_lifecycle.py tests/test_final_delivery.py tests/test_cancelled_response_hook.py
@@ -197,7 +199,7 @@ git commit -m "refactor: return typed terminal lifecycle resolution"
 - Test: `tests/test_cancelled_response_hook.py`
 - Test: `tests/test_streaming_finalize.py`
 
-- [ ] **Step 1: Write failing tests for gateway-owned terminal hook emission.**
+- [x] **Step 1: Write failing tests for gateway-owned terminal hook emission.**
 
 Cover at minimum:
 - ordinary non-streaming failed send emits exactly one terminal hook
@@ -206,7 +208,7 @@ Cover at minimum:
 - `suppression_cleanup_failed` stays in the typed contract after delivery starts
 - preserved-stream re-edit failure does not redact the already-visible stream
 
-- [ ] **Step 2: Run the targeted gateway tests and verify failure.**
+- [x] **Step 2: Run the targeted gateway tests and verify failure.**
 
 Run:
 ```bash
@@ -216,7 +218,7 @@ uv run pytest tests/test_cancelled_response_hook.py tests/test_streaming_finaliz
 Expected:
 - FAIL on current hook emission or cleanup behavior
 
-- [ ] **Step 3: Refactor `delivery_gateway.py` so it is the only terminal hook owner.**
+- [x] **Step 3: Refactor `delivery_gateway.py` so it is the only terminal hook owner.**
 
 Requirements:
 - canonical outcome for every final send/edit failure
@@ -224,13 +226,13 @@ Requirements:
 - no exception escape after delivery has started
 - preserved-stream states keep the event physically visible
 
-- [ ] **Step 4: Remove matching runner/lifecycle terminal-hook emission.**
+- [x] **Step 4: Remove matching runner/lifecycle terminal-hook emission.**
 
 Requirements:
 - no duplicate hook emission paths
 - no hook backfill from raw `DeliveryResult`
 
-- [ ] **Step 5: Re-run the gateway tests until green.**
+- [x] **Step 5: Re-run the gateway tests until green.**
 
 Run:
 ```bash
@@ -240,7 +242,7 @@ uv run pytest tests/test_cancelled_response_hook.py tests/test_streaming_finaliz
 Expected:
 - PASS
 
-- [ ] **Step 6: Run the stop-the-line hook grep.**
+- [x] **Step 6: Run the stop-the-line hook grep.**
 
 Run:
 ```bash
@@ -250,7 +252,7 @@ rg -n "emit_cancelled_response|emit_after_response" src/mindroom/response_runner
 Expected:
 - no remaining terminal hook emission in runner/lifecycle
 
-- [ ] **Step 7: Commit gateway ownership.**
+- [x] **Step 7: Commit gateway ownership.**
 
 ```bash
 git add src/mindroom/delivery_gateway.py src/mindroom/response_runner.py src/mindroom/response_lifecycle.py tests/test_cancelled_response_hook.py tests/test_streaming_finalize.py
@@ -267,7 +269,7 @@ git commit -m "refactor: centralize terminal delivery hooks in gateway"
 - Test: `tests/test_ai_user_id.py`
 - Test: `tests/test_streaming_finalize.py`
 
-- [ ] **Step 1: Write failing tests for final-text authority.**
+- [x] **Step 1: Write failing tests for final-text authority.**
 
 Cover at minimum:
 - corrective `RunCompletedEvent.content` overrides earlier partial text
@@ -278,7 +280,7 @@ Cover at minimum:
 - hidden-tool-only completion cannot finish as visible `Thinking...`
 - ambiguous first visible terminal send is not retried
 
-- [ ] **Step 2: Run only the new text/stream tests and confirm failure.**
+- [x] **Step 2: Run only the new text/stream tests and confirm failure.**
 
 Run:
 ```bash
@@ -288,14 +290,14 @@ uv run pytest tests/test_ai_user_id.py tests/test_streaming_finalize.py -q -n 0 
 Expected:
 - FAIL on stale text, retry, or placeholder-success behavior
 
-- [ ] **Step 3: Implement the shared canonicalization step and wire every consumer to it.**
+- [x] **Step 3: Implement the shared canonicalization step and wire every consumer to it.**
 
 Requirements:
 - one authoritative final assistant-text rule
 - one authoritative rendered visible-body rule
 - no independent tool-marker reconstruction
 
-- [ ] **Step 4: Re-run the targeted text/stream tests until green.**
+- [x] **Step 4: Re-run the targeted text/stream tests until green.**
 
 Run:
 ```bash
@@ -305,7 +307,7 @@ uv run pytest tests/test_ai_user_id.py tests/test_streaming_finalize.py -q -n 0 
 Expected:
 - PASS
 
-- [ ] **Step 5: Commit the shared final-text boundary.**
+- [x] **Step 5: Commit the shared final-text boundary.**
 
 ```bash
 git add src/mindroom/streaming.py src/mindroom/ai.py src/mindroom/teams.py src/mindroom/api/openai_compat.py tests/test_ai_user_id.py tests/test_streaming_finalize.py
@@ -320,7 +322,7 @@ git commit -m "refactor: unify terminal final text authority"
 - Test: `tests/test_queued_message_notify.py`
 - Test: `tests/test_final_delivery.py`
 
-- [ ] **Step 1: Write failing post-effect tests for policy-driven behavior.**
+- [x] **Step 1: Write failing post-effect tests for policy-driven behavior.**
 
 Cover at minimum:
 - persistence and thread summary use `response_identity_event_id`
@@ -330,7 +332,7 @@ Cover at minimum:
 - cancellation-derived states do not register interactive follow-up
 - suppressed compaction dispatch honors the policy row
 
-- [ ] **Step 2: Run the targeted post-effect tests and confirm failure.**
+- [x] **Step 2: Run the targeted post-effect tests and confirm failure.**
 
 Run:
 ```bash
@@ -340,14 +342,14 @@ uv run pytest tests/test_queued_message_notify.py tests/test_final_delivery.py -
 Expected:
 - FAIL on raw `DeliveryResult` gating
 
-- [ ] **Step 3: Refactor `post_response_effects.py` to consume policy-derived fields only.**
+- [x] **Step 3: Refactor `post_response_effects.py` to consume policy-derived fields only.**
 
 Requirements:
 - no success inference from `DeliveryResult.event_id`
 - interactive registration keys off policy-driven response identity
 - compaction suppression path is explicit
 
-- [ ] **Step 4: Re-run the targeted post-effect tests until green.**
+- [x] **Step 4: Re-run the targeted post-effect tests until green.**
 
 Run:
 ```bash
@@ -357,7 +359,7 @@ uv run pytest tests/test_queued_message_notify.py tests/test_final_delivery.py -
 Expected:
 - PASS
 
-- [ ] **Step 5: Commit policy-driven post-effects.**
+- [x] **Step 5: Commit policy-driven post-effects.**
 
 ```bash
 git add src/mindroom/post_response_effects.py src/mindroom/final_delivery.py tests/test_queued_message_notify.py tests/test_final_delivery.py
@@ -375,7 +377,7 @@ git commit -m "refactor: drive post-response effects from terminal policy"
 - Test: `tests/test_multi_agent_bot.py`
 - Test: `tests/test_cancelled_response_hook.py`
 
-- [ ] **Step 1: Write failing caller-boundary tests.**
+- [x] **Step 1: Write failing caller-boundary tests.**
 
 Cover at minimum:
 - normal responses stop using `str | None` as control flow
@@ -384,7 +386,7 @@ Cover at minimum:
 - cancelled regeneration remains retryable if policy says it should
 - hard-cancelled visible placeholder preserves visible targeting without promoting response identity
 
-- [ ] **Step 2: Run the targeted caller tests and confirm failure.**
+- [x] **Step 2: Run the targeted caller tests and confirm failure.**
 
 Run:
 ```bash
@@ -394,16 +396,16 @@ uv run pytest tests/test_multi_agent_bot.py tests/test_cancelled_response_hook.p
 Expected:
 - FAIL on caller-side truthiness or wrong handledness
 
-- [ ] **Step 3: Refactor outward-facing response APIs to return typed results internally.**
+- [x] **Step 3: Refactor outward-facing response APIs to return typed results internally.**
 
 Requirements:
 - `ResponseRunner.generate_response()` and `send_skill_command_response()` migrate first
 - wrappers either return typed results or become explicit leaf projections
 - no wrapper is used for control flow if it still returns an event id
 
-- [ ] **Step 4: Update `bot.py`, `turn_controller.py`, `edit_regenerator.py`, and `commands/handler.py` to use explicit fields.**
+- [x] **Step 4: Update `bot.py`, `turn_controller.py`, `edit_regenerator.py`, and `commands/handler.py` to use explicit fields.**
 
-- [ ] **Step 5: Re-run the targeted caller tests until green.**
+- [x] **Step 5: Re-run the targeted caller tests until green.**
 
 Run:
 ```bash
@@ -413,7 +415,7 @@ uv run pytest tests/test_multi_agent_bot.py tests/test_cancelled_response_hook.p
 Expected:
 - PASS
 
-- [ ] **Step 6: Run the stop-the-line caller grep.**
+- [x] **Step 6: Run the stop-the-line caller grep.**
 
 Run:
 ```bash
@@ -425,7 +427,7 @@ Expected:
 - no control-flow-facing `str | None` boundaries remain
 - any surviving event-id wrappers are leaf projections only
 
-- [ ] **Step 7: Commit the caller migration.**
+- [x] **Step 7: Commit the caller migration.**
 
 ```bash
 git add src/mindroom/response_runner.py src/mindroom/bot.py src/mindroom/turn_controller.py src/mindroom/edit_regenerator.py src/mindroom/commands/handler.py tests/test_multi_agent_bot.py tests/test_cancelled_response_hook.py
@@ -440,16 +442,16 @@ git commit -m "refactor: migrate callers to typed terminal delivery results"
 - Modify: `src/mindroom/post_response_effects.py`
 - Test: existing targeted suites
 
-- [ ] **Step 1: Write one failing regression test for each remaining legacy helper you plan to remove.**
+- [x] **Step 1: Write one failing regression test for each remaining legacy helper you plan to remove.**
 
 Focus on:
 - `resolve_response_event_id`
 - `_is_cancelled_delivery_result`
 - any remaining `tracked_event_id` semantic fallback
 
-- [ ] **Step 2: Remove the legacy reconstruction helpers and replace remaining uses with canonical fields.**
+- [x] **Step 2: Remove the legacy reconstruction helpers and replace remaining uses with canonical fields.**
 
-- [ ] **Step 3: Re-run focused suites.**
+- [x] **Step 3: Re-run focused suites.**
 
 Run:
 ```bash
@@ -460,7 +462,7 @@ uv run pytest tests/test_multi_agent_bot.py -q -n 0 --no-cov -k "skill_command o
 Expected:
 - PASS
 
-- [ ] **Step 4: Run the final contract grep suite.**
+- [x] **Step 4: Run the final contract grep suite.**
 
 Run:
 ```bash
@@ -472,7 +474,7 @@ rg -n "-> str \\| None|Awaitable\\[str \\| None\\]" src/mindroom/bot.py src/mind
 Expected:
 - no hits, or only transport-only helpers with no semantic role and a comment proving why they remain
 
-- [ ] **Step 5: Run pre-commit and full targeted verification.**
+- [x] **Step 5: Run pre-commit and full targeted verification.**
 
 Run:
 ```bash
@@ -482,7 +484,7 @@ uv run pre-commit run --all-files
 Expected:
 - PASS
 
-- [ ] **Step 6: Commit the legacy seam removal.**
+- [x] **Step 6: Commit the legacy seam removal.**
 
 ```bash
 git add src/mindroom/response_runner.py src/mindroom/response_lifecycle.py src/mindroom/post_response_effects.py tests/test_final_delivery.py tests/test_streaming_finalize.py tests/test_cancelled_response_hook.py tests/test_queued_message_notify.py tests/test_ai_user_id.py tests/test_multi_agent_bot.py

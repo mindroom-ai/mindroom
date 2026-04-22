@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn
 
-from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.events import (
@@ -30,9 +31,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+StreamInputChunk = (
+    str | StructuredStreamChunk | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+)
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 _STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS = 5.0
+_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 
 
 class _NonTerminalDeliveryError(Exception):
@@ -71,6 +75,17 @@ def _merge_tool_trace(existing: list[ToolTraceEntry], incoming: list[ToolTraceEn
     if len(incoming) >= len(existing):
         return incoming.copy()
     return existing.copy()
+
+
+def _merge_final_completion_content(accumulated_text: str, final_text: str) -> str:
+    """Preserve visible tool markers when a provider emits canonical final content."""
+    tool_marker_lines = [
+        line for line in accumulated_text.splitlines() if _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)
+    ]
+    if not tool_marker_lines:
+        return final_text
+    tool_marker_block = "\n\n".join(tool_marker_lines)
+    return f"{tool_marker_block}\n\n{final_text}" if final_text else tool_marker_block
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,9 +134,26 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             text_chunk = chunk.content
             if chunk.tool_trace is not None:
                 streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
-        elif isinstance(chunk, RunContentEvent) and chunk.content:
-            text_chunk = str(chunk.content)
+        elif isinstance(chunk, RunContentEvent):
+            if chunk.reasoning_content:
+                streaming.observed_reasoning_content = True
+            if chunk.content:
+                text_chunk = str(chunk.content)
+            else:
+                _queue_delivery_request(delivery_queue, progress_hint=True)
+                continue
+        elif isinstance(chunk, RunCompletedEvent):
+            if chunk.reasoning_content:
+                streaming.observed_reasoning_content = True
+            if chunk.content is not None:
+                streaming.accumulated_text = _merge_final_completion_content(
+                    streaming.accumulated_text,
+                    str(chunk.content),
+                )
+            continue
         elif isinstance(chunk, ToolCallStartedEvent):
+            if chunk.tool is not None:
+                streaming.observed_tool_calls += 1
             if not streaming.show_tool_calls:
                 if chunk.tool is not None:
                     streaming._ensure_hidden_tool_gap()

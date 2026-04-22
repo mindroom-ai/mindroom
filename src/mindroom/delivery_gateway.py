@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import CompactionOutcome
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
-    from mindroom.streaming import _StreamInputChunk
+    from mindroom.streaming_delivery import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -332,7 +332,7 @@ class StreamingDeliveryRequest:
     """Parameters for streamed Matrix delivery."""
 
     target: MessageTarget
-    response_stream: AsyncIterator[_StreamInputChunk]
+    response_stream: AsyncIterator[StreamInputChunk]
     existing_event_id: str | None = None
     adopt_existing_placeholder: bool = False
     header: str | None = None

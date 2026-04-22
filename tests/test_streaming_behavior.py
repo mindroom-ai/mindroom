@@ -18,7 +18,13 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
-from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
+from mindroom.constants import (
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_STREAMING,
+    STREAM_VISIBLE_BODY_KEY,
+)
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -28,9 +34,11 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
+    _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE,
     CANCELLED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
+    StreamDeliveryState,
     StreamingDeliveryError,
     StreamingResponse,
     build_restart_interrupted_body,
@@ -1521,9 +1529,13 @@ class TestStreamingBehavior:
 
         with (
             patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
+            patch(
+                "mindroom.streaming.edit_message_result",
+                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit123", content_sent={})),
+            ),
             patch("mindroom.streaming._drain_worker_progress_events", new=lingering_drain),
         ):
-            event_id, accumulated = await send_streaming_response(
+            outcome = await send_streaming_response(
                 client=mock_client,
                 room_id="!test:localhost",
                 reply_to_event_id="$original_123",
@@ -1534,8 +1546,9 @@ class TestStreamingBehavior:
                 response_stream=stream(),
             )
 
-        assert event_id == "$event123"
-        assert accumulated == "hello"
+        assert outcome.last_physical_stream_event_id == "$event123"
+        assert outcome.terminal_result == "succeeded"
+        assert outcome.rendered_body == "hello"
 
     @pytest.mark.asyncio
     async def test_worker_progress_delivery_failure_does_not_leak_undelivered_buffered_text(self) -> None:
@@ -1845,9 +1858,17 @@ class TestStreamingBehavior:
                 cancelled: bool = False,
                 restart_interrupted: bool = False,
                 error: Exception | None = None,
-            ) -> None:
+            ) -> StreamTransportOutcome:
                 del client, cancelled, restart_interrupted
                 finalize_calls.append(error)
+                return StreamTransportOutcome(
+                    last_physical_stream_event_id=self.event_id,
+                    terminal_operation="none",
+                    terminal_result="not_attempted",
+                    terminal_status="completed",
+                    rendered_body=None,
+                    visible_body_state="none",
+                )
 
         async def fail_stream_supervision(
             response_stream: AsyncIterator[object],
@@ -2067,7 +2088,8 @@ class TestStreamingBehavior:
             await asyncio.sleep(0.4)
             yield "x" * 300
 
-        event_id, accumulated = await send_streaming_response(
+        stream_state = StreamDeliveryState()
+        outcome = await send_streaming_response(
             client=mock_client,
             room_id="!test:localhost",
             reply_to_event_id="$original_123",
@@ -2076,11 +2098,12 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             response_stream=stream(),
+            stream_state=stream_state,
         )
 
-        assert event_id == "$warmup_stream_123"
-        assert accumulated == "x" * 300
-        assert "Preparing isolated worker" not in accumulated
+        assert outcome.last_physical_stream_event_id == "$warmup_stream_123"
+        assert stream_state.accumulated_text == "x" * 300
+        assert "Preparing isolated worker" not in stream_state.accumulated_text
 
     @pytest.mark.asyncio
     async def test_hidden_tool_mode_worker_warmup_uses_generic_copy(self) -> None:
@@ -2201,7 +2224,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("terminal_kind", "expected_final_text"),
-        [("cancel", CANCELLED_RESPONSE_NOTE), ("complete", PROGRESS_PLACEHOLDER)],
+        [("cancel", CANCELLED_RESPONSE_NOTE), ("complete", _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE)],
     )
     async def test_send_streaming_response_terminal_update_ignores_late_progress(
         self,
