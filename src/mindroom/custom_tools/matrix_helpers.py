@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, cast
 
 import nio
 
-from mindroom.matrix.message_content import extract_and_resolve_message
-from mindroom.matrix.visible_body import bundled_visible_body_preview
+from mindroom.matrix.message_content import resolve_event_source_content
+from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
 
 if TYPE_CHECKING:
     from collections import deque
@@ -70,23 +70,27 @@ async def thread_root_body_preview(
     """Return the canonical preview body for one thread root event."""
     if isinstance(event, nio.MegolmEvent):
         return "[encrypted]"
-    if isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
-        replacement_body = bundled_replacement_body(
-            event.source,
-            trusted_sender_ids=trusted_sender_ids,
-        )
-        if replacement_body is not None:
-            return message_preview(replacement_body)
-        resolved_message = await extract_and_resolve_message(
-            event,
-            client,
-            trusted_sender_ids=trusted_sender_ids,
-        )
-        return message_preview(resolved_message.get("body"))
+    replacement_body = bundled_replacement_body(
+        event.source,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    if replacement_body is not None:
+        return message_preview(replacement_body)
     event_source = event.source if isinstance(event.source, dict) else {}
-    content = event_source.get("content", {})
-    body = content.get("body") if isinstance(content, dict) else None
-    return message_preview(body)
+    resolved_event_source = await resolve_event_source_content(event_source, client)
+    content = resolved_event_source.get("content")
+    fallback_body = ""
+    if isinstance(content, dict):
+        body = content.get("body")
+        if isinstance(body, str):
+            fallback_body = body
+    return message_preview(
+        visible_body_from_event_source(
+            resolved_event_source,
+            fallback_body,
+            trusted_sender_ids=trusted_sender_ids,
+        ),
+    )
 
 
 def check_rate_limit(

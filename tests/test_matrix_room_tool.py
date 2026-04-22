@@ -547,6 +547,50 @@ async def test_threads_preview_prefers_trusted_visible_body_without_bundled_repl
 
 
 @pytest.mark.asyncio
+async def test_threads_preview_resolves_large_file_root_through_canonical_visible_body() -> None:
+    """Threads should hydrate large streamed m.file roots before building previews."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    ctx.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "Final large root message\n\n⏳ Preparing isolated worker...",
+                    "io.mindroom.visible_body": "Final large root message",
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    event = nio.RoomMessageFile.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$thread-large",
+            "sender": "@mindroom_general:localhost",
+            "origin_server_ts": 1000,
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview root...",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/thread-large",
+            },
+            "unsigned": {"m.relations": {"m.thread": {"count": 3}}},
+        },
+    )
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Final large root message"
+
+
+@pytest.mark.asyncio
 async def test_threads_respects_limit() -> None:
     """Threads should forward the clamped limit and report has_more when next_token present."""
     tool = MatrixRoomTools()

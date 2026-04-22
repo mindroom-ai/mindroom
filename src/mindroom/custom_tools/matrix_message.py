@@ -42,9 +42,9 @@ from mindroom.matrix.client_delivery import (
     send_message_result,
 )
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
+from mindroom.matrix.identity import managed_internal_sender_ids
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
-from mindroom.matrix.visible_body import configured_visible_body_sender_ids
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -496,7 +496,7 @@ class MatrixMessageTools(Toolkit):
                 response=str(response),
             )
 
-        trusted_sender_ids = configured_visible_body_sender_ids(context.config, context.runtime_paths)
+        trusted_sender_ids = managed_internal_sender_ids(context.config, context.runtime_paths)
         resolved = [
             await extract_and_resolve_message(
                 event,
@@ -593,7 +593,7 @@ class MatrixMessageTools(Toolkit):
                 event_type=type(event).__name__,
             )
             return None
-        trusted_sender_ids = configured_visible_body_sender_ids(context.config, context.runtime_paths)
+        trusted_sender_ids = managed_internal_sender_ids(context.config, context.runtime_paths)
         body_preview = await thread_root_body_preview(
             event,
             client=context.client,

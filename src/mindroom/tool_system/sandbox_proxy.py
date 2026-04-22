@@ -459,8 +459,11 @@ def _is_request_level_proxy_http_error(exc: Exception) -> bool:
     except (ValueError, json.JSONDecodeError):
         return False
     detail = payload.get("detail") if isinstance(payload, Mapping) else None
-    is_string_detail = isinstance(detail, str) and bool(detail)
-    return is_string_detail and (status_code in {400, 422} or detail != "Not Found")
+    if isinstance(detail, str) and detail:
+        return status_code in {400, 422} or detail != "Not Found"
+    if status_code == 422 and isinstance(detail, list):
+        return bool(detail)
+    return False
 
 
 def _record_proxy_response_failure_for_worker(

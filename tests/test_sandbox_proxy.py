@@ -2354,6 +2354,7 @@ def test_worker_routed_worker_failure_records_worker_failure(
     [
         (400, {"detail": "credential_overrides must be supplied via lease_id."}),
         (422, {"detail": "Input should be a valid dictionary"}),
+        (422, {"detail": [{"msg": "Input should be a valid dictionary", "type": "dict_type"}]}),
         (404, {"detail": "Tool 'file' does not expose 'read_file'."}),
     ],
 )

@@ -278,7 +278,7 @@ async def extract_edit_body(
         sender_id=event_source.get("sender"),
         trusted_sender_ids=trusted_sender_ids,
     )
-    if body:
+    if isinstance(new_content.get("body"), str) or body:
         normalized_new_content = dict(new_content)
         normalized_new_content["body"] = body
         return body, normalized_new_content

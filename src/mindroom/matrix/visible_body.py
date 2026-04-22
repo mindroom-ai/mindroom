@@ -9,14 +9,6 @@ from mindroom.constants import STREAM_VISIBLE_BODY_KEY, STREAM_WARMUP_SUFFIX_KEY
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
 
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
-
-
-def configured_visible_body_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return the exact configured internal sender IDs allowed to override visible body."""
-    return frozenset(matrix_id.full_id for matrix_id in config.get_ids(runtime_paths).values())
-
 
 def _sender_is_trusted(sender_id: object, *, trusted_sender_ids: Collection[str]) -> bool:
     """Return whether one sender may override canonical visible-body reads."""

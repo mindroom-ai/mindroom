@@ -2,13 +2,17 @@
 
 import json
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 
 import mindroom.matrix.message_content as message_content_module
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY
+from mindroom.matrix.identity import managed_internal_sender_ids
 from mindroom.matrix.message_content import (
     _clear_mxc_cache,
     _download_mxc_text,
@@ -16,8 +20,9 @@ from mindroom.matrix.message_content import (
     extract_edit_body,
     resolve_event_source_content,
 )
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.visible_body import visible_body_from_event_source
-from tests.conftest import make_matrix_client_mock
+from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 
 
 def _make_message_event(
@@ -394,6 +399,64 @@ class TestResolvedMessageExtraction:
             trusted_sender_ids={"@mindroom_general:localhost"},
         ) == ("Diagnosis follows\n\n⚠️ Worker startup failed for shell.run: intentional example.")
 
+    def test_visible_body_from_event_source_trusts_persisted_removed_agent_sender_ids(self, tmp_path: Path) -> None:
+        """Historical messages from removed managed senders should keep canonical-body metadata."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        state = MatrixState()
+        state.add_account("agent_removed", "mindroom_removed", "pw")
+        state.save(runtime_paths=runtime_paths)
+
+        event_source = {
+            "sender": "@mindroom_removed:localhost",
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello\n\n⏳ Preparing isolated worker...",
+                "io.mindroom.visible_body": "hello",
+            },
+        }
+
+        assert (
+            visible_body_from_event_source(
+                event_source,
+                "hello",
+                trusted_sender_ids=managed_internal_sender_ids(config, runtime_paths),
+            )
+            == "hello"
+        )
+
+    def test_visible_body_from_event_source_trusts_persisted_runtime_usernames(self, tmp_path: Path) -> None:
+        """Persisted managed usernames should stay trusted even when they drift from current config-derived IDs."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw")
+        state.save(runtime_paths=runtime_paths)
+
+        event_source = {
+            "sender": "@mindroom_general_oldns:localhost",
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello\n\n⏳ Preparing isolated worker...",
+                "io.mindroom.visible_body": "hello",
+            },
+        }
+
+        assert (
+            visible_body_from_event_source(
+                event_source,
+                "hello",
+                trusted_sender_ids=managed_internal_sender_ids(config, runtime_paths),
+            )
+            == "hello"
+        )
+
 
 class TestDownloadMxcText:
     """Tests for _download_mxc_text function."""
@@ -585,6 +648,33 @@ class TestCanonicalContentResolution:
             "body": "hello\n\n⏳ Preparing isolated worker...",
             "msgtype": "m.text",
             "io.mindroom.visible_body": "hello",
+        }
+
+    @pytest.mark.asyncio
+    async def test_extract_edit_body_preserves_explicit_empty_string_body(self) -> None:
+        """Edit extraction should keep explicit empty-string bodies instead of dropping the edit."""
+        event_source = {
+            "sender": "@mindroom_general:localhost",
+            "content": {
+                "body": "* Preview edit",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        }
+
+        body, resolved_content = await extract_edit_body(
+            event_source,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
+
+        assert body == ""
+        assert resolved_content == {
+            "body": "",
+            "msgtype": "m.text",
         }
 
 

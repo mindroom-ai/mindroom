@@ -27,7 +27,7 @@ from mindroom.matrix.client_delivery import edit_message_result, send_message_re
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, resolve_latest_visible_messages
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.identity import MatrixID, extract_agent_name
+from mindroom.matrix.identity import MatrixID, extract_agent_name, managed_internal_sender_ids
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
@@ -37,7 +37,6 @@ from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
 )
-from mindroom.matrix.visible_body import configured_visible_body_sender_ids
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
@@ -1044,9 +1043,7 @@ def _is_internal_sender(
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Return whether the sender is one of MindRoom's own Matrix accounts."""
-    internal_ids = {matrix_id.full_id for matrix_id in config.get_ids(runtime_paths).values()}
-    mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
-    return sender_id in internal_ids or sender_id == mindroom_user_id
+    return sender_id in managed_internal_sender_ids(config, runtime_paths)
 
 
 def _cleanup_trusted_sender_ids(
@@ -1056,7 +1053,7 @@ def _cleanup_trusted_sender_ids(
     runtime_paths: RuntimePaths,
 ) -> frozenset[str]:
     """Return the exact sender IDs cleanup may trust for canonical visible-body metadata."""
-    trusted_sender_ids = set(configured_visible_body_sender_ids(config, runtime_paths))
+    trusted_sender_ids = set(managed_internal_sender_ids(config, runtime_paths))
     trusted_sender_ids.add(bot_user_id)
     return frozenset(trusted_sender_ids)
 

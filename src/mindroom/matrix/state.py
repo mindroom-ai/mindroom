@@ -1,7 +1,8 @@
 """Pydantic models for Matrix state."""
 
 from datetime import UTC, datetime
-from typing import Self
+from functools import lru_cache
+from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, Field, field_serializer
@@ -40,16 +41,10 @@ class MatrixState(BaseModel):
     space_room_id: str | None = None
 
     @classmethod
-    def load(cls, runtime_paths: constants.RuntimePaths) -> Self:
+    def load(cls, runtime_paths: constants.RuntimePaths) -> "MatrixState":
         """Load state from file."""
         state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
-        if not state_file.exists():
-            return cls()
-
-        with state_file.open() as f:
-            data = yaml.safe_load(f) or {}
-
-        return cls.model_validate(data)
+        return _load_matrix_state_file(state_file)
 
     def save(self, runtime_paths: constants.RuntimePaths) -> None:
         """Save state to file."""
@@ -97,3 +92,38 @@ class MatrixState(BaseModel):
     def set_space_room_id(self, room_id: str | None) -> None:
         """Persist the root Matrix Space room ID."""
         self.space_room_id = room_id
+
+
+def managed_account_usernames(runtime_paths: constants.RuntimePaths) -> dict[str, str]:
+    """Return persisted managed Matrix account usernames keyed by state account key."""
+    state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
+    state = _load_matrix_state_file_for_accounts(*_matrix_state_cache_key(state_file))
+    return {key: account.username for key, account in state.accounts.items() if key.startswith("agent_")}
+
+
+def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int | None, int | None]:
+    """Return one cache key that invalidates when the state file changes."""
+    if not state_file.exists():
+        return state_file, None, None
+    stat = state_file.stat()
+    return state_file, stat.st_mtime_ns, stat.st_size
+
+
+@lru_cache(maxsize=64)
+def _load_matrix_state_file_for_accounts(
+    state_file: Path,
+    mtime_ns: int | None,
+    size: int | None,
+) -> MatrixState:
+    """Load Matrix state through a file-change-sensitive cache for account reads."""
+    del mtime_ns, size
+    return _load_matrix_state_file(state_file)
+
+
+def _load_matrix_state_file(state_file: Path) -> MatrixState:
+    """Load one Matrix state file from disk."""
+    if not state_file.exists():
+        return MatrixState()
+    with state_file.open() as f:
+        data = yaml.safe_load(f) or {}
+    return MatrixState.model_validate(data)

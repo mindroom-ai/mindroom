@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import nio
@@ -88,7 +90,7 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
-    from pathlib import Path
+    from typing import Any
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
@@ -320,14 +322,24 @@ def _conversation_runtime(
     coordinator: _EventCacheWriteCoordinator | None = None,
 ) -> BotRuntimeState:
     """Build one minimal live runtime state for conversation-cache tests."""
+    config = _conversation_runtime_config()
     return BotRuntimeState(
         client=client,
-        config=MagicMock(spec=Config),
-        runtime_paths=MagicMock(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
         enable_streaming=True,
         orchestrator=None,
         event_cache=event_cache or _runtime_event_cache(),
         event_cache_write_coordinator=coordinator or _runtime_write_coordinator(),
+    )
+
+
+def _conversation_runtime_config() -> Config:
+    """Return one runtime-bound config for conversation-cache tests."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp(prefix="mindroom-threading-runtime-")))
+    return bind_runtime_paths(
+        Config(agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])}),
+        runtime_paths,
     )
 
 
@@ -1140,10 +1152,11 @@ class TestMatrixConversationCacheThreadReads:
     @pytest.mark.asyncio
     async def test_get_latest_thread_event_id_fails_open_without_write_coordinator(self) -> None:
         """Thread reads should fail open when runtime support omitted the write coordinator."""
+        config = _conversation_runtime_config()
         runtime = BotRuntimeState(
             client=AsyncMock(spec=nio.AsyncClient),
-            config=MagicMock(spec=Config),
-            runtime_paths=MagicMock(),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
             enable_streaming=True,
             orchestrator=None,
             event_cache=_runtime_event_cache(),

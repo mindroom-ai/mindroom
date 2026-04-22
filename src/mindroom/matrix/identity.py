@@ -8,6 +8,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar
 
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_server_name, runtime_mindroom_namespace
+from mindroom.matrix.state import managed_account_usernames
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -200,6 +201,18 @@ def extract_agent_name(sender_id: str, config: Config, runtime_paths: RuntimePat
         return None
     mid = MatrixID.parse(sender_id)
     return mid.agent_name(config, runtime_paths)
+
+
+def managed_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the exact managed internal sender IDs for this runtime."""
+    domain = config.get_domain(runtime_paths)
+    sender_ids = {matrix_id.full_id for matrix_id in config.get_ids(runtime_paths).values()}
+    mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
+    if mindroom_user_id is not None:
+        sender_ids.add(mindroom_user_id)
+    for username in managed_account_usernames(runtime_paths).values():
+        sender_ids.add(MatrixID.from_username(username, domain).full_id)
+    return frozenset(sender_ids)
 
 
 def agent_username_localpart(agent_name: str, runtime_paths: RuntimePaths) -> str:

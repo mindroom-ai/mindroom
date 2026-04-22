@@ -1682,6 +1682,56 @@ async def test_matrix_message_room_threads_resolves_notice_root_without_replacem
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_room_threads_resolves_large_file_root_through_canonical_visible_body() -> None:
+    """room-threads should hydrate large m.file roots before building previews."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    ctx.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "Final large root message\n\n⏳ Preparing isolated worker...",
+                    "io.mindroom.visible_body": "Final large root message",
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    thread_root = nio.RoomMessageFile.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$thread-large",
+            "sender": "@mindroom_general:localhost",
+            "origin_server_ts": 1234,
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview root...",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/thread-large",
+            },
+            "unsigned": {"m.relations": {"m.thread": {"count": 4}}},
+        },
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Final large root message"
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
     """room-threads should skip malformed roots instead of crashing the whole action."""
     tool = MatrixMessageTools()
