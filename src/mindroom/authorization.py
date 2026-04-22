@@ -12,8 +12,8 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     MatrixID,
+    active_internal_sender_ids,
     extract_agent_name,
-    managed_internal_sender_ids,
     managed_room_key_from_alias_localpart,
     room_alias_localpart,
 )
@@ -171,7 +171,7 @@ def get_effective_sender_id_for_reply_permissions(
     transcriptions, scheduled task fires, etc.) and include the original sender
     in event content. For trusted internal senders, use that embedded sender.
     """
-    is_internal_mindroom_sender = sender_id in managed_internal_sender_ids(config, runtime_paths)
+    is_internal_mindroom_sender = sender_id in active_internal_sender_ids(config, runtime_paths)
     if not is_internal_mindroom_sender:
         return sender_id
     if not event_source:

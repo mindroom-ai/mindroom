@@ -19,7 +19,7 @@ from mindroom.attachments import (
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.identity import managed_internal_sender_ids
+from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.image_handler import download_image
 from mindroom.matrix.message_content import (
     is_v2_sidecar_text_preview,
@@ -145,7 +145,7 @@ class InboundTurnNormalizer:
             return event
 
         resolved_source = await resolve_event_source_content(event.source, self._client())
-        trusted_sender_ids = managed_internal_sender_ids(
+        trusted_sender_ids = active_internal_sender_ids(
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
@@ -218,7 +218,7 @@ class InboundTurnNormalizer:
             return None
 
         resolved_source = await resolve_event_source_content(event.source, self._client())
-        trusted_sender_ids = managed_internal_sender_ids(
+        trusted_sender_ids = active_internal_sender_ids(
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )

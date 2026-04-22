@@ -77,6 +77,23 @@ class WorkerWarmupState:
         for worker_key in failed_worker_keys:
             self.active_warmups.pop(worker_key, None)
 
+    def _clear_failed_retry_duplicates(
+        self,
+        *,
+        worker_key: str,
+        tool_label: str,
+    ) -> None:
+        """Drop stale failed warmups when a new retry starts for the same tool."""
+        stale_failed_worker_keys = [
+            active_worker_key
+            for active_worker_key, warmup in self.active_warmups.items()
+            if active_worker_key != worker_key
+            and warmup.last_event.phase == "failed"
+            and tool_label in warmup.tool_labels
+        ]
+        for stale_worker_key in stale_failed_worker_keys:
+            self.active_warmups.pop(stale_worker_key, None)
+
     def render_lines(self, *, show_tool_calls: bool) -> list[str]:
         """Render all active worker warmup notices as side-band suffix lines."""
         if not self.active_warmups:
@@ -101,6 +118,11 @@ class WorkerWarmupState:
 
         tool_label = f"{event.tool_name}.{event.function_name}"
         self.needs_warmup_clear_edit = False
+        if progress.phase != "failed":
+            self._clear_failed_retry_duplicates(
+                worker_key=worker_key,
+                tool_label=tool_label,
+            )
         warmup = self.active_warmups.get(worker_key)
         if warmup is None:
             self.active_warmups[worker_key] = _ActiveWarmup(

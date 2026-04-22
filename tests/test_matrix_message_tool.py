@@ -167,7 +167,20 @@ def _make_bundled_replacement(
     bundle_key: str | None = None,
     sender: str = "@editor:localhost",
     visible_body: str | None = None,
+    long_text: dict[str, object] | None = None,
+    url: str | None = None,
 ) -> dict[str, object]:
+    new_content: dict[str, object] = {
+        "body": body,
+        "msgtype": msgtype,
+    }
+    if visible_body is not None:
+        new_content["io.mindroom.visible_body"] = visible_body
+    if long_text is not None:
+        new_content["io.mindroom.long_text"] = long_text
+    if url is not None:
+        new_content["url"] = url
+
     replacement_event = {
         "type": "m.room.message",
         "event_id": f"{event_id}-edit",
@@ -175,19 +188,14 @@ def _make_bundled_replacement(
         "origin_server_ts": 9999,
         "content": {
             "body": f"* {body}",
-            "msgtype": msgtype,
-            "m.new_content": {
-                "body": body,
-                "msgtype": msgtype,
-            },
+            "msgtype": "m.text",
+            "m.new_content": new_content,
             "m.relates_to": {
                 "rel_type": "m.replace",
                 "event_id": event_id,
             },
         },
     }
-    if visible_body is not None:
-        replacement_event["content"]["m.new_content"]["io.mindroom.visible_body"] = visible_body
     if bundle_key is None:
         return replacement_event
     return {bundle_key: replacement_event}
@@ -1729,6 +1737,60 @@ async def test_matrix_message_room_threads_resolves_large_file_root_through_cano
 
     assert payload["status"] == "ok"
     assert payload["threads"][0]["body_preview"] == "Final large root message"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_room_threads_resolves_large_bundled_replacement_through_canonical_visible_body() -> None:
+    """room-threads should hydrate large bundled latest edits before building previews."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    ctx.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "Final bundled edit\n\n⏳ Preparing isolated worker...",
+                    "io.mindroom.visible_body": "Final bundled edit",
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    thread_root = _make_room_thread_root(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        timestamp=1234,
+        body="Original root",
+        reply_count=4,
+    )
+    thread_root.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 4},
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread-root",
+                body="Preview latest edit...",
+                msgtype="m.file",
+                sender="@mindroom_general:localhost",
+                long_text={
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                url="mxc://server/thread-root-edit",
+            ),
+        },
+    }
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Final bundled edit"
 
 
 @pytest.mark.asyncio

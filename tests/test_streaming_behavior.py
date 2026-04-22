@@ -2487,6 +2487,55 @@ class TestStreamingBehavior:
         body = mock_client.room_send.call_args.kwargs["content"]["body"]
         assert body.count("Preparing isolated worker") == 2
 
+    @pytest.mark.asyncio
+    async def test_worker_warmup_retry_clears_stale_failure_notice_before_text(self) -> None:
+        """A new retry should replace the old failed notice for the same tool before normal text arrives."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$warmup_retry"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+        )
+        streaming.apply_worker_progress_event(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="failed",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=4.0,
+                    error="boom",
+                ),
+            ),
+        )
+        streaming.apply_worker_progress_event(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="cold_start",
+                    worker_key="worker-b",
+                    backend_name="kubernetes",
+                    elapsed_seconds=1.0,
+                ),
+            ),
+        )
+
+        await streaming._send_or_edit_message(mock_client, allow_empty_progress=True)
+
+        body = mock_client.room_send.call_args.kwargs["content"]["body"]
+        assert "Preparing isolated worker" in body
+        assert "Worker startup failed" not in body
+
 
 class TestStreamingConfig:
     """Tests for StreamingConfig and its wiring into send_streaming_response."""

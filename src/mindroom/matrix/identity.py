@@ -203,15 +203,57 @@ def extract_agent_name(sender_id: str, config: Config, runtime_paths: RuntimePat
     return mid.agent_name(config, runtime_paths)
 
 
-def managed_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return the exact managed internal sender IDs for this runtime."""
-    domain = config.get_domain(runtime_paths)
+def _active_managed_account_keys(config: Config) -> frozenset[str]:
+    """Return persisted Matrix account keys for currently active managed accounts."""
+    account_keys = {f"agent_{ROUTER_AGENT_NAME}"}
+    account_keys.update(f"agent_{agent_name}" for agent_name in config.agents)
+    account_keys.update(f"agent_{team_name}" for team_name in config.teams)
+    if config.mindroom_user is not None:
+        account_keys.add("agent_user")
+    return frozenset(account_keys)
+
+
+def _configured_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+    """Return the current configured internal sender IDs for this runtime."""
     sender_ids = {matrix_id.full_id for matrix_id in config.get_ids(runtime_paths).values()}
     mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
     if mindroom_user_id is not None:
         sender_ids.add(mindroom_user_id)
-    for username in managed_account_usernames(runtime_paths).values():
-        sender_ids.add(MatrixID.from_username(username, domain).full_id)
+    return sender_ids
+
+
+def _persisted_internal_sender_ids(
+    runtime_paths: RuntimePaths,
+    *,
+    account_keys: frozenset[str] | None = None,
+    domain: str,
+) -> set[str]:
+    """Return persisted managed sender IDs, optionally filtered to specific account keys."""
+    usernames = managed_account_usernames(runtime_paths)
+    if account_keys is not None:
+        usernames = {key: username for key, username in usernames.items() if key in account_keys}
+    return {MatrixID.from_username(username, domain).full_id for username in usernames.values()}
+
+
+def active_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return sender IDs trusted for live authorization and relay decisions."""
+    domain = config.get_domain(runtime_paths)
+    sender_ids = _configured_internal_sender_ids(config, runtime_paths)
+    sender_ids.update(
+        _persisted_internal_sender_ids(
+            runtime_paths,
+            account_keys=_active_managed_account_keys(config),
+            domain=domain,
+        ),
+    )
+    return frozenset(sender_ids)
+
+
+def historical_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return sender IDs trusted for historical MindRoom-authored readback."""
+    domain = config.get_domain(runtime_paths)
+    sender_ids = _configured_internal_sender_ids(config, runtime_paths)
+    sender_ids.update(_persisted_internal_sender_ids(runtime_paths, domain=domain))
     return frozenset(sender_ids)
 
 

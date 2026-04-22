@@ -106,4 +106,7 @@ def bundled_visible_body_preview(
         sender_id=sender_id,
         trusted_sender_ids=trusted_sender_ids,
     )
-    return body or None
+    has_explicit_body = isinstance(visible_content.get("body"), str)
+    if has_explicit_body or has_trusted_stream_body_metadata(visible_content):
+        return body
+    return None

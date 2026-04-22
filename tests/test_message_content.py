@@ -12,7 +12,7 @@ import mindroom.matrix.message_content as message_content_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY
-from mindroom.matrix.identity import managed_internal_sender_ids
+from mindroom.matrix.identity import historical_internal_sender_ids
 from mindroom.matrix.message_content import (
     _clear_mxc_cache,
     _download_mxc_text,
@@ -423,7 +423,7 @@ class TestResolvedMessageExtraction:
             visible_body_from_event_source(
                 event_source,
                 "hello",
-                trusted_sender_ids=managed_internal_sender_ids(config, runtime_paths),
+                trusted_sender_ids=historical_internal_sender_ids(config, runtime_paths),
             )
             == "hello"
         )
@@ -452,7 +452,7 @@ class TestResolvedMessageExtraction:
             visible_body_from_event_source(
                 event_source,
                 "hello",
-                trusted_sender_ids=managed_internal_sender_ids(config, runtime_paths),
+                trusted_sender_ids=historical_internal_sender_ids(config, runtime_paths),
             )
             == "hello"
         )

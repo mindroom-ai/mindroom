@@ -418,7 +418,21 @@ def _make_bundled_replacement(
     bundle_key: str | None = None,
     sender: str = "@editor:localhost",
     visible_body: str | None = None,
+    msgtype: str = "m.text",
+    long_text: dict[str, object] | None = None,
+    url: str | None = None,
 ) -> dict[str, object]:
+    new_content: dict[str, object] = {
+        "body": body,
+        "msgtype": msgtype,
+    }
+    if visible_body is not None:
+        new_content["io.mindroom.visible_body"] = visible_body
+    if long_text is not None:
+        new_content["io.mindroom.long_text"] = long_text
+    if url is not None:
+        new_content["url"] = url
+
     replacement_event: dict[str, object] = {
         "type": "m.room.message",
         "event_id": f"{event_id}-edit",
@@ -427,18 +441,13 @@ def _make_bundled_replacement(
         "content": {
             "body": f"* {body}",
             "msgtype": "m.text",
-            "m.new_content": {
-                "body": body,
-                "msgtype": "m.text",
-            },
+            "m.new_content": new_content,
             "m.relates_to": {
                 "rel_type": "m.replace",
                 "event_id": event_id,
             },
         },
     }
-    if visible_body is not None:
-        replacement_event["content"]["m.new_content"]["io.mindroom.visible_body"] = visible_body
     if bundle_key is None:
         return replacement_event
     return {bundle_key: replacement_event}
@@ -588,6 +597,31 @@ async def test_threads_preview_resolves_large_file_root_through_canonical_visibl
 
     assert payload["status"] == "ok"
     assert payload["threads"][0]["body_preview"] == "Final large root message"
+
+
+@pytest.mark.asyncio
+async def test_threads_preview_preserves_empty_bundled_replacement_body() -> None:
+    """Threads should keep empty bundled latest-edit bodies instead of falling back to stale root text."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    event = _thread_event("$thread1", body="ORIGINAL ROOT", reply_count=3)
+    event.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 3},
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread1",
+                body="",
+                sender="@mindroom_general:localhost",
+            ),
+        },
+    }
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == ""
 
 
 @pytest.mark.asyncio

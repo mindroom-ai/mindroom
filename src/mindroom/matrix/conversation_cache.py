@@ -34,7 +34,7 @@ from mindroom.matrix.client_thread_history import (
     get_room_threads_page,
 )
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.identity import managed_internal_sender_ids
+from mindroom.matrix.identity import historical_internal_sender_ids
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_membership import (
@@ -401,7 +401,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     def _trusted_sender_ids(self) -> frozenset[str]:
         """Return the exact internal sender IDs allowed to override canonical visible-body reads."""
-        return managed_internal_sender_ids(
+        return historical_internal_sender_ids(
             self.runtime.config,
             self.runtime.runtime_paths,
         )

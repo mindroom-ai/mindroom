@@ -28,12 +28,9 @@ def message_preview(body: object, max_length: int = 120) -> str:
     return f"{compact[: max_length - 3].rstrip()}..."
 
 
-def bundled_replacement_body(
-    event_source: object,
-    *,
-    trusted_sender_ids: Collection[str] = (),
-) -> str | None:
-    """Return one trusted preview body from bundled replacement metadata."""
+def _bundled_replacement_candidates(event_source: object) -> list[dict[str, object]]:
+    """Return bundled replacement event-source candidates in preference order."""
+    candidates: list[dict[str, object]] = []
     unsigned = None
     if isinstance(event_source, dict):
         event_source_dict = cast("dict[str, object]", event_source)
@@ -55,9 +52,27 @@ def bundled_replacement_body(
             replacement_dict.get("event"),
             replacement_dict.get("latest_event"),
         ):
-            body = bundled_visible_body_preview(candidate, trusted_sender_ids=trusted_sender_ids)
-            if body is not None:
-                return body
+            candidates.extend(
+                [cast("dict[str, object]", candidate)] if isinstance(candidate, dict) else [],
+            )
+    return candidates
+
+
+async def bundled_replacement_body(
+    event_source: object,
+    *,
+    client: nio.AsyncClient,
+    trusted_sender_ids: Collection[str] = (),
+) -> str | None:
+    """Return one trusted preview body from bundled replacement metadata."""
+    for candidate in _bundled_replacement_candidates(event_source):
+        resolved_candidate = await resolve_event_source_content(candidate, client)
+        body = bundled_visible_body_preview(
+            resolved_candidate,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+        if body is not None:
+            return body
     return None
 
 
@@ -70,8 +85,9 @@ async def thread_root_body_preview(
     """Return the canonical preview body for one thread root event."""
     if isinstance(event, nio.MegolmEvent):
         return "[encrypted]"
-    replacement_body = bundled_replacement_body(
+    replacement_body = await bundled_replacement_body(
         event.source,
+        client=client,
         trusted_sender_ids=trusted_sender_ids,
     )
     if replacement_body is not None:
