@@ -2,7 +2,6 @@
 name: mindroom-docs
 description: MindRoom documentation corpus for accurate product, configuration, and workflow guidance.
 metadata: '{openclaw:{always:true}}'
-user-invocable: true
 ---
 
 # MindRoom Docs
@@ -11,8 +10,7 @@ Use this skill when the user asks how MindRoom works, how to configure it, or wh
 
 ## Inputs
 
-- If invoked via `!skill mindroom-docs ...`, treat the command arguments as the user question.
-- If used implicitly, use the current conversation request.
+- Use the current conversation request.
 
 ## Workflow
 

@@ -25,9 +25,7 @@ from mindroom.coalescing import (
     build_batch_dispatch_event,
 )
 from mindroom.commands.handler import (
-    CommandEvent,
     CommandHandlerContext,
-    _run_skill_command_tool,
     handle_command,
 )
 from mindroom.commands.parsing import command_parser
@@ -86,7 +84,6 @@ from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAc
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
-    from pathlib import Path
 
     import structlog
     from agno.media import Image
@@ -151,7 +148,6 @@ class TurnControllerDeps:
     runtime: BotRuntimeView
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
-    storage_path: Path
     agent_name: str
     matrix_id: MatrixID
     conversation_cache: MatrixConversationCache
@@ -201,10 +197,6 @@ class TurnController:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-
-    def _requester_user_id_for_event(self, event: CommandEvent) -> str:
-        """Return the effective requester for one command-dispatch event."""
-        return self._requester_user_id(sender=event.sender, source=event.source)
 
     def _sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
         """Return whether one sender may supply trusted ingress metadata overrides."""
@@ -637,36 +629,11 @@ class TurnController:
         event: _TextDispatchEvent,
         requester_user_id: str,
         command: Command,
-        *,
-        source_envelope: MessageEnvelope | None = None,
     ) -> None:
         """Run one explicit command executor path from the turn controller."""
         event = await self.deps.normalizer.resolve_text_event(
             TextNormalizationRequest(event=event),
         )
-
-        async def send_skill_command_response(
-            *,
-            room_id: str,
-            reply_to_event_id: str,
-            thread_id: str | None,
-            thread_history: Sequence[ResolvedVisibleMessage],
-            prompt: str,
-            agent_name: str,
-            user_id: str | None,
-            reply_to_event: nio.RoomMessageText | None = None,
-        ) -> str | None:
-            return await self.deps.response_runner.send_skill_command_response(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
-                thread_history=thread_history,
-                prompt=prompt,
-                agent_name=agent_name,
-                user_id=user_id,
-                reply_to_event=reply_to_event,
-                source_envelope=source_envelope,
-            )
 
         async def send_response(
             room_id: str,
@@ -690,39 +657,6 @@ class TurnController:
                 ),
             )
 
-        async def run_skill_command_tool(
-            *,
-            agent_name: str,
-            command_tool: str,
-            skill_name: str,
-            args_text: str,
-            requester_user_id: str,
-            room_id: str,
-            thread_id: str | None = None,
-        ) -> str:
-            target = self.deps.resolver.build_message_target(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=event.event_id,
-                event_source=event.source,
-            )
-            dispatch_context = self.deps.tool_runtime.build_required_live_dispatch_context(
-                target,
-                user_id=requester_user_id,
-                agent_name=agent_name,
-                source_envelope=source_envelope,
-            )
-            return await _run_skill_command_tool(
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
-                agent_name=agent_name,
-                storage_path=self.deps.storage_path,
-                command_tool=command_tool,
-                skill_name=skill_name,
-                args_text=args_text,
-                dispatch_context=dispatch_context,
-            )
-
         orchestrator = self.deps.runtime.orchestrator
         matrix_admin = None
         if orchestrator is not None:
@@ -737,18 +671,14 @@ class TurnController:
             client=self._client(),
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
-            storage_path=self.deps.storage_path,
             logger=self.deps.logger,
             derive_conversation_context=self.deps.resolver.derive_conversation_context,
             conversation_cache=self.deps.resolver.deps.conversation_cache,
             event_cache=self.deps.runtime.event_cache,
             matrix_admin=matrix_admin,
-            requester_user_id_for_event=self._requester_user_id_for_event,
             build_message_target=self.deps.resolver.build_message_target,
             record_handled_turn=self.deps.turn_store.record_turn,
             send_response=send_response,
-            send_skill_command_response=send_skill_command_response,
-            run_skill_command_tool=run_skill_command_tool,
             reload_plugins=reload_plugins,
         )
         await handle_command(
@@ -1468,7 +1398,6 @@ class TurnController:
                         event=event,
                         requester_user_id=requester_user_id,
                         command=command,
-                        source_envelope=dispatch.envelope,
                     )
                 return
             if self._has_newer_unresponded_in_thread(
