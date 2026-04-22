@@ -685,6 +685,7 @@ class ApprovalManager:
         reason: str | None,
         resolved_by: str,
         handled_on_truncated_approval: bool = True,
+        resolve_truncated_approval: bool = False,
     ) -> AnchoredApprovalActionResult:
         """Resolve one Matrix-anchored approval action against the original approval card."""
         pending = self._anchored_request(
@@ -700,6 +701,24 @@ class ApprovalManager:
         if pending.approver_user_id != resolved_by:
             return AnchoredApprovalActionResult(handled=False)
         if status == "approved" and pending.event_arguments_truncated:
+            if resolve_truncated_approval:
+                if (
+                    await self._resolve_pending(
+                        pending.id,
+                        status="denied",
+                        reason=_DEFAULT_TRUNCATED_APPROVAL_REASON,
+                        resolved_by=resolved_by,
+                    )
+                    is not None
+                ):
+                    return AnchoredApprovalActionResult(handled=True)
+                refreshed = self._anchored_request(
+                    approval_event_id=approval_event_id,
+                    room_id=room_id,
+                )
+                return AnchoredApprovalActionResult(
+                    handled=refreshed is not None and refreshed.status != "pending" and refreshed.resolution_synced_at is None,
+                )
             return AnchoredApprovalActionResult(
                 handled=handled_on_truncated_approval,
                 error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON,
@@ -779,7 +798,7 @@ class ApprovalManager:
             status=status,
             reason=trimmed_reason or None,
             resolved_by=resolved_by,
-            handled_on_truncated_approval=False,
+            resolve_truncated_approval=True,
         )
 
     async def approve(

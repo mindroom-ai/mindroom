@@ -2637,8 +2637,10 @@ async def test_bot_custom_approval_response_event_resolves_pending_call(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_bot_custom_approval_response_event_refuses_truncated_approval(tmp_path: Path) -> None:
-    """Approve clicks on truncated approval cards should post a threaded notice and leave the request pending."""
+async def test_bot_custom_approval_response_event_denies_truncated_approval_and_edits_card(
+    tmp_path: Path,
+) -> None:
+    """Approve clicks on truncated approval cards should fail closed through the normal edit contract."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = _runtime_bound_config(
         runtime_paths,
@@ -2678,31 +2680,22 @@ async def test_bot_custom_approval_response_event_refuses_truncated_approval(tmp
             ),
         )
 
-    assert handled is False
-    assert task.done() is False
-    assert store.list_pending() == [pending]
-    editor.assert_not_awaited()
-    bot.client.room_send.assert_awaited_once_with(
-        room_id="!room:localhost",
-        message_type="m.room.message",
-        content={
-            "msgtype": "m.notice",
-            "body": (
-                "Cannot approve: the displayed arguments are truncated. "
-                "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
-            ),
-            "m.relates_to": {
-                "rel_type": "m.thread",
-                "event_id": "$thread",
-                "is_falling_back": True,
-                "m.in_reply_to": {"event_id": "$approval"},
-            },
-        },
-    )
-
-    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
+    assert handled is True
     decision = await task
     assert decision.status == "denied"
+    assert decision.reason == (
+        "Cannot approve: the displayed arguments are truncated. "
+        "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    )
+    assert store.list_pending() == []
+    editor.assert_awaited_once()
+    assert editor.await_args.args[:3] == ("!room:localhost", "$approval", "@mindroom_code:localhost")
+    assert editor.await_args.args[3]["status"] == "denied"
+    assert editor.await_args.args[3]["resolution_reason"] == (
+        "Cannot approve: the displayed arguments are truncated. "
+        "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    )
+    bot.client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
