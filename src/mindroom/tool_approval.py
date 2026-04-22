@@ -496,6 +496,21 @@ class ApprovalManager:
             ]
         return sorted(requests, key=lambda approval: approval.resolved_at or approval.requested_at)
 
+    def list_unsynced_requests_for_sender(self, sender_user_id: str) -> list[PendingApproval]:
+        """Return unsynced approval cards originally sent by one Matrix user."""
+        with self._state_lock:
+            requests = [
+                approval
+                for approval in self._requests_by_id.values()
+                if (
+                    approval.original_event_sender_user_id == sender_user_id
+                    and approval.room_id is not None
+                    and approval.event_id is not None
+                    and approval.resolution_synced_at is None
+                )
+            ]
+        return sorted(requests, key=lambda approval: approval.requested_at)
+
     def _claim_unsynced_resolved_replay(self, approval_id: str) -> PendingApproval | None:
         with self._state_lock:
             pending = self._requests_by_id.get(approval_id)
@@ -1025,6 +1040,36 @@ class ApprovalManager:
             finally:
                 self._finish_unsynced_resolved_replay(pending.id)
         return synced_requests
+
+    async def sync_unsynced_request(self, approval_id: str) -> PendingApproval | None:
+        """Replay one resolved approval card that still needs one Matrix edit."""
+        with self._state_lock:
+            pending = self._requests_by_id.get(approval_id)
+            if pending is None or pending.status == "pending" or pending.resolution_synced_at is not None:
+                return None
+
+        claimed_pending = self._claim_unsynced_resolved_replay(approval_id)
+        if claimed_pending is None:
+            return None
+        try:
+            previous_synced_at = claimed_pending.resolution_synced_at
+            await self._edit_resolved_event(claimed_pending)
+            if claimed_pending.resolution_synced_at != previous_synced_at:
+                return claimed_pending
+            return None
+        finally:
+            self._finish_unsynced_resolved_replay(approval_id)
+
+    def acknowledge_unsynced_request(self, approval_id: str) -> PendingApproval | None:
+        """Mark one resolved approval as handled when no Matrix edit can be sent."""
+        with self._state_lock:
+            pending = self._requests_by_id.get(approval_id)
+            if pending is None or pending.status == "pending" or pending.resolution_synced_at is not None:
+                return None
+            pending.resolution_synced_at = _utcnow()
+        self._persist_request(pending)
+        self._discard(approval_id)
+        return pending
 
     @staticmethod
     def _new_decision(

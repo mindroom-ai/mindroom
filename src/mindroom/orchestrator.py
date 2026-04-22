@@ -58,6 +58,7 @@ from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_approval import (
     SentApprovalEvent,
+    get_approval_store,
     initialize_approval_store,
     shutdown_approval_store,
     sync_unsynced_approval_event_resolutions,
@@ -119,6 +120,7 @@ if TYPE_CHECKING:
 
     from .constants import RuntimePaths
 logger = get_logger(__name__)
+_REMOVED_SENDER_BOT_APPROVAL_REASON = "Original sender bot removed during config reload."
 
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
@@ -511,6 +513,124 @@ class MultiAgentOrchestrator:
             )
             return False
         return True
+
+    @staticmethod
+    def _approval_sender_user_id(bot: AgentBot | TeamBot) -> str | None:
+        """Return the Matrix user id that owns one approval card sender identity."""
+        if bot.client is not None:
+            user_id = bot.client.user_id
+            if isinstance(user_id, str) and user_id:
+                return user_id
+        user_id = bot.agent_user.user_id
+        if isinstance(user_id, str) and user_id:
+            return user_id
+        return None
+
+    def _pick_notice_bot_for_approval(
+        self,
+        room_id: str,
+        *,
+        preferred_sender_user_id: str | None,
+    ) -> AgentBot | TeamBot | None:
+        """Return one live room bot that can post a plain approval notice."""
+        preferred_bot: AgentBot | TeamBot | None = None
+        for bot in self.agent_bots.values():
+            if not bot.running or bot.client is None or room_id not in bot.client.rooms:
+                continue
+            user_id = bot.client.user_id
+            if not isinstance(user_id, str) or not user_id:
+                continue
+            if preferred_sender_user_id is not None and user_id == preferred_sender_user_id:
+                preferred_bot = bot
+                continue
+            return bot
+        return preferred_bot
+
+    async def _send_approval_notice(
+        self,
+        *,
+        room_id: str,
+        approval_event_id: str,
+        thread_id: str | None,
+        reason: str,
+        preferred_sender_user_id: str | None,
+    ) -> bool:
+        """Send one threaded approval notice from any live room bot."""
+        bot = self._pick_notice_bot_for_approval(
+            room_id,
+            preferred_sender_user_id=preferred_sender_user_id,
+        )
+        if bot is None or bot.client is None:
+            logger.warning(
+                "No live bot available to send approval notice",
+                room_id=room_id,
+                approval_event_id=approval_event_id,
+                preferred_sender_user_id=preferred_sender_user_id,
+            )
+            return False
+
+        thread_root_event_id = thread_id or approval_event_id
+        response = await bot.client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content={
+                "msgtype": "m.notice",
+                "body": reason,
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": thread_root_event_id,
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": approval_event_id},
+                },
+            },
+        )
+        if isinstance(response, nio.RoomSendResponse):
+            return True
+
+        logger.warning(
+            "Failed to send approval notice",
+            room_id=room_id,
+            approval_event_id=approval_event_id,
+            preferred_sender_user_id=preferred_sender_user_id,
+            response=str(response),
+        )
+        return False
+
+    async def _force_finalize_pending_approvals_for_sender(self, sender_user_id: str) -> None:
+        """Finalize or explicitly abandon approval cards before removing one sender bot."""
+        approval_store = get_approval_store()
+        if approval_store is None:
+            return
+
+        sender_requests = approval_store.list_unsynced_requests_for_sender(sender_user_id)
+        if not sender_requests:
+            return
+
+        for request in sender_requests:
+            if request.status != "pending":
+                continue
+            with suppress(LookupError, ValueError):
+                await approval_store.expire(request.id, reason=_REMOVED_SENDER_BOT_APPROVAL_REASON)
+
+        for request in approval_store.list_unsynced_requests_for_sender(sender_user_id):
+            if request.status == "pending":
+                continue
+            await approval_store.sync_unsynced_request(request.id)
+
+        remaining_requests = approval_store.list_unsynced_requests_for_sender(sender_user_id)
+        for request in remaining_requests:
+            room_id = request.room_id
+            approval_event_id = request.event_id
+            if room_id is None or approval_event_id is None:
+                continue
+            await self._send_approval_notice(
+                room_id=room_id,
+                approval_event_id=approval_event_id,
+                thread_id=request.thread_id,
+                reason=_REMOVED_SENDER_BOT_APPROVAL_REASON,
+                preferred_sender_user_id=sender_user_id,
+            )
+            approval_store.acknowledge_unsynced_request(request.id)
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
@@ -1378,6 +1498,12 @@ class MultiAgentOrchestrator:
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
             await cancel_sync_task(entity_name, self._sync_tasks)
+
+            bot = self.agent_bots.get(entity_name)
+            if bot is not None:
+                sender_user_id = self._approval_sender_user_id(bot)
+                if sender_user_id is not None:
+                    await self._force_finalize_pending_approvals_for_sender(sender_user_id)
 
             bot = self.agent_bots.pop(entity_name, None)
             if bot is not None:

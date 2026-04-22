@@ -407,6 +407,97 @@ def _mock_managed_bot(config: Config) -> MagicMock:
     return bot
 
 
+def _approval_reload_config(tmp_path: Path, *, include_code: bool) -> Config:
+    """Return one minimal config for approval reload tests."""
+    agents: dict[str, dict[str, object]] = {
+        "general": {
+            "display_name": "GeneralAgent",
+            "role": "General assistant",
+            "model": "default",
+            "rooms": ["lobby"],
+        },
+    }
+    if include_code:
+        agents["code"] = {
+            "display_name": "CodeAgent",
+            "role": "Writes code",
+            "model": "default",
+            "rooms": ["lobby"],
+        }
+    return _runtime_bound_config(
+        Config(
+            agents=agents,
+            models={"default": {"provider": "test", "id": "test-model"}},
+        ),
+        tmp_path,
+    )
+
+
+def _mock_approval_reload_bot(
+    config: Config,
+    *,
+    agent_name: str,
+    user_id: str,
+    room_send: AsyncMock,
+) -> MagicMock:
+    """Return one managed-bot double with a live Matrix client for approval reload tests."""
+    bot = _mock_managed_bot(config)
+    bot.agent_name = agent_name
+    bot.running = True
+    bot.client = make_matrix_client_mock(user_id=user_id)
+    bot.client.room_send = room_send
+    bot.client.rooms["!room:localhost"].add_member(user_id, agent_name.capitalize(), None)
+    latest_thread_event_id = "$latest-thread-event" if agent_name == "code" else None
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
+    bot.cleanup = AsyncMock()
+    return bot
+
+
+def _approval_removal_plan(new_config: Config) -> ConfigUpdatePlan:
+    """Return one config-update plan that removes the code bot without restarting others."""
+    return ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        all_new_entities=set(),
+        entities_to_restart=set(),
+        new_entities=set(),
+        removed_entities={"code"},
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+
+def _cleanup_recorder(event_order: list[str]) -> Callable[[], Awaitable[None]]:
+    """Return one async cleanup side effect that records teardown ordering."""
+
+    async def _cleanup() -> None:
+        event_order.append("cleanup")
+
+    return _cleanup
+
+
+def _mock_shared_knowledge_manager(
+    *,
+    base_id: str,
+    storage_root: Path,
+    knowledge_path: Path,
+    knowledge: object,
+) -> KnowledgeManager:
+    manager = MagicMock(spec=KnowledgeManager)
+    manager.base_id = base_id
+    manager.storage_path = storage_root
+    manager.knowledge_path = knowledge_path
+    manager._cached_persisted_indexing_state = SimpleNamespace(
+        status="complete",
+        availability=KnowledgeAvailability.READY.value,
+    )
+    manager.matches.return_value = True
+    manager.get_knowledge.return_value = knowledge
+    return manager
+
+
 def _hook_plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
     """Create a minimal plugin stub for hook registry tests."""
     return SimpleNamespace(
@@ -12361,6 +12452,117 @@ class TestMultiAgentOrchestrator:
                 "@mindroom_general:localhost",
             )
             assert request_path.exists() is False
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_update_config_finalizes_approvals_before_removing_sender_bot(self, tmp_path: Path) -> None:
+        """Hot reload should expire and edit approval cards before a removed sender bot cleans up."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+
+        old_config = _approval_reload_config(tmp_path, include_code=True)
+        new_config = _approval_reload_config(tmp_path, include_code=False)
+
+        orchestrator.config = old_config
+        orchestrator.running = True
+
+        event_order: list[str] = []
+
+        async def _code_room_send(
+            *,
+            room_id: str,
+            message_type: str,
+            content: dict[str, object],
+        ) -> nio.RoomSendResponse:
+            assert room_id == "!room:localhost"
+            assert message_type == "io.mindroom.tool_approval"
+            if "m.new_content" in content:
+                event_order.append("edit")
+                new_content = content["m.new_content"]
+                assert isinstance(new_content, dict)
+                assert new_content["status"] == "expired"
+                assert new_content["resolution_reason"] == "Original sender bot removed during config reload."
+                return nio.RoomSendResponse(event_id="$approval-edit", room_id=room_id)
+            event_order.append("send")
+            return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
+
+        code_bot = _mock_approval_reload_bot(
+            old_config,
+            agent_name="code",
+            user_id="@mindroom_code:localhost",
+            room_send=AsyncMock(side_effect=_code_room_send),
+        )
+        code_client = code_bot.client
+        assert code_client is not None
+
+        general_room_send = AsyncMock(
+            return_value=nio.RoomSendResponse(event_id="$notice", room_id="!room:localhost"),
+        )
+        general_bot = _mock_approval_reload_bot(
+            old_config,
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            room_send=general_room_send,
+        )
+        general_client = general_bot.client
+        assert general_client is not None
+
+        code_bot.cleanup = AsyncMock(side_effect=_cleanup_recorder(event_order))
+
+        orchestrator.agent_bots = {"code": code_bot, "general": general_bot}
+
+        store = initialize_approval_store(
+            runtime_paths,
+            sender=orchestrator._send_approval_event,
+            editor=orchestrator._edit_approval_event,
+        )
+        task = asyncio.create_task(
+            store.request_approval(
+                tool_name="run_shell_command",
+                arguments={"command": "echo hi"},
+                agent_name="code",
+                transport_agent_name="code",
+                room_id="!room:localhost",
+                thread_id="$thread",
+                requester_id="@user:localhost",
+                approver_user_id="@user:localhost",
+                matched_rule="run_shell_*",
+                script_path=None,
+                timeout_seconds=60,
+            ),
+        )
+
+        async with asyncio.timeout(1):
+            while True:
+                pending = store.list_pending()
+                if pending and pending[0].event_id is not None:
+                    break
+                await asyncio.sleep(0)
+
+        plan = _approval_removal_plan(new_config)
+
+        try:
+            with (
+                patch("mindroom.orchestrator.load_config", return_value=new_config),
+                patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+                patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+                patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+                patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+                patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+                patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
+                patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            ):
+                updated = await orchestrator.update_config()
+
+            decision = await task
+
+            assert updated is True
+            assert decision.status == "expired"
+            assert decision.reason == "Original sender bot removed during config reload."
+            assert event_order == ["send", "edit", "cleanup"]
+            general_client.room_send.assert_not_awaited()
         finally:
             await shutdown_approval_store()
 
