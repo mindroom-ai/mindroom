@@ -136,12 +136,23 @@ class ResolvedVisibleMessage:
         return message_data
 
 
-def _trusted_sender_ids(
+def trusted_visible_sender_ids(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> frozenset[str]:
     """Return the trusted internal senders for high-level Matrix read helpers."""
     return active_internal_sender_ids(config, runtime_paths)
+
+
+def _resolved_trusted_sender_ids(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    trusted_sender_ids: Collection[str] | None,
+) -> Collection[str]:
+    """Reuse one caller-provided trust set or derive it from the current runtime."""
+    if trusted_sender_ids is not None:
+        return trusted_sender_ids
+    return trusted_visible_sender_ids(config, runtime_paths)
 
 
 async def extract_visible_message(
@@ -152,6 +163,7 @@ async def extract_visible_message(
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    trusted_sender_ids: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Extract one visible message using runtime-derived sender trust."""
     return await extract_and_resolve_message(
@@ -159,7 +171,7 @@ async def extract_visible_message(
         client,
         event_cache=event_cache,
         room_id=room_id,
-        trusted_sender_ids=_trusted_sender_ids(config, runtime_paths),
+        trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
     )
 
 
@@ -171,6 +183,7 @@ async def extract_visible_edit_body(
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    trusted_sender_ids: Collection[str] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract one visible edit body using runtime-derived sender trust."""
     return await extract_edit_body(
@@ -178,7 +191,7 @@ async def extract_visible_edit_body(
         client,
         event_cache=event_cache,
         room_id=room_id,
-        trusted_sender_ids=_trusted_sender_ids(config, runtime_paths),
+        trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
     )
 
 
@@ -191,6 +204,7 @@ async def resolve_visible_event_source(
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    trusted_sender_ids: Collection[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Resolve one event source plus its canonical visible body from runtime config."""
     normalized_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
@@ -203,11 +217,11 @@ async def resolve_visible_event_source(
     return resolved_event_source, visible_body_from_event_source(
         resolved_event_source,
         fallback_body,
-        trusted_sender_ids=_trusted_sender_ids(config, runtime_paths),
+        trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
     )
 
 
-def _message_preview(body: object, max_length: int = 120) -> str:
+def message_preview(body: object, max_length: int = 120) -> str:
     """Return one compact visible-body preview."""
     if not isinstance(body, str):
         return ""
@@ -250,9 +264,10 @@ async def bundled_replacement_body(
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    trusted_sender_ids: Collection[str] | None = None,
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
-    trusted_sender_ids = _trusted_sender_ids(config, runtime_paths)
+    trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
     for candidate in _bundled_replacement_candidates(event_source):
         resolved_candidate = await resolve_event_source_content(
             candidate,
@@ -290,11 +305,13 @@ async def thread_root_body_preview(
     runtime_paths: RuntimePaths,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    trusted_sender_ids: Collection[str] | None = None,
 ) -> str:
     """Return the canonical preview body for one thread root event."""
     if isinstance(event, nio.MegolmEvent):
         return "[encrypted]"
     event_source = event.source if isinstance(event.source, dict) else {}
+    trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
     replacement_body = await bundled_replacement_body(
         event_source,
         client=client,
@@ -302,9 +319,10 @@ async def thread_root_body_preview(
         runtime_paths=runtime_paths,
         event_cache=event_cache,
         room_id=room_id,
+        trusted_sender_ids=trusted_sender_ids,
     )
     if replacement_body is not None:
-        return _message_preview(replacement_body)
+        return message_preview(replacement_body)
     _resolved_event_source, visible_body = await resolve_visible_event_source(
         event_source,
         client,
@@ -313,8 +331,9 @@ async def thread_root_body_preview(
         runtime_paths=runtime_paths,
         event_cache=event_cache,
         room_id=room_id,
+        trusted_sender_ids=trusted_sender_ids,
     )
-    return _message_preview(visible_body)
+    return message_preview(visible_body)
 
 
 def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | None:
@@ -486,8 +505,10 @@ __all__ = [
     "bundled_replacement_body",
     "extract_visible_edit_body",
     "extract_visible_message",
+    "message_preview",
     "replace_visible_message",
     "resolve_latest_visible_messages",
     "resolve_visible_event_source",
     "thread_root_body_preview",
+    "trusted_visible_sender_ids",
 ]

@@ -23,10 +23,7 @@ from mindroom.custom_tools.attachments import (
     _send_attachment_paths,
     send_context_attachments,
 )
-from mindroom.custom_tools.matrix_helpers import (
-    check_rate_limit,
-    message_preview,
-)
+from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.interactive import (
     add_reaction_buttons,
     clear_interactive_question,
@@ -45,7 +42,9 @@ from mindroom.matrix.client_visible_messages import (
     extract_visible_message as extract_and_resolve_message,
 )
 from mindroom.matrix.client_visible_messages import (
+    message_preview,
     thread_root_body_preview,
+    trusted_visible_sender_ids,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.tool_system.runtime_context import (
@@ -499,12 +498,14 @@ class MatrixMessageTools(Toolkit):
                 response=str(response),
             )
 
+        trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
         resolved = [
             await extract_and_resolve_message(
                 event,
                 context.client,
                 config=context.config,
                 runtime_paths=context.runtime_paths,
+                trusted_sender_ids=trusted_sender_ids,
             )
             for event in reversed(response.chunk)
             if isinstance(event, self._VISIBLE_ROOM_MESSAGE_EVENT_TYPES)
@@ -578,6 +579,7 @@ class MatrixMessageTools(Toolkit):
         context: ToolRuntimeContext,
         *,
         event: nio.Event,
+        trusted_sender_ids: frozenset[str],
     ) -> dict[str, object] | None:
         event_id = event.event_id
         sender = event.sender
@@ -601,6 +603,7 @@ class MatrixMessageTools(Toolkit):
             client=context.client,
             config=context.config,
             runtime_paths=context.runtime_paths,
+            trusted_sender_ids=trusted_sender_ids,
         )
 
         payload = {
@@ -643,8 +646,13 @@ class MatrixMessageTools(Toolkit):
             return self._payload("error", **error_payload)
 
         threads: list[dict[str, object]] = []
+        trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
         for event in thread_roots:
-            thread = await self._serialize_thread_root(context, event=event)
+            thread = await self._serialize_thread_root(
+                context,
+                event=event,
+                trusted_sender_ids=trusted_sender_ids,
+            )
             if thread is not None:
                 threads.append(thread)
         return self._payload(

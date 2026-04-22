@@ -1,4 +1,4 @@
-"""Shared helpers for Matrix tool modules."""
+"""Shared non-rendering helpers for Matrix tool modules."""
 
 from __future__ import annotations
 
@@ -10,16 +10,6 @@ if TYPE_CHECKING:
     from threading import Lock
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-
-
-def message_preview(body: object, max_length: int = 120) -> str:
-    """Return a compact preview of a message body, truncated to max_length."""
-    if not isinstance(body, str):
-        return ""
-    compact = " ".join(body.split())
-    if len(compact) <= max_length:
-        return compact
-    return f"{compact[: max_length - 3].rstrip()}..."
 
 
 def check_rate_limit(

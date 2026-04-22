@@ -7,7 +7,7 @@ import json
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -1685,6 +1685,7 @@ async def test_matrix_message_room_threads_resolves_notice_root_without_replacem
         client=ctx.client,
         config=ctx.config,
         runtime_paths=ctx.runtime_paths,
+        trusted_sender_ids=ANY,
     )
 
 
@@ -1844,6 +1845,7 @@ async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
         client=ctx.client,
         config=ctx.config,
         runtime_paths=ctx.runtime_paths,
+        trusted_sender_ids=ANY,
     )
     mock_warning.assert_called_once()
 
@@ -2143,9 +2145,11 @@ async def test_matrix_message_read_room_includes_notice_events() -> None:
         *,
         config: Config,
         runtime_paths: object,
+        trusted_sender_ids: frozenset[str],
     ) -> dict[str, object]:
         assert config is ctx.config
         assert runtime_paths == ctx.runtime_paths
+        assert trusted_sender_ids
         return extracted_messages[event.event_id]
 
     with (
@@ -2162,6 +2166,74 @@ async def test_matrix_message_read_room_includes_notice_events() -> None:
         {"event_id": "$text", "body": "hello"},
         {"event_id": "$notice", "body": "Compacted 12 messages", "msgtype": "m.notice"},
     ]
+    assert mock_extract.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_room_precomputes_trusted_sender_ids_once() -> None:
+    """Room reads should resolve the trust set once and pass it through every extraction."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+    response = nio.RoomMessagesResponse.from_dict(
+        {
+            "chunk": [
+                {
+                    "type": "m.room.message",
+                    "event_id": "$notice",
+                    "sender": "@mindroom:localhost",
+                    "origin_server_ts": 2,
+                    "content": {"msgtype": "m.notice", "body": "Compacted 12 messages"},
+                },
+                {
+                    "type": "m.room.message",
+                    "event_id": "$text",
+                    "sender": "@alice:localhost",
+                    "origin_server_ts": 1,
+                    "content": {"msgtype": "m.text", "body": "hello"},
+                },
+            ],
+            "start": "s",
+            "end": "e",
+        },
+        ctx.room_id,
+    )
+    ctx.client.room_messages.return_value = response
+    trusted_sender_ids = frozenset({"@mindroom_general:localhost"})
+
+    async def _extract(
+        event: nio.Event,
+        _client: nio.AsyncClient,
+        *,
+        config: Config,
+        runtime_paths: object,
+        trusted_sender_ids: frozenset[str],
+    ) -> dict[str, object]:
+        assert config is ctx.config
+        assert runtime_paths == ctx.runtime_paths
+        assert trusted_sender_ids is trusted_sender_ids_for_assertion
+        return {"event_id": event.event_id, "body": event.source["content"]["body"]}
+
+    trusted_sender_ids_for_assertion = trusted_sender_ids
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.trusted_visible_sender_ids",
+            return_value=trusted_sender_ids,
+        ) as mock_trusted_sender_ids,
+        patch(
+            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            new=AsyncMock(side_effect=_extract),
+        ) as mock_extract,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="read", limit=5))
+
+    assert payload["status"] == "ok"
+    assert payload["messages"] == [
+        {"event_id": "$text", "body": "hello"},
+        {"event_id": "$notice", "body": "Compacted 12 messages"},
+    ]
+    mock_trusted_sender_ids.assert_called_once_with(ctx.config, ctx.runtime_paths)
     assert mock_extract.await_count == 2
 
 

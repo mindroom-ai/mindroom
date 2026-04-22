@@ -3,7 +3,7 @@
 import json
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -14,6 +14,7 @@ from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY
 from mindroom.matrix.client_visible_messages import (
     extract_visible_edit_body,
+    message_preview,
     resolve_visible_event_source,
     thread_root_body_preview,
 )
@@ -605,6 +606,69 @@ class TestResolvedMessageExtraction:
         )
 
         assert preview == "Edited body"
+
+    @pytest.mark.asyncio
+    async def test_thread_root_body_preview_passes_precomputed_trusted_sender_ids_to_nested_helpers(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Thread previews should reuse one caller-provided trust set through nested helpers."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        event = _make_message_event(
+            body="Original root",
+            content={"msgtype": "m.text", "body": "Original root"},
+            event_id="$thread-root",
+            sender="@user:example.com",
+        )
+        client = _make_client()
+        trusted_sender_ids = frozenset({"@mindroom_general:localhost"})
+
+        with (
+            patch(
+                "mindroom.matrix.client_visible_messages.bundled_replacement_body",
+                new=AsyncMock(return_value=None),
+            ) as mock_bundled,
+            patch(
+                "mindroom.matrix.client_visible_messages.resolve_visible_event_source",
+                new=AsyncMock(return_value=(event.source, "Resolved root")),
+            ) as mock_resolve,
+        ):
+            preview = await thread_root_body_preview(
+                event,
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                trusted_sender_ids=trusted_sender_ids,
+            )
+
+        assert preview == "Resolved root"
+        mock_bundled.assert_awaited_once_with(
+            event.source,
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=None,
+            room_id=None,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+        mock_resolve.assert_awaited_once_with(
+            event.source,
+            client,
+            fallback_body="Original root",
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=None,
+            room_id=None,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+
+    def test_message_preview_compacts_whitespace_and_truncates(self) -> None:
+        """Shared preview compaction should live in the Matrix visible-message layer."""
+        assert message_preview("  alpha   beta  \n gamma  ", max_length=12) == "alpha bet..."
 
 
 class TestDownloadMxcText:
