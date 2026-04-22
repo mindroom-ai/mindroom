@@ -1392,6 +1392,39 @@ class TestStreamingCompletion:
         ]
         assert "".join(contents) == "hello"
 
+    def test_streaming_corrective_final_content_can_replace_stale_buffered_tail(
+        self,
+        app_client: TestClient,
+    ) -> None:
+        """A final corrective body should replace an unflushed stale tail, not preserve it."""
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="hellx")
+            yield RunCompletedEvent(content="hello")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.strip().split("\n\n")
+            if line.startswith("data: {")
+        ]
+        contents = [
+            chunk["choices"][0]["delta"].get("content", "")
+            for chunk in chunks
+            if "content" in chunk["choices"][0]["delta"]
+        ]
+        assert "".join(contents) == "hello"
+
     def test_streaming_first_event_error_returns_500(self, app_client: TestClient) -> None:
         """If first stream event is an error string, return HTTP 500 instead of SSE."""
 

@@ -104,6 +104,14 @@ class _ToolStreamState:
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class _AssistantTextStreamState:
+    """Buffer the newest assistant text chunk so a final completion can replace its stale tail."""
+
+    emitted_text: str = ""
+    pending_delta: str | None = None
+
+
 def _load_config(
     request: Request,
     *,
@@ -1057,32 +1065,52 @@ def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> 
     return _format_stream_tool_event(event, tool_state)
 
 
-def _extract_stream_delta(
+def _flush_pending_assistant_delta(assistant_state: _AssistantTextStreamState) -> str | None:
+    """Flush the buffered assistant delta once it is safe to expose."""
+    pending_delta = assistant_state.pending_delta
+    if not pending_delta:
+        return None
+    assistant_state.emitted_text = f"{assistant_state.emitted_text}{pending_delta}"
+    assistant_state.pending_delta = None
+    return pending_delta
+
+
+def _extract_stream_deltas(
     event: AIStreamChunk,
     tool_state: _ToolStreamState,
-    emitted_assistant_text: str,
-) -> tuple[str | None, str]:
-    """Extract one SSE delta while avoiding duplicate corrective final content."""
-    delta: str | None = None
-    next_emitted_text = emitted_assistant_text
+    assistant_state: _AssistantTextStreamState,
+) -> list[str]:
+    """Extract SSE deltas while letting a final completion replace one buffered text chunk."""
+    deltas: list[str] = []
 
     if isinstance(event, RunContentEvent):
         if event.content:
-            text = str(event.content)
-            delta = text
-            next_emitted_text = f"{emitted_assistant_text}{text}"
-    elif isinstance(event, RunCompletedEvent):
-        if event.content is not None:
-            final_text = str(event.content)
-            next_emitted_text = final_text
-            if not emitted_assistant_text:
-                delta = final_text
-            elif final_text.startswith(emitted_assistant_text):
-                delta = final_text[len(emitted_assistant_text) :] or None
-    else:
-        delta = _extract_stream_text(event, tool_state)
+            flushed_delta = _flush_pending_assistant_delta(assistant_state)
+            if flushed_delta:
+                deltas.append(flushed_delta)
+            assistant_state.pending_delta = str(event.content)
+        return deltas
 
-    return delta, next_emitted_text
+    if isinstance(event, RunCompletedEvent) and event.content is not None:
+        final_text = str(event.content)
+        if final_text.startswith(assistant_state.emitted_text):
+            delta = final_text[len(assistant_state.emitted_text) :] or None
+            assistant_state.emitted_text = final_text
+            assistant_state.pending_delta = None
+            if delta:
+                deltas.append(delta)
+            return deltas
+        assistant_state.emitted_text = final_text
+        assistant_state.pending_delta = None
+        return deltas
+
+    flushed_delta = _flush_pending_assistant_delta(assistant_state)
+    if flushed_delta:
+        deltas.append(flushed_delta)
+    delta = _extract_stream_text(event, tool_state)
+    if delta:
+        deltas.append(delta)
+    return deltas
 
 
 async def _stream_completion(
@@ -1135,31 +1163,33 @@ async def _stream_completion(
 
     async def event_generator() -> AsyncIterator[str]:
         tool_state = _ToolStreamState()
-        emitted_assistant_text = ""
+        assistant_state = _AssistantTextStreamState()
         try:
             # 1. Initial role announcement
             yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
             # 2. Yield the peeked first event
-            text, emitted_assistant_text = _extract_stream_delta(
+            for text in _extract_stream_deltas(
                 first_event,
                 tool_state,
-                emitted_assistant_text,
-            )
-            if text:
+                assistant_state,
+            ):
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
             # 3. Stream remaining content
             # Error strings after the first event are sent as content chunks
             # since we can't switch to an error HTTP status mid-stream.
             async for event in stream:
-                text, emitted_assistant_text = _extract_stream_delta(
+                for text in _extract_stream_deltas(
                     event,
                     tool_state,
-                    emitted_assistant_text,
-                )
-                if text:
+                    assistant_state,
+                ):
                     yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
+
+            flushed_delta = _flush_pending_assistant_delta(assistant_state)
+            if flushed_delta:
+                yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': flushed_delta})}\n\n"
 
             # 4. Final chunk with finish_reason
             logger.info("Chat completion sent", model=agent_name, stream=True)
