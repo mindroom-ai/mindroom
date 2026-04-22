@@ -889,30 +889,15 @@ class DeliveryGateway:
         )
         return False
 
-    async def deliver_final(self, request: FinalDeliveryRequest) -> FinalDeliveryOutcome:  # noqa: C901, PLR0912
+    async def deliver_final(self, request: FinalDeliveryRequest) -> FinalDeliveryOutcome:  # noqa: C901, PLR0911
         """Apply before/after hooks around one final send or edit."""
-        try:
-            draft = (
-                await self.deps.response_hooks.apply_before_response(
-                    correlation_id=request.correlation_id,
-                    envelope=request.response_envelope,
-                    response_text=request.response_text,
-                    response_kind=request.response_kind,
-                    tool_trace=request.tool_trace,
-                    extra_content=request.extra_content,
-                )
-                if request.apply_before_hooks
-                else ResponseDraft(
-                    response_text=request.response_text,
-                    response_kind=request.response_kind,
-                    tool_trace=request.tool_trace,
-                    extra_content=request.extra_content,
-                    envelope=request.response_envelope,
-                )
-            )
-        except Exception as error:
-            cancelled = isinstance(error, asyncio.CancelledError)
-            failure_reason = str(error)
+
+        async def before_response_failure_outcome(
+            *,
+            cancelled: bool,
+            failure_reason: str,
+        ) -> FinalDeliveryOutcome:
+            outcome: FinalDeliveryOutcome
             if request.existing_event_id is not None:
                 if request.existing_event_is_placeholder:
                     cleanup_outcome = await self._cleanup_visible_placeholder(
@@ -970,6 +955,45 @@ class DeliveryGateway:
                     tool_trace=request.tool_trace or (),
                     extra_content=request.extra_content,
                 )
+            return outcome
+
+        try:
+            draft = (
+                await self.deps.response_hooks.apply_before_response(
+                    correlation_id=request.correlation_id,
+                    envelope=request.response_envelope,
+                    response_text=request.response_text,
+                    response_kind=request.response_kind,
+                    tool_trace=request.tool_trace,
+                    extra_content=request.extra_content,
+                )
+                if request.apply_before_hooks
+                else ResponseDraft(
+                    response_text=request.response_text,
+                    response_kind=request.response_kind,
+                    tool_trace=request.tool_trace,
+                    extra_content=request.extra_content,
+                    envelope=request.response_envelope,
+                )
+            )
+        except asyncio.CancelledError as error:
+            outcome = await before_response_failure_outcome(
+                cancelled=True,
+                failure_reason=str(error),
+            )
+            if request.emit_terminal_hooks:
+                return await self.emit_terminal_outcome_hooks(
+                    outcome=outcome,
+                    correlation_id=request.correlation_id,
+                    envelope=request.response_envelope,
+                    response_kind=request.response_kind,
+                )
+            return outcome
+        except Exception as error:
+            outcome = await before_response_failure_outcome(
+                cancelled=False,
+                failure_reason=str(error),
+            )
             if request.emit_terminal_hooks:
                 return await self.emit_terminal_outcome_hooks(
                     outcome=outcome,
@@ -1343,6 +1367,22 @@ class DeliveryGateway:
                 ),
             )
             if final_outcome.state == "error_without_visible_response" and visible_stream_event_id is not None:
+                recovered_outcome = self._completed_stream_failure_outcome(
+                    visible_stream_event_id=visible_stream_event_id,
+                    failure_reason=final_outcome.failure_reason or "terminal_update_failed",
+                    streamed_text=streamed_text or None,
+                    tool_trace=request.tool_trace,
+                    extra_content=request.extra_content,
+                    option_map=stream_outcome.option_map,
+                    options_list=stream_outcome.options_list,
+                )
+                return await self.emit_terminal_outcome_hooks(
+                    outcome=recovered_outcome,
+                    correlation_id=request.correlation_id,
+                    envelope=request.response_envelope,
+                    response_kind=request.response_kind,
+                )
+            if final_outcome.state == "kept_prior_visible_response_after_error" and visible_stream_event_id is not None:
                 recovered_outcome = self._completed_stream_failure_outcome(
                     visible_stream_event_id=visible_stream_event_id,
                     failure_reason=final_outcome.failure_reason or "terminal_update_failed",

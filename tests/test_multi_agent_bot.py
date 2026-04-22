@@ -2963,6 +2963,62 @@ class TestAgentBot:
         gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_finalize_streamed_response_failed_terminal_edit_preserves_visible_stream_as_completed_failure(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A failed post-stream rewrite must keep the visible streamed reply handled and non-retryable."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
+        gateway = replace_delivery_gateway_deps(
+            bot,
+            response_hooks=SimpleNamespace(
+                apply_before_response=AsyncMock(
+                    return_value=SimpleNamespace(
+                        response_text="updated text",
+                        response_kind="ai",
+                        tool_trace=None,
+                        extra_content=None,
+                        envelope=response_envelope,
+                        suppress=False,
+                    ),
+                ),
+                emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
+            ),
+        )
+        mock_deliver_final = AsyncMock(
+            return_value=FinalDeliveryOutcome.kept_prior_visible_response_after_error(
+                final_visible_event_id="$streaming",
+                failure_reason="delivery_failed",
+            ),
+        )
+        object.__setattr__(gateway, "deliver_final", mock_deliver_final)
+
+        outcome = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                stream_transport_outcome=_stream_outcome("$streaming", "chunk"),
+                initial_delivery_kind="sent",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-finalize-stream-completed-terminal-failure",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome.state == "kept_prior_visible_stream_after_completed_terminal_failure"
+        assert outcome.visible_response_event_id == "$streaming"
+        assert outcome.response_identity_event_id == "$streaming"
+        assert outcome.should_mark_handled is True
+        assert outcome.retryable is False
+        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_finalize_streamed_response_detects_in_place_hook_metadata_mutation(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -9347,6 +9403,49 @@ class TestAgentBot:
             room_id="!test:localhost",
             event_id="$thinking",
             reason="Failed placeholder response before delivery",
+        )
+        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_deliver_final_before_response_cancellation_cleans_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A cancelled before-response hook must still redact a visible placeholder."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
+        gateway = replace_delivery_gateway_deps(
+            bot,
+            redact_message_event=AsyncMock(return_value=True),
+            response_hooks=SimpleNamespace(
+                apply_before_response=AsyncMock(side_effect=asyncio.CancelledError("hook cancelled")),
+                emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
+            ),
+        )
+
+        outcome = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                existing_event_id="$thinking",
+                existing_event_is_placeholder=True,
+                response_text="Updated answer",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-deliver-before-hook-cancel",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome.state == "cancelled_without_visible_response"
+        gateway.deps.redact_message_event.assert_awaited_once_with(
+            room_id="!test:localhost",
+            event_id="$thinking",
+            reason="Cancelled placeholder response",
         )
         gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
