@@ -876,6 +876,16 @@ class AgentBot:
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
+        rooms_to_leave = await self._room_lifecycle.rooms_to_leave()
+        if rooms_to_leave:
+            orchestrator = self.orchestrator
+            if orchestrator is not None:
+                sender_user_id = orchestrator._approval_sender_user_id(self)
+                if sender_user_id is not None:
+                    await orchestrator._force_finalize_pending_approvals_for_sender(
+                        sender_user_id,
+                        room_ids=set(rooms_to_leave),
+                    )
         await self._room_lifecycle.leave_unconfigured_rooms()
 
     async def ensure_user_account(self) -> None:

@@ -121,9 +121,14 @@ class BotRoomLifecycle:
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this bot is no longer configured for."""
         client = self._client()
+        await leave_non_dm_rooms(client, await self.rooms_to_leave())
+
+    async def rooms_to_leave(self) -> list[str]:
+        """Return joined non-DM rooms this bot should now leave."""
+        client = self._client()
         joined_rooms = await get_joined_rooms(client)
         if joined_rooms is None:
-            return
+            return []
 
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.deps.get_configured_rooms())
@@ -134,7 +139,7 @@ class BotRoomLifecycle:
             if root_space_id is not None:
                 configured_rooms.add(root_space_id)
 
-        await leave_non_dm_rooms(client, list(current_rooms - configured_rooms))
+        return list(current_rooms - configured_rooms)
 
     async def send_welcome_message_if_empty(self, room_id: str) -> None:
         """Send the router welcome message only when the room has no other history."""

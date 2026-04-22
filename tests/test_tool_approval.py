@@ -2085,6 +2085,45 @@ async def test_orchestrator_edit_approval_event_returns_false_without_live_room_
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_edit_approval_event_returns_false_when_sender_left_room(tmp_path: Path) -> None:
+    """Approval edits should not target the original sender after it has left the room."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+    client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$edit-event", room_id="!room:localhost"),
+    )
+    bot = MagicMock()
+    bot.agent_name = "code"
+    bot.running = True
+    bot.client = client
+    orchestrator.agent_bots = {"code": bot}
+    _grant_approval_room_access_for_client(client, room_id="!other-room:localhost")
+
+    edited = await orchestrator._edit_approval_event(
+        "!room:localhost",
+        "$approval-event",
+        "@mindroom_code:localhost",
+        {
+            "approval_id": "approval-1",
+            "tool_name": "run_shell_command",
+            "arguments": {"command": "echo hi"},
+            "agent_name": "code",
+            "status": "approved",
+            "msgtype": "io.mindroom.tool_approval",
+            "body": "Approved: run_shell_command",
+            "thread_id": "$thread",
+            "resolved_at": "2026-04-12T00:00:00+00:00",
+            "resolved_by": "@bas:localhost",
+        },
+    )
+
+    assert edited is False
+    client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_bot_reaction_approves_pending_tool_call(tmp_path: Path) -> None:
     """Reactions on approval cards should resolve the pending approval from the bot handler."""
     runtime_paths = test_runtime_paths(tmp_path)

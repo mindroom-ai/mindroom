@@ -57,6 +57,7 @@ from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_approval import (
+    PendingApproval,
     SentApprovalEvent,
     get_approval_store,
     initialize_approval_store,
@@ -460,12 +461,13 @@ class MultiAgentOrchestrator:
 
     def _pick_room_bot_for_approval(self, room_id: str, sender_user_id: str) -> AgentBot | TeamBot | None:
         """Return the live bot that originally sent the approval card."""
-        del room_id
         for bot in self.agent_bots.values():
             if not bot.running or bot.client is None:
                 continue
             user_id = bot.client.user_id
             if user_id != sender_user_id:
+                continue
+            if room_id not in tuple(bot.client.rooms):
                 continue
             return bot
         return None
@@ -596,13 +598,24 @@ class MultiAgentOrchestrator:
         )
         return False
 
-    async def _force_finalize_pending_approvals_for_sender(self, sender_user_id: str) -> None:
+    async def _force_finalize_pending_approvals_for_sender(
+        self,
+        sender_user_id: str,
+        *,
+        room_ids: set[str] | None = None,
+    ) -> None:
         """Finalize or explicitly abandon approval cards before removing one sender bot."""
         approval_store = get_approval_store()
         if approval_store is None:
             return
 
-        sender_requests = approval_store.list_unsynced_requests_for_sender(sender_user_id)
+        def _sender_requests() -> list[PendingApproval]:
+            requests = approval_store.list_unsynced_requests_for_sender(sender_user_id)
+            if room_ids is None:
+                return requests
+            return [request for request in requests if request.room_id in room_ids]
+
+        sender_requests = _sender_requests()
         if not sender_requests:
             return
 
@@ -612,12 +625,12 @@ class MultiAgentOrchestrator:
             with suppress(LookupError, ValueError):
                 await approval_store.expire(request.id, reason=_REMOVED_SENDER_BOT_APPROVAL_REASON)
 
-        for request in approval_store.list_unsynced_requests_for_sender(sender_user_id):
+        for request in _sender_requests():
             if request.status == "pending":
                 continue
             await approval_store.sync_unsynced_request(request.id)
 
-        remaining_requests = approval_store.list_unsynced_requests_for_sender(sender_user_id)
+        remaining_requests = _sender_requests()
         for request in remaining_requests:
             room_id = request.room_id
             approval_event_id = request.event_id
