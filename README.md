@@ -244,7 +244,6 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
 - `!config <operation>` - Manage configuration
 - `!hi` - Show welcome message
-- `!skill <name> [args]` - Run a skill by name
 
 <!-- OUTPUT:END -->
 
