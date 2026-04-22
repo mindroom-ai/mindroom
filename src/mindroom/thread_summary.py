@@ -78,6 +78,18 @@ class _SupportsTemperature(Protocol):
     temperature: float | None
 
 
+def _supports_summary_temperature_override(model: object) -> bool:
+    """Return whether the summary path should override ``model.temperature``.
+
+    Vertex Claude models currently reject a ``temperature`` parameter on the
+    rawPredict helper path even though the Python object exposes the attribute.
+    """
+    model_module = type(model).__module__
+    if model_module.startswith("agno.models.vertexai.claude"):
+        return False
+    return isinstance(model, _SupportsTemperature)
+
+
 def normalize_thread_summary_text(raw_text: str) -> str:
     """Strip common markdown formatting and collapse the result to one plain-text line."""
     normalized = raw_text.strip()
@@ -296,7 +308,7 @@ async def _generate_summary(
     """Generate a one-line summary of a thread conversation via LLM."""
     model_name = config.defaults.thread_summary_model or "default"
     model = model_loading.get_model_instance(config, runtime_paths, model_name)
-    if isinstance(model, _SupportsTemperature):
+    if _supports_summary_temperature_override(model):
         model.temperature = _SUMMARY_TEMPERATURE
     else:
         model_class = type(model).__name__
