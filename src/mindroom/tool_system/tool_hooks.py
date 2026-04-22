@@ -437,7 +437,6 @@ async def _maybe_block_for_tool_approval(
         tool_name=tool_name,
         arguments=approval_arguments,
         agent_name=resolved_context.agent_name,
-        transport_agent_name=resolved_context.transport_agent_name,
         room_id=resolved_context.room_id,
         thread_id=resolved_context.thread_id,
         requester_id=resolved_context.requester_id,

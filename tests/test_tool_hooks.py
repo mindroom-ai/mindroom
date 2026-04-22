@@ -242,7 +242,7 @@ def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> A
 def _initialize_test_approval_store(runtime_paths: RuntimePaths) -> None:
     initialize_approval_store(
         runtime_paths,
-        sender=AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_code:localhost")),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
         editor=AsyncMock(),
     )
 
@@ -1234,12 +1234,15 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 
     client = MagicMock()
-    client.user_id = "@mindroom_code:localhost"
+    client.user_id = "@mindroom_router:localhost"
     client.room_send = AsyncMock(side_effect=mock_room_send)
+    client.rooms = {"!room:localhost": object()}
     bot = MagicMock()
+    bot.agent_name = "router"
+    bot.running = True
     bot.client = client
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
-    orchestrator.agent_bots = {"code": bot}
+    orchestrator.agent_bots = {"router": bot}
     initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=AsyncMock())
 
     bridge = build_tool_hook_bridge(
@@ -1277,7 +1280,7 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: Path) -> None:
+async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: Path) -> None:  # noqa: PLR0915
     """Approval-gated sync tools should resume after approval resolves on another loop."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -1300,14 +1303,17 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     orchestrator._capture_runtime_loop()
 
     client = MagicMock()
-    client.user_id = "@mindroom_code:localhost"
+    client.user_id = "@mindroom_router:localhost"
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
     )
+    client.rooms = {"!room:localhost": object()}
     bot = MagicMock()
+    bot.agent_name = "router"
+    bot.running = True
     bot.client = client
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
-    orchestrator.agent_bots = {"code": bot}
+    orchestrator.agent_bots = {"router": bot}
     editor = AsyncMock()
     initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=editor)
 
@@ -1370,7 +1376,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     assert result.status == "success"
     assert result.result == "HI"
     client.room_send.assert_awaited_once()
-    assert editor.await_args.args[3]["status"] == "approved"
+    assert editor.await_args.args[2]["status"] == "approved"
 
 
 @pytest.mark.asyncio
@@ -1399,7 +1405,7 @@ async def test_tool_approval_scripts_cannot_mutate_rendered_approval_payload(tmp
         ),
         runtime_paths,
     )
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_code:localhost"))
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
 
     bridge = build_tool_hook_bridge(
@@ -1447,7 +1453,7 @@ async def test_tool_approval_scripts_cannot_mutate_rendered_approval_payload(tmp
                 break
             await asyncio.sleep(0)
 
-    approval_payload = sender.await_args.args[3]
+    approval_payload = sender.await_args.args[2]
     assert approval_payload["arguments"] == {"payload": "original"}
 
     await store.handle_approval_resolution(
@@ -1527,7 +1533,7 @@ async def test_tool_approval_uses_transport_agent_for_detached_team_member_runs(
         ),
         runtime_paths,
     )
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_general:localhost"))
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
     dispatch_context = _dispatch_context(
         ToolExecutionIdentity(
@@ -1558,8 +1564,8 @@ async def test_tool_approval_uses_transport_agent_for_detached_team_member_runs(
         assert store is not None
         pending = store.list_pending()
         assert len(pending) == 1
-        assert sender.await_args.args[:3] == ("!room:localhost", "$resolved-thread", "general")
-        assert sender.await_args.args[3]["agent_name"] == "code"
+        assert sender.await_args.args[:2] == ("!room:localhost", "$resolved-thread")
+        assert sender.await_args.args[2]["agent_name"] == "code"
         await store.approve(pending[0].id, resolved_by="@user:localhost")
         result = await task
 
@@ -1585,7 +1591,7 @@ async def test_tool_approval_uses_transport_agent_for_delegated_live_runs(tmp_pa
         ),
         runtime_paths,
     )
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_general:localhost"))
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
     delegated_runtime_context = replace(
         _tool_runtime_context(tmp_path),
@@ -1619,8 +1625,8 @@ async def test_tool_approval_uses_transport_agent_for_delegated_live_runs(tmp_pa
         assert store is not None
         pending = store.list_pending()
         assert len(pending) == 1
-        assert sender.await_args.args[:3] == ("!room:localhost", "$resolved-thread", "general")
-        assert sender.await_args.args[3]["agent_name"] == "code"
+        assert sender.await_args.args[:2] == ("!room:localhost", "$resolved-thread")
+        assert sender.await_args.args[2]["agent_name"] == "code"
         await store.approve(pending[0].id, resolved_by="@user:localhost")
         result = await task
 
@@ -1647,7 +1653,7 @@ async def test_tool_approval_rejects_internal_mindroom_user_requester(tmp_path: 
         ),
         runtime_paths,
     )
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_code:localhost"))
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
     internal_user_id = config.get_mindroom_user_id(runtime_paths)
     assert internal_user_id is not None
@@ -1907,7 +1913,7 @@ async def test_tool_before_call_hooks_run_before_tool_approval_gate(tmp_path: Pa
 async def test_tool_before_call_decline_short_circuits_tool_approval(tmp_path: Path) -> None:
     """Denied policy hooks should prevent approval cards from being shown."""
     runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval", "@mindroom_code:localhost"))
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
     config = bind_runtime_paths(
         Config(

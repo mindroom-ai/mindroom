@@ -57,10 +57,7 @@ from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_approval import (
-    ApprovalManager,
-    PendingApproval,
     SentApprovalEvent,
-    get_approval_store,
     initialize_approval_store,
     shutdown_approval_store,
     sync_unsynced_approval_event_resolutions,
@@ -122,7 +119,6 @@ if TYPE_CHECKING:
 
     from .constants import RuntimePaths
 logger = get_logger(__name__)
-_REMOVED_SENDER_BOT_APPROVAL_REASON = "Original sender bot removed during config reload."
 
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
@@ -401,28 +397,26 @@ class MultiAgentOrchestrator:
         self,
         room_id: str,
         thread_id: str | None,
-        agent_name: str,
         content: dict[str, Any],
     ) -> SentApprovalEvent | None:
         """Send one custom approval event into the active Matrix thread."""
         return await self._run_on_runtime_loop(
-            lambda: self._send_approval_event_now(room_id, thread_id, agent_name, content),
+            lambda: self._send_approval_event_now(room_id, thread_id, content),
         )
 
     async def _send_approval_event_now(
         self,
         room_id: str,
         thread_id: str | None,
-        agent_name: str,
         content: dict[str, Any],
     ) -> SentApprovalEvent | None:
         """Send one custom approval event on the current loop."""
-        bot = self._get_bot_by_agent_name(agent_name)
+        bot = self._approval_transport_bot(room_id)
         if bot is None or bot.client is None:
             return None
         send_content = dict(content)
         if thread_id is not None:
-            send_content["m.relates_to"] = await self._approval_thread_relation(room_id, thread_id, agent_name)
+            send_content["m.relates_to"] = await self._approval_thread_relation(room_id, thread_id, bot.agent_name)
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
@@ -435,15 +429,15 @@ class MultiAgentOrchestrator:
                     "Approval sender bot is missing a Matrix user id",
                     room_id=room_id,
                     thread_id=thread_id,
-                    agent_name=agent_name,
+                    agent_name=bot.agent_name,
                 )
                 return None
-            return SentApprovalEvent(event_id=str(response.event_id), sender_user_id=sender_user_id)
+            return SentApprovalEvent(event_id=str(response.event_id))
         logger.warning(
             "Failed to send approval Matrix event",
             room_id=room_id,
             thread_id=thread_id,
-            agent_name=agent_name,
+            agent_name=bot.agent_name,
             response=str(response),
         )
         return None
@@ -452,7 +446,6 @@ class MultiAgentOrchestrator:
         self,
         room_id: str,
         event_id: str,
-        original_event_sender_user_id: str,
         new_content: dict[str, Any],
         *,
         known_joined_room_ids: set[str] | None = None,
@@ -462,7 +455,6 @@ class MultiAgentOrchestrator:
             lambda: self._edit_approval_event_now(
                 room_id,
                 event_id,
-                original_event_sender_user_id,
                 new_content,
                 known_joined_room_ids=known_joined_room_ids,
             ),
@@ -482,43 +474,36 @@ class MultiAgentOrchestrator:
             return True
         return allow_known_joined_room
 
-    def _pick_room_bot_for_approval(
+    def _approval_transport_bot(
         self,
         room_id: str,
-        sender_user_id: str,
         *,
-        known_joined_room_ids: set[str] | None = None,
+        allow_known_joined_room: bool = False,
     ) -> AgentBot | TeamBot | None:
-        """Return the live bot that originally sent the approval card."""
-        for bot in self.agent_bots.values():
-            if not bot.running or bot.client is None:
-                continue
-            user_id = bot.client.user_id
-            if user_id != sender_user_id:
-                continue
-            if not self._bot_has_approval_room(
-                bot,
-                room_id,
-                allow_known_joined_room=known_joined_room_ids is not None and room_id in known_joined_room_ids,
-            ):
-                continue
-            return bot
-        return None
+        """Return the live router bot that owns approval transport for one room."""
+        bot = self.agent_bots.get("router")
+        if bot is None or not bot.running or bot.client is None:
+            return None
+        if not self._bot_has_approval_room(
+            bot,
+            room_id,
+            allow_known_joined_room=allow_known_joined_room,
+        ):
+            return None
+        return bot
 
     async def _edit_approval_event_now(
         self,
         room_id: str,
         event_id: str,
-        original_event_sender_user_id: str,
         new_content: dict[str, Any],
         *,
         known_joined_room_ids: set[str] | None = None,
     ) -> bool:
         """Edit one previously sent approval event on the current loop."""
-        bot = self._pick_room_bot_for_approval(
+        bot = self._approval_transport_bot(
             room_id,
-            original_event_sender_user_id,
-            known_joined_room_ids=known_joined_room_ids,
+            allow_known_joined_room=known_joined_room_ids is not None and room_id in known_joined_room_ids,
         )
         if bot is None or bot.client is None:
             return False
@@ -555,51 +540,6 @@ class MultiAgentOrchestrator:
             return False
         return True
 
-    @staticmethod
-    def _approval_sender_user_id(bot: AgentBot | TeamBot) -> str | None:
-        """Return the Matrix user id that owns one approval card sender identity."""
-        if bot.client is not None:
-            user_id = bot.client.user_id
-            if isinstance(user_id, str) and user_id:
-                return user_id
-        user_id = bot.agent_user.user_id
-        if isinstance(user_id, str) and user_id:
-            return user_id
-        return None
-
-    def _pick_notice_bot_for_approval(
-        self,
-        room_id: str,
-        *,
-        preferred_sender_user_id: str | None,
-        known_joined_sender_room_ids: set[str] | None = None,
-    ) -> AgentBot | TeamBot | None:
-        """Return one live room bot that can post a plain approval notice."""
-        preferred_bot: AgentBot | TeamBot | None = None
-        for bot in self.agent_bots.values():
-            if not bot.running or bot.client is None:
-                continue
-            user_id = bot.client.user_id
-            if not isinstance(user_id, str) or not user_id:
-                continue
-            allow_known_joined_room = (
-                known_joined_sender_room_ids is not None
-                and preferred_sender_user_id is not None
-                and user_id == preferred_sender_user_id
-                and room_id in known_joined_sender_room_ids
-            )
-            if not self._bot_has_approval_room(
-                bot,
-                room_id,
-                allow_known_joined_room=allow_known_joined_room,
-            ):
-                continue
-            if preferred_sender_user_id is not None and user_id == preferred_sender_user_id:
-                preferred_bot = bot
-                continue
-            return bot
-        return preferred_bot
-
     async def _send_approval_notice(
         self,
         *,
@@ -607,21 +547,14 @@ class MultiAgentOrchestrator:
         approval_event_id: str,
         thread_id: str | None,
         reason: str,
-        preferred_sender_user_id: str | None,
-        known_joined_sender_room_ids: set[str] | None = None,
     ) -> bool:
-        """Send one threaded approval notice from any live room bot."""
-        bot = self._pick_notice_bot_for_approval(
-            room_id,
-            preferred_sender_user_id=preferred_sender_user_id,
-            known_joined_sender_room_ids=known_joined_sender_room_ids,
-        )
+        """Send one threaded approval notice through the router transport bot."""
+        bot = self._approval_transport_bot(room_id)
         if bot is None or bot.client is None:
             logger.warning(
-                "No live bot available to send approval notice",
+                "Router approval transport unavailable for notice",
                 room_id=room_id,
                 approval_event_id=approval_event_id,
-                preferred_sender_user_id=preferred_sender_user_id,
             )
             return False
 
@@ -647,109 +580,10 @@ class MultiAgentOrchestrator:
             "Failed to send approval notice",
             room_id=room_id,
             approval_event_id=approval_event_id,
-            preferred_sender_user_id=preferred_sender_user_id,
+            agent_name=bot.agent_name,
             response=str(response),
         )
         return False
-
-    async def _known_joined_rooms_for_forced_sender_finalization(
-        self,
-        sender_user_id: str,
-        *,
-        room_ids: set[str] | None,
-    ) -> set[str] | None:
-        """Return the joined rooms already known for one forced sender finalization."""
-        if room_ids is not None:
-            return room_ids
-
-        for bot in self.agent_bots.values():
-            if not bot.running or bot.client is None:
-                continue
-            user_id = bot.client.user_id
-            if user_id != sender_user_id:
-                continue
-            joined_rooms = await get_joined_rooms(bot.client)
-            if joined_rooms is None:
-                return None
-            return set(joined_rooms)
-        return None
-
-    @staticmethod
-    def _sender_requests_for_forced_finalization(
-        approval_store: ApprovalManager,
-        sender_user_id: str,
-        *,
-        room_ids: set[str] | None,
-    ) -> list[PendingApproval]:
-        """Return unsynced approval requests covered by one forced sender finalization."""
-        requests = approval_store.list_unsynced_requests_for_sender(sender_user_id)
-        if room_ids is None:
-            return requests
-        return [request for request in requests if request.room_id in room_ids]
-
-    async def _force_finalize_pending_approvals_for_sender(
-        self,
-        sender_user_id: str,
-        *,
-        room_ids: set[str] | None = None,
-    ) -> None:
-        """Finalize or explicitly abandon approval cards before removing one sender bot."""
-        approval_store = get_approval_store()
-        if approval_store is None:
-            return
-
-        sender_requests = self._sender_requests_for_forced_finalization(
-            approval_store,
-            sender_user_id,
-            room_ids=room_ids,
-        )
-        if not sender_requests:
-            return
-
-        known_joined_room_ids = await self._known_joined_rooms_for_forced_sender_finalization(
-            sender_user_id,
-            room_ids=room_ids,
-        )
-        edit_event = (
-            partial(self._edit_approval_event, known_joined_room_ids=known_joined_room_ids)
-            if known_joined_room_ids is not None
-            else None
-        )
-
-        for request in sender_requests:
-            if request.status != "pending":
-                continue
-            with suppress(LookupError, ValueError):
-                await approval_store.expire(request.id, reason=_REMOVED_SENDER_BOT_APPROVAL_REASON)
-
-        for request in self._sender_requests_for_forced_finalization(
-            approval_store,
-            sender_user_id,
-            room_ids=room_ids,
-        ):
-            if request.status == "pending":
-                continue
-            await approval_store.sync_unsynced_request(request.id, edit_event=edit_event)
-
-        remaining_requests = self._sender_requests_for_forced_finalization(
-            approval_store,
-            sender_user_id,
-            room_ids=room_ids,
-        )
-        for request in remaining_requests:
-            room_id = request.room_id
-            approval_event_id = request.event_id
-            if room_id is None or approval_event_id is None:
-                continue
-            await self._send_approval_notice(
-                room_id=room_id,
-                approval_event_id=approval_event_id,
-                thread_id=request.thread_id,
-                reason=_REMOVED_SENDER_BOT_APPROVAL_REASON,
-                preferred_sender_user_id=sender_user_id,
-                known_joined_sender_room_ids=known_joined_room_ids,
-            )
-            approval_store.acknowledge_unsynced_request(request.id)
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
@@ -1617,12 +1451,6 @@ class MultiAgentOrchestrator:
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
             await cancel_sync_task(entity_name, self._sync_tasks)
-
-            bot = self.agent_bots.get(entity_name)
-            if bot is not None:
-                sender_user_id = self._approval_sender_user_id(bot)
-                if sender_user_id is not None:
-                    await self._force_finalize_pending_approvals_for_sender(sender_user_id)
 
             bot = self.agent_bots.pop(entity_name, None)
             if bot is not None:

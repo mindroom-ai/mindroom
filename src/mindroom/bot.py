@@ -876,16 +876,6 @@ class AgentBot:
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
-        rooms_to_leave = await self._room_lifecycle.rooms_to_actually_leave()
-        if rooms_to_leave:
-            orchestrator = self.orchestrator
-            if orchestrator is not None:
-                sender_user_id = orchestrator._approval_sender_user_id(self)
-                if sender_user_id is not None:
-                    await orchestrator._force_finalize_pending_approvals_for_sender(
-                        sender_user_id,
-                        room_ids=set(rooms_to_leave),
-                    )
         await self._room_lifecycle.leave_unconfigured_rooms()
 
     async def ensure_user_account(self) -> None:
@@ -1569,40 +1559,6 @@ class AgentBot:
             correlation_id=event.event_id,
         )
 
-    async def _send_tool_approval_notice(
-        self,
-        *,
-        room_id: str,
-        approval_event_id: str,
-        thread_id: str | None,
-        reason: str,
-    ) -> None:
-        """Post one threaded notice anchored to the original approval card."""
-        assert self.client is not None
-        thread_root_event_id = thread_id or approval_event_id
-        relates_to: dict[str, object] = {
-            "rel_type": "m.thread",
-            "event_id": thread_root_event_id,
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": approval_event_id},
-        }
-        response = await self.client.room_send(
-            room_id=room_id,
-            message_type="m.room.message",
-            content={
-                "msgtype": "m.notice",
-                "body": reason,
-                "m.relates_to": relates_to,
-            },
-        )
-        if not isinstance(response, nio.RoomSendResponse):
-            self.logger.warning(
-                "Failed to send approval notice",
-                room_id=room_id,
-                approval_event_id=approval_event_id,
-                response=str(response),
-            )
-
     def _sender_can_resolve_tool_approval(self, room: nio.MatrixRoom, sender_id: str) -> bool:
         """Return whether the sender is currently allowed to act on a tool approval."""
         if not is_authorized_sender(
@@ -1632,11 +1588,13 @@ class AgentBot:
         if not self._sender_can_resolve_tool_approval(room, sender_id):
             return False
         result = await action(approval_manager)
-        if result.error_reason is not None and self._should_send_tool_approval_notice(
-            room_id=room.room_id,
-            preferred_sender_user_id=result.notice_sender_user_id,
+        orchestrator = self.orchestrator
+        if (
+            result.error_reason is not None
+            and orchestrator is not None
+            and self._should_send_tool_approval_notice(room_id=room.room_id)
         ):
-            await self._send_tool_approval_notice(
+            await orchestrator._send_approval_notice(
                 room_id=room.room_id,
                 approval_event_id=approval_event_id,
                 thread_id=result.thread_id,
@@ -1648,61 +1606,13 @@ class AgentBot:
         self,
         *,
         room_id: str,
-        preferred_sender_user_id: str | None,
     ) -> bool:
-        """Return whether this bot should emit one truncated-approval notice."""
-        if self.client is None:
-            return False
-        current_user_id = self.client.user_id
-        if not isinstance(current_user_id, str) or not current_user_id:
-            return False
-        target_user_id = self._tool_approval_notice_sender_user_id(
-            room_id=room_id,
-            preferred_sender_user_id=preferred_sender_user_id,
-        )
-        return current_user_id == target_user_id
-
-    def _tool_approval_notice_sender_user_id(
-        self,
-        *,
-        room_id: str,
-        preferred_sender_user_id: str | None,
-    ) -> str | None:
-        """Return which live bot should emit one truncated-approval notice."""
-        if self.client is None:
-            return None
-        current_user_id = self.client.user_id
-        if not isinstance(current_user_id, str) or not current_user_id:
-            return None
-
+        """Return whether this bot owns router-scoped approval notice transport."""
         orchestrator = self.orchestrator
-        if isinstance(preferred_sender_user_id, str) and preferred_sender_user_id:
-            if orchestrator is None:
-                return preferred_sender_user_id
-            preferred_bot = orchestrator._pick_room_bot_for_approval(room_id, preferred_sender_user_id)
-            if preferred_bot is not None:
-                return preferred_sender_user_id
-
-        live_room_user_ids = self._live_room_bot_user_ids(room_id)
-        if live_room_user_ids:
-            return live_room_user_ids[0]
-        return current_user_id
-
-    def _live_room_bot_user_ids(self, room_id: str) -> list[str]:
-        """Return sorted Matrix user ids for live bots that are present in one room."""
-        orchestrator = self.orchestrator
-        if orchestrator is None:
-            return []
-
-        user_ids: list[str] = []
-        for bot in orchestrator.agent_bots.values():
-            if not bot.running or bot.client is None or room_id not in bot.client.rooms:
-                continue
-            user_id = bot.client.user_id
-            if not isinstance(user_id, str) or not user_id:
-                continue
-            user_ids.append(user_id)
-        return sorted(user_ids)
+        if orchestrator is None or self.client is None:
+            return False
+        transport_bot = orchestrator._approval_transport_bot(room_id)
+        return transport_bot is not None and transport_bot.client is self.client
 
     async def _on_media_message(
         self,

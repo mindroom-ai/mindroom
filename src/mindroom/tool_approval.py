@@ -34,8 +34,8 @@ if TYPE_CHECKING:
 
 ApprovalStatus = Literal["approved", "denied", "expired"]
 PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
-MatrixEventSender = Callable[[str, str | None, str, dict[str, Any]], Awaitable["SentApprovalEvent | None"]]
-MatrixEventEditor = Callable[[str, str, str, dict[str, Any]], Awaitable[bool]]
+MatrixEventSender = Callable[[str, str | None, dict[str, Any]], Awaitable["SentApprovalEvent | None"]]
+MatrixEventEditor = Callable[[str, str, dict[str, Any]], Awaitable[bool]]
 
 _APPROVALS_DIRNAME = "approvals"
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
@@ -185,10 +185,9 @@ class ApprovalDecision:
 
 @dataclass(frozen=True, slots=True)
 class SentApprovalEvent:
-    """One delivered approval event plus the Matrix user that sent it."""
+    """One delivered approval event."""
 
     event_id: str
-    sender_user_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +197,6 @@ class AnchoredApprovalActionResult:
     handled: bool
     error_reason: str | None = None
     thread_id: str | None = None
-    notice_sender_user_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -217,7 +215,6 @@ class PendingApproval:
     thread_id: str | None
     requester_id: str | None
     approver_user_id: str
-    original_event_sender_user_id: str | None
     matched_rule: str
     script_path: str | None
     requested_at: datetime
@@ -244,7 +241,6 @@ class PendingApproval:
             "thread_id": self.thread_id,
             "requester_id": self.requester_id,
             "approver_user_id": self.approver_user_id,
-            "original_event_sender_user_id": self.original_event_sender_user_id,
             "matched_rule": self.matched_rule,
             "script_path": self.script_path,
             "requested_at": self.requested_at.isoformat(),
@@ -280,14 +276,6 @@ class PendingApproval:
             arguments_preview_truncated=arguments_preview_truncated,
         )
         event_id = cast("str | None", payload.get("event_id"))
-        original_event_sender_user_id = cast("str | None", payload.get("original_event_sender_user_id"))
-        if event_id is None and (
-            not isinstance(original_event_sender_user_id, str) or not original_event_sender_user_id.strip()
-        ):
-            original_event_sender_user_id = None
-        elif not isinstance(original_event_sender_user_id, str) or not original_event_sender_user_id.strip():
-            msg = f"Persisted approval request '{payload.get('id')}' is missing original_event_sender_user_id."
-            raise ValueError(msg)
         return cls(
             id=cast("str", payload["id"]),
             tool_name=cast("str", payload["tool_name"]),
@@ -301,7 +289,6 @@ class PendingApproval:
             thread_id=cast("str | None", payload.get("thread_id")),
             requester_id=cast("str | None", payload.get("requester_id")),
             approver_user_id=cast("str", payload["approver_user_id"]),
-            original_event_sender_user_id=original_event_sender_user_id,
             matched_rule=cast("str", payload["matched_rule"]),
             script_path=cast("str | None", payload.get("script_path")),
             requested_at=cast("datetime", _parse_datetime(cast("str", payload["requested_at"]))),
@@ -426,7 +413,7 @@ class ApprovalManager:
         with self._state_lock:
             return list(self._pending_by_id.values())
 
-    def _set_event_delivery(self, approval_id: str, event_id: str, sender_user_id: str) -> None:
+    def _set_event_delivery(self, approval_id: str, event_id: str) -> None:
         with self._state_lock:
             pending = self._requests_by_id.get(approval_id)
             if pending is None:
@@ -434,7 +421,6 @@ class ApprovalManager:
             if pending.event_id is not None:
                 self._approval_id_by_event_id.pop(pending.event_id, None)
             pending.event_id = event_id
-            pending.original_event_sender_user_id = sender_user_id
             self._approval_id_by_event_id[event_id] = approval_id
 
     def _load_existing(self) -> None:
@@ -496,21 +482,6 @@ class ApprovalManager:
             ]
         return sorted(requests, key=lambda approval: approval.resolved_at or approval.requested_at)
 
-    def list_unsynced_requests_for_sender(self, sender_user_id: str) -> list[PendingApproval]:
-        """Return unsynced approval cards originally sent by one Matrix user."""
-        with self._state_lock:
-            requests = [
-                approval
-                for approval in self._requests_by_id.values()
-                if (
-                    approval.original_event_sender_user_id == sender_user_id
-                    and approval.room_id is not None
-                    and approval.event_id is not None
-                    and approval.resolution_synced_at is None
-                )
-            ]
-        return sorted(requests, key=lambda approval: approval.requested_at)
-
     def _claim_unsynced_resolved_replay(self, approval_id: str) -> PendingApproval | None:
         with self._state_lock:
             pending = self._requests_by_id.get(approval_id)
@@ -551,7 +522,6 @@ class ApprovalManager:
         tool_name: str,
         arguments: dict[str, Any],
         agent_name: str,
-        transport_agent_name: str,
         room_id: str | None,
         thread_id: str | None,
         requester_id: str | None,
@@ -588,7 +558,6 @@ class ApprovalManager:
             thread_id=thread_id,
             requester_id=requester_id,
             approver_user_id=approver_user_id,
-            original_event_sender_user_id=None,
             matched_rule=matched_rule,
             script_path=script_path,
             requested_at=requested_at,
@@ -604,7 +573,6 @@ class ApprovalManager:
                 sent_event = await self._send_event(
                     room_id,
                     thread_id,
-                    transport_agent_name,
                     self._pending_event_content(pending),
                 )
             except asyncio.CancelledError:
@@ -624,7 +592,7 @@ class ApprovalManager:
                 approval_id=pending.id,
                 room_id=room_id,
                 thread_id=thread_id,
-                agent_name=transport_agent_name,
+                agent_name=agent_name,
                 exc_info=True,
             )
         if sent_event is None:
@@ -633,7 +601,7 @@ class ApprovalManager:
                 approval_id=pending.id,
                 room_id=room_id,
                 thread_id=thread_id,
-                agent_name=transport_agent_name,
+                agent_name=agent_name,
             )
             decision = await self._resolve_pending(
                 pending.id,
@@ -644,7 +612,7 @@ class ApprovalManager:
             self._discard(pending.id)
             return decision or self._decision_from_pending(pending)
 
-        self._set_event_delivery(pending.id, sent_event.event_id, sent_event.sender_user_id)
+        self._set_event_delivery(pending.id, sent_event.event_id)
         self._persist_request(pending)
         if pending.status != "pending" and pending.resolution_synced_at is None:
             await self._edit_resolved_event(pending)
@@ -725,7 +693,6 @@ class ApprovalManager:
                 handled=handled_on_truncated_approval,
                 error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON,
                 thread_id=pending.thread_id,
-                notice_sender_user_id=pending.original_event_sender_user_id,
             )
 
         if (
@@ -959,19 +926,12 @@ class ApprovalManager:
         edit_event: MatrixEventEditor | None = None,
     ) -> None:
         event_editor = edit_event or self._edit_event
-        if (
-            event_editor is None
-            or pending.room_id is None
-            or pending.event_id is None
-            or not isinstance(pending.original_event_sender_user_id, str)
-            or not pending.original_event_sender_user_id
-        ):
+        if event_editor is None or pending.room_id is None or pending.event_id is None:
             return
         try:
             delivered = await event_editor(
                 pending.room_id,
                 pending.event_id,
-                pending.original_event_sender_user_id,
                 self._resolved_event_content(pending),
             )
         except Exception:
