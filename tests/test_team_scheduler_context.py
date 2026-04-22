@@ -13,7 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED, STREAM_STATUS_KEY
+from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.identity import MatrixID
@@ -212,7 +212,7 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
         INTERRUPTED_RESPONSE_NOTE,
         "$thread_root",
         tool_trace=None,
-        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
+        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
     )
 
 
