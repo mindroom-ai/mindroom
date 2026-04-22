@@ -115,12 +115,13 @@ class ResponseLifecycle:
     ) -> TurnDeliveryResolution:
         """Run outer lifecycle finalization and return the typed terminal resolution."""
         final_delivery_outcome = outcome.final_delivery_outcome
-        turn_completion_event_id = await self.apply_effects_safely(
-            response_event_id=(
-                final_delivery_outcome.turn_completion_event_id
-                if final_delivery_outcome.should_shield_late_failures
-                else None
-            ),
+        turn_completion_event_id = (
+            final_delivery_outcome.turn_completion_event_id
+            if final_delivery_outcome.should_shield_late_failures
+            else None
+        )
+        await self.apply_effects_safely(
+            response_event_id=(turn_completion_event_id),
             post_response_outcome=lambda: build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
@@ -139,7 +140,7 @@ class ResponseLifecycle:
         response_event_id: str | None,
         post_response_outcome: ResponseOutcome | Callable[[], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
-    ) -> str | None:
+    ) -> None:
         """Apply post-response effects without masking failures before visible delivery."""
         try:
             await apply_post_response_effects(
@@ -154,7 +155,6 @@ class ResponseLifecycle:
                 response_event_id=response_event_id,
                 error=error,
             )
-            return response_event_id
         except Exception as error:
             if response_event_id is None:
                 raise
@@ -163,5 +163,3 @@ class ResponseLifecycle:
                 response_event_id=response_event_id,
                 error=error,
             )
-            return response_event_id
-        return response_event_id

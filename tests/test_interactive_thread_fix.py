@@ -75,7 +75,14 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
             yield "Test interactive response"
 
         mock_ai_response.return_value = mock_stream()
-        mock_send_streaming_response.return_value = ("$agent_message_id", "Test interactive response")
+        mock_send_streaming_response.return_value = StreamTransportOutcome(
+            last_physical_stream_event_id="$agent_message_id",
+            terminal_operation="send",
+            terminal_result="succeeded",
+            terminal_status="completed",
+            rendered_body="Test interactive response",
+            visible_body_state="visible_body",
+        )
 
         mock_response = MagicMock()
         mock_response.formatted_text = "Test interactive question"

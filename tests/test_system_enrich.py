@@ -25,7 +25,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.delivery_gateway import DeliveryResult
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_SYSTEM_ENRICH,
@@ -539,9 +539,9 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
         patch(
             "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
             new=AsyncMock(
-                return_value=DeliveryResult(
-                    event_id="$response",
-                    response_text="handled",
+                return_value=FinalDeliveryOutcome.final_visible_delivery(
+                    final_visible_event_id="$response",
+                    final_visible_body="handled",
                     delivery_kind="sent",
                 ),
             ),
@@ -581,10 +581,17 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         assert kwargs["system_enrichment_items"] == system_items
         yield "stream chunk"
 
-    async def fake_send_streaming_response(*args: object, **_kwargs: object) -> tuple[str, str]:
+    async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
         response_stream = args[7]
         chunks = [str(chunk) async for chunk in response_stream]
-        return "$response", "".join(chunks)
+        return StreamTransportOutcome(
+            last_physical_stream_event_id="$response",
+            terminal_operation="send",
+            terminal_result="succeeded",
+            terminal_status="completed",
+            rendered_body="".join(chunks),
+            visible_body_state="visible_body",
+        )
 
     with (
         patch(

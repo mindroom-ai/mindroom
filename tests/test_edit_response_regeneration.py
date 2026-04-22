@@ -30,7 +30,6 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.conversation_state_writer import ConversationStateWriter
-from mindroom.delivery_gateway import DeliveryResult
 from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.history.interrupted_replay import build_interrupted_replay_run, build_interrupted_replay_snapshot
@@ -925,9 +924,9 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         patch(
             "mindroom.response_runner.DeliveryGateway.deliver_final",
             new=AsyncMock(
-                return_value=DeliveryResult(
-                    event_id=response_event_id,
-                    response_text="team response",
+                return_value=FinalDeliveryOutcome.final_visible_delivery(
+                    final_visible_event_id=response_event_id,
+                    final_visible_body="team response",
                     delivery_kind="edited",
                 ),
             ),
@@ -2880,7 +2879,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     session_id = create_session_id("!test:example.com", None)
     storage = _FakeAgentStorage(session=None)
 
-    async def process_and_respond(*_args: object, **kwargs: object) -> DeliveryResult:
+    async def process_and_respond(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
         storage.session = AgentSession(
             session_id=session_id,
             runs=[
@@ -2898,9 +2897,9 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
                 ),
             ],
         )
-        return DeliveryResult(
-            event_id="$response:example.com",
-            response_text="ok",
+        return FinalDeliveryOutcome.final_visible_delivery(
+            final_visible_event_id="$response:example.com",
+            final_visible_body="ok",
             delivery_kind="sent",
         )
 
@@ -3284,7 +3283,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
         conversation_target=stored_target,
     )
 
-    async def process_and_respond(*_args: object, **kwargs: object) -> DeliveryResult:
+    async def process_and_respond(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
         storage = bot._conversation_state_writer.create_storage(None)
         try:
             storage.upsert_session(
@@ -3313,9 +3312,9 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             )
         finally:
             storage.close()
-        return DeliveryResult(
-            event_id="$response-new:example.com",
-            response_text="ok",
+        return FinalDeliveryOutcome.final_visible_delivery(
+            final_visible_event_id="$response-new:example.com",
+            final_visible_body="ok",
             delivery_kind="sent",
         )
 

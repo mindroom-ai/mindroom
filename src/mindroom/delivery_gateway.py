@@ -156,6 +156,124 @@ class DeliveryResult:
     failure_reason: str | None = None
 
 
+def _is_cancelled_failure_reason(failure_reason: str | None) -> bool:
+    """Return whether one fallback failure reason represents cancellation."""
+    if failure_reason is None:
+        return False
+    return "cancel" in failure_reason.lower()
+
+
+def _late_failure_without_visible(*, cancelled: bool, reason: str) -> FinalDeliveryOutcome:
+    if cancelled:
+        return FinalDeliveryOutcome.cancelled_without_visible_response(failure_reason=reason)
+    return FinalDeliveryOutcome.error_without_visible_response(failure_reason=reason)
+
+
+def _late_failure_with_preserved_stream(
+    *,
+    cancelled: bool,
+    event_id: str,
+    reason: str,
+) -> FinalDeliveryOutcome:
+    if cancelled:
+        return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
+            last_physical_stream_event_id=event_id,
+            final_visible_body=None,
+            failure_reason=reason,
+        )
+    return FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
+        last_physical_stream_event_id=event_id,
+        final_visible_body=None,
+        failure_reason=reason,
+    )
+
+
+def _late_failure_with_visible_response(
+    *,
+    cancelled: bool,
+    event_id: str,
+    reason: str,
+) -> FinalDeliveryOutcome:
+    if cancelled:
+        return FinalDeliveryOutcome.cancelled_with_visible_response(
+            final_visible_event_id=event_id,
+            failure_reason=reason,
+        )
+    return FinalDeliveryOutcome.error_with_visible_response(
+        final_visible_event_id=event_id,
+        final_visible_body="",
+        failure_reason=reason,
+    )
+
+
+def _late_delivery_failure_outcome(
+    *,
+    tracked_event_id: str | None,
+    existing_event_id: str | None,
+    existing_event_is_placeholder: bool,
+    placeholder_event_id: str | None,
+    failure_reason: str | None,
+) -> FinalDeliveryOutcome:
+    """Map raw late-failure transport facts into one canonical terminal outcome."""
+    cancelled = _is_cancelled_failure_reason(failure_reason)
+
+    if tracked_event_id is not None and tracked_event_id == placeholder_event_id:
+        return _late_failure_without_visible(
+            cancelled=cancelled,
+            reason=(
+                failure_reason
+                or (
+                    "delivery_result_missing_after_placeholder_cancel"
+                    if cancelled
+                    else "delivery_result_missing_after_placeholder"
+                )
+            ),
+        )
+    if (
+        tracked_event_id is not None
+        and existing_event_id is not None
+        and existing_event_is_placeholder
+        and tracked_event_id == existing_event_id
+    ):
+        return _late_failure_without_visible(
+            cancelled=cancelled,
+            reason=(
+                failure_reason
+                or (
+                    "delivery_result_missing_after_visible_placeholder_cancel"
+                    if cancelled
+                    else "delivery_result_missing_after_visible_placeholder"
+                )
+            ),
+        )
+    if tracked_event_id is not None and (existing_event_id is None or tracked_event_id != existing_event_id):
+        return _late_failure_with_preserved_stream(
+            cancelled=cancelled,
+            event_id=tracked_event_id,
+            reason=failure_reason
+            or (
+                "delivery_result_missing_after_visible_stream_cancel"
+                if cancelled
+                else "delivery_result_missing_after_visible_stream"
+            ),
+        )
+    if existing_event_id is not None and not existing_event_is_placeholder:
+        return _late_failure_with_visible_response(
+            cancelled=cancelled,
+            event_id=existing_event_id,
+            reason=failure_reason
+            or (
+                "delivery_result_missing_after_visible_response_cancel"
+                if cancelled
+                else "delivery_result_missing_after_visible_response"
+            ),
+        )
+    return _late_failure_without_visible(
+        cancelled=cancelled,
+        reason=failure_reason or ("delivery_result_missing_cancelled" if cancelled else "delivery_result_missing"),
+    )
+
+
 @dataclass(frozen=True)
 class SendTextRequest:
     """Parameters for one visible Matrix send."""
@@ -936,7 +1054,7 @@ class DeliveryGateway:
     async def deliver_stream(
         self,
         request: StreamingDeliveryRequest,
-    ) -> StreamTransportOutcome | tuple[str | None, str]:
+    ) -> StreamTransportOutcome:
         """Send one streaming Matrix response."""
         client = self._client()
         config = self.deps.runtime.config

@@ -87,7 +87,7 @@ class CommandHandlerContext:
     event_cache: ConversationEventCache
     build_message_target: Callable[..., MessageTarget]
     record_handled_turn: Callable[[HandledTurnState], None]
-    send_response: Callable[..., Awaitable[str | None]]
+    send_response: Callable[..., Awaitable[TurnDeliveryResolution]]
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
 
@@ -170,11 +170,6 @@ def _generate_welcome_message(room_id: str, config: Config, runtime_paths: Runti
     )
 
     return welcome_msg
-
-
-def _normalized_response_event_id(raw_response_event_id: str | None) -> str | None:
-    """Normalize Matrix send helpers that may return empty strings or None."""
-    return raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
 
 
 def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
@@ -300,7 +295,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         # If we have change_info, this is a config set that needs confirmation
         if change_info:
             # Send the preview message
-            raw_response_event_id = await context.send_response(
+            resolution = await context.send_response(
                 room.room_id,
                 event.event_id,
                 response_text,
@@ -308,13 +303,14 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 reply_to_event=event,
                 skip_mentions=True,
             )
-            response_event_id = _normalized_response_event_id(raw_response_event_id)
-            handled_turn = HandledTurnState.from_source_event_id(
-                event.event_id,
-                response_event_id=response_event_id,
-            )
+            response_event_id = resolution.response_identity_event_id
 
-            if response_event_id:
+            if resolution.should_mark_handled:
+                assert response_event_id
+                handled_turn = apply_delivery_resolution(
+                    HandledTurnState.from_source_event_id(event.event_id),
+                    resolution,
+                )
                 context.record_handled_turn(handled_turn)
                 # Register the pending change
                 config_confirmation.register_pending_change(
@@ -351,7 +347,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = "❌ Unknown command. Try !help for available commands."
 
     if response_text:
-        raw_response_event_id = await context.send_response(
+        resolution = await context.send_response(
             room.room_id,
             event.event_id,
             response_text,
@@ -359,11 +355,10 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             reply_to_event=event,
             skip_mentions=True,
         )
-        response_event_id = _normalized_response_event_id(raw_response_event_id)
-        if response_event_id is not None:
+        if resolution.should_mark_handled:
             context.record_handled_turn(
-                HandledTurnState.from_source_event_id(
-                    event.event_id,
-                    response_event_id=response_event_id,
+                apply_delivery_resolution(
+                    HandledTurnState.from_source_event_id(event.event_id),
+                    resolution,
                 ),
             )

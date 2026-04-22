@@ -35,7 +35,7 @@ from mindroom.bot import (
     TeamBot,
 )
 from mindroom.coalescing import PreparedTextEvent
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -53,7 +53,11 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.conversation_resolver import MessageContext
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryResult, FinalDeliveryRequest
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    FinalDeliveryRequest,
+    _late_delivery_failure_outcome,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome, TurnDeliveryResolution
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionOutcome
@@ -101,7 +105,6 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
-    _coerce_final_delivery_outcome,
     _late_stream_finalize_cancelled_outcome,
     _merge_response_extra_content,
 )
@@ -146,6 +149,27 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.turn_store import TurnStore
+
+
+def _stream_outcome(
+    event_id: str | None,
+    body: str,
+    *,
+    terminal_operation: str = "send",
+    terminal_result: str = "succeeded",
+    terminal_status: str = "completed",
+    visible_body_state: str = "visible_body",
+    failure_reason: str | None = None,
+) -> StreamTransportOutcome:
+    return StreamTransportOutcome(
+        last_physical_stream_event_id=event_id,
+        terminal_operation=terminal_operation,
+        terminal_result=terminal_result,
+        terminal_status=terminal_status,
+        rendered_body=body,
+        visible_body_state=visible_body_state,
+        failure_reason=failure_reason,
+    )
 
 
 def _make_matrix_client_mock() -> AsyncMock:
@@ -1585,7 +1609,7 @@ class TestAgentBot:
             new_callable=AsyncMock,
         ) as mock_send_streaming_response:
             mock_stream_agent_response.return_value = mock_streaming_response()
-            mock_send_streaming_response.return_value = ("$response", "chunk")
+            mock_send_streaming_response.return_value = _stream_outcome("$response", "chunk")
             with patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
@@ -1741,7 +1765,7 @@ class TestAgentBot:
             "mindroom.delivery_gateway.send_streaming_response",
             new_callable=AsyncMock,
         ) as mock_send_streaming_response:
-            mock_send_streaming_response.return_value = ("$response", "chunk")
+            mock_send_streaming_response.return_value = _stream_outcome("$response", "chunk")
             with patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
@@ -1828,11 +1852,18 @@ class TestAgentBot:
 
             return _gen()
 
-        async def _consuming_send_streaming(*args: object, **_kwargs: object) -> tuple[str, str]:
+        async def _consuming_send_streaming(*args: object, **_kwargs: object) -> StreamTransportOutcome:
             stream = args[7]  # response_stream positional arg
             async for _ in stream:
                 pass
-            return ("$response", "chunk")
+            return StreamTransportOutcome(
+                last_physical_stream_event_id="$response",
+                terminal_operation="send",
+                terminal_result="succeeded",
+                terminal_status="completed",
+                rendered_body="chunk",
+                visible_body_state="visible_body",
+            )
 
         attachment_ids = ["att_image", "att_zip"]
         with (
@@ -1914,11 +1945,18 @@ class TestAgentBot:
 
             return _gen()
 
-        async def _consuming_send_streaming(*args: object, **_kwargs: object) -> tuple[str, str]:
+        async def _consuming_send_streaming(*args: object, **_kwargs: object) -> StreamTransportOutcome:
             stream = args[7]
             async for _ in stream:
                 pass
-            return ("$response", "hello")
+            return StreamTransportOutcome(
+                last_physical_stream_event_id="$response",
+                terminal_operation="send",
+                terminal_result="succeeded",
+                terminal_status="completed",
+                rendered_body="hello",
+                visible_body_state="visible_body",
+            )
 
         with (
             patch(
@@ -1971,7 +2009,7 @@ class TestAgentBot:
 
         captured_extra_content_ref: list[dict[str, Any] | None] = [None]
 
-        async def _consuming_send_streaming(*args: object, **kwargs: object) -> tuple[str, str]:
+        async def _consuming_send_streaming(*args: object, **kwargs: object) -> StreamTransportOutcome:
             captured_extra_content_ref[0] = kwargs.get("extra_content")
             stream = args[7]
             try:
@@ -2217,7 +2255,7 @@ class TestAgentBot:
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ) as mock_edit_message,
         ):
-            mock_send_streaming_response.return_value = ("$response", "chunk")
+            mock_send_streaming_response.return_value = _stream_outcome("$response", "chunk")
             with patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
@@ -2278,7 +2316,7 @@ class TestAgentBot:
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
             ) as mock_send_streaming_response:
-                mock_send_streaming_response.return_value = ("$response", "chunk")
+                mock_send_streaming_response.return_value = _stream_outcome("$response", "chunk")
                 with patch_response_runner_module(
                     typing_indicator=noop_typing_indicator,
                     stream_agent_response=mock_stream,
@@ -2328,8 +2366,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
-        bot._send_response = AsyncMock(return_value="$team")
-        install_send_response_mock(bot, bot._send_response)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -2338,6 +2374,10 @@ class TestAgentBot:
         )
         matrix_ids = config.get_ids(runtime_paths_for(config))
         with (
+            patch(
+                "mindroom.delivery_gateway.send_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ) as mock_send_message,
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
@@ -2362,6 +2402,7 @@ class TestAgentBot:
             )
 
         assert resolution.response_identity_event_id == "$team"
+        assert mock_send_message.await_args.args[2]["body"] == "🤝 Team Response: Thinking..."
         assert mock_edit_message.await_args.args[4] == "Team reply [hooked]"
         assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
 
@@ -2377,8 +2418,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
-        bot._send_response = AsyncMock(return_value="$team")
-        install_send_response_mock(bot, bot._send_response)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -2387,6 +2426,10 @@ class TestAgentBot:
         matrix_ids = config.get_ids(runtime_paths_for(config))
         bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
         with (
+            patch(
+                "mindroom.delivery_gateway.send_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
@@ -2424,8 +2467,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
-        bot._send_response = AsyncMock(return_value="$team")
-        install_send_response_mock(bot, bot._send_response)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -2435,6 +2476,10 @@ class TestAgentBot:
         mock_team_response = AsyncMock(return_value="Team reply")
 
         with (
+            patch(
+                "mindroom.delivery_gateway.send_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
@@ -2484,8 +2529,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
-        bot._send_response = AsyncMock(return_value="$team")
-        install_send_response_mock(bot, bot._send_response)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -2496,6 +2539,10 @@ class TestAgentBot:
         timestamped_prompt = "[2026-03-20 08:15 PDT] What time is it?"
 
         with (
+            patch(
+                "mindroom.delivery_gateway.send_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
@@ -2975,7 +3022,7 @@ class TestAgentBot:
             ) as mock_send_streaming_response,
         ):
             mock_stream_agent_response.return_value = mock_streaming_response()
-            mock_send_streaming_response.return_value = ("$streaming", "chunk")
+            mock_send_streaming_response.return_value = _stream_outcome("$streaming", "chunk")
             delivery = await bot._response_runner.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
@@ -3003,28 +3050,23 @@ class TestAgentBot:
 
     def test_failed_placeholder_edit_does_not_preserve_response_identity(self) -> None:
         """A failed placeholder edit must not preserve a response identity."""
-        delivery = DeliveryResult(
-            event_id=None,
-            response_text="Handled",
-            delivery_kind=None,
-            suppressed=False,
-        )
-        outcome = _coerce_final_delivery_outcome(
-            delivery,
+        outcome = _late_delivery_failure_outcome(
             tracked_event_id="$placeholder",
             existing_event_id="$placeholder",
             existing_event_is_placeholder=True,
+            placeholder_event_id=None,
+            failure_reason="delivery_failed",
         )
 
         assert outcome.response_identity_event_id is None
 
     def test_missing_delivery_preserves_visible_stream_error_state(self) -> None:
         """Late exceptions after a visible stream lands must preserve the visible stream event."""
-        outcome = _coerce_final_delivery_outcome(
-            None,
+        outcome = _late_delivery_failure_outcome(
             tracked_event_id="$stream",
             existing_event_id=None,
             existing_event_is_placeholder=False,
+            placeholder_event_id=None,
             failure_reason="late_finalize_exception",
         )
 
@@ -3044,8 +3086,7 @@ class TestAgentBot:
         expected_state: str,
     ) -> None:
         """A leaked placeholder id must not become the canonical visible terminal response."""
-        outcome = _coerce_final_delivery_outcome(
-            None,
+        outcome = _late_delivery_failure_outcome(
             tracked_event_id="$thinking",
             existing_event_id=None,
             existing_event_is_placeholder=False,
@@ -3090,8 +3131,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
-        bot._send_response = AsyncMock(return_value="$team")
-        install_send_response_mock(bot, bot._send_response)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -3106,6 +3145,10 @@ class TestAgentBot:
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
                 team_response=AsyncMock(return_value=interactive_response),
+            ),
+            patch(
+                "mindroom.delivery_gateway.send_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
             ),
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
@@ -3519,10 +3562,9 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
-                        event_id="$response",
-                        response_text="ok",
-                        delivery_kind="sent",
+                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                        final_visible_event_id="$response",
+                        final_visible_body="ok",
                     ),
                 ),
             ) as mock_process,
@@ -3632,10 +3674,9 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
-                        event_id="$response",
-                        response_text="ok",
-                        delivery_kind="sent",
+                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                        final_visible_event_id="$response",
+                        final_visible_body="ok",
                     ),
                 ),
             ) as mock_process,
@@ -3724,9 +3765,9 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond_streaming",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
-                        event_id="$thinking",
-                        response_text="",
+                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                        final_visible_event_id="$thinking",
+                        final_visible_body="",
                         delivery_kind="edited",
                     ),
                 ),
@@ -3814,10 +3855,9 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
-                        event_id="$response",
-                        response_text="ok",
-                        delivery_kind="sent",
+                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                        final_visible_event_id="$response",
+                        final_visible_body="ok",
                     ),
                 ),
             ) as mock_process,
@@ -3909,9 +3949,9 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
-                        event_id="$thinking",
-                        response_text="ok",
+                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                        final_visible_event_id="$thinking",
+                        final_visible_body="ok",
                         delivery_kind="edited",
                     ),
                 ),
@@ -4177,10 +4217,9 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
-                        event_id="$response",
-                        response_text="ok",
-                        delivery_kind="sent",
+                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                        final_visible_event_id="$response",
+                        final_visible_body="ok",
                     ),
                 ),
             ),
@@ -4484,7 +4523,16 @@ class TestAgentBot:
             patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
-                new=AsyncMock(return_value=("$team-response", "Team reply")),
+                new=AsyncMock(
+                    return_value=StreamTransportOutcome(
+                        last_physical_stream_event_id="$team-response",
+                        terminal_operation="send",
+                        terminal_result="succeeded",
+                        terminal_status="completed",
+                        rendered_body="Team reply",
+                        visible_body_state="visible_body",
+                    ),
+                ),
             ),
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
@@ -4588,7 +4636,16 @@ class TestAgentBot:
             patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
-                new=AsyncMock(return_value=("$placeholder", "stream chunk")),
+                new=AsyncMock(
+                    return_value=StreamTransportOutcome(
+                        last_physical_stream_event_id="$placeholder",
+                        terminal_operation="edit",
+                        terminal_result="succeeded",
+                        terminal_status="completed",
+                        rendered_body="stream chunk",
+                        visible_body_state="visible_body",
+                    ),
+                ),
             ) as mock_send_streaming_response,
         ):
             resolution = await bot._generate_team_response_helper(
@@ -4657,7 +4714,16 @@ class TestAgentBot:
             patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
-                new=AsyncMock(return_value=("$placeholder", "stream chunk")),
+                new=AsyncMock(
+                    return_value=StreamTransportOutcome(
+                        last_physical_stream_event_id="$placeholder",
+                        terminal_operation="edit",
+                        terminal_result="succeeded",
+                        terminal_status="completed",
+                        rendered_body="stream chunk",
+                        visible_body_state="visible_body",
+                    ),
+                ),
             ),
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
@@ -7734,10 +7800,9 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
-                        event_id="$response",
-                        response_text="ok",
-                        delivery_kind="sent",
+                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                        final_visible_event_id="$response",
+                        final_visible_body="ok",
                     ),
                 ),
             ) as mock_process,
@@ -8464,8 +8529,14 @@ class TestAgentBot:
         install_edit_message_mock(bot, bot._edit_message)
         bot._generate_response = AsyncMock()
         install_generate_response_mock(bot, bot._generate_response)
-        send_response_mock = AsyncMock(return_value="$error")
-        install_send_response_mock(bot, send_response_mock)
+        bot._delivery_gateway.deliver_final = AsyncMock(
+            return_value=FinalDeliveryOutcome.error_with_visible_response(
+                final_visible_event_id="$error",
+                final_visible_body="[calculator] ⚠️ Error: Failed to download image",
+                failure_reason="Failed to download image",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+            ),
+        )
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_policy.plan_turn = AsyncMock(
             return_value=DispatchPlan(
@@ -8491,11 +8562,11 @@ class TestAgentBot:
 
         bot._generate_response.assert_not_called()
         bot._edit_message.assert_not_awaited()
-        send_response_mock.assert_awaited_once()
-        send_args = send_response_mock.await_args.args
-        assert send_args[0] == room.room_id
-        assert send_args[1] == "$img_event_fail"
-        assert "Failed to download image" in send_args[2]
+        bot._delivery_gateway.deliver_final.assert_awaited_once()
+        assert (
+            bot._delivery_gateway.deliver_final.await_args.args[0].response_text
+            == "[calculator] ⚠️ Error: Failed to download image"
+        )
         expected_handled_turn = _agent_response_handled_turn(
             agent_name=mock_agent_user.agent_name,
             room_id=room.room_id,
@@ -8523,13 +8594,19 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch setup failures should send a terminal error message in-thread."""
+        """Dispatch setup failures should go through the terminal delivery gateway."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        mock_send_response = AsyncMock(return_value="$error")
-        install_send_response_mock(bot, mock_send_response)
+        gateway_outcome = FinalDeliveryOutcome.error_with_visible_response(
+            final_visible_event_id="$error",
+            final_visible_body="[calculator] ⚠️ Error: boom",
+            failure_reason="boom",
+            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+        )
+        bot._delivery_gateway.deliver_final = AsyncMock(return_value=gateway_outcome)
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
 
         resolution = await bot._turn_controller._finalize_dispatch_failure(
@@ -8541,25 +8618,95 @@ class TestAgentBot:
             error=RuntimeError("boom"),
         )
 
-        assert resolution == TurnDeliveryResolution.from_outcome(
-            FinalDeliveryOutcome.error_with_visible_response(
-                final_visible_event_id="$error",
-                final_visible_body="[calculator] ⚠️ Error: boom",
+        assert resolution == TurnDeliveryResolution.from_outcome(gateway_outcome)
+        bot._delivery_gateway.deliver_final.assert_awaited_once_with(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
+                existing_event_id=None,
+                response_text="[calculator] ⚠️ Error: boom",
+                response_kind="ai",
+                response_envelope=_hook_envelope(body="hello", source_event_id="$event"),
+                correlation_id="corr-dispatch-failure",
+                tool_trace=None,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+                apply_before_hooks=False,
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_finalize_dispatch_failure_uses_team_response_kind_for_team_bot(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Dispatch setup failures should preserve team response kind for terminal hooks."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                },
+                teams={
+                    "team_bot": TeamConfig(
+                        display_name="Team Bot",
+                        role="Coordinate work",
+                        agents=["general"],
+                        rooms=["!test:localhost"],
+                    ),
+                },
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                authorization=AuthorizationConfig(default_room_access=True),
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        team_user = AgentMatrixUser(
+            agent_name="team_bot",
+            user_id="@mindroom_team_bot:localhost",
+            display_name="Team Bot",
+            password=TEST_PASSWORD,
+        )
+        team_member = config.get_ids(runtime_paths)["general"]
+        bot = TeamBot(
+            team_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_agents=[team_member],
+            team_mode="coordinate",
+        )
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._delivery_gateway.deliver_final = AsyncMock(
+            return_value=FinalDeliveryOutcome.error_with_visible_response(
+                final_visible_event_id="$team-error",
+                final_visible_body="[team_bot] ⚠️ Error: boom",
                 failure_reason="boom",
                 extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
             ),
         )
-        mock_send_response.assert_awaited_once_with(
-            "!test:localhost",
-            "$event",
-            "[calculator] ⚠️ Error: boom",
-            "$thread_root",
-            reply_to_event=None,
-            skip_mentions=False,
-            tool_trace=None,
-            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
-            thread_mode_override=None,
-            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
+        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+
+        await bot._turn_controller._finalize_dispatch_failure(
+            room_id="!test:localhost",
+            reply_to_event_id="$event",
+            thread_id="$thread_root",
+            response_envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            correlation_id="corr-team-dispatch-failure",
+            error=RuntimeError("boom"),
+        )
+
+        assert bot._delivery_gateway.deliver_final.await_args.args == (
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
+                existing_event_id=None,
+                response_text="[team_bot] ⚠️ Error: boom",
+                response_kind="team",
+                response_envelope=_hook_envelope(body="hello", source_event_id="$event"),
+                correlation_id="corr-team-dispatch-failure",
+                tool_trace=None,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+                apply_before_hooks=False,
+            ),
         )
 
     @pytest.mark.asyncio
@@ -8605,10 +8752,16 @@ class TestAgentBot:
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
             raise RuntimeError(failure_message)
 
-        mock_send_response = AsyncMock(return_value="$error")
         mock_edit = AsyncMock(return_value=False)
-        install_send_response_mock(bot, mock_send_response)
         install_edit_message_mock(bot, mock_edit)
+        bot._delivery_gateway.deliver_final = AsyncMock(
+            return_value=FinalDeliveryOutcome.error_with_visible_response(
+                final_visible_event_id="$error",
+                final_visible_body="[calculator] ⚠️ Error: setup failed",
+                failure_reason="setup failed",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+            ),
+        )
         _replace_turn_policy_deps(
             bot,
             delivery_gateway=bot._delivery_gateway,
@@ -8627,7 +8780,7 @@ class TestAgentBot:
             )
 
         mock_edit.assert_not_awaited()
-        mock_send_response.assert_awaited_once()
+        bot._delivery_gateway.deliver_final.assert_awaited_once()
         tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",

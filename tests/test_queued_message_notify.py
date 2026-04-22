@@ -34,7 +34,6 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
-from mindroom.delivery_gateway import DeliveryResult
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
@@ -562,9 +561,9 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
-                        event_id="$response",
-                        response_text="ok",
+                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                        final_visible_event_id="$response",
+                        final_visible_body="ok",
                         delivery_kind="sent",
                     ),
                 ),

@@ -16,6 +16,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -200,7 +201,16 @@ class TestAIErrorDisplay:
             error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
             with patch(
                 "mindroom.delivery_gateway.DeliveryGateway.deliver_stream",
-                new=AsyncMock(return_value=("$msg_id", error_text)),
+                new=AsyncMock(
+                    return_value=StreamTransportOutcome(
+                        last_physical_stream_event_id="$msg_id",
+                        terminal_operation="edit",
+                        terminal_result="succeeded",
+                        terminal_status="completed",
+                        rendered_body=error_text,
+                        visible_body_state="visible_body",
+                    ),
+                ),
             ) as mock_deliver_stream:
                 # Call the method with an existing_event_id
                 await bot._response_runner.process_and_respond_streaming(

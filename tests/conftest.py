@@ -18,7 +18,7 @@ import mindroom.bot  # noqa: F401
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
+from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
 from mindroom.matrix.cache.event_cache import _EventCache
@@ -679,6 +679,41 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         )
 
     bot._delivery_gateway.send_text = AsyncMock(side_effect=_send_text)
+
+    async def _deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
+        event_id = await send_response(
+            request.target.room_id,
+            request.target.reply_to_event_id,
+            request.response_text,
+            request.target.resolved_thread_id,
+            reply_to_event=None,
+            skip_mentions=request.skip_mentions,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+            thread_mode_override=None,
+            target=request.target,
+        )
+        delivery_kind = "edited" if request.existing_event_id is not None else "sent"
+        if event_id is None:
+            if request.existing_event_id is not None:
+                return FinalDeliveryOutcome.error_with_visible_response(
+                    final_visible_event_id=request.existing_event_id,
+                    final_visible_body=request.response_text,
+                    failure_reason="test_mock_no_visible_response",
+                    delivery_kind=delivery_kind,
+                    extra_content=request.extra_content,
+                )
+            return FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason="test_mock_no_visible_response",
+            )
+        return FinalDeliveryOutcome.final_visible_delivery(
+            final_visible_event_id=event_id,
+            final_visible_body=request.response_text,
+            delivery_kind=delivery_kind,
+            extra_content=request.extra_content,
+        )
+
+    bot._delivery_gateway.deliver_final = AsyncMock(side_effect=_deliver_final)
     replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
 

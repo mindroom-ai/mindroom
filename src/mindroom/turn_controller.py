@@ -42,9 +42,9 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import FinalDeliveryRequest, SendTextRequest
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
+from mindroom.final_delivery import TurnDeliveryResolution
 from mindroom.handled_turns import HandledTurnState, apply_delivery_resolution
-from mindroom.hooks import build_hook_matrix_admin
+from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin
 from mindroom.hooks.ingress import (
     hook_ingress_policy,
     is_automation_source_kind,
@@ -93,7 +93,6 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
@@ -115,6 +114,8 @@ type _MediaDispatchEvent = (
 type _InboundMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
 type _TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
+type MatrixEventId = str
+type RequesterUserId = str
 
 
 class _EditRegenerator(Protocol):
@@ -234,7 +235,7 @@ class TurnController:
         event: _DispatchEvent | _InboundMediaEvent,
         *,
         is_edit: bool = False,
-    ) -> str | None:
+    ) -> RequesterUserId | None:
         """Run shared early-exit checks for inbound text and media events."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
         source_kind = content.get("com.mindroom.source_kind") if isinstance(content, dict) else None
@@ -513,13 +514,13 @@ class TurnController:
         *,
         text: str,
         thread_id: str | None,
-    ) -> str | None:
+    ) -> MatrixEventId | None:
         """Optionally post a display-only router echo for normalized audio."""
         if self.deps.agent_name != ROUTER_AGENT_NAME or not self.deps.runtime.config.voice.visible_router_echo:
             return None
 
         existing_visible_echo_event_id = self.deps.turn_store.visible_echo_for_source(event.event_id)
-        if existing_visible_echo_event_id is not None:
+        if existing_visible_echo_event_id:
             return existing_visible_echo_event_id
 
         target = self.deps.resolver.build_message_target(
@@ -535,7 +536,7 @@ class TurnController:
                 skip_mentions=True,
             ),
         )
-        if visible_echo_event_id is not None:
+        if visible_echo_event_id:
             self.deps.turn_store.record_visible_echo(event.event_id, visible_echo_event_id)
         return visible_echo_event_id
 
@@ -643,20 +644,40 @@ class TurnController:
             thread_id: str | None,
             reply_to_event: nio.RoomMessageText | None = None,
             skip_mentions: bool = False,
-        ) -> str | None:
+        ) -> TurnDeliveryResolution:
             target = self.deps.resolver.build_message_target(
                 room_id=room_id,
                 thread_id=thread_id,
                 reply_to_event_id=reply_to_event_id,
                 event_source=reply_to_event.source if reply_to_event is not None else None,
             )
-            return await self.deps.delivery_gateway.send_text(
-                SendTextRequest(
+            response_envelope = source_envelope or MessageEnvelope(
+                source_event_id=event.event_id,
+                room_id=room_id,
+                target=target,
+                requester_id=requester_user_id,
+                sender_id=requester_user_id,
+                body=event.body,
+                attachment_ids=(),
+                mentioned_agents=(),
+                agent_name=self.deps.agent_name,
+                source_kind="command",
+            )
+            final_outcome = await self.deps.delivery_gateway.deliver_final(
+                FinalDeliveryRequest(
                     target=target,
+                    existing_event_id=None,
                     response_text=response_text,
+                    response_kind=("team" if self.deps.agent_name in self.deps.runtime.config.teams else "ai"),
+                    response_envelope=response_envelope,
+                    correlation_id=event.event_id,
+                    tool_trace=None,
+                    extra_content=None,
+                    apply_before_hooks=False,
                     skip_mentions=skip_mentions,
                 ),
             )
+            return TurnDeliveryResolution.from_outcome(final_outcome)
 
         orchestrator = self.deps.runtime.orchestrator
         matrix_admin = None
@@ -731,9 +752,7 @@ class TurnController:
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
             HandledTurnState.from_source_event_id(selection.question_event_id),
             additional_source_event_ids=(
-                (source_event_id,)
-                if source_event_id is not None and source_event_id != selection.question_event_id
-                else ()
+                (source_event_id,) if source_event_id and source_event_id != selection.question_event_id else ()
             ),
         )
 
@@ -758,7 +777,7 @@ class TurnController:
                     response_resolution,
                 ),
             )
-            if source_event_id is not None and source_event_id != selection.question_event_id:
+            if source_event_id and source_event_id != selection.question_event_id:
                 self._mark_source_events_responded(
                     apply_delivery_resolution(
                         HandledTurnState.from_source_event_id(source_event_id),
@@ -930,30 +949,19 @@ class TurnController:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
         )
-        response_event_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(
+        response_kind = "team" if self.deps.agent_name in self.deps.runtime.config.teams else "ai"
+        final_outcome = await self.deps.delivery_gateway.deliver_final(
+            FinalDeliveryRequest(
                 target=target,
+                existing_event_id=None,
                 response_text=error_text,
+                response_kind=response_kind,
+                response_envelope=response_envelope,
+                correlation_id=correlation_id,
+                tool_trace=None,
                 extra_content=terminal_extra_content,
+                apply_before_hooks=False,
             ),
-        )
-        if response_event_id is not None:
-            outcome = FinalDeliveryOutcome.error_with_visible_response(
-                final_visible_event_id=response_event_id,
-                final_visible_body=error_text,
-                failure_reason=str(error),
-                extra_content=terminal_extra_content,
-            )
-        else:
-            outcome = FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason=str(error),
-                extra_content=terminal_extra_content,
-            )
-        final_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
-            outcome=outcome,
-            correlation_id=correlation_id,
-            envelope=response_envelope,
-            response_kind="ai",
         )
         return TurnDeliveryResolution.from_outcome(final_outcome)
 
@@ -1021,7 +1029,7 @@ class TurnController:
                 self._mark_source_events_responded(
                     apply_delivery_resolution(handled_turn, response_resolution),
                 )
-            if dispatch_timing is not None and response_resolution.turn_completion_event_id is not None:
+            if dispatch_timing is not None and response_resolution.turn_completion_event_id:
                 dispatch_timing.mark_first_visible_reply("final")
                 dispatch_timing.mark("response_complete")
                 dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
@@ -1054,7 +1062,7 @@ class TurnController:
             )
             if response_resolution.should_mark_handled:
                 self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))
-            if dispatch_timing is not None and response_resolution.turn_completion_event_id is not None:
+            if dispatch_timing is not None and response_resolution.turn_completion_event_id:
                 dispatch_timing.mark_first_visible_reply("final")
                 dispatch_timing.mark("response_complete")
                 dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")

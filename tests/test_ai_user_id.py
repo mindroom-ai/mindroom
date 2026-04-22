@@ -58,12 +58,6 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.delivery_gateway import (
-    CancelledVisibleNoteRequest,
-    DeliveryResult,
-    FinalDeliveryRequest,
-    FinalizeStreamedResponseRequest,
-)
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
@@ -117,6 +111,33 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Generator
     from pathlib import Path
+
+    from mindroom.delivery_gateway import (
+        CancelledVisibleNoteRequest,
+        FinalDeliveryRequest,
+        FinalizeStreamedResponseRequest,
+    )
+
+
+def _stream_outcome(
+    event_id: str | None,
+    body: str,
+    *,
+    terminal_operation: str = "send",
+    terminal_result: str = "succeeded",
+    terminal_status: str = "completed",
+    visible_body_state: str = "visible_body",
+    failure_reason: str | None = None,
+) -> StreamTransportOutcome:
+    return StreamTransportOutcome(
+        last_physical_stream_event_id=event_id,
+        terminal_operation=terminal_operation,
+        terminal_result=terminal_result,
+        terminal_status=terminal_status,
+        rendered_body=body,
+        visible_body_state=visible_body_state,
+        failure_reason=failure_reason,
+    )
 
 
 def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
@@ -1080,7 +1101,7 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-        async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
+        async def consume_delivery_and_fail(request: object) -> StreamTransportOutcome:
             chunks = [chunk async for chunk in request.response_stream]
             accumulated = "".join(chunks)
             sequence.append(f"deliver:{accumulated}")
@@ -1147,7 +1168,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-        async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
+        async def consume_delivery_and_fail(request: object) -> StreamTransportOutcome:
             accumulated = ""
             async for chunk in request.response_stream:
                 accumulated += str(chunk)
@@ -1210,7 +1231,7 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-        async def consume_delivery_and_fail(_request: object) -> tuple[str, str]:
+        async def consume_delivery_and_fail(_request: object) -> StreamTransportOutcome:
             raise StreamingDeliveryError(
                 RuntimeError("boom"),
                 event_id="$terminal",
@@ -1372,12 +1393,12 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-        async def consume_delivery_and_cancel(request: object) -> tuple[str, str]:
+        async def consume_delivery_and_cancel(request: object) -> StreamTransportOutcome:
             accumulated = ""
             async for chunk in request.response_stream:
                 accumulated += str(chunk)
                 sequence.append(f"deliver:{accumulated}")
-            return "$msg_id", accumulated
+            return _stream_outcome("$msg_id", accumulated)
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_cancel
 
@@ -1735,7 +1756,7 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
         async def fake_generate_streaming(
             *_args: object,
             **kwargs: object,
-        ) -> tuple[str | None, str]:
+        ) -> StreamTransportOutcome:
             turn_recorder = cast("TurnRecorder", kwargs["turn_recorder"])
             turn_recorder.set_run_id("run-stream-delivery-cancel")
             turn_recorder.record_completed(
@@ -1743,7 +1764,14 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
                 assistant_text="Hello!",
                 completed_tools=[],
             )
-            return "$stream-msg", "Hello!"
+            return StreamTransportOutcome(
+                last_physical_stream_event_id="$stream-msg",
+                terminal_operation="send",
+                terminal_result="succeeded",
+                terminal_status="completed",
+                rendered_body="Hello!",
+                visible_body_state="visible_body",
+            )
 
         coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
             side_effect=asyncio.CancelledError("delivery cancel"),
@@ -2017,7 +2045,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
 
-        async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
+        async def consume_delivery_and_fail(request: object) -> StreamTransportOutcome:
             chunks = [chunk async for chunk in request.response_stream]
             accumulated = "".join(chunks)
             sequence.append(f"deliver:{accumulated}")
@@ -2094,7 +2122,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
 
-        async def consume_delivery_and_fail(request: object) -> tuple[str, str]:
+        async def consume_delivery_and_fail(request: object) -> StreamTransportOutcome:
             accumulated = ""
             async for chunk in request.response_stream:
                 accumulated += str(chunk)
@@ -2162,7 +2190,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
 
-        async def consume_delivery_and_fail(_request: object) -> tuple[str, str]:
+        async def consume_delivery_and_fail(_request: object) -> StreamTransportOutcome:
             raise StreamingDeliveryError(
                 RuntimeError("boom"),
                 event_id="$team-terminal",
@@ -2384,11 +2412,11 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             side_effect=asyncio.CancelledError("delivery cancel"),
         )
 
-        async def consume_stream(request: object) -> tuple[str, str]:
+        async def consume_stream(request: object) -> StreamTransportOutcome:
             accumulated = ""
             async for chunk in request.response_stream:
                 accumulated += str(chunk)
-            return "$team-msg", accumulated
+            return _stream_outcome("$team-msg", accumulated)
 
         coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(side_effect=consume_stream)
 
@@ -2700,12 +2728,12 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
 
-        async def consume_delivery_and_cancel(request: object) -> tuple[str, str]:
+        async def consume_delivery_and_cancel(request: object) -> StreamTransportOutcome:
             accumulated = ""
             async for chunk in request.response_stream:
                 accumulated += str(chunk)
                 sequence.append(f"deliver:{accumulated}")
-            return "$team-msg", accumulated
+            return _stream_outcome("$team-msg", accumulated)
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_cancel
 
@@ -2846,7 +2874,7 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
 async def test_generate_team_response_helper_uses_delivery_result_failure_reason_for_cancelled_stream(
     tmp_path: Path,
 ) -> None:
-    """Team cancelled hooks should fall back to DeliveryResult.failure_reason when no exception was raised."""
+    """Typed gateway outcomes should preserve their canonical failure_reason."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
@@ -2869,12 +2897,18 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(return_value=("$team-msg", "Team hello"))
+        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(
+            return_value=StreamTransportOutcome(
+                last_physical_stream_event_id="$team-msg",
+                terminal_operation="send",
+                terminal_result="succeeded",
+                terminal_status="completed",
+                rendered_body="Team hello",
+                visible_body_state="visible_body",
+            ),
+        )
         coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
-            return_value=DeliveryResult(
-                event_id=None,
-                response_text="Team hello",
-                delivery_kind=None,
+            return_value=FinalDeliveryOutcome.error_without_visible_response(
                 failure_reason="stream failure",
             ),
         )
@@ -2902,19 +2936,8 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
         )
 
     assert resolution.state == "error_without_visible_response"
-    coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
-    assert (
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
-            "failure_reason"
-        ]
-        == "stream failure"
-    )
-    assert (
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
-            "visible_response_event_id"
-        ]
-        is None
-    )
+    assert resolution.retryable is True
+    assert resolution.visible_response_event_id is None
 
 
 class TestUserIdPassthrough:
@@ -3041,10 +3064,10 @@ class TestUserIdPassthrough:
                 requester_id="@bob:localhost",
             )
 
-            async def consume_delivery(request: object) -> tuple[str, str]:
+            async def consume_delivery(request: object) -> StreamTransportOutcome:
                 response_stream = request.response_stream
                 chunks = [chunk async for chunk in response_stream]
-                return "$msg_id", "".join(chunks)
+                return _stream_outcome("$msg_id", "".join(chunks))
 
             coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
 
