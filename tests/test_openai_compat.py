@@ -1359,11 +1359,11 @@ class TestStreamingCompletion:
 
         assert text == "final answer"
 
-    def test_streaming_final_completion_does_not_append_after_emitted_assistant_text(
+    def test_streaming_final_completion_appends_missing_suffix_after_emitted_prefix(
         self,
         app_client: TestClient,
     ) -> None:
-        """Terminal completion text is ignored once assistant text has already streamed."""
+        """Terminal completion text may safely append an unseen suffix to emitted text."""
 
         async def mock_stream(**_kw: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="hel")
@@ -1390,7 +1390,7 @@ class TestStreamingCompletion:
             for chunk in chunks
             if "content" in chunk["choices"][0]["delta"]
         ]
-        assert "".join(contents) == "hel"
+        assert "".join(contents) == "hello"
 
     def test_extract_stream_deltas_emits_first_assistant_chunk_immediately(self) -> None:
         """The first assistant content chunk should not wait for stream completion."""
@@ -1425,6 +1425,26 @@ class TestStreamingCompletion:
         assert first == ["Hello "]
         assert second == ["world!"]
         assert assistant_state.emitted_text == "Hello world!"
+
+    def test_extract_stream_deltas_appends_safe_final_suffix(self) -> None:
+        """A final completion may append unseen trailing text without rewriting the emitted prefix."""
+        tool_state = openai_compat._ToolStreamState()
+        assistant_state = openai_compat._AssistantTextStreamState()
+
+        first = openai_compat._extract_stream_deltas(
+            RunContentEvent(content="hel"),
+            tool_state,
+            assistant_state,
+        )
+        final = openai_compat._extract_stream_deltas(
+            RunCompletedEvent(content="hello"),
+            tool_state,
+            assistant_state,
+        )
+
+        assert first == ["hel"]
+        assert final == ["lo"]
+        assert assistant_state.emitted_text == "hello"
 
     def test_streaming_final_only_completion_content_is_emitted_when_no_prior_content(
         self,

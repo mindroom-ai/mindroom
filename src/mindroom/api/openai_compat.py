@@ -1072,9 +1072,9 @@ def _extract_stream_deltas(
     """Extract SSE deltas with explicit adapter semantics.
 
     SSE clients cannot rewrite assistant text that was already emitted.
-    We therefore stream every assistant content delta immediately and only use
-    `RunCompletedEvent.content` as visible content when no assistant text has
-    been sent yet.
+    We therefore stream every assistant content delta immediately, allow
+    `RunCompletedEvent.content` to append an unseen suffix when it cleanly
+    extends the emitted prefix, and otherwise keep the already-emitted text.
     """
     deltas: list[str] = []
 
@@ -1087,10 +1087,15 @@ def _extract_stream_deltas(
 
     if isinstance(event, RunCompletedEvent) and event.content is not None:
         final_text = str(event.content)
-        had_visible_assistant_text = bool(assistant_state.emitted_text)
+        prior_emitted_text = assistant_state.emitted_text
         assistant_state.emitted_text = final_text
-        if final_text and not had_visible_assistant_text:
+        if final_text and not prior_emitted_text:
             deltas.append(final_text)
+            return deltas
+        if final_text.startswith(prior_emitted_text):
+            suffix = final_text[len(prior_emitted_text) :]
+            if suffix:
+                deltas.append(suffix)
         return deltas
 
     if isinstance(event, str):
