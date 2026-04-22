@@ -20,6 +20,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
+    STREAM_WARMUP_SUFFIX_KEY,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
@@ -36,6 +37,7 @@ from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
 )
+from mindroom.matrix.visible_body import configured_visible_body_sender_ids
 from mindroom.streaming import (
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
@@ -472,7 +474,16 @@ async def _scan_room_message_states(
     )
 
     bot_message_events = [event for event in message_events if event.sender == bot_user_id]
-    resolved_messages = await resolve_latest_visible_messages(bot_message_events, client)
+    trusted_sender_ids = _cleanup_trusted_sender_ids(
+        bot_user_id=bot_user_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    resolved_messages = await resolve_latest_visible_messages(
+        bot_message_events,
+        client,
+        trusted_sender_ids=trusted_sender_ids,
+    )
     bot_resolved_messages = {
         event_id: message for event_id, message in resolved_messages.items() if message.sender == bot_user_id
     }
@@ -685,6 +696,13 @@ async def _derive_requester_ids_for_bot_messages(
     requester_ids_by_event_id: dict[str, str] = {}
     requester_cache: dict[str, str | None] = {}
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None] = {}
+    trusted_sender_ids = set(
+        _cleanup_trusted_sender_ids(
+            bot_user_id=bot_user_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        ),
+    )
     sorted_messages = sorted(
         resolved_messages.items(),
         key=lambda item: (item[1].timestamp, item[0]),
@@ -707,6 +725,7 @@ async def _derive_requester_ids_for_bot_messages(
                 fetched_message_data_by_event_id=fetched_message_data_by_event_id,
                 config=config,
                 runtime_paths=runtime_paths,
+                trusted_sender_ids=trusted_sender_ids,
             )
         except Exception as exc:
             logger.warning(
@@ -735,6 +754,7 @@ async def _resolve_requester_for_bot_message(
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None],
     config: Config,
     runtime_paths: RuntimePaths,
+    trusted_sender_ids: set[str],
 ) -> str | None:
     """Resolve the requester for one bot-authored message from its exact reply target."""
     reply_to_event_id = message_data.reply_to_event_id
@@ -745,6 +765,7 @@ async def _resolve_requester_for_bot_message(
             event_id=target_event_id,
             scanned_message_data_by_event_id=scanned_message_data_by_event_id,
             fetched_message_data_by_event_id=fetched_message_data_by_event_id,
+            trusted_sender_ids=trusted_sender_ids,
         )
         if original_message_data is None:
             return None
@@ -761,6 +782,7 @@ async def _resolve_requester_for_bot_message(
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
         config=config,
         runtime_paths=runtime_paths,
+        trusted_sender_ids=trusted_sender_ids,
         visited_event_ids={target_event_id},
     )
 
@@ -776,6 +798,7 @@ async def _resolve_requester_for_event_id(
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None],
     config: Config,
     runtime_paths: RuntimePaths,
+    trusted_sender_ids: set[str],
     visited_event_ids: set[str],
     max_depth: int = _MAX_REQUESTER_RESOLUTION_DEPTH,
 ) -> str | None:
@@ -795,6 +818,7 @@ async def _resolve_requester_for_event_id(
         resolved_messages=resolved_messages,
         scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
+        trusted_sender_ids=trusted_sender_ids,
     )
     if message_data is not None and sender is not None:
         requester_user_id = _effective_requester_for_message(
@@ -818,6 +842,7 @@ async def _resolve_requester_for_event_id(
                 fetched_message_data_by_event_id=fetched_message_data_by_event_id,
                 config=config,
                 runtime_paths=runtime_paths,
+                trusted_sender_ids=trusted_sender_ids,
                 visited_event_ids=visited_event_ids,
                 max_depth=max_depth - 1,
             )
@@ -833,6 +858,7 @@ async def _load_message_data_for_requester_resolution(
     resolved_messages: dict[str, ResolvedVisibleMessage],
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None],
+    trusted_sender_ids: set[str],
 ) -> tuple[ResolvedVisibleMessage | None, str | None]:
     """Load one message from scanned history or the Matrix API with its sender ID."""
     message_data = resolved_messages.get(event_id)
@@ -846,6 +872,7 @@ async def _load_message_data_for_requester_resolution(
         event_id=event_id,
         scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
+        trusted_sender_ids=trusted_sender_ids,
     )
     return message_data, message_data.sender if message_data is not None else None
 
@@ -862,6 +889,7 @@ async def _resolve_requester_from_internal_reply(
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None],
     config: Config,
     runtime_paths: RuntimePaths,
+    trusted_sender_ids: set[str],
     visited_event_ids: set[str],
     max_depth: int = _MAX_REQUESTER_RESOLUTION_DEPTH,
 ) -> str | None:
@@ -874,6 +902,7 @@ async def _resolve_requester_from_internal_reply(
             event_id=event_id,
             scanned_message_data_by_event_id=scanned_message_data_by_event_id,
             fetched_message_data_by_event_id=fetched_message_data_by_event_id,
+            trusted_sender_ids=trusted_sender_ids,
         )
         if original_message_data is not None:
             reply_to_event_id = original_message_data.reply_to_event_id
@@ -890,6 +919,7 @@ async def _resolve_requester_from_internal_reply(
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
         config=config,
         runtime_paths=runtime_paths,
+        trusted_sender_ids=trusted_sender_ids,
         visited_event_ids=visited_event_ids | {event_id},
         max_depth=max_depth - 1,
     )
@@ -902,6 +932,7 @@ async def _load_scanned_or_fetched_message_data(
     event_id: str,
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None],
+    trusted_sender_ids: set[str],
 ) -> ResolvedVisibleMessage | None:
     """Load one message from scanned room history before falling back to the Matrix API."""
     scanned_message_data = scanned_message_data_by_event_id.get(event_id)
@@ -913,6 +944,7 @@ async def _load_scanned_or_fetched_message_data(
         room_id=room_id,
         event_id=event_id,
         fetched_message_data_by_event_id=fetched_message_data_by_event_id,
+        trusted_sender_ids=trusted_sender_ids,
     )
     if fetched_message_data is not None:
         return fetched_message_data
@@ -925,6 +957,7 @@ async def _fetch_message_data_for_event_id(
     room_id: str,
     event_id: str,
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None],
+    trusted_sender_ids: set[str],
 ) -> ResolvedVisibleMessage | None:
     """Fetch basic message data for one exact Matrix event ID."""
     if event_id in fetched_message_data_by_event_id:
@@ -945,7 +978,11 @@ async def _fetch_message_data_for_event_id(
     event_info = EventInfo.from_event(event_source)
     if isinstance(event, nio.RoomMessageText):
         if event_info.is_edit:
-            edited_body, edited_content = await extract_edit_body(event_source, client)
+            edited_body, edited_content = await extract_edit_body(
+                event_source,
+                client,
+                trusted_sender_ids=trusted_sender_ids,
+            )
             if edited_body is not None and edited_content is not None:
                 message_data = _requester_resolution_message(
                     event_id=event_id,
@@ -957,7 +994,11 @@ async def _fetch_message_data_for_event_id(
                 fetched_message_data_by_event_id[event_id] = message_data
                 return message_data
 
-        extracted_message = await extract_and_resolve_message(event, client)
+        extracted_message = await extract_and_resolve_message(
+            event,
+            client,
+            trusted_sender_ids=trusted_sender_ids,
+        )
         message_data = ResolvedVisibleMessage.from_message_data(
             extracted_message,
             thread_id=None,
@@ -1006,6 +1047,18 @@ def _is_internal_sender(
     internal_ids = {matrix_id.full_id for matrix_id in config.get_ids(runtime_paths).values()}
     mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
     return sender_id in internal_ids or sender_id == mindroom_user_id
+
+
+def _cleanup_trusted_sender_ids(
+    *,
+    bot_user_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> frozenset[str]:
+    """Return the exact sender IDs cleanup may trust for canonical visible-body metadata."""
+    trusted_sender_ids = set(configured_visible_body_sender_ids(config, runtime_paths))
+    trusted_sender_ids.add(bot_user_id)
+    return frozenset(trusted_sender_ids)
 
 
 def _effective_requester_for_message(
@@ -1068,6 +1121,7 @@ async def _edit_stale_message(
     if should_preserve_visible_body and extra_content is not None:
         extra_content = dict(extra_content)
         extra_content.pop(STREAM_VISIBLE_BODY_KEY, None)
+        extra_content.pop(STREAM_WARMUP_SUFFIX_KEY, None)
     content = format_message_with_mentions(
         config,
         runtime_paths,

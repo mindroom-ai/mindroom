@@ -15,7 +15,9 @@ from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 import mindroom.matrix.client_thread_history as matrix_client_module
-from mindroom.constants import STREAM_STATUS_KEY
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.constants import STREAM_WARMUP_SUFFIX_KEY
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
@@ -42,7 +44,12 @@ from mindroom.matrix.client_thread_history import (
     _resolve_thread_history_from_event_sources_timed,
 )
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
-from tests.conftest import make_event_cache_mock
+from tests.conftest import (
+    bind_runtime_paths,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -248,6 +255,7 @@ class TestThreadHistory:
             "$thread_root",
             hydrate_sidecars=True,
             event_cache=event_cache,
+            trusted_sender_ids=(),
         )
         mock_store.assert_awaited_once_with(
             event_cache,
@@ -625,6 +633,7 @@ class TestThreadHistory:
             cache_reject_diagnostics={
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
             },
+            trusted_sender_ids=(),
         )
 
     @pytest.mark.asyncio
@@ -672,6 +681,7 @@ class TestThreadHistory:
             cache_reject_diagnostics={
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
             },
+            trusted_sender_ids=(),
         )
 
     @pytest.mark.asyncio
@@ -2243,7 +2253,7 @@ class TestThreadHistoryCache:
                 "body": "hello\n\n⏳ Preparing isolated worker...",
                 "msgtype": "m.file",
                 "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
-                STREAM_STATUS_KEY: "streaming",
+                STREAM_WARMUP_SUFFIX_KEY: "⏳ Preparing isolated worker...",
             },
         )
         await self._seed_thread_cache(
@@ -2260,11 +2270,18 @@ class TestThreadHistoryCache:
         client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
 
         try:
+            config = bind_runtime_paths(
+                Config(agents={"general": AgentConfig(display_name="General Agent")}),
+                test_runtime_paths(tmp_path),
+            )
             snapshot = await fetch_thread_snapshot(
                 client,
                 "!room:localhost",
                 "$thread_root",
                 event_cache=cache,
+                trusted_sender_ids={
+                    matrix_id.full_id for matrix_id in config.get_ids(runtime_paths_for(config)).values()
+                },
             )
         finally:
             await cache.close()

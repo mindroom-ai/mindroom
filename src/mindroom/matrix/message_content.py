@@ -13,12 +13,12 @@ from nio import crypto
 from mindroom.logging_config import get_logger
 from mindroom.matrix.visible_body import (
     has_trusted_stream_body_metadata,
-    local_agent_domain_from_user_id,
-    trusted_local_agent_sender,
     visible_body_from_content,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from mindroom.matrix.cache import ConversationEventCache
 
 logger = get_logger(__name__)
@@ -27,18 +27,6 @@ logger = get_logger(__name__)
 _mxc_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
 _cache_ttl = 3600.0  # 1 hour TTL
 _mxc_cache_max_entries = 500
-
-
-def _effective_local_agent_domain(
-    client: nio.AsyncClient | None,
-    local_agent_domain: str | None,
-) -> str | None:
-    """Return the trusted local agent domain for visible-body resolution."""
-    if local_agent_domain is not None:
-        return local_agent_domain
-    if client is None:
-        return None
-    return local_agent_domain_from_user_id(client.user_id)
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -210,7 +198,7 @@ async def extract_and_resolve_message(
     *,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
-    local_agent_domain: str | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
 
@@ -222,7 +210,7 @@ async def extract_and_resolve_message(
         client: Optional Matrix client for downloading attachments
         event_cache: Optional durable event cache used for restart-safe sidecar reuse
         room_id: Room scope for durable sidecar cache reads and writes
-        local_agent_domain: Optional trusted local agent domain for visible-body resolution
+        trusted_sender_ids: Exact trusted internal sender IDs allowed to override visible body
 
     Returns:
         Dict with sender, body, timestamp, event_id, and content fields.
@@ -238,23 +226,21 @@ async def extract_and_resolve_message(
         event_cache=event_cache,
         room_id=room_id,
     )
-    effective_local_agent_domain = _effective_local_agent_domain(client, local_agent_domain)
-    trusted_local_agent = trusted_local_agent_sender(event.sender, local_agent_domain=effective_local_agent_domain)
     resolved_body = visible_body_from_content(
         resolved_content,
         event.body,
         sender_id=event.sender,
-        local_agent_domain=effective_local_agent_domain,
+        trusted_sender_ids=trusted_sender_ids,
     )
     relates_to = _normalized_content_dict(resolved_content.get("m.relates_to"))
-    if trusted_local_agent and relates_to.get("rel_type") == "m.replace":
+    if event.sender in trusted_sender_ids and relates_to.get("rel_type") == "m.replace":
         new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
         if has_trusted_stream_body_metadata(new_content):
             resolved_body = visible_body_from_content(
                 new_content,
                 resolved_body,
                 sender_id=event.sender,
-                local_agent_domain=effective_local_agent_domain,
+                trusted_sender_ids=trusted_sender_ids,
             )
     message_data = {
         "sender": event.sender,
@@ -275,7 +261,7 @@ async def extract_edit_body(
     *,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
-    local_agent_domain: str | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
     content = _normalized_content_dict(event_source.get("content", {}))
@@ -286,12 +272,11 @@ async def extract_edit_body(
         room_id=room_id,
     )
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
-    effective_local_agent_domain = _effective_local_agent_domain(client, local_agent_domain)
     body = visible_body_from_content(
         new_content,
         "",
         sender_id=event_source.get("sender"),
-        local_agent_domain=effective_local_agent_domain,
+        trusted_sender_ids=trusted_sender_ids,
     )
     if body:
         normalized_new_content = dict(new_content)

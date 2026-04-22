@@ -2,80 +2,73 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_VISIBLE_BODY_KEY
-from mindroom.matrix.identity import MatrixID
+from mindroom.constants import STREAM_VISIBLE_BODY_KEY, STREAM_WARMUP_SUFFIX_KEY
 
+if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping
 
-def local_agent_domain_from_user_id(user_id: str | None) -> str | None:
-    """Return the local agent domain derived from one Matrix user ID."""
-    if not isinstance(user_id, str):
-        return None
-    try:
-        return MatrixID.parse(user_id).domain
-    except ValueError:
-        return None
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 
-def trusted_local_agent_sender(sender_id: object, *, local_agent_domain: str | None) -> bool:
-    """Return whether one sender is a trusted local MindRoom agent identity."""
-    if not isinstance(sender_id, str) or local_agent_domain is None:
-        return False
-    try:
-        sender = MatrixID.parse(sender_id)
-    except ValueError:
-        return False
-    return sender.domain == local_agent_domain and sender.username.startswith(MatrixID.AGENT_PREFIX)
+def configured_visible_body_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the exact configured internal sender IDs allowed to override visible body."""
+    return frozenset(matrix_id.full_id for matrix_id in config.get_ids(runtime_paths).values())
 
 
-def _is_worker_warmup_line(line: str) -> bool:
-    """Return whether one line is streamed worker warmup decoration."""
-    normalized_line = line.strip()
-    return normalized_line.startswith(("⏳ Preparing isolated worker", "⚠️ Worker startup failed"))
+def _sender_is_trusted(sender_id: object, *, trusted_sender_ids: Collection[str]) -> bool:
+    """Return whether one sender may override canonical visible-body reads."""
+    return isinstance(sender_id, str) and sender_id in trusted_sender_ids
 
 
-def _strip_trailing_worker_warmup_block(body: str) -> str:
-    """Strip one trailing worker warmup block from a trusted streamed body."""
-    sections = body.split("\n\n")
-    if len(sections) < 2:
+def _strip_explicit_warmup_suffix(body: str, *, warmup_suffix: str) -> str:
+    """Remove one explicitly recorded trailing warmup suffix from the visible body."""
+    if not warmup_suffix:
         return body
-    trailing_lines = [line for line in sections[-1].splitlines() if line.strip()]
-    if trailing_lines and all(_is_worker_warmup_line(line) for line in trailing_lines):
-        return "\n\n".join(sections[:-1]).rstrip()
+    if body == warmup_suffix:
+        return ""
+    joined_suffix = f"\n\n{warmup_suffix}"
+    if body.endswith(joined_suffix):
+        return body[: -len(joined_suffix)].rstrip()
     return body
 
 
 def visible_body_from_content(
-    content: dict[str, object],
+    content: Mapping[str, object],
     fallback_body: str,
     *,
     sender_id: object,
-    local_agent_domain: str | None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> str:
     """Return the canonical visible body for one content dict."""
-    trust_stream_visible_body = trusted_local_agent_sender(sender_id, local_agent_domain=local_agent_domain)
+    sender_is_trusted = _sender_is_trusted(sender_id, trusted_sender_ids=trusted_sender_ids)
     visible_body = content.get(STREAM_VISIBLE_BODY_KEY)
-    if trust_stream_visible_body and isinstance(visible_body, str) and visible_body:
+    if sender_is_trusted and isinstance(visible_body, str) and visible_body:
         return visible_body
+
     body = content.get("body")
-    if not isinstance(body, str):
-        return fallback_body
-    if trust_stream_visible_body and isinstance(content.get(STREAM_STATUS_KEY), str):
-        return _strip_trailing_worker_warmup_block(body)
-    return body
+    resolved_body = body if isinstance(body, str) else fallback_body
+    if not sender_is_trusted:
+        return resolved_body
+
+    warmup_suffix = content.get(STREAM_WARMUP_SUFFIX_KEY)
+    if isinstance(warmup_suffix, str) and warmup_suffix:
+        return _strip_explicit_warmup_suffix(resolved_body, warmup_suffix=warmup_suffix)
+    return resolved_body
 
 
-def has_trusted_stream_body_metadata(content: dict[str, object]) -> bool:
-    """Return whether content carries canonical-body metadata for trusted streamed text."""
-    return STREAM_VISIBLE_BODY_KEY in content or isinstance(content.get(STREAM_STATUS_KEY), str)
+def has_trusted_stream_body_metadata(content: Mapping[str, object]) -> bool:
+    """Return whether content carries explicit canonical-body metadata."""
+    return STREAM_VISIBLE_BODY_KEY in content or STREAM_WARMUP_SUFFIX_KEY in content
 
 
 def visible_body_from_event_source(
-    event_source: dict[str, object],
+    event_source: Mapping[str, object],
     fallback_body: str,
     *,
-    local_agent_domain: str | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> str:
     """Return the canonical visible body from one Matrix event source."""
     content = event_source.get("content")
@@ -86,7 +79,7 @@ def visible_body_from_event_source(
         visible_content,
         fallback_body,
         sender_id=event_source.get("sender"),
-        local_agent_domain=local_agent_domain,
+        trusted_sender_ids=trusted_sender_ids,
     )
 
 
@@ -106,7 +99,11 @@ def _visible_preview_content(event_source: object) -> tuple[object, dict[str, ob
     return sender_id, cast("dict[str, object]", visible_content) if isinstance(visible_content, dict) else None
 
 
-def bundled_visible_body_preview(event_source: object, *, local_agent_domain: str | None) -> str | None:
+def bundled_visible_body_preview(
+    event_source: object,
+    *,
+    trusted_sender_ids: Collection[str] = (),
+) -> str | None:
     """Return one trusted visible body for a bundled replacement candidate."""
     sender_id, visible_content = _visible_preview_content(event_source)
     if not isinstance(visible_content, dict):
@@ -115,6 +112,6 @@ def bundled_visible_body_preview(event_source: object, *, local_agent_domain: st
         visible_content,
         "",
         sender_id=sender_id,
-        local_agent_domain=local_agent_domain,
+        trusted_sender_ids=trusted_sender_ids,
     )
     return body or None

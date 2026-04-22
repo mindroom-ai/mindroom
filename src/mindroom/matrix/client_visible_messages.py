@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -202,6 +202,7 @@ async def _apply_latest_edits_to_messages(
     required_thread_id: str | None = None,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply latest edits to message records and synthesize missing originals when allowed."""
     for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
@@ -217,6 +218,7 @@ async def _apply_latest_edits_to_messages(
             client,
             event_cache=event_cache,
             room_id=room_id,
+            trusted_sender_ids=trusted_sender_ids,
         )
         if edited_body is None:
             continue
@@ -249,6 +251,7 @@ async def resolve_latest_visible_messages(
     client: nio.AsyncClient,
     *,
     sender: str | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
@@ -269,7 +272,11 @@ async def resolve_latest_visible_messages(
         if event.event_id in messages_by_event_id:
             continue
 
-        message_data = await extract_and_resolve_message(event, client)
+        message_data = await extract_and_resolve_message(
+            event,
+            client,
+            trusted_sender_ids=trusted_sender_ids,
+        )
         messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
             message_data,
             thread_id=event_info.thread_id,
@@ -280,6 +287,7 @@ async def resolve_latest_visible_messages(
         client,
         messages_by_event_id=messages_by_event_id,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        trusted_sender_ids=trusted_sender_ids,
     )
     return messages_by_event_id
 

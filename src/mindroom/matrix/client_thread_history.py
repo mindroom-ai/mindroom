@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -43,7 +43,7 @@ from mindroom.matrix.thread_projection import (
     sort_thread_event_sources_root_first,
     sort_thread_messages_root_first,
 )
-from mindroom.matrix.visible_body import local_agent_domain_from_user_id, visible_body_from_event_source
+from mindroom.matrix.visible_body import visible_body_from_event_source
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
@@ -137,7 +137,11 @@ def _room_message_fallback_body(event: nio.Event) -> str:
     return ""
 
 
-def _snapshot_message_dict(event: nio.Event, *, local_agent_domain: str | None) -> ResolvedVisibleMessage:
+def _snapshot_message_dict(
+    event: nio.Event,
+    *,
+    trusted_sender_ids: Collection[str] = (),
+) -> ResolvedVisibleMessage:
     """Build one lightweight visible message without hydrating sidecars."""
     event_source = event.source if isinstance(event.source, dict) else {}
     content = event_source.get("content", {})
@@ -148,7 +152,7 @@ def _snapshot_message_dict(event: nio.Event, *, local_agent_domain: str | None) 
         body=visible_body_from_event_source(
             event_source,
             _room_message_fallback_body(event),
-            local_agent_domain=local_agent_domain,
+            trusted_sender_ids=trusted_sender_ids,
         ),
         timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
         event_id=event.event_id,
@@ -227,6 +231,7 @@ async def _resolve_thread_history_from_event_sources_timed(
     event_sources: Sequence[dict[str, Any]],
     hydrate_sidecars: bool = True,
     event_cache: ConversationEventCache,
+    trusted_sender_ids: Collection[str] = (),
 ) -> tuple[list[ResolvedVisibleMessage], float]:
     """Resolve visible thread history and return approximate sidecar hydration time."""
     input_order_by_event_id: dict[str, int] = {}
@@ -245,7 +250,6 @@ async def _resolve_thread_history_from_event_sources_timed(
     ]
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
-    local_agent_domain = local_agent_domain_from_user_id(client.user_id)
     sidecar_hydration_started = time.perf_counter()
     for event in parsed_events:
         event_info = EventInfo.from_event(event.source)
@@ -272,9 +276,10 @@ async def _resolve_thread_history_from_event_sources_timed(
                 client,
                 event_cache=event_cache,
                 room_id=room_id,
+                trusted_sender_ids=trusted_sender_ids,
             )
             if hydrate_sidecars
-            else _snapshot_message_dict(event, local_agent_domain=local_agent_domain)
+            else _snapshot_message_dict(event, trusted_sender_ids=trusted_sender_ids)
         )
 
     await _apply_latest_edits_to_messages(
@@ -304,6 +309,7 @@ async def _load_stale_cached_thread_history(
     hydrate_sidecars: bool = True,
     fetch_error: Exception,
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult | None:
     """Return stale cached thread history when a refetch fails but durable rows still exist."""
     cache_read_started = time.perf_counter()
@@ -329,6 +335,7 @@ async def _load_stale_cached_thread_history(
         event_cache=event_cache,
         cached_event_sources=cached_event_sources,
         hydrate_sidecars=hydrate_sidecars,
+        trusted_sender_ids=trusted_sender_ids,
     )
     if resolved_history is None:
         return None
@@ -364,6 +371,7 @@ async def _resolve_cached_thread_history(
     event_cache: ConversationEventCache,
     cached_event_sources: Sequence[dict[str, Any]],
     hydrate_sidecars: bool = True,
+    trusted_sender_ids: Collection[str] = (),
 ) -> tuple[list[ResolvedVisibleMessage] | None, float]:
     """Resolve cached thread history or invalidate the cache entry on corruption."""
     try:
@@ -374,6 +382,7 @@ async def _resolve_cached_thread_history(
             event_sources=cached_event_sources,
             hydrate_sidecars=hydrate_sidecars,
             event_cache=event_cache,
+            trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
         logger.warning(
@@ -423,6 +432,7 @@ async def _load_cached_thread_history_if_usable(
     event_cache: ConversationEventCache,
     hydrate_sidecars: bool,
     runtime_started_at: float | None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> tuple[ThreadHistoryResult | None, dict[str, str | int | float | bool] | None]:
     """Return a fresh durable thread snapshot when the current runtime may safely trust it."""
     cache_state = await event_cache.get_thread_cache_state(room_id, thread_id)
@@ -459,6 +469,7 @@ async def _load_cached_thread_history_if_usable(
         event_cache=event_cache,
         cached_event_sources=cached_event_sources,
         hydrate_sidecars=hydrate_sidecars,
+        trusted_sender_ids=trusted_sender_ids,
     )
     if resolved_history is None:
         return None, {
@@ -501,6 +512,7 @@ async def _fetch_thread_history_with_events(
     *,
     hydrate_sidecars: bool,
     event_cache: ConversationEventCache,
+    trusted_sender_ids: Collection[str] = (),
 ) -> _ThreadHistoryFetchResult:
     """Fetch thread history and raw event sources from the homeserver."""
     return await _fetch_thread_history_via_room_messages_with_events(
@@ -509,6 +521,7 @@ async def _fetch_thread_history_with_events(
         thread_id,
         hydrate_sidecars=hydrate_sidecars,
         event_cache=event_cache,
+        trusted_sender_ids=trusted_sender_ids,
     )
 
 
@@ -522,6 +535,7 @@ async def refresh_thread_history_from_source(
     allow_stale_fallback: bool = True,
     cache_write_guard_started_at: float | None = None,
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
     try:
@@ -531,6 +545,7 @@ async def refresh_thread_history_from_source(
             thread_id,
             hydrate_sidecars=hydrate_sidecars,
             event_cache=event_cache,
+            trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
         if allow_stale_fallback:
@@ -542,6 +557,7 @@ async def refresh_thread_history_from_source(
                 hydrate_sidecars=hydrate_sidecars,
                 fetch_error=exc,
                 cache_reject_diagnostics=cache_reject_diagnostics,
+                trusted_sender_ids=trusted_sender_ids,
             )
             if stale_history is not None:
                 return stale_history
@@ -621,16 +637,16 @@ async def _resolve_thread_history_message(
     *,
     event_cache: ConversationEventCache,
     room_id: str,
+    trusted_sender_ids: Collection[str] = (),
 ) -> ResolvedVisibleMessage:
     """Resolve one room-message event into the normalized thread-history shape."""
-    local_agent_domain = local_agent_domain_from_user_id(client.user_id)
     if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
         message_data = await extract_and_resolve_message(
             event,
             client,
             event_cache=event_cache,
             room_id=room_id,
-            local_agent_domain=local_agent_domain,
+            trusted_sender_ids=trusted_sender_ids,
         )
         return ResolvedVisibleMessage.from_message_data(
             message_data,
@@ -652,7 +668,7 @@ async def _resolve_thread_history_message(
         body=visible_body_from_event_source(
             resolved_event_source,
             _room_message_fallback_body(event),
-            local_agent_domain=local_agent_domain,
+            trusted_sender_ids=trusted_sender_ids,
         ),
         timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
         event_id=event.event_id,
@@ -670,6 +686,7 @@ async def fetch_thread_history(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
     """Fetch all messages in a thread."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -681,6 +698,7 @@ async def fetch_thread_history(
             event_cache=event_cache,
             hydrate_sidecars=True,
             runtime_started_at=runtime_started_at,
+            trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
         logger.warning(
@@ -699,6 +717,7 @@ async def fetch_thread_history(
         event_cache,
         allow_stale_fallback=True,
         cache_reject_diagnostics=cache_reject_diagnostics,
+        trusted_sender_ids=trusted_sender_ids,
     )
 
 
@@ -709,6 +728,7 @@ async def fetch_thread_snapshot(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
     """Fetch lightweight thread context without hydrating sidecars when a fresh cache hit is unavailable."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -720,6 +740,7 @@ async def fetch_thread_snapshot(
             event_cache=event_cache,
             hydrate_sidecars=False,
             runtime_started_at=runtime_started_at,
+            trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
         logger.warning(
@@ -739,6 +760,7 @@ async def fetch_thread_snapshot(
         hydrate_sidecars=False,
         allow_stale_fallback=True,
         cache_reject_diagnostics=cache_reject_diagnostics,
+        trusted_sender_ids=trusted_sender_ids,
     )
 
 
@@ -749,6 +771,7 @@ async def fetch_dispatch_thread_history(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
     """Fetch strict full thread history for dispatch using only fresh cache data or a homeserver refill."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -760,6 +783,7 @@ async def fetch_dispatch_thread_history(
             event_cache=event_cache,
             hydrate_sidecars=True,
             runtime_started_at=runtime_started_at,
+            trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
         logger.warning(
@@ -779,6 +803,7 @@ async def fetch_dispatch_thread_history(
         hydrate_sidecars=True,
         allow_stale_fallback=False,
         cache_reject_diagnostics=cache_reject_diagnostics,
+        trusted_sender_ids=trusted_sender_ids,
     )
 
 
@@ -790,6 +815,7 @@ async def fetch_dispatch_thread_snapshot(
     *,
     runtime_started_at: float | None = None,
     cache_write_guard_started_at: float | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
     """Fetch strict lightweight dispatch context using only fresh cache data or a homeserver refill."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -801,6 +827,7 @@ async def fetch_dispatch_thread_snapshot(
             event_cache=event_cache,
             hydrate_sidecars=False,
             runtime_started_at=runtime_started_at,
+            trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
         logger.warning(
@@ -821,6 +848,7 @@ async def fetch_dispatch_thread_snapshot(
         allow_stale_fallback=False,
         cache_write_guard_started_at=cache_write_guard_started_at,
         cache_reject_diagnostics=cache_reject_diagnostics,
+        trusted_sender_ids=trusted_sender_ids,
     )
 
 
@@ -831,6 +859,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
     *,
     hydrate_sidecars: bool,
     event_cache: ConversationEventCache,
+    trusted_sender_ids: Collection[str] = (),
 ) -> _ThreadHistoryFetchResult:
     """Fetch all thread messages by scanning room history pages."""
     fetch_started = time.perf_counter()
@@ -843,6 +872,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
         event_sources=scan_result.event_sources,
         hydrate_sidecars=hydrate_sidecars,
         event_cache=event_cache,
+        trusted_sender_ids=trusted_sender_ids,
     )
     return _ThreadHistoryFetchResult(
         history=history,

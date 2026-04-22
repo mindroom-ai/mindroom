@@ -42,9 +42,10 @@ from mindroom.matrix.thread_membership import (
     resolve_event_thread_id,
 )
 from mindroom.matrix.thread_room_scan import _room_scan_membership_access_for_client
+from mindroom.matrix.visible_body import configured_visible_body_sender_ids
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Collection
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -220,6 +221,7 @@ async def _apply_cached_latest_edit(
     room_id: str,
     client: nio.AsyncClient,
     event_cache: ConversationEventCache,
+    trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Project one cached original event into its latest visible edited state."""
     if event_source.get("type") != "m.room.message":
@@ -239,6 +241,7 @@ async def _apply_cached_latest_edit(
         client,
         event_cache=event_cache,
         room_id=room_id,
+        trusted_sender_ids=trusted_sender_ids,
     )
     if edited_body is None or edited_content is None:
         return event_source
@@ -267,6 +270,7 @@ async def _cached_room_get_event_response(
     *,
     room_id: str,
     event_source: dict[str, Any],
+    trusted_sender_ids: Collection[str] = (),
 ) -> nio.RoomGetEventResponse | None:
     """Reconstruct one cached room-get-event response, applying visible edits when present."""
     visible_event_source = await _apply_cached_latest_edit(
@@ -274,6 +278,7 @@ async def _cached_room_get_event_response(
         room_id=room_id,
         client=client,
         event_cache=event_cache,
+        trusted_sender_ids=trusted_sender_ids,
     )
     cached_response = nio.RoomGetEventResponse.from_dict(visible_event_source)
     return cached_response if isinstance(cached_response, nio.RoomGetEventResponse) else None
@@ -284,6 +289,8 @@ async def _cached_room_get_event(
     event_cache: ConversationEventCache,
     room_id: str,
     event_id: str,
+    *,
+    trusted_sender_ids: Collection[str] = (),
 ) -> tuple[nio.RoomGetEventResponse | RoomGetEventError, dict[str, Any] | None]:
     """Return one event through the persistent cache when available."""
     normalized_event_id = event_id.strip()
@@ -304,6 +311,7 @@ async def _cached_room_get_event(
                     event_cache,
                     room_id=room_id,
                     event_source=cached_event,
+                    trusted_sender_ids=trusted_sender_ids,
                 )
                 if cached_response is not None:
                     return cached_response, None
@@ -328,6 +336,7 @@ async def _cached_room_get_event(
         event_cache,
         room_id=room_id,
         event_source=normalized_event_source,
+        trusted_sender_ids=trusted_sender_ids,
     )
     return (visible_response if visible_response is not None else response), normalized_event_source
 
@@ -389,6 +398,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
             msg = "Matrix client is not ready for conversation cache"
             raise RuntimeError(msg)
         return client
+
+    def _trusted_sender_ids(self) -> frozenset[str]:
+        """Return the exact internal sender IDs allowed to override canonical visible-body reads."""
+        return configured_visible_body_sender_ids(
+            self.runtime.config,
+            self.runtime.runtime_paths,
+        )
 
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:
@@ -477,6 +493,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             self.runtime.event_cache,
             room_id,
             event_id,
+            trusted_sender_ids=self._trusted_sender_ids(),
         )
         if fetched_event_source is not None and persist_lookup_fill:
             await self._persist_lookup_fill(
@@ -545,6 +562,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            trusted_sender_ids=self._trusted_sender_ids(),
         )
 
     async def _fetch_thread_snapshot_from_client(
@@ -558,6 +576,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            trusted_sender_ids=self._trusted_sender_ids(),
         )
 
     async def _fetch_dispatch_thread_history_from_client(
@@ -571,6 +590,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            trusted_sender_ids=self._trusted_sender_ids(),
         )
 
     async def _fetch_dispatch_thread_snapshot_from_client(
@@ -584,6 +604,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            trusted_sender_ids=self._trusted_sender_ids(),
         )
 
     async def _refresh_dispatch_thread_snapshot_for_startup_prewarm(
@@ -600,6 +621,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
             cache_write_guard_started_at=fetch_started_at,
+            trusted_sender_ids=self._trusted_sender_ids(),
         )
 
     async def _startup_thread_prewarm_ids(

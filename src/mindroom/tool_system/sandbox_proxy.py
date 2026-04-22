@@ -452,7 +452,7 @@ def _is_request_level_proxy_http_error(exc: Exception) -> bool:
     if not isinstance(exc, httpx.HTTPStatusError):
         return False
     status_code = exc.response.status_code
-    if status_code not in {400, 404}:
+    if status_code not in {400, 404, 422}:
         return False
     try:
         payload = exc.response.json()
@@ -460,7 +460,7 @@ def _is_request_level_proxy_http_error(exc: Exception) -> bool:
         return False
     detail = payload.get("detail") if isinstance(payload, Mapping) else None
     is_string_detail = isinstance(detail, str) and bool(detail)
-    return is_string_detail and (status_code == 400 or detail != "Not Found")
+    return is_string_detail and (status_code in {400, 422} or detail != "Not Found")
 
 
 def _record_proxy_response_failure_for_worker(

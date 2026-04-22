@@ -255,7 +255,10 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_helpers"
-depends_on = ["mindroom.matrix.visible_body"]
+depends_on = [
+    "mindroom.matrix.message_content",
+    "mindroom.matrix.visible_body",
+]
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_message"
@@ -306,6 +309,7 @@ depends_on = [
     "mindroom.hooks.ingress",
     "mindroom.matrix.identity",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.visible_body",
     "mindroom.runtime_protocols",
 ]
 
@@ -691,6 +695,7 @@ depends_on = [
     "mindroom.matrix.thread_bookkeeping",
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_room_scan",
+    "mindroom.matrix.visible_body",
 ]
 
 [[modules]]
@@ -877,6 +882,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_projection",
+    "mindroom.matrix.visible_body",
     "mindroom.streaming",
 ]
 

@@ -24,9 +24,9 @@ from mindroom.custom_tools.attachments import (
     send_context_attachments,
 )
 from mindroom.custom_tools.matrix_helpers import (
-    bundled_replacement_body,
     check_rate_limit,
     message_preview,
+    thread_root_body_preview,
 )
 from mindroom.interactive import (
     add_reaction_buttons,
@@ -44,7 +44,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
-from mindroom.matrix.visible_body import local_agent_domain_from_user_id
+from mindroom.matrix.visible_body import configured_visible_body_sender_ids
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -496,8 +496,13 @@ class MatrixMessageTools(Toolkit):
                 response=str(response),
             )
 
+        trusted_sender_ids = configured_visible_body_sender_ids(context.config, context.runtime_paths)
         resolved = [
-            await extract_and_resolve_message(event, context.client)
+            await extract_and_resolve_message(
+                event,
+                context.client,
+                trusted_sender_ids=trusted_sender_ids,
+            )
             for event in reversed(response.chunk)
             if isinstance(event, self._VISIBLE_ROOM_MESSAGE_EVENT_TYPES)
         ]
@@ -588,22 +593,12 @@ class MatrixMessageTools(Toolkit):
                 event_type=type(event).__name__,
             )
             return None
-        if source.get("type") == "m.room.encrypted":
-            body_preview = "[encrypted]"
-        elif isinstance(event, self._VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-            replacement_body = bundled_replacement_body(
-                source,
-                local_agent_domain=local_agent_domain_from_user_id(context.client.user_id),
-            )
-            if replacement_body is not None:
-                body_preview = message_preview(replacement_body)
-            else:
-                resolved_message = await extract_and_resolve_message(event, context.client)
-                body_preview = message_preview(resolved_message.get("body"))
-        else:
-            content = source.get("content", {})
-            body = content.get("body") if isinstance(content, dict) else None
-            body_preview = message_preview(body)
+        trusted_sender_ids = configured_visible_body_sender_ids(context.config, context.runtime_paths)
+        body_preview = await thread_root_body_preview(
+            event,
+            client=context.client,
+            trusted_sender_ids=trusted_sender_ids,
+        )
 
         payload = {
             "thread_id": event_id,

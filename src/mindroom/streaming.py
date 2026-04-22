@@ -18,6 +18,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
+    STREAM_WARMUP_SUFFIX_KEY,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
@@ -424,6 +425,7 @@ class StreamingResponse:
         if warmup_suffix_lines:
             content[STREAM_VISIBLE_BODY_KEY] = canonical_visible_body
             warmup_suffix = "\n".join(warmup_suffix_lines)
+            content[STREAM_WARMUP_SUFFIX_KEY] = warmup_suffix
             display_text = f"{display_text}\n\n{warmup_suffix}" if display_text else warmup_suffix
             content["body"] = f"{content['body']}\n\n{warmup_suffix}"
             suffix_html = "".join(f"<p>{escape(line)}</p>" for line in warmup_suffix_lines)

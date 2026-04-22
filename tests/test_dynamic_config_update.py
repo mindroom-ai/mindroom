@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -36,6 +37,7 @@ def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMo
     bot._runtime_view = BotRuntimeState(
         client=None,
         config=config,
+        runtime_paths=orchestrator_runtime_paths(Path(tempfile.mkdtemp())),
         enable_streaming=enable_streaming,
         orchestrator=None,
         event_cache=make_event_cache_mock(),

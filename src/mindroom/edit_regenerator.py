@@ -11,6 +11,7 @@ from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks.ingress import hook_ingress_policy
 from mindroom.matrix.identity import extract_agent_name
 from mindroom.matrix.message_content import extract_edit_body
+from mindroom.matrix.visible_body import configured_visible_body_sender_ids
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -185,7 +186,14 @@ class EditRegenerator:
             response_event_id=response_event_id,
         )
 
-        edited_content, _ = await extract_edit_body(event.source, self._client())
+        edited_content, _ = await extract_edit_body(
+            event.source,
+            self._client(),
+            trusted_sender_ids=configured_visible_body_sender_ids(
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+            ),
+        )
         if edited_content is None:
             self._logger().debug("Edited message missing resolved body", event_id=event.event_id)
             return

@@ -14,12 +14,12 @@ from aiohttp import ClientError
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import (
-    bundled_replacement_body,
     check_rate_limit,
     message_preview,
+    thread_root_body_preview,
 )
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
-from mindroom.matrix.visible_body import local_agent_domain_from_user_id
+from mindroom.matrix.visible_body import configured_visible_body_sender_ids
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -342,22 +342,18 @@ class MatrixRoomTools(Toolkit):
             )
 
         threads_list: list[dict[str, Any]] = []
-        local_agent_domain = local_agent_domain_from_user_id(context.client.user_id)
+        trusted_sender_ids = configured_visible_body_sender_ids(context.config, context.runtime_paths)
         for event in thread_roots:
-            replacement_body = bundled_replacement_body(event.source, local_agent_domain=local_agent_domain)
             thread_info: dict[str, Any] = {
                 "thread_id": event.event_id,
                 "sender": event.sender,
                 "timestamp": event.server_timestamp,
             }
-            if isinstance(event, nio.MegolmEvent):
-                thread_info["body_preview"] = "[encrypted]"
-            elif replacement_body is not None:
-                thread_info["body_preview"] = message_preview(replacement_body)
-            elif isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
-                thread_info["body_preview"] = message_preview(event.body)
-            else:
-                thread_info["body_preview"] = ""
+            thread_info["body_preview"] = await thread_root_body_preview(
+                event,
+                client=context.client,
+                trusted_sender_ids=trusted_sender_ids,
+            )
             thread_info["reply_count"] = self._thread_reply_count(event)
 
             threads_list.append(thread_info)

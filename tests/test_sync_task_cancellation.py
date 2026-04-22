@@ -386,6 +386,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._runtime_view = BotRuntimeState(
         client=bot.client,
         config=MagicMock(spec=Config),
+        runtime_paths=MagicMock(),
         enable_streaming=True,
         orchestrator=None,
         event_cache=make_event_cache_mock(),

@@ -526,6 +526,27 @@ async def test_threads_preview_prefers_trusted_canonical_body_from_bundled_repla
 
 
 @pytest.mark.asyncio
+async def test_threads_preview_prefers_trusted_visible_body_without_bundled_replacement() -> None:
+    """Threads should use canonical visible-body metadata for trusted non-bundled roots too."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    event = _thread_event(
+        "$thread1",
+        sender="@mindroom_general:localhost",
+        body="Final root message\n\n⏳ Preparing isolated worker...",
+        reply_count=3,
+    )
+    event.source["content"]["io.mindroom.visible_body"] = "Final root message"
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Final root message"
+
+
+@pytest.mark.asyncio
 async def test_threads_respects_limit() -> None:
     """Threads should forward the clamped limit and report has_more when next_token present."""
     tool = MatrixRoomTools()

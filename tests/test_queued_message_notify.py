@@ -294,6 +294,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     runtime = BotRuntimeState(
         client=client,
         config=config,
+        runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
         event_cache=make_event_cache_mock(),

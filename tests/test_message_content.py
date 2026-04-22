@@ -8,7 +8,7 @@ import nio
 import pytest
 
 import mindroom.matrix.message_content as message_content_module
-from mindroom.constants import STREAM_STATUS_KEY
+from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY
 from mindroom.matrix.message_content import (
     _clear_mxc_cache,
     _download_mxc_text,
@@ -313,7 +313,35 @@ class TestResolvedMessageExtraction:
             },
         }
 
-        assert visible_body_from_event_source(event_source, "hello", local_agent_domain="localhost") == "hello"
+        assert (
+            visible_body_from_event_source(
+                event_source,
+                "hello",
+                trusted_sender_ids={"@mindroom_general:localhost"},
+            )
+            == "hello"
+        )
+
+    def test_visible_body_from_event_source_uses_explicit_warmup_suffix_metadata(self) -> None:
+        """Trusted streamed previews may remove only the exact suffix that was explicitly appended."""
+        warmup_suffix = "⏳ Preparing isolated worker..."
+        event_source = {
+            "sender": "@mindroom_general:localhost",
+            "content": {
+                "msgtype": "m.text",
+                "body": f"hello\n\n{warmup_suffix}",
+                STREAM_WARMUP_SUFFIX_KEY: warmup_suffix,
+            },
+        }
+
+        assert (
+            visible_body_from_event_source(
+                event_source,
+                "hello",
+                trusted_sender_ids={"@mindroom_general:localhost"},
+            )
+            == "hello"
+        )
 
     def test_visible_body_from_event_source_ignores_empty_canonical_stream_body(self) -> None:
         """Empty canonical stream metadata should fall back to the actual Matrix body."""
@@ -326,14 +354,16 @@ class TestResolvedMessageExtraction:
             },
         }
 
-        assert visible_body_from_event_source(event_source, "Thinking...", local_agent_domain="localhost") == (
-            "Thinking..."
-        )
+        assert visible_body_from_event_source(
+            event_source,
+            "Thinking...",
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        ) == ("Thinking...")
 
     def test_visible_body_from_event_source_ignores_untrusted_visible_body(self) -> None:
         """Untrusted inbound events should not override the real Matrix body via visible_body."""
         event_source = {
-            "sender": "@alice:localhost",
+            "sender": "@mindroom_fake:localhost",
             "content": {
                 "msgtype": "m.text",
                 "body": "benign body",
@@ -341,9 +371,28 @@ class TestResolvedMessageExtraction:
             },
         }
 
-        assert visible_body_from_event_source(event_source, "benign body", local_agent_domain="localhost") == (
-            "benign body"
-        )
+        assert visible_body_from_event_source(
+            event_source,
+            "benign body",
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        ) == ("benign body")
+
+    def test_visible_body_from_event_source_does_not_strip_literal_status_text_without_explicit_metadata(self) -> None:
+        """Legitimate final content should stay intact when no explicit warmup metadata is present."""
+        event_source = {
+            "sender": "@mindroom_general:localhost",
+            "content": {
+                "msgtype": "m.text",
+                "body": "Diagnosis follows\n\n⚠️ Worker startup failed for shell.run: intentional example.",
+                STREAM_STATUS_KEY: "completed",
+            },
+        }
+
+        assert visible_body_from_event_source(
+            event_source,
+            "Diagnosis follows",
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        ) == ("Diagnosis follows\n\n⚠️ Worker startup failed for shell.run: intentional example.")
 
 
 class TestDownloadMxcText:
@@ -497,7 +546,10 @@ class TestCanonicalContentResolution:
             },
         }
 
-        body, resolved_content = await extract_edit_body(event_source, local_agent_domain="localhost")
+        body, resolved_content = await extract_edit_body(
+            event_source,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
 
         assert body == "hello"
         assert resolved_content == {
@@ -523,7 +575,10 @@ class TestCanonicalContentResolution:
             },
         }
 
-        body, resolved_content = await extract_edit_body(event_source, local_agent_domain="localhost")
+        body, resolved_content = await extract_edit_body(
+            event_source,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
 
         assert body == "hello\n\n⏳ Preparing isolated worker..."
         assert resolved_content == {
@@ -607,7 +662,10 @@ class TestExtractAndResolveMessage:
             },
         )
 
-        result = await extract_and_resolve_message(event, local_agent_domain="localhost")
+        result = await extract_and_resolve_message(
+            event,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
 
         assert result["body"] == "hello"
 
@@ -628,6 +686,9 @@ class TestExtractAndResolveMessage:
             },
         )
 
-        result = await extract_and_resolve_message(event, local_agent_domain="localhost")
+        result = await extract_and_resolve_message(
+            event,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
 
         assert result["body"] == "benign body"

@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
@@ -23,6 +24,9 @@ class BotRuntimeView(Protocol):
 
     @property
     def config(self) -> Config: ...  # noqa: D102
+
+    @property
+    def runtime_paths(self) -> RuntimePaths: ...  # noqa: D102
 
     @property
     def enable_streaming(self) -> bool: ...  # noqa: D102
@@ -49,6 +53,7 @@ class BotRuntimeState:
 
     client: nio.AsyncClient | None
     config: Config
+    runtime_paths: RuntimePaths
     enable_streaming: bool
     orchestrator: MultiAgentOrchestrator | None
     event_cache: ConversationEventCache | None

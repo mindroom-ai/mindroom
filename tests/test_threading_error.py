@@ -323,6 +323,7 @@ def _conversation_runtime(
     return BotRuntimeState(
         client=client,
         config=MagicMock(spec=Config),
+        runtime_paths=MagicMock(),
         enable_streaming=True,
         orchestrator=None,
         event_cache=event_cache or _runtime_event_cache(),
@@ -1142,6 +1143,7 @@ class TestMatrixConversationCacheThreadReads:
         runtime = BotRuntimeState(
             client=AsyncMock(spec=nio.AsyncClient),
             config=MagicMock(spec=Config),
+            runtime_paths=MagicMock(),
             enable_streaming=True,
             orchestrator=None,
             event_cache=_runtime_event_cache(),
