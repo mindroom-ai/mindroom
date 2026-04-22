@@ -702,6 +702,17 @@ def resolve_config_relative_path(
     return (runtime_paths.config_dir / unresolved).resolve()
 
 
+def resolve_config_relative_path_preserving_leaf(
+    raw_path: str | Path,
+    runtime_paths: RuntimePaths,
+) -> Path:
+    """Resolve a configured path lexically without following the final component."""
+    unresolved = Path(_expand_runtime_path_vars(os.fspath(raw_path), runtime_paths)).expanduser()
+    if unresolved.is_absolute():
+        return unresolved
+    return runtime_paths.config_dir / unresolved
+
+
 def _docker_container_enabled(runtime_paths: RuntimePaths) -> bool:
     """Return whether MindRoom is running from the packaged container image."""
     return runtime_paths.env_flag("DOCKER_CONTAINER")
