@@ -36,9 +36,6 @@ from mindroom.streaming_delivery import (
     _shutdown_worker_progress_drain,
     _StreamDeliveryShutdownTimeoutError,
 )
-from mindroom.streaming_delivery import (
-    _consume_streaming_chunks as _consume_streaming_chunks_impl,
-)
 from mindroom.streaming_warmup import WorkerWarmupState
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
@@ -664,30 +661,6 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.accumulated_text = new_chunk
         self.chars_since_last_update += len(new_chunk)
         self.last_delta_at = time.time()
-
-
-async def _consume_streaming_chunks(
-    client: nio.AsyncClient,
-    response_stream: AsyncIterator[_StreamInputChunk],
-    streaming: StreamingResponse,
-) -> None:
-    """Compatibility helper for tests that exercise chunk consumption directly."""
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-    delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
-    try:
-        await _consume_streaming_chunks_impl(response_stream, streaming, delivery_queue)
-        delivery_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        delivery_task = None
-        if delivery_error is not None:
-            raise delivery_error
-    finally:
-        if delivery_task is not None:
-            cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if cleanup_error is not None:
-                logger.warning(
-                    "Stream delivery controller raised during compatibility cleanup",
-                    error=str(cleanup_error),
-                )
 
 
 async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915

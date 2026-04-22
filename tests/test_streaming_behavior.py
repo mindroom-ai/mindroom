@@ -49,11 +49,13 @@ from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
-    _consume_streaming_chunks,
     build_restart_interrupted_body,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
     send_streaming_response,
+)
+from mindroom.streaming_delivery import (
+    _consume_streaming_chunks as _consume_streaming_chunks_impl,
 )
 from mindroom.streaming_delivery import (
     _DeliveryRequest,
@@ -105,6 +107,26 @@ def _make_matrix_client_mock() -> AsyncMock:
     client = make_matrix_client_mock(user_id="@mindroom_streaming:localhost")
     client.room_get_event_relations = MagicMock(return_value=_aiter())
     return client
+
+
+async def _consume_streaming_chunks_for_test(
+    client: nio.AsyncClient,
+    response_stream: AsyncIterator[object],
+    streaming: StreamingResponse,
+) -> None:
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+    delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
+    try:
+        await _consume_streaming_chunks_impl(response_stream, streaming, delivery_queue)
+        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        delivery_task = None
+        if shutdown_error is not None:
+            raise shutdown_error
+    finally:
+        if delivery_task is not None:
+            cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            if cleanup_error is not None:
+                raise cleanup_error
 
 
 @pytest.fixture
@@ -667,7 +689,7 @@ class TestStreamingBehavior:
                 yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
 
             with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.0, 100.0, 100.0]):
-                await _consume_streaming_chunks(mock_client, response_stream(), streaming)
+                await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
             await streaming.finalize(mock_client)
 
             assert mock_client.room_send.call_count == 2
@@ -719,7 +741,7 @@ class TestStreamingBehavior:
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
 
         with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 105.0, 105.0, 105.0]):
-            await _consume_streaming_chunks(mock_client, response_stream(), streaming)
+            await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
         await streaming.finalize(mock_client)
 
         assert mock_client.room_send.call_count == 2
@@ -950,7 +972,7 @@ class TestStreamingBehavior:
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
 
         with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.1, 100.1, 100.1]):
-            await _consume_streaming_chunks(mock_client, response_stream(), streaming)
+            await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
         await streaming.finalize(mock_client)
 
         assert streaming._send_or_edit_message.await_count == 2
