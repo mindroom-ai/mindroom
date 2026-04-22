@@ -85,6 +85,20 @@ def _config(**kwargs: object) -> Config:
     return _bind_runtime_paths(Config(**kwargs))
 
 
+def _isolated_config(tmp_path: Path, **kwargs: object) -> Config:
+    runtime_paths = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "https://example.com",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    bound = Config.validate_with_runtime(Config(**kwargs).authored_model_dump(), runtime_paths)
+    _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
+    return bound
+
+
 async def get_available_agents_for_sender_authoritative(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
@@ -1108,6 +1122,226 @@ def test_effective_sender_does_not_trust_cross_domain_router_like_ids() -> None:
     }
 
     assert get_effective_sender_id_for_reply_permissions(spoofed_router, event_source, config) == spoofed_router
+
+
+def test_effective_sender_does_not_trust_removed_persisted_internal_accounts(tmp_path: Path) -> None:
+    """Removed historical bot usernames must not stay trusted for relay authorization."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_removed", "mindroom_removed", "pw", domain="legacy.example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    event_source = {
+        "content": {
+            "body": "stale relay",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
+        },
+    }
+
+    assert (
+        get_effective_sender_id_for_reply_permissions(
+            "@mindroom_removed:legacy.example.com",
+            event_source,
+            config,
+        )
+        == "@mindroom_removed:legacy.example.com"
+    )
+
+
+def test_effective_sender_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
+    """Current managed accounts should stay trusted even when their stored username drifts."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    event_source = {
+        "content": {
+            "body": "current relay",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
+        },
+    }
+
+    assert (
+        get_effective_sender_id_for_reply_permissions(
+            "@mindroom_assistant_oldns:example.com",
+            event_source,
+            config,
+        )
+        == "@alice:example.com"
+    )
+
+
+def test_reply_permissions_bypass_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
+    """Current managed accounts should bypass reply allowlists even when their username drifted."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": False,
+            "agent_reply_permissions": {"assistant": ["@alice:example.com"]},
+        },
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_sender_allowed_for_agent_reply("@mindroom_assistant_oldns:example.com", "assistant", config) is True
+
+
+def test_sender_authorization_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
+    """Current managed accounts should stay authorized for room ingress when their username drifted."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": False},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_authorized_sender("@mindroom_assistant_oldns:example.com", config, "!room:example.com") is True
+
+
+def test_reply_permissions_do_not_trust_configured_id_after_username_drift(tmp_path: Path) -> None:
+    """Config-derived IDs should stop bypassing allowlists after a persisted username drift."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": False,
+            "agent_reply_permissions": {"assistant": ["@alice:example.com"]},
+        },
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_sender_allowed_for_agent_reply("@mindroom_assistant:example.com", "assistant", config) is False
+
+
+def test_sender_authorization_does_not_trust_configured_id_after_username_drift(tmp_path: Path) -> None:
+    """Config-derived IDs should stop bypassing room auth after a persisted username drift."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": False},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_authorized_sender("@mindroom_assistant:example.com", config, "!room:example.com") is False
+
+
+def test_effective_sender_ignores_persisted_current_internal_accounts_with_domain_drift(tmp_path: Path) -> None:
+    """Old-domain sender IDs must not stay trusted for live relay authorization."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="legacy.example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    event_source = {
+        "content": {
+            "body": "current relay",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
+        },
+    }
+
+    assert (
+        get_effective_sender_id_for_reply_permissions(
+            "@mindroom_assistant_oldns:legacy.example.com",
+            event_source,
+            config,
+        )
+        == "@mindroom_assistant_oldns:legacy.example.com"
+    )
+
+
+def test_available_agents_in_room_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
+    """Room agent discovery should keep current managed agents visible after username drift."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_assistant_oldns:example.com", "Assistant", None)
+
+    available_agents = mindroom.authorization.get_available_agents_in_room(room, config, runtime_paths)
+    assert [agent.full_id for agent in available_agents] == ["@mindroom_assistant_oldns:example.com"]
 
 
 def test_resolve_alias_method() -> None:

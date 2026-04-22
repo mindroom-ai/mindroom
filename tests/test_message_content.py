@@ -2,20 +2,27 @@
 
 import json
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 
 import mindroom.matrix.message_content as message_content_module
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY
+from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.message_content import (
     _clear_mxc_cache,
     _download_mxc_text,
     extract_and_resolve_message,
     extract_edit_body,
     resolve_event_source_content,
-    visible_body_from_event_source,
 )
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.visible_body import visible_body_from_event_source
+from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 
 
 def _make_message_event(
@@ -41,6 +48,11 @@ def _make_message_event(
     )
     event.sender = sender
     return event
+
+
+def _make_client() -> AsyncMock:
+    """Return one AsyncClient-shaped test mock with a local agent user ID."""
+    return make_matrix_client_mock(user_id="@mindroom_general:localhost")
 
 
 class TestResolvedMessageExtraction:
@@ -71,7 +83,7 @@ class TestResolvedMessageExtraction:
                 "url": "mxc://server/sidecar",
             },
         )
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _make_client()
         client.download = AsyncMock(
             return_value=MagicMock(
                 spec=nio.DownloadResponse,
@@ -115,7 +127,7 @@ class TestResolvedMessageExtraction:
                 "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
             },
         )
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _make_client()
         client.download = AsyncMock(
             return_value=MagicMock(
                 spec=nio.DownloadResponse,
@@ -142,7 +154,7 @@ class TestResolvedMessageExtraction:
             },
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
         }
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _make_client()
         client.download = AsyncMock(
             return_value=MagicMock(
                 spec=nio.DownloadResponse,
@@ -189,7 +201,7 @@ class TestResolvedMessageExtraction:
                 "url": "mxc://server/legacy-sidecar",
             },
         )
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _make_client()
         client.download = AsyncMock()
 
         resolved = await extract_and_resolve_message(event, client)
@@ -201,7 +213,7 @@ class TestResolvedMessageExtraction:
     @pytest.mark.asyncio
     async def test_extract_edit_body_leaves_legacy_v1_preview_untouched(self) -> None:
         """Unsupported v1 edit sidecars should keep the preview body/content coherent."""
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _make_client()
         client.download = AsyncMock()
 
         body, content = await extract_edit_body(
@@ -249,7 +261,7 @@ class TestResolvedMessageExtraction:
             },
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
         }
-        client = AsyncMock(spec=nio.AsyncClient)
+        client = _make_client()
         client.download = AsyncMock(
             return_value=MagicMock(
                 spec=nio.DownloadResponse,
@@ -294,6 +306,187 @@ class TestResolvedMessageExtraction:
         }
 
         assert visible_body_from_event_source(event_source, "* Preview edit") == "Full edit body"
+
+    def test_visible_body_from_event_source_prefers_canonical_stream_body(self) -> None:
+        """Visible-body extraction should prefer canonical stream text over transient warmup suffixes."""
+        event_source = {
+            "sender": "@mindroom_general:localhost",
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello\n\n⏳ Preparing isolated worker...",
+                "io.mindroom.visible_body": "hello",
+            },
+        }
+
+        assert (
+            visible_body_from_event_source(
+                event_source,
+                "hello",
+                trusted_sender_ids={"@mindroom_general:localhost"},
+            )
+            == "hello"
+        )
+
+    def test_visible_body_from_event_source_uses_explicit_warmup_suffix_metadata(self) -> None:
+        """Trusted streamed previews may remove only the exact suffix that was explicitly appended."""
+        warmup_suffix = "⏳ Preparing isolated worker..."
+        event_source = {
+            "sender": "@mindroom_general:localhost",
+            "content": {
+                "msgtype": "m.text",
+                "body": f"hello\n\n{warmup_suffix}",
+                STREAM_WARMUP_SUFFIX_KEY: warmup_suffix,
+            },
+        }
+
+        assert (
+            visible_body_from_event_source(
+                event_source,
+                "hello",
+                trusted_sender_ids={"@mindroom_general:localhost"},
+            )
+            == "hello"
+        )
+
+    def test_visible_body_from_event_source_ignores_empty_canonical_stream_body(self) -> None:
+        """Empty canonical stream metadata should fall back to the actual Matrix body."""
+        event_source = {
+            "sender": "@mindroom_general:localhost",
+            "content": {
+                "msgtype": "m.text",
+                "body": "Thinking...",
+                "io.mindroom.visible_body": "",
+            },
+        }
+
+        assert visible_body_from_event_source(
+            event_source,
+            "Thinking...",
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        ) == ("Thinking...")
+
+    def test_visible_body_from_event_source_ignores_untrusted_visible_body(self) -> None:
+        """Untrusted inbound events should not override the real Matrix body via visible_body."""
+        event_source = {
+            "sender": "@mindroom_fake:localhost",
+            "content": {
+                "msgtype": "m.text",
+                "body": "benign body",
+                "io.mindroom.visible_body": "spoofed body",
+            },
+        }
+
+        assert visible_body_from_event_source(
+            event_source,
+            "benign body",
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        ) == ("benign body")
+
+    def test_visible_body_from_event_source_does_not_strip_literal_status_text_without_explicit_metadata(self) -> None:
+        """Legitimate final content should stay intact when no explicit warmup metadata is present."""
+        event_source = {
+            "sender": "@mindroom_general:localhost",
+            "content": {
+                "msgtype": "m.text",
+                "body": "Diagnosis follows\n\n⚠️ Worker startup failed for shell.run: intentional example.",
+                STREAM_STATUS_KEY: "completed",
+            },
+        }
+
+        assert visible_body_from_event_source(
+            event_source,
+            "Diagnosis follows",
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        ) == ("Diagnosis follows\n\n⚠️ Worker startup failed for shell.run: intentional example.")
+
+    def test_visible_body_from_event_source_ignores_removed_agent_sender_ids(self, tmp_path: Path) -> None:
+        """Removed managed senders must not keep overriding canonical-body metadata."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        state = MatrixState()
+        state.add_account("agent_removed", "mindroom_removed", "pw", domain="legacy.example.com")
+        state.save(runtime_paths=runtime_paths)
+
+        event_source = {
+            "sender": "@mindroom_removed:legacy.example.com",
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello\n\n⏳ Preparing isolated worker...",
+                "io.mindroom.visible_body": "hello",
+            },
+        }
+
+        assert (
+            visible_body_from_event_source(
+                event_source,
+                "hello",
+                trusted_sender_ids=active_internal_sender_ids(config, runtime_paths),
+            )
+            == "hello\n\n⏳ Preparing isolated worker..."
+        )
+
+    def test_visible_body_from_event_source_trusts_persisted_runtime_usernames(self, tmp_path: Path) -> None:
+        """Persisted current usernames should stay trusted on the current runtime domain."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="legacy.example.com")
+        state.save(runtime_paths=runtime_paths)
+        current_domain = config.get_domain(runtime_paths)
+
+        event_source = {
+            "sender": f"@mindroom_general_oldns:{current_domain}",
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello\n\n⏳ Preparing isolated worker...",
+                "io.mindroom.visible_body": "hello",
+            },
+        }
+
+        assert (
+            visible_body_from_event_source(
+                event_source,
+                "hello",
+                trusted_sender_ids=active_internal_sender_ids(config, runtime_paths),
+            )
+            == "hello"
+        )
+
+    def test_visible_body_from_event_source_ignores_previous_persisted_sender_ids(self, tmp_path: Path) -> None:
+        """Earlier persisted usernames must not stay trusted after a rename."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_v1", "pw", domain="legacy.example.com")
+        state.add_account("agent_general", "mindroom_general_v2", "pw", domain="current.example.com")
+        state.save(runtime_paths=runtime_paths)
+
+        event_source = {
+            "sender": f"@mindroom_general_v1:{config.get_domain(runtime_paths)}",
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello\n\n⏳ Preparing isolated worker...",
+                "io.mindroom.visible_body": "hello",
+            },
+        }
+
+        assert (
+            visible_body_from_event_source(
+                event_source,
+                "hello",
+                trusted_sender_ids=active_internal_sender_ids(config, runtime_paths),
+            )
+            == "hello\n\n⏳ Preparing isolated worker..."
+        )
 
 
 class TestDownloadMxcText:
@@ -430,6 +623,91 @@ class TestCanonicalContentResolution:
             "io.mindroom.tool_trace": {"version": 1, "events": [{"tool": "web_search"}]},
         }
 
+    @pytest.mark.asyncio
+    async def test_extract_edit_body_prefers_canonical_stream_body(self) -> None:
+        """Edit extraction should drop transient warmup suffixes when canonical stream text is present."""
+        event_source = {
+            "sender": "@mindroom_general:localhost",
+            "content": {
+                "body": "* hello",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "hello\n\n⏳ Preparing isolated worker...",
+                    "msgtype": "m.text",
+                    "io.mindroom.visible_body": "hello",
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        }
+
+        body, resolved_content = await extract_edit_body(
+            event_source,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
+
+        assert body == "hello"
+        assert resolved_content == {
+            "body": "hello",
+            "msgtype": "m.text",
+            "io.mindroom.visible_body": "hello",
+        }
+
+    @pytest.mark.asyncio
+    async def test_extract_edit_body_ignores_untrusted_visible_body(self) -> None:
+        """Edit extraction should not trust canonical-body overrides from arbitrary room senders."""
+        event_source = {
+            "sender": "@alice:localhost",
+            "content": {
+                "body": "* hello",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "hello\n\n⏳ Preparing isolated worker...",
+                    "msgtype": "m.text",
+                    "io.mindroom.visible_body": "hello",
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        }
+
+        body, resolved_content = await extract_edit_body(
+            event_source,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
+
+        assert body == "hello\n\n⏳ Preparing isolated worker..."
+        assert resolved_content == {
+            "body": "hello\n\n⏳ Preparing isolated worker...",
+            "msgtype": "m.text",
+            "io.mindroom.visible_body": "hello",
+        }
+
+    @pytest.mark.asyncio
+    async def test_extract_edit_body_preserves_explicit_empty_string_body(self) -> None:
+        """Edit extraction should keep explicit empty-string bodies instead of dropping the edit."""
+        event_source = {
+            "sender": "@mindroom_general:localhost",
+            "content": {
+                "body": "* Preview edit",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        }
+
+        body, resolved_content = await extract_edit_body(
+            event_source,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
+
+        assert body == ""
+        assert resolved_content == {
+            "body": "",
+            "msgtype": "m.text",
+        }
+
 
 class TestExtractAndResolveMessage:
     """Tests for extracted read/thread payload formatting."""
@@ -481,3 +759,57 @@ class TestExtractAndResolveMessage:
             "content": {"msgtype": "m.notice", "body": "Compacted 12 messages"},
             "msgtype": "m.notice",
         }
+
+    @pytest.mark.asyncio
+    async def test_extract_and_resolve_message_prefers_canonical_body_for_trusted_edit_event(self) -> None:
+        """Trusted local agent edit events should resolve to canonical body text."""
+        event = nio.RoomMessageText.from_dict(
+            {
+                "type": "m.room.message",
+                "event_id": "$edit",
+                "sender": "@mindroom_general:localhost",
+                "origin_server_ts": 3,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "* hello",
+                    "m.new_content": {
+                        "msgtype": "m.text",
+                        "body": "hello\n\n⏳ Preparing isolated worker...",
+                        "io.mindroom.visible_body": "hello",
+                        STREAM_STATUS_KEY: "streaming",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+                },
+            },
+        )
+
+        result = await extract_and_resolve_message(
+            event,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
+
+        assert result["body"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_extract_and_resolve_message_ignores_spoofed_visible_body(self) -> None:
+        """Arbitrary inbound events should not override the real body via visible_body."""
+        event = nio.RoomMessageText.from_dict(
+            {
+                "type": "m.room.message",
+                "event_id": "$spoof",
+                "sender": "@alice:localhost",
+                "origin_server_ts": 4,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "benign body",
+                    "io.mindroom.visible_body": "spoofed body",
+                },
+            },
+        )
+
+        result = await extract_and_resolve_message(
+            event,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
+
+        assert result["body"] == "benign body"

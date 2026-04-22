@@ -284,7 +284,7 @@ async def update_schedule(
     api_request: Request,
 ) -> ScheduledTaskResponse:
     """Update prompt text and schedule fields for an existing task."""
-    _runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(api_request)
+    _, runtime_paths = config_lifecycle.read_committed_runtime_config(api_request)
     resolved_room_id = _resolve_room_id(request.room_id, runtime_paths=runtime_paths)
 
     client = await _get_router_client(runtime_paths)

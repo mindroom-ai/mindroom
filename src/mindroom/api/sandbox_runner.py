@@ -16,7 +16,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import yaml
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
@@ -332,6 +332,7 @@ class SandboxRunnerExecuteResponse(BaseModel):
     ok: bool
     result: Any | None = None
     error: str | None = None
+    failure_kind: Literal["tool", "worker"] | None = None
 
 
 class SandboxWorkerResponse(BaseModel):
@@ -528,7 +529,11 @@ async def _execute_request_inprocess(
             runner_token=runner_token,
         )
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
-        return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+        return SandboxRunnerExecuteResponse(
+            ok=False,
+            error=str(exc),
+            failure_kind=("worker" if exc.failure_kind == "worker" else "tool"),
+        )
     if request.tool_name == "shell" and prepared is not None:
         worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
         worker_execution_env.update(execution_env)
@@ -580,6 +585,7 @@ async def _execute_request_inprocess(
             return SandboxRunnerExecuteResponse(
                 ok=False,
                 error=f"Sandbox tool execution failed: {type(exc).__name__}: {exc}",
+                failure_kind="tool",
             )
 
     return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
@@ -591,7 +597,7 @@ def _subprocess_failure_response(
     runtime_paths: RuntimePaths,
 ) -> SandboxRunnerExecuteResponse:
     sandbox_worker_prep.record_worker_failure(request.worker_key, error, runtime_paths)
-    return SandboxRunnerExecuteResponse(ok=False, error=error)
+    return SandboxRunnerExecuteResponse(ok=False, error=error, failure_kind="worker")
 
 
 def _parse_subprocess_response(
@@ -637,7 +643,11 @@ def _execute_request_subprocess_sync(
             runner_token=runner_token,
         )
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
-        return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+        return SandboxRunnerExecuteResponse(
+            ok=False,
+            error=str(exc),
+            failure_kind=("worker" if exc.failure_kind == "worker" else "tool"),
+        )
 
     python_executable, subprocess_env, cwd = sandbox_exec.resolve_subprocess_worker_context(
         prepared.paths if prepared is not None else None,
@@ -694,6 +704,7 @@ def _run_subprocess_worker() -> int:
                 SandboxRunnerExecuteResponse(
                     ok=False,
                     error="Sandbox subprocess received empty payload.",
+                    failure_kind="worker",
                 ).model_dump_json(),
             ),
             file=sys.stderr,
@@ -709,6 +720,7 @@ def _run_subprocess_worker() -> int:
                 SandboxRunnerExecuteResponse(
                     ok=False,
                     error=f"Sandbox subprocess payload validation failed: {exc}",
+                    failure_kind="worker",
                 ).model_dump_json(),
             ),
             file=sys.stderr,
@@ -853,6 +865,8 @@ async def execute_tool_call(
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
+            if exc.failure_kind == "worker":
+                return SandboxRunnerExecuteResponse(ok=False, error=str(exc), failure_kind="worker")
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Shell background handles live in the long-lived runner process, so shell
     # must stay on the in-process path even when the runner defaults to

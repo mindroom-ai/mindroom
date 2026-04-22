@@ -5,7 +5,7 @@ import json
 import nio
 import pytest
 
-from mindroom.constants import AI_RUN_METADATA_KEY, ORIGINAL_SENDER_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, ORIGINAL_SENDER_KEY, STREAM_WARMUP_SUFFIX_KEY
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
     _calculate_event_size,
@@ -299,6 +299,68 @@ async def test_prepare_large_message_preserves_original_sender_metadata() -> Non
 
 
 @pytest.mark.asyncio
+async def test_prepare_large_message_moves_visible_body_to_json_sidecar_regular() -> None:
+    """Large streamed previews should keep canonical visible body only in the JSON sidecar payload."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
+
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1002"})
+            return response, None
+
+    client = MockClient()
+    content = {
+        "body": "v" * 100000,
+        "msgtype": "m.text",
+        "io.mindroom.visible_body": "v" * 100000,
+    }
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    assert "io.mindroom.visible_body" not in result
+    assert client.uploaded_data is not None
+    uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
+    assert uploaded_payload["io.mindroom.visible_body"] == "v" * 100000
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_keeps_explicit_warmup_suffix_on_preview() -> None:
+    """Large streamed previews should retain the explicit warmup suffix metadata on the preview event."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
+
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1002"})
+            return response, None
+
+    client = MockClient()
+    warmup_suffix = "⏳ Preparing isolated worker..."
+    content = {
+        "body": ("v" * 100000) + f"\n\n{warmup_suffix}",
+        "msgtype": "m.text",
+        "io.mindroom.visible_body": "v" * 100000,
+        STREAM_WARMUP_SUFFIX_KEY: warmup_suffix,
+    }
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    assert result[STREAM_WARMUP_SUFFIX_KEY] == warmup_suffix
+    assert "io.mindroom.visible_body" not in result
+
+
+@pytest.mark.asyncio
 async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_edit() -> None:
     """Edit large-message conversion keeps tool trace in uploaded sidecar, not preview."""
 
@@ -332,3 +394,42 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_edit() -> 
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
     assert _TOOL_TRACE_KEY in uploaded_payload["m.new_content"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_moves_visible_body_to_json_sidecar_edit() -> None:
+    """Large streamed edit previews should keep canonical visible body only in the JSON sidecar payload."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
+
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1003"})
+            return response, None
+
+    client = MockClient()
+    visible_body = "w" * 50000
+    edit_content = {
+        "body": "* " + visible_body,
+        "m.new_content": {
+            "body": visible_body,
+            "msgtype": "m.text",
+            "io.mindroom.visible_body": visible_body,
+        },
+        "io.mindroom.visible_body": visible_body,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
+        "msgtype": "m.text",
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    assert "io.mindroom.visible_body" not in result
+    assert "io.mindroom.visible_body" not in result["m.new_content"]
+    assert client.uploaded_data is not None
+    uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
+    assert uploaded_payload["m.new_content"]["io.mindroom.visible_body"] == visible_body

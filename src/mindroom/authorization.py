@@ -12,7 +12,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     MatrixID,
-    extract_agent_name,
+    active_internal_sender_ids,
     managed_room_key_from_alias_localpart,
     room_alias_localpart,
 )
@@ -83,16 +83,9 @@ def is_authorized_sender(
         True if the sender is authorized, False otherwise
 
     """
-    # Always allow configured internal user on the current domain.
-    mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
-    if mindroom_user_id is not None and sender_id == mindroom_user_id:
+    # Always allow active internal identities owned by this runtime.
+    if sender_id in active_internal_sender_ids(config, runtime_paths):
         return True
-
-    # Check if sender is an agent or team
-    agent_name = extract_agent_name(sender_id, config, runtime_paths)
-    if agent_name:
-        # Agent is either in config.agents, config.teams, or is the router
-        return agent_name in config.agents or agent_name in config.teams or agent_name == ROUTER_AGENT_NAME
 
     # Resolve bridge aliases to canonical user ID before permission checks.
     resolved_id = config.authorization.resolve_alias(sender_id)
@@ -146,12 +139,7 @@ def is_sender_allowed_for_agent_reply(
 
     # Internal MindRoom participants are not restricted by per-user reply lists.
     # Bridge bot accounts are intentionally not exempt.
-    mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
-    if (mindroom_user_id is not None and sender_id == mindroom_user_id) or extract_agent_name(
-        sender_id,
-        config,
-        runtime_paths,
-    ):
+    if sender_id in active_internal_sender_ids(config, runtime_paths):
         return True
 
     resolved_sender = config.authorization.resolve_alias(sender_id)
@@ -170,11 +158,7 @@ def get_effective_sender_id_for_reply_permissions(
     transcriptions, scheduled task fires, etc.) and include the original sender
     in event content. For trusted internal senders, use that embedded sender.
     """
-    known_internal_ids = {matrix_id.full_id for matrix_id in config.get_ids(runtime_paths).values()}
-    mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
-    is_internal_mindroom_sender = (
-        mindroom_user_id is not None and sender_id == mindroom_user_id
-    ) or sender_id in known_internal_ids
+    is_internal_mindroom_sender = sender_id in active_internal_sender_ids(config, runtime_paths)
     if not is_internal_mindroom_sender:
         return sender_id
     if not event_source:

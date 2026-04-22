@@ -19,12 +19,13 @@ from mindroom.attachments import (
 from mindroom.coalescing import PreparedTextEvent
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.image_handler import download_image
 from mindroom.matrix.message_content import (
     is_v2_sidecar_text_preview,
     resolve_event_source_content,
-    visible_body_from_event_source,
 )
+from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.voice_handler import prepare_voice_message
@@ -144,10 +145,18 @@ class InboundTurnNormalizer:
             return event
 
         resolved_source = await resolve_event_source_content(event.source, self._client())
+        trusted_sender_ids = active_internal_sender_ids(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
         return PreparedTextEvent(
             sender=event.sender,
             event_id=event.event_id,
-            body=visible_body_from_event_source(resolved_source, event.body),
+            body=visible_body_from_event_source(
+                resolved_source,
+                event.body,
+                trusted_sender_ids=trusted_sender_ids,
+            ),
             source=resolved_source,
             server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )
@@ -209,10 +218,18 @@ class InboundTurnNormalizer:
             return None
 
         resolved_source = await resolve_event_source_content(event.source, self._client())
+        trusted_sender_ids = active_internal_sender_ids(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
         return PreparedTextEvent(
             sender=event.sender,
             event_id=event.event_id,
-            body=visible_body_from_event_source(resolved_source, event.body),
+            body=visible_body_from_event_source(
+                resolved_source,
+                event.body,
+                trusted_sender_ids=trusted_sender_ids,
+            ),
             source=resolved_source,
             server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )

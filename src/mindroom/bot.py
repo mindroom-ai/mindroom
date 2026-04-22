@@ -337,6 +337,7 @@ class AgentBot:
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
+            runtime_paths=self.runtime_paths,
             enable_streaming=enable_streaming,
             orchestrator=None,
             event_cache=None,

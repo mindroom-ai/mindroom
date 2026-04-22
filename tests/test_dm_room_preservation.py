@@ -181,8 +181,9 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
+        current_domain = config.get_domain(runtime_paths_for(config))
         # Mock room members - includes an orphaned bot
-        members = ["@user:server", "@mindroom_orphaned:server", "@mindroom_configured_agent:server"]
+        members = ["@user:server", "@mindroom_orphaned:server", f"@mindroom_configured_agent:{current_domain}"]
 
         with (
             patch(
@@ -214,6 +215,44 @@ class TestDMPreservationDuringCleanup:
                 "@mindroom_orphaned:server",
                 reason="Bot no longer configured for this room",
             )
+
+    async def test_orphaned_bot_cleanup_preserves_drifted_current_bot_username(self, tmp_path: Path) -> None:
+        """Current managed bots with persisted username drift must not be treated as orphaned."""
+        client = AsyncMock()
+        config = _config_with_runtime_paths(
+            tmp_path,
+            agents={
+                "configured_agent": AgentConfig(
+                    display_name="Configured Agent",
+                    role="Agent that should be in rooms",
+                    rooms=["!regular:server"],
+                ),
+            },
+        )
+        runtime_paths = runtime_paths_for(config)
+        state = MatrixState()
+        state.add_account(
+            "agent_configured_agent",
+            "mindroom_configured_agent_oldns",
+            "pw",
+            domain=config.get_domain(runtime_paths),
+        )
+        state.save(runtime_paths=runtime_paths)
+        members = [f"@mindroom_configured_agent_oldns:{config.get_domain(runtime_paths)}"]
+
+        with (
+            patch("mindroom.matrix.room_cleanup.get_room_members", return_value=members),
+            patch("mindroom.matrix.room_cleanup.is_dm_room", return_value=False),
+        ):
+            kicked_bots = await _cleanup_orphaned_bots_in_room(
+                client,
+                "!regular:server",
+                config,
+                runtime_paths,
+            )
+
+        assert kicked_bots == []
+        assert not client.room_kick.called
 
     async def test_cleanup_all_orphaned_bots_respects_dm_rooms(self, tmp_path: Path) -> None:
         """Test that cleanup_all_orphaned_bots respects DM rooms when DM mode is enabled."""
@@ -369,6 +408,7 @@ class TestDMPreservationDuringCleanup:
             },
         )
         rp = runtime_paths_for(config)
+        current_domain = config.get_domain(rp)
 
         # Persist root space
         state = MatrixState.load(runtime_paths=rp)
@@ -384,7 +424,7 @@ class TestDMPreservationDuringCleanup:
             patch("mindroom.matrix.room_cleanup.get_joined_rooms", return_value=joined_rooms),
             patch(
                 "mindroom.matrix.room_cleanup.get_room_members",
-                return_value=["@mindroom_router:server"],
+                return_value=[f"@mindroom_router:{current_domain}"],
             ),
             patch(
                 "mindroom.matrix.room_cleanup._get_all_known_bot_usernames",

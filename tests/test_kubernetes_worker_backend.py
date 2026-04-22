@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
+from unittest.mock import patch
 
 import pytest
 
@@ -25,12 +29,16 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import kubernetes as kubernetes_backend_module
+from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.backends.kubernetes_resources import ANNOTATION_STARTUP_MANIFEST_HASH
-from mindroom.workers.models import WorkerSpec
+from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.constants import RuntimePaths
 
 _TEST_TOKEN_SECRET_NAME = "mindroom-secrets"  # noqa: S105
@@ -46,6 +54,71 @@ _TEST_TOOL_VALIDATION_SNAPSHOT = {
         "runtime_loadable": True,
     },
 }
+
+
+class _ControlledMonotonicClock:
+    def __init__(self, initial_seconds: float = 0.0) -> None:
+        self._now = initial_seconds
+        self._condition = threading.Condition()
+        self._listeners: list[Callable[[], None]] = []
+
+    def monotonic(self) -> float:
+        with self._condition:
+            return self._now
+
+    def sleep(self, seconds: float) -> None:
+        self.wait_until(self.monotonic() + seconds)
+
+    def wait_until(self, target_seconds: float) -> None:
+        with self._condition:
+            while self._now < target_seconds:
+                self._condition.wait(timeout=0.1)
+
+    def advance_to(self, target_seconds: float) -> None:
+        with self._condition:
+            assert target_seconds >= self._now
+            self._now = target_seconds
+            listeners = tuple(self._listeners)
+            self._condition.notify_all()
+        for listener in listeners:
+            listener()
+
+    def add_listener(self, listener: Callable[[], None]) -> None:
+        with self._condition:
+            self._listeners.append(listener)
+
+
+class _ControlledCondition:
+    def __init__(self, clock: _ControlledMonotonicClock) -> None:
+        self._clock = clock
+        self._condition = threading.Condition()
+        self._wakeups = 0
+        self._clock.add_listener(self._notify_from_clock)
+
+    def __enter__(self) -> Self:
+        self._condition.__enter__()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self._condition.__exit__(exc_type, exc, tb)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else self._clock.monotonic() + timeout
+        while True:
+            if self._wakeups > 0:
+                self._wakeups -= 1
+                return True
+            if deadline is not None and self._clock.monotonic() >= deadline:
+                return True
+            self._condition.wait(timeout=0.1)
+
+    def notify_all(self) -> None:
+        self._wakeups += 1
+        self._condition.notify_all()
+
+    def _notify_from_clock(self) -> None:
+        with self._condition:
+            self._condition.notify_all()
 
 
 def _load_startup_manifest(
@@ -265,9 +338,59 @@ def _backend(
     return backend, apps_api, core_api
 
 
-def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # noqa: PLR0915
+def _install_real_elapsed_wait_for_ready(
+    backend: KubernetesWorkerBackend,
+    *,
+    ready_after_seconds: float,
+    ready_gate: threading.Event | None = None,
+    poll_interval_seconds: float = 0.01,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    on_iteration: Callable[[float], None] | None = None,
+) -> None:
+    object.__setattr__(
+        backend.config,
+        "ready_timeout_seconds",
+        max(backend.config.ready_timeout_seconds, ready_after_seconds + 1.0),
+    )
+
+    def _ready(
+        self: object,
+        deployment_name: str,
+        *,
+        timeout_seconds: float,
+        deployment_ready_fn: object,
+        on_poll_tick: Callable[[float], None] | None = None,
+    ) -> object:
+        del deployment_ready_fn
+        started_at = monotonic()
+        deadline = started_at + timeout_seconds
+        while True:
+            elapsed_seconds = monotonic() - started_at
+            if on_iteration is not None:
+                on_iteration(elapsed_seconds)
+            if elapsed_seconds >= ready_after_seconds and (ready_gate is None or ready_gate.is_set()):
+                deployment = self.read_deployment(deployment_name)
+                assert deployment is not None
+                return deployment
+            assert monotonic() < deadline
+            if on_poll_tick is not None:
+                on_poll_tick(elapsed_seconds)
+            sleep(poll_interval_seconds)
+
+    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
+
+
+def test_kubernetes_backend_ensures_worker_service_and_deployment(tmp_path: Path) -> None:  # noqa: PLR0915
     """Ensuring one worker should create a service/deployment pair on shared storage."""
-    backend, apps_api, core_api = _backend(owner_deployment_name="mindroom-demo")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        owner_deployment_name="mindroom-demo",
+    )
     worker_key = _TEST_SCOPED_WORKER_KEY_A
 
     handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
@@ -480,8 +603,12 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert not local_credentials_path.exists()
 
 
-def test_kubernetes_backend_uses_provided_validation_snapshot() -> None:
+def test_kubernetes_backend_uses_provided_validation_snapshot(tmp_path: Path) -> None:
     """Worker env should reflect the authoritative snapshot passed into the backend."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
     custom_snapshot = {
         "worker_only": {
             "config_fields": [],
@@ -491,6 +618,7 @@ def test_kubernetes_backend_uses_provided_validation_snapshot() -> None:
         },
     }
     backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
         owner_deployment_name="mindroom-demo",
         tool_validation_snapshot=custom_snapshot,
     )
@@ -1128,8 +1256,9 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
         *,
         timeout_seconds: float,
         deployment_ready_fn: object,
+        on_poll_tick: object | None = None,
     ) -> object:
-        del timeout_seconds, deployment_ready_fn
+        del timeout_seconds, deployment_ready_fn, on_poll_tick
         raise WorkerBackendError(error_message)
 
     backend._resources.wait_for_ready = MethodType(_boom, backend._resources)
@@ -1149,6 +1278,636 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     assert handle.status == "failed"
     assert handle.failure_reason == error_message
     assert worker_id not in _core_api.services
+
+
+def test_kubernetes_backend_progress_respects_real_elapsed_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cold-start progress should fire on the 1.5s grace deadline even with 1.0s polling."""
+    backend, _apps_api, _core_api = _backend()
+    events: list[WorkerReadyProgress] = []
+    cold_start_seen = threading.Event()
+    ensure_worker_returned = threading.Event()
+    first_poll_seen = threading.Event()
+    clock = _ControlledMonotonicClock()
+    handle: list[object] = []
+    errors: list[BaseException] = []
+
+    def sink(progress: WorkerReadyProgress) -> None:
+        events.append(progress)
+        if progress.phase == "cold_start":
+            cold_start_seen.set()
+
+    monkeypatch.setattr(
+        kubernetes_backend_module,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, time=time.time),
+    )
+    monkeypatch.setattr(
+        kubernetes_backend_module,
+        "threading",
+        SimpleNamespace(
+            Condition=lambda: _ControlledCondition(clock),
+            Thread=threading.Thread,
+            Lock=threading.Lock,
+        ),
+    )
+    _install_real_elapsed_wait_for_ready(
+        backend,
+        ready_after_seconds=1.7,
+        poll_interval_seconds=kubernetes_resources_module._READY_POLL_INTERVAL_SECONDS,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        on_iteration=lambda _elapsed_seconds: first_poll_seen.set(),
+    )
+
+    def ensure_worker() -> None:
+        try:
+            handle.append(
+                backend.ensure_worker(
+                    WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+                    now=10.0,
+                    progress_sink=sink,
+                ),
+            )
+        except BaseException as exc:  # pragma: no cover - raised explicitly below
+            errors.append(exc)
+        finally:
+            ensure_worker_returned.set()
+
+    worker_thread = threading.Thread(target=ensure_worker)
+    worker_thread.start()
+
+    assert first_poll_seen.wait(timeout=1.0)
+    clock.advance_to(1.0)
+    assert not cold_start_seen.wait(timeout=0.1)
+    assert not ensure_worker_returned.is_set()
+
+    clock.advance_to(1.5)
+    assert cold_start_seen.wait(timeout=1.0)
+    assert not ensure_worker_returned.is_set()
+
+    clock.advance_to(1.7)
+    assert not ensure_worker_returned.is_set()
+
+    clock.advance_to(2.0)
+    worker_thread.join(timeout=1.0)
+    assert ensure_worker_returned.is_set()
+
+    if errors:
+        raise errors[0]
+
+    assert len(handle) == 1
+    assert [event.phase for event in events] == ["cold_start", "ready"]
+    assert 1.5 <= events[0].elapsed_seconds <= 1.7
+    assert events[1].elapsed_seconds >= 2.0
+
+    assert handle[0].worker_key == _TEST_SCOPED_WORKER_KEY_A
+
+
+def test_kubernetes_backend_skips_progress_for_warm_worker() -> None:
+    """Warm ready workers should stay silent even when a sink is provided."""
+    backend, _apps_api, _core_api = _backend()
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    events: list[WorkerReadyProgress] = []
+
+    backend.ensure_worker(
+        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+        now=11.0,
+        progress_sink=events.append,
+    )
+
+    assert events == []
+
+
+def test_kubernetes_backend_reports_progress_for_recreated_ready_deployment(tmp_path: Path) -> None:
+    """Recreating a ready deployment should emit cold-start progress for the real startup lifecycle."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    initial_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot["search"] = {
+        "config_fields": ["engine"],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=initial_snapshot,
+    )
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    updated_backend, _, _ = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=updated_snapshot,
+    )
+    updated_backend._resources.apps_api = apps_api
+    updated_backend._resources.core_api = core_api
+    updated_backend._resources.api_exception_cls = _FakeApiError
+    _install_real_elapsed_wait_for_ready(updated_backend, ready_after_seconds=1.6)
+
+    events: list[WorkerReadyProgress] = []
+    updated_backend.ensure_worker(
+        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+        now=11.0,
+        progress_sink=events.append,
+    )
+
+    assert [event.phase for event in events] == ["cold_start", "ready"]
+
+
+def test_kubernetes_backend_recreated_ready_deployment_refreshes_startup_metadata(tmp_path: Path) -> None:
+    """Recreating a ready deployment should refresh startup metadata instead of reusing stale values."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    initial_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot["search"] = {
+        "config_fields": ["engine"],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=initial_snapshot,
+    )
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    updated_backend, _, _ = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=updated_snapshot,
+    )
+    updated_backend._resources.apps_api = apps_api
+    updated_backend._resources.core_api = core_api
+    updated_backend._resources.api_exception_cls = _FakeApiError
+    _install_real_elapsed_wait_for_ready(updated_backend, ready_after_seconds=1.6)
+
+    handle = updated_backend.ensure_worker(
+        WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+        now=11.0,
+    )
+
+    assert handle.last_started_at == 11.0
+    assert handle.startup_count == 2
+
+
+def test_kubernetes_backend_recreate_metadata_patch_failure_is_normalized(tmp_path: Path) -> None:
+    """Recreate metadata patch failures should still record failed startup state and raise WorkerBackendError."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    initial_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot["search"] = {
+        "config_fields": ["engine"],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=initial_snapshot,
+    )
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    updated_backend, _, _ = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=updated_snapshot,
+    )
+    updated_backend._resources.apps_api = apps_api
+    updated_backend._resources.core_api = core_api
+    updated_backend._resources.api_exception_cls = _FakeApiError
+
+    original_patch_deployment = updated_backend._resources.patch_deployment
+    first_patch_attempt = True
+
+    def patch_deployment_with_failure(
+        deployment_name: str,
+        *,
+        replicas: int | None = None,
+        annotations: dict[str, str] | None = None,
+    ) -> None:
+        nonlocal first_patch_attempt
+        if first_patch_attempt:
+            first_patch_attempt = False
+            msg = "refresh metadata failed"
+            raise RuntimeError(msg)
+        original_patch_deployment(
+            deployment_name,
+            replicas=replicas,
+            annotations=annotations,
+        )
+
+    updated_backend._resources.patch_deployment = patch_deployment_with_failure
+
+    events: list[WorkerReadyProgress] = []
+    with pytest.raises(WorkerBackendError, match="refresh metadata failed"):
+        updated_backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=11.0,
+            progress_sink=events.append,
+        )
+
+    worker_id = next(iter(apps_api.deployments))
+    deployment = apps_api.deployments[worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == "refresh metadata failed"
+    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "2"
+    assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "11.0"
+    assert [event.phase for event in events] == ["failed"]
+
+
+def test_kubernetes_backend_ready_metadata_patch_failure_is_normalized(tmp_path: Path) -> None:
+    """A failed ready-status patch should fail ensure_worker without tearing down a healthy worker."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    initial_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    updated_snapshot["search"] = {
+        "config_fields": ["engine"],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=initial_snapshot,
+    )
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    updated_backend, _, _ = _backend(
+        runtime_paths=runtime_paths,
+        tool_validation_snapshot=updated_snapshot,
+    )
+    updated_backend._resources.apps_api = apps_api
+    updated_backend._resources.core_api = core_api
+    updated_backend._resources.api_exception_cls = _FakeApiError
+    _install_real_elapsed_wait_for_ready(updated_backend, ready_after_seconds=1.6)
+
+    original_patch_deployment = updated_backend._resources.patch_deployment
+
+    def patch_deployment_with_ready_failure(
+        deployment_name: str,
+        *,
+        replicas: int | None = None,
+        annotations: dict[str, str] | None = None,
+    ) -> None:
+        if annotations is not None and annotations.get("mindroom.ai/worker-status") == "ready":
+            msg = "ready patch failed"
+            raise RuntimeError(msg)
+        original_patch_deployment(
+            deployment_name,
+            replicas=replicas,
+            annotations=annotations,
+        )
+
+    updated_backend._resources.patch_deployment = patch_deployment_with_ready_failure
+
+    events: list[WorkerReadyProgress] = []
+    with pytest.raises(WorkerBackendError, match="ready patch failed"):
+        updated_backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=11.0,
+            progress_sink=events.append,
+        )
+
+    worker_id = next(iter(apps_api.deployments))
+    deployment = apps_api.deployments[worker_id]
+    assert deployment.spec.replicas == 1
+    assert worker_id in core_api.services
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] != "failed"
+    assert [event.phase for event in events] == ["cold_start", "failed"]
+
+
+@pytest.mark.parametrize(
+    ("failure_target", "error_message"),
+    [
+        ("apply_deployment", "deployment reconcile failed"),
+        ("apply_service", "service apply failed"),
+    ],
+)
+def test_kubernetes_backend_warm_reconcile_failures_are_non_destructive(
+    tmp_path: Path,
+    failure_target: str,
+    error_message: str,
+) -> None:
+    """Warm reconcile failures should fail ensure_worker without tearing down the existing worker."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    if failure_target == "apply_deployment":
+
+        def apply_deployment_with_failure(**_kwargs: object) -> object:
+            msg = error_message
+            raise RuntimeError(msg)
+
+        backend._resources.apply_deployment = apply_deployment_with_failure
+    else:
+
+        def apply_service_with_failure(worker_id: str) -> None:
+            _ = worker_id
+            msg = error_message
+            raise RuntimeError(msg)
+
+        backend._resources.apply_service = apply_service_with_failure
+
+    events: list[WorkerReadyProgress] = []
+    with pytest.raises(WorkerBackendError, match=error_message):
+        backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=11.0,
+            progress_sink=events.append,
+        )
+
+    deployment = apps_api.deployments[handle.worker_id]
+    assert deployment.spec.replicas == 1
+    assert handle.worker_id in core_api.services
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] != "failed"
+    assert [event.phase for event in events] == []
+
+
+@pytest.mark.parametrize(
+    ("failure_target", "error_message"),
+    [
+        ("apply_service", "service apply failed"),
+        ("wait_for_ready", "worker never became ready"),
+    ],
+)
+def test_kubernetes_backend_existing_starting_worker_failures_record_failure(
+    tmp_path: Path,
+    failure_target: str,
+    error_message: str,
+) -> None:
+    """Existing starting workers should still be marked failed when recovery fails."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    deployment = apps_api.deployments[handle.worker_id]
+    deployment.metadata.annotations["mindroom.ai/worker-status"] = "starting"
+    deployment.metadata.annotations.pop("mindroom.ai/failure-reason", None)
+    deployment.status.ready_replicas = 0
+
+    if failure_target == "apply_service":
+
+        def apply_service_with_failure(worker_id: str) -> None:
+            _ = worker_id
+            msg = error_message
+            raise RuntimeError(msg)
+
+        backend._resources.apply_service = apply_service_with_failure
+    else:
+
+        def wait_for_ready_with_failure(
+            _worker_id: str,
+            *,
+            timeout_seconds: float,
+            deployment_ready_fn: object,
+            on_poll_tick: object | None = None,
+        ) -> object:
+            del timeout_seconds, deployment_ready_fn, on_poll_tick
+            msg = error_message
+            raise WorkerBackendError(msg)
+
+        backend._resources.wait_for_ready = wait_for_ready_with_failure
+
+    events: list[WorkerReadyProgress] = []
+    with pytest.raises(WorkerBackendError, match=error_message):
+        backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=11.0,
+            progress_sink=events.append,
+        )
+
+    deployment = apps_api.deployments[handle.worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == error_message
+    assert deployment.spec.replicas == 0
+    assert handle.worker_id not in core_api.services
+    assert events[-1].phase == "failed"
+
+
+@pytest.mark.parametrize(
+    ("failure_target", "error_message"),
+    [
+        ("sync_shared_credentials", "sync credentials failed"),
+        ("apply_service", "service apply failed"),
+    ],
+)
+def test_kubernetes_backend_prestartup_failures_are_normalized(
+    tmp_path: Path,
+    failure_target: str,
+    error_message: str,
+) -> None:
+    """Fresh startup failures before readiness polling should still persist failed worker state."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    if failure_target == "sync_shared_credentials":
+        failure_context = patch(
+            "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
+            side_effect=RuntimeError(error_message),
+        )
+    else:
+
+        def apply_service_with_failure(worker_id: str) -> None:
+            _ = worker_id
+            msg = error_message
+            raise RuntimeError(msg)
+
+        backend._resources.apply_service = apply_service_with_failure
+        failure_context = nullcontext()
+
+    events: list[WorkerReadyProgress] = []
+    with failure_context, pytest.raises(WorkerBackendError, match=error_message):
+        backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=10.0,
+            progress_sink=events.append,
+        )
+
+    worker_id = backend._worker_id(_TEST_SCOPED_WORKER_KEY_A)
+    deployment = apps_api.deployments[worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == error_message
+    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "1"
+    assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "10.0"
+    assert [event.phase for event in events] == ["failed"]
+
+
+def test_kubernetes_backend_apply_deployment_failure_is_normalized(tmp_path: Path) -> None:
+    """Deployment apply failures should surface as WorkerBackendError and emit failed progress."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    def apply_deployment_with_failure(**_kwargs: object) -> object:
+        msg = "deployment apply failed"
+        raise RuntimeError(msg)
+
+    backend._resources.apply_deployment = apply_deployment_with_failure
+
+    events: list[WorkerReadyProgress] = []
+    with pytest.raises(WorkerBackendError, match="deployment apply failed"):
+        backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=10.0,
+            progress_sink=events.append,
+        )
+
+    assert [event.phase for event in events] == ["failed"]
+
+
+def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:
+    """Failed cold starts should surface a terminal failed progress event with the error."""
+    backend, _apps_api, _core_api = _backend()
+    events: list[WorkerReadyProgress] = []
+    error_message = "worker never became ready"
+
+    def _boom(
+        _self: object,
+        _deployment_name: str,
+        *,
+        timeout_seconds: float,
+        deployment_ready_fn: object,
+        on_poll_tick: Callable[[float], None] | None = None,
+    ) -> object:
+        del deployment_ready_fn
+        assert on_poll_tick is not None
+        started_at = time.monotonic()
+        deadline = started_at + timeout_seconds
+        while True:
+            elapsed_seconds = time.monotonic() - started_at
+            if elapsed_seconds >= 2.0:
+                raise WorkerBackendError(error_message)
+            assert time.monotonic() < deadline
+            on_poll_tick(elapsed_seconds)
+            time.sleep(0.01)
+
+    backend._resources.wait_for_ready = MethodType(_boom, backend._resources)
+
+    with pytest.raises(WorkerBackendError, match=error_message):
+        backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=10.0,
+            progress_sink=events.append,
+        )
+
+    assert [event.phase for event in events] == ["cold_start", "failed"]
+    assert events[-1].error == error_message
+
+
+def test_kubernetes_backend_ignores_progress_when_sink_is_absent() -> None:
+    """Cold starts should still succeed when the first caller has no sink."""
+    backend, _apps_api, _core_api = _backend()
+
+    def _ready(
+        self: object,
+        deployment_name: str,
+        *,
+        timeout_seconds: float,
+        deployment_ready_fn: object,
+        on_poll_tick: object | None = None,
+    ) -> object:
+        del timeout_seconds, deployment_ready_fn
+        assert on_poll_tick is not None
+        return self.read_deployment(deployment_name)
+
+    backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0, progress_sink=None)
+
+
+def test_kubernetes_backend_replays_progress_snapshot_to_late_joining_waiter() -> None:
+    """A waiter that joins after cold_start should replay that state before terminal ready."""
+    backend, _apps_api, _core_api = _backend()
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+    first_events: list[WorkerReadyProgress] = []
+    second_events: list[WorkerReadyProgress] = []
+    cold_start_seen = threading.Event()
+    ready_gate = threading.Event()
+    second_registered = threading.Event()
+    errors: list[BaseException] = []
+    handles: dict[str, object] = {}
+
+    def first_sink(progress: WorkerReadyProgress) -> None:
+        first_events.append(progress)
+        if progress.phase == "cold_start":
+            cold_start_seen.set()
+
+    def second_sink(progress: WorkerReadyProgress) -> None:
+        second_events.append(progress)
+
+    original_register = backend._register_progress_sink
+
+    def register_with_signal(current_worker_key: str, progress_sink: object) -> None:
+        original_register(current_worker_key, progress_sink)
+        if current_worker_key == worker_key and progress_sink is second_sink:
+            second_registered.set()
+
+    backend._register_progress_sink = register_with_signal
+
+    _install_real_elapsed_wait_for_ready(
+        backend,
+        ready_after_seconds=1.6,
+        ready_gate=ready_gate,
+    )
+
+    def ensure_worker(name: str, *, progress_sink: Callable[[WorkerReadyProgress], None], now: float) -> None:
+        try:
+            handles[name] = backend.ensure_worker(
+                WorkerSpec(worker_key),
+                now=now,
+                progress_sink=progress_sink,
+            )
+        except BaseException as exc:  # pragma: no cover - raised explicitly below
+            errors.append(exc)
+
+    first_thread = threading.Thread(
+        target=ensure_worker,
+        args=("first",),
+        kwargs={"progress_sink": first_sink, "now": 10.0},
+    )
+    second_thread = threading.Thread(
+        target=ensure_worker,
+        args=("second",),
+        kwargs={"progress_sink": second_sink, "now": 11.0},
+    )
+
+    first_thread.start()
+    assert cold_start_seen.wait(timeout=3.0)
+    second_thread.start()
+    assert second_registered.wait(timeout=1.0)
+    ready_gate.set()
+    first_thread.join()
+    second_thread.join()
+
+    if errors:
+        raise errors[0]
+
+    assert [event.phase for event in first_events] == ["cold_start", "ready"]
+    assert [event.phase for event in second_events] == ["cold_start", "ready"]
+    assert handles["first"].worker_id == handles["second"].worker_id
 
 
 def test_kubernetes_backend_keeps_digest_when_worker_name_prefix_is_long() -> None:

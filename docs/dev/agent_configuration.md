@@ -182,7 +182,7 @@ agents:
 - **compress_tool_results**: Compress tool results in history to save context (per-agent override)
 - **compaction**: Optional per-agent auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, `notify`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed. Authoring `defaults.compaction` enables the optional destructive compaction phase for inheriting agents and teams. A non-empty agent block also enables that destructive phase for the agent, but a bare `agents.<name>.compaction: {}` is only a no-op override that inherits authored defaults. Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)
-- **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override)
+- **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override). When disabled, routed tools may still show generic worker warmup copy, but it never includes tool identifiers or tool-trace metadata
 - **worker_tools**: Tool names to route through scoped workers (overrides defaults; `null` uses the built-in default routing policy)
 - **worker_scope**: Worker runtime reuse mode for routed tools: `shared`, `user`, or `user_agent`
 - **delegate_to**: List of agent names this agent can delegate tasks to via tool calls

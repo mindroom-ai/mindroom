@@ -165,19 +165,31 @@ def _make_bundled_replacement(
     body: str,
     msgtype: str,
     bundle_key: str | None = None,
+    sender: str = "@editor:localhost",
+    visible_body: str | None = None,
+    long_text: dict[str, object] | None = None,
+    url: str | None = None,
 ) -> dict[str, object]:
+    new_content: dict[str, object] = {
+        "body": body,
+        "msgtype": msgtype,
+    }
+    if visible_body is not None:
+        new_content["io.mindroom.visible_body"] = visible_body
+    if long_text is not None:
+        new_content["io.mindroom.long_text"] = long_text
+    if url is not None:
+        new_content["url"] = url
+
     replacement_event = {
         "type": "m.room.message",
         "event_id": f"{event_id}-edit",
-        "sender": "@editor:localhost",
+        "sender": sender,
         "origin_server_ts": 9999,
         "content": {
             "body": f"* {body}",
-            "msgtype": msgtype,
-            "m.new_content": {
-                "body": body,
-                "msgtype": msgtype,
-            },
+            "msgtype": "m.text",
+            "m.new_content": new_content,
             "m.relates_to": {
                 "rel_type": "m.replace",
                 "event_id": event_id,
@@ -1380,9 +1392,9 @@ async def test_matrix_message_room_threads_returns_paginated_thread_roots() -> N
             new=AsyncMock(return_value=([thread_root], next_page)),
         ) as mock_get_page,
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
-            new=AsyncMock(return_value={"body": "Resolved root message body"}),
-        ) as mock_extract,
+            "mindroom.custom_tools.matrix_message.thread_root_body_preview",
+            new=AsyncMock(return_value="Resolved root message body"),
+        ) as mock_preview,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -1414,7 +1426,7 @@ async def test_matrix_message_room_threads_returns_paginated_thread_roots() -> N
         limit=7,
         page_token=page_marker,
     )
-    mock_extract.assert_awaited_once_with(thread_root, ctx.client)
+    mock_preview.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1447,9 +1459,9 @@ async def test_matrix_message_room_threads_includes_latest_activity_ts() -> None
             new=AsyncMock(return_value=([thread_root], None)),
         ),
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
-            new=AsyncMock(return_value={"body": "Resolved root message body"}),
-        ),
+            "mindroom.custom_tools.matrix_message.thread_root_body_preview",
+            new=AsyncMock(return_value="Resolved root message body"),
+        ) as mock_preview,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
@@ -1465,6 +1477,7 @@ async def test_matrix_message_room_threads_includes_latest_activity_ts() -> None
             "reply_count": 4,
         },
     ]
+    mock_preview.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1519,6 +1532,49 @@ async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_
         limit=1,
         page_token=None,
     )
+    mock_extract.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_room_threads_prefers_trusted_canonical_bundled_preview() -> None:
+    """room-threads should hide transient warmup text for trusted bundled local edits."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    thread_root = _make_room_thread_root(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        timestamp=1234,
+        body="Thinking...",
+        reply_count=4,
+    )
+    thread_root.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 4},
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread-root",
+                body="Final root message\n\n⏳ Preparing isolated worker...",
+                msgtype="m.text",
+                sender="@mindroom_general:localhost",
+                visible_body="Final root message",
+            ),
+        },
+    }
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            new=AsyncMock(),
+        ) as mock_extract,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Final root message"
     mock_extract.assert_not_awaited()
 
 
@@ -1601,9 +1657,9 @@ async def test_matrix_message_room_threads_resolves_notice_root_without_replacem
             new=AsyncMock(return_value=([thread_root], None)),
         ) as mock_get_page,
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
-            new=AsyncMock(return_value={"body": "Resolved notice body"}),
-        ) as mock_extract,
+            "mindroom.custom_tools.matrix_message.thread_root_body_preview",
+            new=AsyncMock(return_value="Resolved notice body"),
+        ) as mock_preview,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
@@ -1624,7 +1680,117 @@ async def test_matrix_message_room_threads_resolves_notice_root_without_replacem
         limit=1,
         page_token=None,
     )
-    mock_extract.assert_awaited_once_with(thread_root, ctx.client)
+    mock_preview.assert_awaited_once_with(
+        thread_root,
+        client=ctx.client,
+        trusted_sender_ids=frozenset(
+            {"@mindroom_general:localhost", "@mindroom_router:localhost"},
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_room_threads_resolves_large_file_root_through_canonical_visible_body() -> None:
+    """room-threads should hydrate large m.file roots before building previews."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    ctx.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "Final large root message\n\n⏳ Preparing isolated worker...",
+                    "io.mindroom.visible_body": "Final large root message",
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    thread_root = nio.RoomMessageFile.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$thread-large",
+            "sender": "@mindroom_general:localhost",
+            "origin_server_ts": 1234,
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview root...",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/thread-large",
+            },
+            "unsigned": {"m.relations": {"m.thread": {"count": 4}}},
+        },
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Final large root message"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_room_threads_resolves_large_bundled_replacement_through_canonical_visible_body() -> None:
+    """room-threads should hydrate large bundled latest edits before building previews."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    ctx.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "Final bundled edit\n\n⏳ Preparing isolated worker...",
+                    "io.mindroom.visible_body": "Final bundled edit",
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    thread_root = _make_room_thread_root(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        timestamp=1234,
+        body="Original root",
+        reply_count=4,
+    )
+    thread_root.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 4},
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread-root",
+                body="Preview latest edit...",
+                msgtype="m.file",
+                sender="@mindroom_general:localhost",
+                long_text={
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                url="mxc://server/thread-root-edit",
+            ),
+        },
+    }
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Final bundled edit"
 
 
 @pytest.mark.asyncio
@@ -1641,6 +1807,9 @@ async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
     )
 
     class MalformedThreadRoot:
+        event_id: ClassVar[object] = None
+        sender: ClassVar[str] = "@broken:localhost"
+        server_timestamp: ClassVar[int] = 1234
         source: ClassVar[dict[str, object]] = {
             "type": "m.room.message",
             "content": {"msgtype": "m.text", "body": "broken"},
@@ -1652,9 +1821,9 @@ async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
             new=AsyncMock(return_value=([MalformedThreadRoot(), thread_root], None)),
         ),
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
-            new=AsyncMock(return_value={"body": "Resolved root message body"}),
-        ) as mock_extract,
+            "mindroom.custom_tools.matrix_message.thread_root_body_preview",
+            new=AsyncMock(return_value="Resolved root message body"),
+        ) as mock_preview,
         patch("mindroom.custom_tools.matrix_message.logger.warning") as mock_warning,
         tool_runtime_context(ctx),
     ):
@@ -1671,7 +1840,13 @@ async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
             "reply_count": 4,
         },
     ]
-    mock_extract.assert_awaited_once_with(thread_root, ctx.client)
+    mock_preview.assert_awaited_once_with(
+        thread_root,
+        client=ctx.client,
+        trusted_sender_ids=frozenset(
+            {"@mindroom_general:localhost", "@mindroom_router:localhost"},
+        ),
+    )
     mock_warning.assert_called_once()
 
 
@@ -1964,7 +2139,15 @@ async def test_matrix_message_read_room_includes_notice_events() -> None:
         "$notice": {"event_id": "$notice", "body": "Compacted 12 messages", "msgtype": "m.notice"},
     }
 
-    async def _extract(event: nio.Event, _client: nio.AsyncClient) -> dict[str, object]:
+    async def _extract(
+        event: nio.Event,
+        _client: nio.AsyncClient,
+        *,
+        trusted_sender_ids: frozenset[str],
+    ) -> dict[str, object]:
+        assert trusted_sender_ids == frozenset(
+            {"@mindroom_general:localhost", "@mindroom_router:localhost"},
+        )
         return extracted_messages[event.event_id]
 
     with (

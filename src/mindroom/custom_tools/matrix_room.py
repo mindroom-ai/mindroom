@@ -13,8 +13,13 @@ from agno.tools import Toolkit
 from aiohttp import ClientError
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
-from mindroom.custom_tools.matrix_helpers import check_rate_limit, message_preview
+from mindroom.custom_tools.matrix_helpers import (
+    check_rate_limit,
+    message_preview,
+    thread_root_body_preview,
+)
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
+from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -70,56 +75,6 @@ class MatrixRoomTools(Toolkit):
         if limit is None:
             return cls._DEFAULT_THREAD_LIMIT
         return max(1, min(limit, cls._MAX_THREAD_LIMIT))
-
-    @staticmethod
-    def _relations_dict(container: object) -> dict[str, object] | None:
-        if not isinstance(container, dict):
-            return None
-        container_dict = cast("dict[str, object]", container)
-        relations = container_dict.get("m.relations")
-        return cast("dict[str, object]", relations) if isinstance(relations, dict) else None
-
-    @staticmethod
-    def _replacement_candidate_body(candidate: object) -> str | None:
-        if not isinstance(candidate, dict):
-            return None
-        candidate_dict = cast("dict[str, object]", candidate)
-        content = candidate_dict.get("content")
-        if not isinstance(content, dict):
-            return None
-        content_dict = cast("dict[str, object]", content)
-        new_content = content_dict.get("m.new_content")
-        if isinstance(new_content, dict):
-            new_content_dict = cast("dict[str, object]", new_content)
-            body = new_content_dict.get("body")
-            if isinstance(body, str):
-                return body
-        body = content_dict.get("body")
-        return body if isinstance(body, str) else None
-
-    @classmethod
-    def _bundled_replacement_body(cls, event_source: object) -> str | None:
-        unsigned = None
-        if isinstance(event_source, dict):
-            event_source_dict = cast("dict[str, object]", event_source)
-            unsigned = event_source_dict.get("unsigned")
-        for container in (unsigned, event_source):
-            relations = cls._relations_dict(container)
-            if relations is None:
-                continue
-            replacement = relations.get("m.replace")
-            if not isinstance(replacement, dict):
-                continue
-            replacement_dict = cast("dict[str, object]", replacement)
-            for candidate in (
-                replacement_dict,
-                replacement_dict.get("event"),
-                replacement_dict.get("latest_event"),
-            ):
-                body = cls._replacement_candidate_body(candidate)
-                if body is not None:
-                    return body
-        return None
 
     @staticmethod
     def _thread_reply_count(event: nio.Event) -> int:
@@ -387,21 +342,18 @@ class MatrixRoomTools(Toolkit):
             )
 
         threads_list: list[dict[str, Any]] = []
+        trusted_sender_ids = active_internal_sender_ids(context.config, context.runtime_paths)
         for event in thread_roots:
-            replacement_body = self._bundled_replacement_body(event.source)
             thread_info: dict[str, Any] = {
                 "thread_id": event.event_id,
                 "sender": event.sender,
                 "timestamp": event.server_timestamp,
             }
-            if isinstance(event, nio.MegolmEvent):
-                thread_info["body_preview"] = "[encrypted]"
-            elif replacement_body is not None:
-                thread_info["body_preview"] = message_preview(replacement_body)
-            elif isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
-                thread_info["body_preview"] = message_preview(event.body)
-            else:
-                thread_info["body_preview"] = ""
+            thread_info["body_preview"] = await thread_root_body_preview(
+                event,
+                client=context.client,
+                trusted_sender_ids=trusted_sender_ids,
+            )
             thread_info["reply_count"] = self._thread_reply_count(event)
 
             threads_list.append(thread_info)

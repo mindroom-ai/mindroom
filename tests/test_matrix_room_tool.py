@@ -48,6 +48,7 @@ def _make_context(
     )
     client = AsyncMock()
     client.rooms = {}
+    client.user_id = "@mindroom_general:localhost"
     return ToolRuntimeContext(
         agent_name="general",
         room_id=room_id,
@@ -415,19 +416,32 @@ def _make_bundled_replacement(
     event_id: str,
     body: str,
     bundle_key: str | None = None,
+    sender: str = "@editor:localhost",
+    visible_body: str | None = None,
+    msgtype: str = "m.text",
+    long_text: dict[str, object] | None = None,
+    url: str | None = None,
 ) -> dict[str, object]:
+    new_content: dict[str, object] = {
+        "body": body,
+        "msgtype": msgtype,
+    }
+    if visible_body is not None:
+        new_content["io.mindroom.visible_body"] = visible_body
+    if long_text is not None:
+        new_content["io.mindroom.long_text"] = long_text
+    if url is not None:
+        new_content["url"] = url
+
     replacement_event: dict[str, object] = {
         "type": "m.room.message",
         "event_id": f"{event_id}-edit",
-        "sender": "@editor:localhost",
+        "sender": sender,
         "origin_server_ts": 9999,
         "content": {
             "body": f"* {body}",
             "msgtype": "m.text",
-            "m.new_content": {
-                "body": body,
-                "msgtype": "m.text",
-            },
+            "m.new_content": new_content,
             "m.relates_to": {
                 "rel_type": "m.replace",
                 "event_id": event_id,
@@ -492,6 +506,154 @@ async def test_threads_preview_prefers_bundled_replacement_body(
     assert payload["status"] == "ok"
     assert payload["threads"][0]["body_preview"] == "Edited body"
     assert payload["threads"][0]["reply_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_threads_preview_prefers_trusted_canonical_body_from_bundled_replacement() -> None:
+    """Threads should hide transient warmup text for trusted local bundled edits."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    event = _thread_event("$thread1", body="Original body", reply_count=3)
+    event.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 3},
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread1",
+                body="Edited body\n\n⏳ Preparing isolated worker...",
+                sender="@mindroom_general:localhost",
+                visible_body="Edited body",
+            ),
+        },
+    }
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Edited body"
+
+
+@pytest.mark.asyncio
+async def test_threads_preview_prefers_nested_bundled_replacement_over_wrapper_preview() -> None:
+    """Threads should prefer nested bundled edits over stale wrapper previews."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    wrapper_replacement = _make_bundled_replacement(
+        event_id="$thread1",
+        body="wrapper body\n\n⏳ Preparing isolated worker...",
+        sender="@mindroom_general:localhost",
+    )
+    wrapper_replacement["latest_event"] = _make_bundled_replacement(
+        event_id="$thread1",
+        body="Edited body\n\n⏳ Preparing isolated worker...",
+        sender="@mindroom_general:localhost",
+        visible_body="Edited body",
+    )
+    event = _thread_event("$thread1", body="Original body", reply_count=3)
+    event.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 3},
+            "m.replace": wrapper_replacement,
+        },
+    }
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Edited body"
+
+
+@pytest.mark.asyncio
+async def test_threads_preview_prefers_trusted_visible_body_without_bundled_replacement() -> None:
+    """Threads should use canonical visible-body metadata for trusted non-bundled roots too."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    event = _thread_event(
+        "$thread1",
+        sender="@mindroom_general:localhost",
+        body="Final root message\n\n⏳ Preparing isolated worker...",
+        reply_count=3,
+    )
+    event.source["content"]["io.mindroom.visible_body"] = "Final root message"
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Final root message"
+
+
+@pytest.mark.asyncio
+async def test_threads_preview_resolves_large_file_root_through_canonical_visible_body() -> None:
+    """Threads should hydrate large streamed m.file roots before building previews."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    ctx.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "Final large root message\n\n⏳ Preparing isolated worker...",
+                    "io.mindroom.visible_body": "Final large root message",
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    event = nio.RoomMessageFile.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$thread-large",
+            "sender": "@mindroom_general:localhost",
+            "origin_server_ts": 1000,
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview root...",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/thread-large",
+            },
+            "unsigned": {"m.relations": {"m.thread": {"count": 3}}},
+        },
+    )
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Final large root message"
+
+
+@pytest.mark.asyncio
+async def test_threads_preview_preserves_empty_bundled_replacement_body() -> None:
+    """Threads should keep empty bundled latest-edit bodies instead of falling back to stale root text."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    event = _thread_event("$thread1", body="ORIGINAL ROOT", reply_count=3)
+    event.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 3},
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread1",
+                body="",
+                sender="@mindroom_general:localhost",
+            ),
+        },
+    }
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == ""
 
 
 @pytest.mark.asyncio

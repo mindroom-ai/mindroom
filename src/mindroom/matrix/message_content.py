@@ -11,8 +11,14 @@ import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.visible_body import (
+    has_trusted_stream_body_metadata,
+    visible_body_from_content,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from mindroom.matrix.cache import ConversationEventCache
 
 logger = get_logger(__name__)
@@ -39,19 +45,6 @@ def _normalized_content_dict(content: object) -> dict[str, Any]:
     if not isinstance(content, dict):
         return {}
     return {key: value for key, value in content.items() if isinstance(key, str)}
-
-
-def _content_body(content: dict[str, Any], fallback_body: str) -> str:
-    """Return the body from content when present, otherwise the provided fallback."""
-    body = content.get("body")
-    return body if isinstance(body, str) else fallback_body
-
-
-def visible_body_from_event_source(event_source: dict[str, Any], fallback_body: str) -> str:
-    """Return the visible message body from an event source dict."""
-    content = _normalized_content_dict(event_source.get("content", {}))
-    visible_content = _normalized_content_dict(content.get("m.new_content")) or content
-    return _content_body(visible_content, fallback_body)
 
 
 def is_v2_sidecar_text_preview(event_source: dict[str, Any]) -> bool:
@@ -205,6 +198,7 @@ async def extract_and_resolve_message(
     *,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
 
@@ -216,6 +210,7 @@ async def extract_and_resolve_message(
         client: Optional Matrix client for downloading attachments
         event_cache: Optional durable event cache used for restart-safe sidecar reuse
         room_id: Room scope for durable sidecar cache reads and writes
+        trusted_sender_ids: Exact trusted internal sender IDs allowed to override visible body
 
     Returns:
         Dict with sender, body, timestamp, event_id, and content fields.
@@ -231,9 +226,25 @@ async def extract_and_resolve_message(
         event_cache=event_cache,
         room_id=room_id,
     )
+    resolved_body = visible_body_from_content(
+        resolved_content,
+        event.body,
+        sender_id=event.sender,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    relates_to = _normalized_content_dict(resolved_content.get("m.relates_to"))
+    if event.sender in trusted_sender_ids and relates_to.get("rel_type") == "m.replace":
+        new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
+        if has_trusted_stream_body_metadata(new_content):
+            resolved_body = visible_body_from_content(
+                new_content,
+                resolved_body,
+                sender_id=event.sender,
+                trusted_sender_ids=trusted_sender_ids,
+            )
     message_data = {
         "sender": event.sender,
-        "body": _content_body(resolved_content, event.body),
+        "body": resolved_body,
         "timestamp": event.server_timestamp,
         "event_id": event.event_id,
         "content": resolved_content,
@@ -250,6 +261,7 @@ async def extract_edit_body(
     *,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    trusted_sender_ids: Collection[str] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
     content = _normalized_content_dict(event_source.get("content", {}))
@@ -260,11 +272,17 @@ async def extract_edit_body(
         room_id=room_id,
     )
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
-
-    body = new_content.get("body")
-    if not isinstance(body, str):
-        return None, None
-    return body, dict(new_content)
+    body = visible_body_from_content(
+        new_content,
+        "",
+        sender_id=event_source.get("sender"),
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    if isinstance(new_content.get("body"), str) or body:
+        normalized_new_content = dict(new_content)
+        normalized_new_content["body"] = body
+        return body, normalized_new_content
+    return None, None
 
 
 async def resolve_event_source_content(

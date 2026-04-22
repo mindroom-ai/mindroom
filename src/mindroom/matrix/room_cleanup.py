@@ -17,7 +17,7 @@ from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID, agent_username_localpart
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms, should_persist_invited_rooms
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.matrix.state import MatrixState
+from mindroom.matrix.state import MatrixState, managed_account_usernames
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
@@ -28,23 +28,17 @@ logger = get_logger(__name__)
 
 
 def _get_all_known_bot_usernames(runtime_paths: RuntimePaths) -> set[str]:
-    """Get all bot usernames that have ever been created (from matrix_state.yaml).
+    """Get all current persisted bot usernames from matrix_state.yaml.
 
     Returns:
-        Set of all known bot usernames
+        Set of current bot usernames
 
     """
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    bot_usernames = set()
-
-    # Get all agent accounts from state
-    for key in state.accounts:
-        # Skip the internal user account; it is not a bot.
-        if key.startswith("agent_") and key != INTERNAL_USER_ACCOUNT_KEY:
-            account = state.accounts[key]
-            bot_usernames.add(account.username)
-
-    return bot_usernames
+    return {
+        username
+        for key, username in managed_account_usernames(runtime_paths).items()
+        if key != INTERNAL_USER_ACCOUNT_KEY
+    }
 
 
 def _load_all_persisted_invited_rooms(
@@ -115,9 +109,13 @@ async def _cleanup_orphaned_bots_in_room(
 
     for user_id in member_ids:
         matrix_id = MatrixID.parse(user_id)
+        agent_name = matrix_id.agent_name(config, runtime_paths)
+        is_configured_current_bot = (
+            agent_name is not None and agent_username_localpart(agent_name, runtime_paths) in configured_bots
+        )
 
         # Check if this is a mindroom bot and shouldn't be in this room
-        if matrix_id.username in known_bot_usernames and matrix_id.username not in configured_bots:
+        if matrix_id.username in known_bot_usernames and not is_configured_current_bot:
             if room_id in persisted_invited_rooms_by_bot.get(matrix_id.username, set()):
                 logger.debug(
                     "orphaned_bot_cleanup_preserved_persisted_invited_room",

@@ -15,6 +15,9 @@ from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 import mindroom.matrix.client_thread_history as matrix_client_module
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.constants import STREAM_WARMUP_SUFFIX_KEY
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
@@ -41,7 +44,12 @@ from mindroom.matrix.client_thread_history import (
     _resolve_thread_history_from_event_sources_timed,
 )
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
-from tests.conftest import make_event_cache_mock
+from tests.conftest import (
+    bind_runtime_paths,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -192,12 +200,12 @@ class TestThreadHistory:
 
         client.room_get_event_relations = MagicMock(side_effect=room_get_event_relations)
         room_scan_chunk: list[nio.Event] = [root_event]
-        seen_event_ids = {getattr(root_event, "event_id", None)}
+        seen_event_ids = {root_event.event_id}
         for value in relations.values():
             if isinstance(value, Exception):
                 continue
             for event in value:
-                event_id = getattr(event, "event_id", None)
+                event_id = event.event_id
                 if event_id in seen_event_ids:
                     continue
                 seen_event_ids.add(event_id)
@@ -247,6 +255,7 @@ class TestThreadHistory:
             "$thread_root",
             hydrate_sidecars=True,
             event_cache=event_cache,
+            trusted_sender_ids=(),
         )
         mock_store.assert_awaited_once_with(
             event_cache,
@@ -481,6 +490,63 @@ class TestThreadHistory:
         client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_history_applies_trusted_canonical_body_from_internal_edit(self) -> None:
+        """Thread history should honor trusted visible-body metadata when applying latest edits."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        thread_event = self._make_text_event(
+            event_id="$reply",
+            sender="@mindroom_general:localhost",
+            body="Thinking...",
+            server_timestamp=2000,
+            source_content={
+                "body": "Thinking...",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+                "io.mindroom.stream_status": "pending",
+            },
+        )
+        newer_edit = self._make_text_event(
+            event_id="$edit_b",
+            sender="@mindroom_general:localhost",
+            body="* hello",
+            server_timestamp=3000,
+            source_content={
+                "body": "* hello",
+                "m.new_content": {
+                    "body": "hello\n\n⏳ Preparing isolated worker...",
+                    "io.mindroom.visible_body": "hello",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+                    "io.mindroom.stream_status": "completed",
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            },
+        )
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [newer_edit, thread_event, root_event]
+        page.end = None
+        client = MagicMock()
+        client.room_messages = AsyncMock(return_value=page)
+        event_cache = make_event_cache_mock()
+        event_cache.get_latest_edit.return_value = None
+
+        history = await fetch_thread_history(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            event_cache=event_cache,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
+
+        assert history[1].body == "hello"
+        assert history[1].content["body"] == "hello"
+        assert history[1].stream_status == "completed"
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_includes_notice_reply(self) -> None:
         """Thread history should keep notice messages in thread history."""
         root_event = self._make_text_event(
@@ -624,6 +690,7 @@ class TestThreadHistory:
             cache_reject_diagnostics={
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
             },
+            trusted_sender_ids=(),
         )
 
     @pytest.mark.asyncio
@@ -671,6 +738,7 @@ class TestThreadHistory:
             cache_reject_diagnostics={
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
             },
+            trusted_sender_ids=(),
         )
 
     @pytest.mark.asyncio
@@ -2147,6 +2215,7 @@ class TestThreadHistoryCache:
         )
 
         client = MagicMock()
+        client.user_id = "@mindroom_general:localhost"
         client.room_get_event = AsyncMock(side_effect=AssertionError("should not use relations root lookup"))
         client.room_get_event_relations = MagicMock(side_effect=AssertionError("should not use relations fast path"))
         page = MagicMock(spec=nio.RoomMessagesResponse)
@@ -2224,6 +2293,59 @@ class TestThreadHistoryCache:
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_snapshot_strips_trusted_warmup_suffix_without_sidecar_hydration(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Snapshot reads should still expose canonical body for trusted streaming previews."""
+        cache = _EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@mindroom_general:localhost",
+            body="hello\n\n⏳ Preparing isolated worker...",
+            server_timestamp=1000,
+            source_content={
+                "body": "hello\n\n⏳ Preparing isolated worker...",
+                "msgtype": "m.file",
+                "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                STREAM_WARMUP_SUFFIX_KEY: "⏳ Preparing isolated worker...",
+            },
+        )
+        await self._seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[self._cache_source(root_event)],
+        )
+
+        client = MagicMock()
+        client.user_id = "@mindroom_general:localhost"
+        client.room_get_event = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
+        client.room_get_event_relations = MagicMock(side_effect=AssertionError("should not refetch fresh cache"))
+        client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
+
+        try:
+            config = bind_runtime_paths(
+                Config(agents={"general": AgentConfig(display_name="General Agent")}),
+                test_runtime_paths(tmp_path),
+            )
+            snapshot = await fetch_thread_snapshot(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+                trusted_sender_ids={
+                    matrix_id.full_id for matrix_id in config.get_ids(runtime_paths_for(config)).values()
+                },
+            )
+        finally:
+            await cache.close()
+
+        assert snapshot[0].body == "hello"
+
+    @pytest.mark.asyncio
     async def test_fetch_dispatch_thread_history_uses_fresh_durable_cache(self, tmp_path: Path) -> None:
         """Strict dispatch history should reuse fresh durable cache instead of refetching."""
         cache = _EventCache(tmp_path / "event_cache.db")
@@ -2254,6 +2376,7 @@ class TestThreadHistoryCache:
         )
 
         client = MagicMock()
+        client.user_id = "@mindroom_general:localhost"
         client.room_get_event = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
         client.room_get_event_relations = MagicMock(side_effect=AssertionError("should not refetch fresh cache"))
         client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
@@ -2302,6 +2425,7 @@ class TestThreadHistoryCache:
         )
 
         client = MagicMock()
+        client.user_id = "@mindroom_general:localhost"
         client.room_get_event = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
         client.room_get_event_relations = MagicMock(side_effect=AssertionError("should not refetch fresh cache"))
         client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))

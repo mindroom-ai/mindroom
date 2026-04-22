@@ -9,13 +9,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.models.response import ToolExecution
+from agno.run.agent import ToolCallStartedEvent
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import RouterConfig
+from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.streaming import StreamingResponse, send_streaming_response
+from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
+from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -33,6 +39,143 @@ if TYPE_CHECKING:
 
 def _matrix_client_mock() -> AsyncMock:
     return make_matrix_client_mock()
+
+
+@pytest.mark.asyncio
+async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None:
+    """Worker warmup notices should edit the placeholder stream body and disappear before content arrives."""
+    runtime_config = bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            router=RouterConfig(model="default"),
+        ),
+        orchestrator_runtime_paths(tmp_path),
+    )
+    client = _matrix_client_mock()
+    deliveries: list[tuple[str, str]] = []
+
+    class FastProgressStreamingResponse(StreamingResponse):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(**kwargs)
+            self.update_interval = 0.01
+            self.min_update_interval = 0.01
+            self.progress_update_interval = 0.01
+            self.min_char_update_interval = 0.01
+            self.update_char_threshold = 10
+            self.min_update_char_threshold = 10
+
+    async def record_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+    ) -> DeliveredMatrixEvent:
+        deliveries.append(("send", str(content["body"])))
+        return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
+
+    async def record_edit(
+        _client: object,
+        _room_id: str,
+        _event_id: str,
+        new_content: dict[str, object],
+        new_text: str,
+    ) -> DeliveredMatrixEvent:
+        deliveries.append(("edit", new_text))
+        return DeliveredMatrixEvent(event_id="$stream_edit", content_sent=dict(new_content))
+
+    async def stream() -> AsyncGenerator[object, None]:
+        async def wait_for_delivery_count(expected_count: int) -> None:
+            for _ in range(200):
+                if len(deliveries) >= expected_count:
+                    return
+                await asyncio.sleep(0.001)
+            msg = f"Timed out waiting for {expected_count} streaming deliveries"
+            raise AssertionError(msg)
+
+        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="shell", tool_args={"cmd": "echo hello"}))
+        await asyncio.sleep(0.02)
+        pump = get_worker_progress_pump()
+        assert pump is not None
+        pump.queue.put_nowait(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="cold_start",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=2.0,
+                ),
+            ),
+        )
+        await wait_for_delivery_count(2)
+        await asyncio.sleep(0.02)
+        pump.queue.put_nowait(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="waiting",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=7.0,
+                ),
+            ),
+        )
+        await wait_for_delivery_count(3)
+        pump.queue.put_nowait(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="ready",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=8.0,
+                ),
+            ),
+        )
+        await wait_for_delivery_count(4)
+        await asyncio.sleep(0.02)
+        yield "x" * 300
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
+        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+    ):
+        await send_streaming_response(
+            client=client,
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=runtime_config,
+            runtime_paths=runtime_paths_for(runtime_config),
+            response_stream=stream(),
+            show_tool_calls=False,
+            streaming_cls=FastProgressStreamingResponse,
+        )
+
+    assert len(deliveries) == 6
+    assert deliveries[0][0] == "send"
+    assert "Thinking..." in deliveries[0][1]
+    assert "Preparing isolated worker" not in deliveries[0][1]
+    assert deliveries[1][0] == "edit"
+    assert "Preparing isolated worker" in deliveries[1][1]
+    assert "Preparing isolated worker..." in deliveries[1][1]
+    assert "shell.run" not in deliveries[1][1]
+    assert "first cold start" not in deliveries[1][1]
+    assert deliveries[2][0] == "edit"
+    assert "7s elapsed" in deliveries[2][1]
+    assert "shell.run" not in deliveries[2][1]
+    assert deliveries[3][0] == "edit"
+    assert "Preparing isolated worker" not in deliveries[3][1]
+    assert "Thinking..." in deliveries[3][1]
+    assert deliveries[4][0] == "edit"
+    assert "Preparing isolated worker" not in deliveries[4][1]
+    assert "x" * 300 in deliveries[4][1]
+    assert deliveries[5][0] == "edit"
+    assert "Preparing isolated worker" not in deliveries[5][1]
 
 
 @pytest.mark.asyncio

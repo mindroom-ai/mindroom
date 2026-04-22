@@ -11,9 +11,16 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
+from unittest.mock import patch
 
+import httpx
 import pytest
+from agno.agent import Agent
+from agno.agent._tools import parse_tools
+from agno.models.base import Model
+from agno.models.response import ModelResponse
 from agno.tools import Toolkit
+from agno.tools.function import Function, FunctionCall
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
@@ -28,6 +35,7 @@ from mindroom.constants import (
     shell_extra_env_values,
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.hooks import HookRegistry
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
     TOOL_METADATA,
@@ -39,7 +47,8 @@ from mindroom.tool_system.metadata import (
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context, worker_progress_pump_scope
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
@@ -49,11 +58,11 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import WorkerSpec
+from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
 from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
@@ -129,6 +138,74 @@ class _FakeResponse:
         return self._payload
 
 
+class _TrackingWorkerManager:
+    def __init__(self) -> None:
+        self.touched: list[str] = []
+        self.failures: list[tuple[str, str]] = []
+
+    def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
+        del now, progress_sink
+        return WorkerHandle(
+            worker_id="worker-1",
+            worker_key=spec.worker_key,
+            endpoint="http://worker/api/sandbox-runner/execute",
+            auth_token=_TEST_AUTH_TOKEN,
+            status="ready",
+            backend_name="kubernetes",
+            last_used_at=0.0,
+            created_at=0.0,
+        )
+
+    def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
+        del now
+        self.touched.append(worker_key)
+        return None
+
+    def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> object:
+        del now
+        self.failures.append((worker_key, failure_reason))
+        return None
+
+
+class _HttpStatusErrorResponse:
+    def __init__(self, url: str, *, status_code: int, payload: dict[str, object] | None = None) -> None:
+        self.url = url
+        self.status_code = status_code
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        request = httpx.Request("POST", self.url)
+        response = (
+            httpx.Response(self.status_code, request=request, json=self.payload)
+            if self.payload is not None
+            else httpx.Response(self.status_code, request=request)
+        )
+        message = f"{self.status_code} client error"
+        raise httpx.HTTPStatusError(message, request=request, response=response)
+
+    def json(self) -> dict[str, object]:
+        return self.payload or {}
+
+
+def _http_status_client_class(*, status_code: int, payload: dict[str, object] | None = None) -> type:
+    class _HttpStatusClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _HttpStatusErrorResponse:
+            del json, headers
+            assert url == "http://worker/api/sandbox-runner/execute"
+            return _HttpStatusErrorResponse(url, status_code=status_code, payload=payload)
+
+    return _HttpStatusClient
+
+
 def _recording_client_class(
     *,
     captured: dict[str, Any] | None = None,
@@ -157,6 +234,33 @@ def _recording_client_class(
             return _FakeResponse(payload)
 
     return _FakeClient
+
+
+class _MinimalModel(Model):
+    """Minimal model surface for exercising Agno's async tool execution path."""
+
+    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok")
+
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok")
+
+    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
+        yield ModelResponse(content="ok")
+
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        yield ModelResponse(content="ok")
+
+    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
+        return response
+
+    def _parse_provider_response_delta(
+        self,
+        response: ModelResponse,
+        *_args: object,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        return response
 
 
 def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1598,7 +1702,8 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
             captured_snapshots.append(tool_validation_snapshot)
             return cls()
 
-        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> object:
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
+            del spec, now, progress_sink
             raise NotImplementedError
 
         def get_worker(self, worker_key: str, *, now: float | None = None) -> object:
@@ -1718,7 +1823,8 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
             del runtime_paths, auth_token, storage_root, tool_validation_snapshot, worker_grantable_credentials
             return cls()
 
-        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> object:
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
+            del spec, now, progress_sink
             raise NotImplementedError
 
         def get_worker(self, worker_key: str, *, now: float | None = None) -> object:
@@ -1989,6 +2095,438 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
         ),
     ):
         await entrypoint("pwd")
+
+
+@pytest.mark.asyncio
+async def test_sync_only_worker_routed_tool_surfaces_progress_in_real_async_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sync-only proxied tools should emit worker progress before the async call result resolves."""
+    release_execute = threading.Event()
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+
+    class _FakeWorkerManager:
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
+            del now
+            assert progress_sink is not None
+            progress_sink(
+                WorkerReadyProgress(
+                    phase="cold_start",
+                    worker_key=spec.worker_key,
+                    backend_name="kubernetes",
+                    elapsed_seconds=1.0,
+                ),
+            )
+            return WorkerHandle(
+                worker_id="worker-1",
+                worker_key=spec.worker_key,
+                endpoint="http://worker/api/sandbox-runner/execute",
+                auth_token=_TEST_AUTH_TOKEN,
+                status="ready",
+                backend_name="kubernetes",
+                last_used_at=0.0,
+                created_at=0.0,
+            )
+
+        def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
+            del worker_key, now
+            return None
+
+    class _BlockingClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            del json, headers
+            assert url == "http://worker/api/sandbox-runner/execute"
+            release_execute.wait(timeout=1.0)
+            return _FakeResponse({"ok": True, "result": "proxied"})
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=_worker_target(runtime_paths, "shared", "code", execution_identity),
+    )
+    assert tool.async_functions == {}
+    tool = prepend_tool_hook_bridge(
+        tool,
+        build_tool_hook_bridge(
+            HookRegistry.empty(),
+            agent_name="code",
+            dispatch_context=None,
+            config=Config(agents={"code": AgentConfig(display_name="Code")}, models={}),
+            runtime_paths=runtime_paths,
+        ),
+    )
+
+    model = _MinimalModel(id="fake-model", provider="fake")
+    agent = Agent(id="code", model=model)
+    parsed_tools = parse_tools(agent, [tool], model, async_mode=True)
+    read_file = next(
+        function for function in parsed_tools if isinstance(function, Function) and function.name == "read_file"
+    )
+
+    progress_queue: asyncio.Queue[object] = asyncio.Queue()
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=_FakeWorkerManager()),
+        patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _BlockingClient),
+        worker_progress_pump_scope(asyncio.get_running_loop(), progress_queue),
+    ):
+        call_task = asyncio.create_task(
+            model.arun_function_call(
+                FunctionCall(
+                    function=read_file,
+                    arguments={"file_name": "demo.txt"},
+                    call_id="call-1",
+                ),
+            ),
+        )
+
+        progress_event = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+        assert progress_event.tool_name == "file"
+        assert progress_event.function_name == "read_file"
+        assert progress_event.progress.phase == "cold_start"
+        assert call_task.done() is False
+
+        release_execute.set()
+        success, _timer, _function_call, result = await call_task
+
+    assert success is True
+    assert result.result == "proxied"
+
+
+def test_worker_routed_tool_error_does_not_record_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ordinary proxied tool errors should fail the call without tearing down the worker."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+
+    class _ToolErrorClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            del json, headers
+            assert url == "http://worker/api/sandbox-runner/execute"
+            return _FakeResponse(
+                {
+                    "ok": False,
+                    "error": "Sandbox tool execution failed: FileNotFoundError: missing.txt",
+                    "failure_kind": "tool",
+                },
+            )
+
+    manager = _TrackingWorkerManager()
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=_worker_target(runtime_paths, "shared", "code", execution_identity),
+    )
+    entrypoint = tool.functions["read_file"].entrypoint
+    assert entrypoint is not None
+
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _ToolErrorClient),
+        pytest.raises(RuntimeError, match=r"FileNotFoundError: missing\.txt"),
+    ):
+        entrypoint("missing.txt")
+
+    assert manager.touched == [_worker_target(runtime_paths, "shared", "code", execution_identity).worker_key]
+    assert manager.failures == []
+
+
+def test_worker_routed_worker_failure_records_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker-level runner failures should still evict broken workers."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    assert worker_target.worker_key is not None
+    manager = _TrackingWorkerManager()
+
+    class _WorkerFailureClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            del json, headers
+            assert url == "http://worker/api/sandbox-runner/execute"
+            return _FakeResponse(
+                {
+                    "ok": False,
+                    "error": "Sandbox subprocess timed out.",
+                    "failure_kind": "worker",
+                },
+            )
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=worker_target,
+    )
+    entrypoint = tool.functions["read_file"].entrypoint
+    assert entrypoint is not None
+
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _WorkerFailureClient),
+        pytest.raises(RuntimeError, match=r"Sandbox subprocess timed out\."),
+    ):
+        entrypoint("missing.txt")
+
+    assert manager.touched == []
+    assert manager.failures == [(worker_target.worker_key, "Sandbox subprocess timed out.")]
+
+
+def test_worker_routed_legacy_structured_failure_records_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Structured failures without failure_kind should fail closed as worker failures."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    assert worker_target.worker_key is not None
+    manager = _TrackingWorkerManager()
+
+    class _LegacyFailureClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            del json, headers
+            assert url == "http://worker/api/sandbox-runner/execute"
+            return _FakeResponse(
+                {
+                    "ok": False,
+                    "error": "Sandbox subprocess timed out.",
+                },
+            )
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=worker_target,
+    )
+    entrypoint = tool.functions["read_file"].entrypoint
+    assert entrypoint is not None
+
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _LegacyFailureClient),
+        pytest.raises(RuntimeError, match=r"Sandbox subprocess timed out\."),
+    ):
+        entrypoint("missing.txt")
+
+    assert manager.touched == []
+    assert manager.failures == [(worker_target.worker_key, "Sandbox subprocess timed out.")]
+
+
+@pytest.mark.parametrize(
+    ("status_code", "payload"),
+    [
+        (400, {"detail": "credential_overrides must be supplied via lease_id."}),
+        (422, {"detail": "Input should be a valid dictionary"}),
+        (422, {"detail": [{"msg": "Input should be a valid dictionary", "type": "dict_type"}]}),
+        (404, {"detail": "Tool 'file' does not expose 'read_file'."}),
+    ],
+)
+def test_worker_routed_http_request_error_does_not_record_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status_code: int,
+    payload: dict[str, object],
+) -> None:
+    """Client-side HTTP errors from a healthy worker should fail the call without tearing down the worker."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    assert worker_target.worker_key is not None
+    manager = _TrackingWorkerManager()
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=worker_target,
+    )
+    entrypoint = tool.functions["read_file"].entrypoint
+    assert entrypoint is not None
+
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _http_status_client_class(status_code=status_code, payload=payload),
+        ),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        entrypoint("missing.txt")
+
+    assert manager.touched == [worker_target.worker_key]
+    assert manager.failures == []
+
+
+@pytest.mark.parametrize(
+    ("status_code", "payload"),
+    [
+        (401, {"detail": "Unauthorized sandbox runner request"}),
+        (404, {"detail": "Not Found"}),
+    ],
+)
+def test_worker_routed_ambiguous_http_client_error_records_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status_code: int,
+    payload: dict[str, object],
+) -> None:
+    """Auth and ambiguous route failures should evict the worker instead of treating it as healthy."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    assert worker_target.worker_key is not None
+    manager = _TrackingWorkerManager()
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=worker_target,
+    )
+    entrypoint = tool.functions["read_file"].entrypoint
+    assert entrypoint is not None
+
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _http_status_client_class(status_code=status_code, payload=payload),
+        ),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        entrypoint("missing.txt")
+
+    assert manager.touched == []
+    assert len(manager.failures) == 1
+    assert manager.failures[0][0] == worker_target.worker_key
 
 
 class TestWorkerToolsOverride:

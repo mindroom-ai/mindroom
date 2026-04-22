@@ -18,14 +18,19 @@ from mindroom.constants import (
     sandbox_shell_execution_runtime_env_values,
 )
 from mindroom.credentials import load_scoped_credentials
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    WorkerProgressEvent,
+    WorkerProgressPump,
+    get_tool_runtime_context,
+    get_worker_progress_pump,
+)
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     WorkerScope,
     resolve_unscoped_worker_key,
     tool_stays_local,
 )
-from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
+from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec, worker_api_endpoint
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,
@@ -271,6 +276,7 @@ def _build_worker_routing_payload(
     tool_name: str,
     function_name: str,
     worker_target: ResolvedWorkerTarget | None,
+    progress_sink: ProgressSink | None,
 ) -> tuple[dict[str, object], WorkerHandle | None]:
     proxy_config = sandbox_proxy_config(runtime_paths)
     worker_scope = worker_target.worker_scope if worker_target is not None else None
@@ -294,7 +300,10 @@ def _build_worker_routing_payload(
             tenant_id=worker_target.tenant_id if worker_target is not None else None,
             account_id=worker_target.account_id if worker_target is not None else None,
         )
-        worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(WorkerSpec(worker_key))
+        worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(
+            WorkerSpec(worker_key),
+            progress_sink=progress_sink,
+        )
         return (
             {
                 "routing_agent_name": effective_agent_name,
@@ -325,6 +334,7 @@ def _build_worker_routing_payload(
             raise RuntimeError(msg)
     worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(
         WorkerSpec(worker_key, private_agent_names=resolved_private_agent_names),
+        progress_sink=progress_sink,
     )
     return (
         {
@@ -420,6 +430,80 @@ def _request_headers_for_handle(
     return {_SANDBOX_PROXY_TOKEN_HEADER: token}
 
 
+def _record_proxy_exception_for_worker(
+    exc: Exception,
+    *,
+    worker_handle: WorkerHandle | None,
+    runtime_paths: RuntimePaths,
+    proxy_config: SandboxProxyConfig,
+) -> None:
+    """Classify one proxy exception as either worker-health or request-level failure."""
+    if worker_handle is None:
+        return
+    manager = _get_worker_manager(runtime_paths, proxy_config)
+    if _is_request_level_proxy_http_error(exc):
+        manager.touch_worker(worker_handle.worker_key)
+        return
+    manager.record_failure(worker_handle.worker_key, str(exc))
+
+
+def _is_request_level_proxy_http_error(exc: Exception) -> bool:
+    """Return whether one execute-route HTTP failure came from a healthy worker."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    status_code = exc.response.status_code
+    if status_code not in {400, 404, 422}:
+        return False
+    try:
+        payload = exc.response.json()
+    except (ValueError, json.JSONDecodeError):
+        return False
+    detail = payload.get("detail") if isinstance(payload, Mapping) else None
+    if isinstance(detail, str) and detail:
+        return status_code in {400, 422} or detail != "Not Found"
+    if status_code == 422 and isinstance(detail, list):
+        return bool(detail)
+    return False
+
+
+def _record_proxy_response_failure_for_worker(
+    *,
+    worker_handle: WorkerHandle | None,
+    runtime_paths: RuntimePaths,
+    proxy_config: SandboxProxyConfig,
+    error: str,
+    failure_kind: object,
+) -> None:
+    """Classify one structured runner failure response for worker health."""
+    if worker_handle is None:
+        return
+    manager = _get_worker_manager(runtime_paths, proxy_config)
+    if failure_kind == "tool":
+        manager.touch_worker(worker_handle.worker_key)
+        return
+    manager.record_failure(worker_handle.worker_key, error)
+
+
+def _make_progress_sink(
+    pump: WorkerProgressPump,
+    *,
+    tool_name: str,
+    function_name: str,
+) -> ProgressSink:
+    def sink(progress: WorkerReadyProgress) -> None:
+        if pump.shutdown.is_set() or pump.loop.is_closed():
+            return
+        event = WorkerProgressEvent(
+            tool_name=tool_name,
+            function_name=function_name,
+            progress=progress,
+        )
+        with suppress(RuntimeError):
+            pump.loop.call_soon_threadsafe(pump.queue.put_nowait, event)
+
+    return sink
+
+
 def _portable_tool_init_overrides(
     tool_init_overrides: dict[str, object] | None,
     *,
@@ -511,6 +595,16 @@ def _call_proxy_sync(  # noqa: C901
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> object:
     proxy_config = sandbox_proxy_config(runtime_paths)
+    pump = get_worker_progress_pump()
+    progress_sink = (
+        _make_progress_sink(
+            pump,
+            tool_name=tool_name,
+            function_name=function_name,
+        )
+        if pump is not None
+        else None
+    )
     payload: dict[str, object] = {
         "tool_name": tool_name,
         "function_name": function_name,
@@ -522,6 +616,7 @@ def _call_proxy_sync(  # noqa: C901
         tool_name=tool_name,
         function_name=function_name,
         worker_target=worker_target,
+        progress_sink=progress_sink,
     )
     payload.update(worker_payload)
     if execution_env:
@@ -573,8 +668,12 @@ def _call_proxy_sync(  # noqa: C901
             response.raise_for_status()
             data = response.json()
     except Exception as exc:
-        if worker_handle is not None:
-            _get_worker_manager(runtime_paths, proxy_config).record_failure(worker_handle.worker_key, str(exc))
+        _record_proxy_exception_for_worker(
+            exc,
+            worker_handle=worker_handle,
+            runtime_paths=runtime_paths,
+            proxy_config=proxy_config,
+        )
         raise
 
     if not isinstance(data, Mapping):
@@ -585,8 +684,13 @@ def _call_proxy_sync(  # noqa: C901
             _get_worker_manager(runtime_paths, proxy_config).touch_worker(worker_handle.worker_key)
         return data.get("result")
     error = data.get("error") or "Sandbox execution failed."
-    if worker_handle is not None:
-        _get_worker_manager(runtime_paths, proxy_config).record_failure(worker_handle.worker_key, str(error))
+    _record_proxy_response_failure_for_worker(
+        worker_handle=worker_handle,
+        runtime_paths=runtime_paths,
+        proxy_config=proxy_config,
+        error=str(error),
+        failure_kind=data.get("failure_kind"),
+    )
     raise RuntimeError(str(error))
 
 
@@ -698,6 +802,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         runtime_paths=runtime_paths,
         extra_env_passthrough=extra_env_passthrough,
     )
+    original_functions = toolkit.functions
+    original_async_functions = toolkit.async_functions
     toolkit.functions = {
         function_name: _wrap_sync_function(
             function,
@@ -712,7 +818,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
         )
-        for function_name, function in toolkit.functions.items()
+        for function_name, function in original_functions.items()
     }
     toolkit.async_functions = {
         function_name: _wrap_async_function(
@@ -728,6 +834,6 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
         )
-        for function_name, function in toolkit.async_functions.items()
+        for function_name, function in original_async_functions.items()
     }
     return toolkit

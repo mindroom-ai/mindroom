@@ -7,6 +7,7 @@ import importlib
 import json
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
@@ -61,6 +62,13 @@ _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentApplyResult:
+    """Describe whether applying one worker Deployment forced a recreate."""
+
+    recreated: bool
 
 
 class _ApiStatusError(Exception):
@@ -309,7 +317,7 @@ class KubernetesResourceManager:
         annotations: dict[str, str],
         replicas: int,
         private_agent_names: frozenset[str] | None = None,
-    ) -> None:
+    ) -> DeploymentApplyResult:
         """Create-or-patch one worker Deployment."""
         manifest = self._deployment_manifest(
             worker_key=worker_key,
@@ -326,7 +334,7 @@ class KubernetesResourceManager:
             desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
             if existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]:
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
-                return
+                return DeploymentApplyResult(recreated=True)
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
@@ -334,6 +342,7 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
+        return DeploymentApplyResult(recreated=False)
 
     def patch_deployment(
         self,
@@ -408,8 +417,10 @@ class KubernetesResourceManager:
         *,
         timeout_seconds: float,
         deployment_ready_fn: Callable[[KubernetesDeployment], bool],
+        on_poll_tick: Callable[[float], None] | None = None,
     ) -> KubernetesDeployment:
         """Poll a worker Deployment until it becomes ready or times out."""
+        started_at = time.monotonic()
         deadline = time.time() + timeout_seconds
         while True:
             deployment = self.read_deployment(deployment_name)
@@ -421,6 +432,8 @@ class KubernetesResourceManager:
             if time.time() >= deadline:
                 msg = f"Kubernetes worker '{deployment_name}' did not become ready within {timeout_seconds:.0f}s."
                 raise WorkerBackendError(msg)
+            if on_poll_tick is not None:
+                on_poll_tick(time.monotonic() - started_at)
             time.sleep(_READY_POLL_INTERVAL_SECONDS)
 
     def _apply_object(

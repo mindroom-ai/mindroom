@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import HandledTurnState
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import install_runtime_cache_support, replace_turn_controller_deps, wrap_extracted_collaborators
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _test_config() -> Config:
+    """Return one typed config for edit-after-restart tests."""
+    return Config(
+        agents={"test_agent": AgentConfig(display_name="Test Agent")},
+        authorization={"default_room_access": True},
+        mindroom_user={"username": "mindroom"},
+    )
 
 
 @pytest.mark.asyncio
@@ -32,32 +42,27 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     6. Matrix server redelivers the edit event
     7. Bot should regenerate (not skip as "already seen")
     """
-    # Create a mock agent user
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    config = _test_config()
+
+    # Create a typed agent user
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
-        user_id="@test_agent:example.com",
+        user_id=config.get_ids(runtime_paths)["test_agent"].full_id,
         display_name="Test Agent",
         password="test_password",  # noqa: S106
     )
-
-    # Create a minimal mock config
-    config = Mock()
-    config.agents = {"test_agent": Mock()}
-    config.get_agent_knowledge_base_ids.return_value = []
-    config.get_ids.return_value = {"test_agent": MatrixID.parse("@test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
     )
     wrap_extracted_collaborators(bot)
@@ -147,32 +152,27 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
     This is the original purpose of the is_handled check - prevent duplicate responses.
     """
-    # Create a mock agent user
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    config = _test_config()
+
+    # Create a typed agent user
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
-        user_id="@test_agent:example.com",
+        user_id=config.get_ids(runtime_paths)["test_agent"].full_id,
         display_name="Test Agent",
         password="test_password",  # noqa: S106
     )
-
-    # Create a minimal mock config
-    config = Mock()
-    config.agents = {"test_agent": Mock()}
-    config.get_agent_knowledge_base_ids.return_value = []
-    config.get_ids.return_value = {"test_agent": MatrixID.parse("@test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.authorization.agent_reply_permissions = {}
 
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
     )
     wrap_extracted_collaborators(bot)

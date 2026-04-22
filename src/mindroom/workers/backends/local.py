@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.manager import WorkerManager
-from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
+from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -165,8 +165,15 @@ class _LocalWorkerBackend:
         self._lock = threading.Lock()
         self._initialization_locks: dict[str, threading.Lock] = {}
 
-    def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
+    def ensure_worker(
+        self,
+        spec: WorkerSpec,
+        *,
+        now: float | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> WorkerHandle:
         """Resolve or create one local worker."""
+        del progress_sink
         timestamp = time.time() if now is None else now
         worker_lock = self._worker_lock(spec.worker_key)
         paths = _local_worker_state_paths(spec.worker_key, worker_root=self.worker_root)

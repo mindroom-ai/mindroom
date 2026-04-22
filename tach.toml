@@ -254,20 +254,35 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.matrix_helpers"
+depends_on = [
+    "mindroom.matrix.message_content",
+    "mindroom.matrix.visible_body",
+]
+visibility = [
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_room",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.matrix_message"
 depends_on = [
     "mindroom.constants",
     "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.matrix_helpers",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.visible_body",
     "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_room"
 depends_on = [
+    "mindroom.custom_tools.matrix_helpers",
     "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.visible_body",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -298,6 +313,7 @@ depends_on = [
     "mindroom.hooks.ingress",
     "mindroom.matrix.identity",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.visible_body",
     "mindroom.runtime_protocols",
 ]
 
@@ -683,6 +699,7 @@ depends_on = [
     "mindroom.matrix.thread_bookkeeping",
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_room_scan",
+    "mindroom.matrix.visible_body",
 ]
 
 [[modules]]
@@ -804,8 +821,26 @@ path = "mindroom.matrix.event_info"
 depends_on = []
 
 [[modules]]
+path = "mindroom.matrix.visible_body"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.identity",
+]
+visibility = [
+    "mindroom.custom_tools.matrix_helpers",
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_room",
+    "mindroom.edit_regenerator",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.message_content",
+    "mindroom.matrix.stale_stream_cleanup",
+]
+
+[[modules]]
 path = "mindroom.matrix.message_content"
-depends_on = []
+depends_on = ["mindroom.matrix.visible_body"]
 
 [[modules]]
 path = "mindroom.matrix.client_thread_history"
@@ -817,6 +852,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_projection",
+    "mindroom.matrix.visible_body",
 ]
 visibility = [
     "mindroom.custom_tools.matrix_message",
@@ -861,6 +897,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_projection",
+    "mindroom.matrix.visible_body",
     "mindroom.streaming",
 ]
 
@@ -1080,8 +1117,28 @@ depends_on = [
 path = "mindroom.streaming"
 depends_on = [
     "mindroom.constants",
+    "mindroom.interactive",
     "mindroom.matrix.client_delivery",
-    "mindroom.orchestration.runtime", "mindroom.tool_system.events",
+    "mindroom.matrix.mentions",
+    "mindroom.message_target",
+    "mindroom.orchestration.runtime",
+    "mindroom.streaming_delivery",
+    "mindroom.streaming_warmup",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.streaming_delivery"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.tool_system.events",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.streaming_warmup"
+depends_on = [
+    "mindroom.workers.models",
 ]
 
 [[modules]]
@@ -1133,6 +1190,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.image_handler",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.visible_body",
     "mindroom.media_inputs",
     "mindroom.runtime_protocols",
     "mindroom.voice_handler",
@@ -1685,6 +1743,8 @@ from = ["mindroom.tool_system.dependencies"]
 expose = [
     "LiveToolDispatchContext",
     "ToolDispatchContext",
+    "WorkerProgressEvent",
+    "WorkerProgressPump",
     "ToolRuntimeContext",
     "ToolRuntimeHookBindings",
     "ToolRuntimeSupport",
@@ -1693,6 +1753,7 @@ expose = [
     "build_scheduling_runtime_from_tool_runtime_context",
     "emit_custom_event",
     "execution_identity_matches_tool_runtime_context",
+    "get_worker_progress_pump",
     "get_plugin_state_root",
     "get_tool_runtime_context",
     "list_tool_runtime_attachment_ids",
@@ -1700,6 +1761,7 @@ expose = [
     "resolve_tool_runtime_hook_bindings",
     "runtime_context_from_dispatch_context",
     "tool_runtime_context",
+    "worker_progress_pump_scope",
 ]
 from = ["mindroom.tool_system.runtime_context"]
 

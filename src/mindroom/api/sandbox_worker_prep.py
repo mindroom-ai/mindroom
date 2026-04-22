@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import HTTPException
 
@@ -67,6 +67,15 @@ class PreparedWorkerRequest:
 
 class WorkerRequestPreparationError(ValueError):
     """Raised when one worker-backed execute request cannot be prepared."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: Literal["request", "worker"] = "request",
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 def bounded_ttl_seconds(raw_ttl_seconds: int) -> int:
@@ -257,13 +266,17 @@ def prepare_worker_request(
     """Prepare one worker-backed request for execution."""
     if worker_key is None:
         msg = "worker_key is required for worker-backed sandbox execution."
-        raise WorkerRequestPreparationError(msg)
+        raise WorkerRequestPreparationError(msg, failure_kind="request")
 
     try:
         worker_handle = prepare_worker(worker_key, runtime_paths, runner_token=runner_token)
     except WorkerBackendError as exc:
         logger.warning("sandbox_worker_initialization_failed", worker_key=worker_key, exc_info=True)
-        raise WorkerRequestPreparationError(str(exc)) from exc
+        dedicated_worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
+        failure_kind: Literal["request", "worker"] = "worker"
+        if dedicated_worker_key is not None and worker_key != dedicated_worker_key:
+            failure_kind = "request"
+        raise WorkerRequestPreparationError(str(exc), failure_kind=failure_kind) from exc
 
     try:
         paths = local_worker_state_paths_from_handle(worker_handle)
@@ -277,7 +290,7 @@ def prepare_worker_request(
             ),
         }
     except (FileNotFoundError, TypeError, ValueError) as exc:
-        raise WorkerRequestPreparationError(str(exc)) from exc
+        raise WorkerRequestPreparationError(str(exc), failure_kind="request") from exc
 
     return PreparedWorkerRequest(
         handle=worker_handle,

@@ -7476,12 +7476,16 @@ class TestAgentBot:
         assert context.thread_id == "$thread_root"
         assert context.thread_history == snapshot_history
         assert context.requires_full_thread_history is True
+        trusted_sender_ids = frozenset(
+            matrix_id.full_id for matrix_id in config.get_ids(runtime_paths_for(config)).values()
+        )
         mock_snapshot.assert_awaited_once_with(
             bot.client,
             room.room_id,
             "$thread_root",
             event_cache=bot.event_cache,
             runtime_started_at=bot._runtime_view.runtime_started_at,
+            trusted_sender_ids=trusted_sender_ids,
         )
 
     @pytest.mark.asyncio

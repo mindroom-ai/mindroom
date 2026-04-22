@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict, deque
 from threading import Lock
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import nio
 from agno.tools import Toolkit
@@ -23,7 +23,11 @@ from mindroom.custom_tools.attachments import (
     _send_attachment_paths,
     send_context_attachments,
 )
-from mindroom.custom_tools.matrix_helpers import check_rate_limit, message_preview
+from mindroom.custom_tools.matrix_helpers import (
+    check_rate_limit,
+    message_preview,
+    thread_root_body_preview,
+)
 from mindroom.interactive import (
     add_reaction_buttons,
     clear_interactive_question,
@@ -38,6 +42,7 @@ from mindroom.matrix.client_delivery import (
     send_message_result,
 )
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
+from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_system.runtime_context import (
@@ -491,8 +496,13 @@ class MatrixMessageTools(Toolkit):
                 response=str(response),
             )
 
+        trusted_sender_ids = active_internal_sender_ids(context.config, context.runtime_paths)
         resolved = [
-            await extract_and_resolve_message(event, context.client)
+            await extract_and_resolve_message(
+                event,
+                context.client,
+                trusted_sender_ids=trusted_sender_ids,
+            )
             for event in reversed(response.chunk)
             if isinstance(event, self._VISIBLE_ROOM_MESSAGE_EVENT_TYPES)
         ]
@@ -542,50 +552,6 @@ class MatrixMessageTools(Toolkit):
         return count if isinstance(count, int) and not isinstance(count, bool) else 0
 
     @staticmethod
-    def _bundled_replacement_body(event_source: dict[str, object]) -> str | None:  # noqa: C901
-        for container in (
-            event_source.get("unsigned"),
-            event_source,
-        ):
-            if not isinstance(container, dict):
-                continue
-            container_dict = cast("dict[str, object]", container)
-            relations = container_dict.get("m.relations")
-            if not isinstance(relations, dict):
-                continue
-            relations_dict = cast("dict[str, object]", relations)
-            replacement = relations_dict.get("m.replace")
-            if not isinstance(replacement, dict):
-                continue
-            replacement_dict = cast("dict[str, object]", replacement)
-            for candidate in (
-                replacement_dict,
-                replacement_dict.get("event"),
-                replacement_dict.get("latest_event"),
-            ):
-                if not isinstance(candidate, dict):
-                    continue
-                candidate_dict = cast("dict[str, object]", candidate)
-                content = candidate_dict.get("content")
-                if not isinstance(content, dict):
-                    continue
-                # This bundled replacement is attached by the homeserver for this root event,
-                # so revalidating m.relates_to.event_id here is redundant defensive code.
-                content_dict = cast("dict[str, object]", content)
-                new_content = content_dict.get("m.new_content")
-                if isinstance(new_content, dict):
-                    new_content_dict = cast("dict[str, object]", new_content)
-                    body = new_content_dict.get("body")
-                    if isinstance(body, str):
-                        # Previews intentionally use the inline bundled body only. Hydrating
-                        # io.mindroom.long_text sidecars here would add async I/O to a sync preview path.
-                        return body
-                body = content_dict.get("body")
-                if isinstance(body, str):
-                    return body
-        return None
-
-    @staticmethod
     def _thread_latest_activity_ts(event: nio.Event) -> int | None:
         unsigned = event.source.get("unsigned", {})
         if not isinstance(unsigned, dict):
@@ -610,10 +576,10 @@ class MatrixMessageTools(Toolkit):
         *,
         event: nio.Event,
     ) -> dict[str, object] | None:
-        event_id = getattr(event, "event_id", None)
-        sender = getattr(event, "sender", None)
-        timestamp = getattr(event, "server_timestamp", None)
-        source = getattr(event, "source", None)
+        event_id = event.event_id
+        sender = event.sender
+        timestamp = event.server_timestamp
+        source = event.source
         if (
             not isinstance(event_id, str)
             or not isinstance(sender, str)
@@ -627,19 +593,12 @@ class MatrixMessageTools(Toolkit):
                 event_type=type(event).__name__,
             )
             return None
-        if source.get("type") == "m.room.encrypted":
-            body_preview = "[encrypted]"
-        elif isinstance(event, self._VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-            replacement_body = self._bundled_replacement_body(source)
-            if replacement_body is not None:
-                body_preview = message_preview(replacement_body)
-            else:
-                resolved_message = await extract_and_resolve_message(event, context.client)
-                body_preview = message_preview(resolved_message.get("body"))
-        else:
-            content = source.get("content", {})
-            body = content.get("body") if isinstance(content, dict) else None
-            body_preview = message_preview(body)
+        trusted_sender_ids = active_internal_sender_ids(context.config, context.runtime_paths)
+        body_preview = await thread_root_body_preview(
+            event,
+            client=context.client,
+            trusted_sender_ids=trusted_sender_ids,
+        )
 
         payload = {
             "thread_id": event_id,
