@@ -6,7 +6,6 @@ import asyncio
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
-from html import escape
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from mindroom import interactive
@@ -424,11 +423,11 @@ class StreamingResponse:
         canonical_visible_body = content["body"]
         if warmup_suffix_lines:
             content[STREAM_VISIBLE_BODY_KEY] = canonical_visible_body
-            warmup_suffix = "\n".join(warmup_suffix_lines)
+            warmup_suffix = "\n".join(line.text for line in warmup_suffix_lines)
             content[STREAM_WARMUP_SUFFIX_KEY] = warmup_suffix
             display_text = f"{display_text}\n\n{warmup_suffix}" if display_text else warmup_suffix
             content["body"] = f"{content['body']}\n\n{warmup_suffix}"
-            suffix_html = "".join(f"<p>{escape(line)}</p>" for line in warmup_suffix_lines)
+            suffix_html = "".join(f"<p>{line.html}</p>" for line in warmup_suffix_lines)
             content["formatted_body"] = f"{content['formatted_body']}{suffix_html}"
 
         return _PreparedStreamingDelivery(
