@@ -876,7 +876,7 @@ class AgentBot:
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
-        rooms_to_leave = await self._room_lifecycle.rooms_to_leave()
+        rooms_to_leave = await self._room_lifecycle.rooms_to_actually_leave()
         if rooms_to_leave:
             orchestrator = self.orchestrator
             if orchestrator is not None:

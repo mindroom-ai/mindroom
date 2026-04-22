@@ -18,7 +18,7 @@ from mindroom.matrix.invited_rooms_store import (
     should_accept_invites,
     should_persist_invited_rooms,
 )
-from mindroom.matrix.rooms import leave_non_dm_rooms
+from mindroom.matrix.rooms import is_dm_room, leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
@@ -121,10 +121,10 @@ class BotRoomLifecycle:
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this bot is no longer configured for."""
         client = self._client()
-        await leave_non_dm_rooms(client, await self.rooms_to_leave())
+        await leave_non_dm_rooms(client, await self.rooms_to_actually_leave())
 
     async def rooms_to_leave(self) -> list[str]:
-        """Return joined non-DM rooms this bot should now leave."""
+        """Return joined rooms this bot should now leave before DM filtering."""
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         if joined_rooms is None:
@@ -140,6 +140,12 @@ class BotRoomLifecycle:
                 configured_rooms.add(root_space_id)
 
         return list(current_rooms - configured_rooms)
+
+    async def rooms_to_actually_leave(self) -> list[str]:
+        """Return the exact rooms this bot will leave after DM filtering."""
+        client = self._client()
+        room_ids = await self.rooms_to_leave()
+        return [room_id for room_id in room_ids if not await is_dm_room(client, room_id)]
 
     async def send_welcome_message_if_empty(self, room_id: str) -> None:
         """Send the router welcome message only when the room has no other history."""

@@ -113,7 +113,13 @@ from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
-from mindroom.tool_approval import SentApprovalEvent, initialize_approval_store, shutdown_approval_store
+from mindroom.tool_approval import (
+    ApprovalDecision,
+    ApprovalManager,
+    SentApprovalEvent,
+    initialize_approval_store,
+    shutdown_approval_store,
+)
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
@@ -431,6 +437,128 @@ def _approval_reload_config(tmp_path: Path, *, include_code: bool) -> Config:
         ),
         tmp_path,
     )
+
+
+def _code_only_config(tmp_path: Path, *, rooms: list[str]) -> Config:
+    """Return one minimal config with only the code agent."""
+    return _runtime_bound_config(
+        Config(
+            agents={
+                "code": {
+                    "display_name": "CodeAgent",
+                    "role": "Writes code",
+                    "model": "default",
+                    "rooms": rooms,
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        ),
+        tmp_path,
+    )
+
+
+def _build_code_bot_for_room_reconcile(
+    tmp_path: Path,
+    *,
+    config: Config,
+    orchestrator: MultiAgentOrchestrator,
+    room_ids: list[str],
+    room_send: AsyncMock,
+) -> AgentBot:
+    """Return one live code bot configured for room-reconcile approval tests."""
+    code_user = AgentMatrixUser(
+        agent_name="code",
+        user_id="@mindroom_code:localhost",
+        display_name="CodeAgent",
+        password=TEST_PASSWORD,
+    )
+    code_bot = AgentBot(
+        code_user,
+        tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=room_ids,
+    )
+    code_bot.orchestrator = orchestrator
+    code_bot.client = make_matrix_client_mock(user_id=code_user.user_id)
+    code_bot.client.room_send = room_send
+    for room_id in room_ids:
+        code_bot.client.rooms[room_id].add_member(code_user.user_id, code_user.display_name, None)
+    code_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+        return_value="$latest-thread-event",
+    )
+    code_bot.running = True
+    return code_bot
+
+
+async def _start_pending_room_approval(
+    store: ApprovalManager,
+    *,
+    room_id: str,
+    approval_event_id: str,
+    request_sent: asyncio.Event,
+) -> asyncio.Task[ApprovalDecision]:
+    """Start one pending approval request and wait until it is anchored by event id."""
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="run_shell_command",
+            arguments={"command": f"echo {room_id}"},
+            agent_name="code",
+            transport_agent_name="code",
+            room_id=room_id,
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            matched_rule="run_shell_*",
+            script_path=None,
+            timeout_seconds=60,
+        ),
+    )
+    async with asyncio.timeout(1):
+        await request_sent.wait()
+    for _ in range(5):
+        if (
+            store.anchored_request_for_event(
+                approval_event_id=approval_event_id,
+                room_id=room_id,
+            )
+            is not None
+        ):
+            return task
+        await asyncio.sleep(0)
+    msg = f"Approval request for {room_id} was not anchored."
+    raise AssertionError(msg)
+
+
+async def _assert_dm_room_reconcile_outcome(
+    *,
+    normal_task: asyncio.Task[ApprovalDecision],
+    store: ApprovalManager,
+    approval_event_ids: dict[str, str],
+    normal_room_id: str,
+    dm_room_id: str,
+    edited_room_ids: list[str],
+    left_room_ids: list[str],
+    code_bot: AgentBot,
+    mock_leave_non_dm_rooms: AsyncMock,
+) -> None:
+    """Assert room reconciliation only finalizes approvals for rooms that are really left."""
+    normal_decision = await normal_task
+    dm_request = store.anchored_request_for_event(
+        approval_event_id=approval_event_ids[dm_room_id],
+        room_id=dm_room_id,
+    )
+
+    assert normal_decision.status == "expired"
+    assert normal_decision.reason == "Original sender bot removed during config reload."
+    assert edited_room_ids == [normal_room_id]
+    assert dm_request is not None
+    assert dm_request.status == "pending"
+    assert left_room_ids == [normal_room_id]
+    joined_room_ids = tuple(code_bot.client.rooms)
+    assert normal_room_id not in joined_room_ids
+    assert dm_room_id in joined_room_ids
+    mock_leave_non_dm_rooms.assert_awaited_once_with(code_bot.client, [normal_room_id])
 
 
 def _mock_approval_reload_bot(
@@ -12833,6 +12961,121 @@ class TestMultiAgentOrchestrator:
             leave_non_dm_rooms.assert_awaited_once()
         finally:
             await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_sender_room_reconcile_preserves_pending_approvals_in_dms(self, tmp_path: Path) -> None:
+        """Force-finalize should only target the exact rooms that will really be left."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+
+        normal_room_id = "!room-normal:localhost"
+        dm_room_id = "!room-dm:localhost"
+        room_ids = [normal_room_id, dm_room_id]
+        approval_event_ids = {
+            normal_room_id: "$approval-normal",
+            dm_room_id: "$approval-dm",
+        }
+        request_sent_events = {room_id: asyncio.Event() for room_id in room_ids}
+        edited_room_ids: list[str] = []
+        left_room_ids: list[str] = []
+
+        old_config = _code_only_config(tmp_path, rooms=["lobby"])
+        new_config = _code_only_config(tmp_path, rooms=[])
+
+        async def _sender(
+            room_id: str,
+            _thread_id: str | None,
+            _agent_name: str,
+            _content: dict[str, object],
+        ) -> SentApprovalEvent:
+            request_sent_events[room_id].set()
+            return SentApprovalEvent(
+                event_id=approval_event_ids[room_id],
+                sender_user_id="@mindroom_code:localhost",
+            )
+
+        async def _code_room_send(
+            *,
+            room_id: str,
+            message_type: str,
+            content: dict[str, object],
+        ) -> nio.RoomSendResponse:
+            assert message_type == "io.mindroom.tool_approval"
+            edited_room_ids.append(room_id)
+            new_content = content["m.new_content"]
+            assert isinstance(new_content, dict)
+            assert new_content["status"] == "expired"
+            if room_id == normal_room_id:
+                assert new_content["resolution_reason"] == "Original sender bot removed during config reload."
+            return nio.RoomSendResponse(event_id=f"$edit-{room_id}", room_id=room_id)
+
+        code_bot = _build_code_bot_for_room_reconcile(
+            tmp_path,
+            config=old_config,
+            orchestrator=orchestrator,
+            room_ids=room_ids,
+            room_send=AsyncMock(side_effect=_code_room_send),
+        )
+
+        orchestrator.agent_bots = {"code": code_bot}
+
+        store = initialize_approval_store(
+            runtime_paths,
+            sender=_sender,
+            editor=orchestrator._edit_approval_event,
+        )
+        normal_task = await _start_pending_room_approval(
+            store,
+            room_id=normal_room_id,
+            approval_event_id=approval_event_ids[normal_room_id],
+            request_sent=request_sent_events[normal_room_id],
+        )
+        dm_task = await _start_pending_room_approval(
+            store,
+            room_id=dm_room_id,
+            approval_event_id=approval_event_ids[dm_room_id],
+            request_sent=request_sent_events[dm_room_id],
+        )
+
+        code_bot.config = new_config
+        code_bot.rooms = []
+
+        async def _leave_rooms(_client: object, room_ids: list[str]) -> None:
+            left_room_ids.extend(room_ids)
+            for room_id in room_ids:
+                del code_bot.client.rooms[room_id]
+
+        try:
+            with (
+                patch(
+                    "mindroom.bot_room_lifecycle.get_joined_rooms",
+                    new=AsyncMock(return_value=[normal_room_id, dm_room_id]),
+                ),
+                patch(
+                    "mindroom.bot_room_lifecycle.is_dm_room",
+                    new=AsyncMock(side_effect=lambda _client, room_id: room_id == dm_room_id),
+                ),
+                patch(
+                    "mindroom.bot_room_lifecycle.leave_non_dm_rooms",
+                    new=AsyncMock(side_effect=_leave_rooms),
+                ) as mock_leave_non_dm_rooms,
+            ):
+                await code_bot.leave_unconfigured_rooms()
+            await _assert_dm_room_reconcile_outcome(
+                normal_task=normal_task,
+                store=store,
+                approval_event_ids=approval_event_ids,
+                normal_room_id=normal_room_id,
+                dm_room_id=dm_room_id,
+                edited_room_ids=edited_room_ids,
+                left_room_ids=left_room_ids,
+                code_bot=code_bot,
+                mock_leave_non_dm_rooms=mock_leave_non_dm_rooms,
+            )
+        finally:
+            await shutdown_approval_store()
+            await asyncio.gather(normal_task, dm_task, return_exceptions=True)
 
     @pytest.mark.asyncio
     async def test_update_config_uses_custom_config_path(self, tmp_path: Path) -> None:
