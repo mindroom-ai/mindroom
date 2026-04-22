@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -72,17 +71,13 @@ def _command_handler_context(
             else SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"]))
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         send_response=send_response or AsyncMock(return_value=_final_visible_resolution("$reply")),
-        send_skill_command_response=AsyncMock(return_value=_error_resolution()),
-        run_skill_command_tool=AsyncMock(return_value=""),
         reload_plugins=reload_plugins,
     )
 
@@ -372,7 +367,6 @@ async def test_handle_command_does_not_record_handled_turn_when_standard_reply_s
         client=AsyncMock(),
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
@@ -639,54 +633,6 @@ async def test_reload_plugins_records_handled_turn_when_reply_delivery_fails(tmp
 
 
 @pytest.mark.asyncio
-async def test_skill_tool_dispatch_records_handled_turn_when_reply_delivery_fails(tmp_path: Path) -> None:
-    """Tool-dispatched skill commands must not replay if their confirmation reply never lands."""
-    context = _command_handler_context(
-        tmp_path,
-        send_response=AsyncMock(return_value=_error_resolution()),
-    )
-    context = replace(context, run_skill_command_tool=AsyncMock(return_value="✅ Tool completed."))
-    room = SimpleNamespace(room_id="!room:example.org")
-    event = SimpleNamespace(
-        sender="@alice:example.org",
-        event_id="$event",
-        source={"content": {"body": "!skill demo do thing"}},
-    )
-    command = Command(
-        type=CommandType.SKILL,
-        args={"skill_name": "demo", "args_text": "do thing"},
-        raw_text="!skill demo do thing",
-    )
-
-    with (
-        patch("mindroom.commands.handler.check_agent_mentioned", return_value=([], None, None)),
-        patch(
-            "mindroom.commands.handler._resolve_skill_command_agent",
-            new=AsyncMock(return_value=("demo_agent", None)),
-        ),
-        patch(
-            "mindroom.commands.handler.resolve_skill_command_spec",
-            return_value=SimpleNamespace(
-                name="demo",
-                user_invocable=True,
-                dispatch=SimpleNamespace(kind="tool", tool_name="demo_tool"),
-                disable_model_invocation=False,
-            ),
-        ),
-    ):
-        await handle_command(
-            context=context,
-            room=room,
-            event=event,
-            command=command,
-            requester_user_id="@alice:example.org",
-        )
-
-    context.run_skill_command_tool.assert_awaited_once()
-    context.record_handled_turn.assert_called_once_with(HandledTurnState.from_source_event_id("$event"))
-
-
-@pytest.mark.asyncio
 async def test_handle_command_config_set_confirmation_records_preview_event_id(tmp_path: Path) -> None:
     """Config preview replies should persist confirmation state and record the preview event ID."""
     context = CommandHandlerContext(
@@ -843,7 +789,6 @@ async def test_handle_command_config_set_preview_send_failure_stays_retryable(tm
         client=AsyncMock(),
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),

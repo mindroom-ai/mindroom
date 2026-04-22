@@ -651,7 +651,7 @@ class TurnController:
                 reply_to_event_id=reply_to_event_id,
                 event_source=reply_to_event.source if reply_to_event is not None else None,
             )
-            response_envelope = source_envelope or MessageEnvelope(
+            response_envelope = MessageEnvelope(
                 source_event_id=event.event_id,
                 room_id=room_id,
                 target=target,
