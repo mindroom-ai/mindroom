@@ -1683,9 +1683,8 @@ async def test_matrix_message_room_threads_resolves_notice_root_without_replacem
     mock_preview.assert_awaited_once_with(
         thread_root,
         client=ctx.client,
-        trusted_sender_ids=frozenset(
-            {"@mindroom_general:localhost", "@mindroom_router:localhost"},
-        ),
+        config=ctx.config,
+        runtime_paths=ctx.runtime_paths,
     )
 
 
@@ -1843,9 +1842,8 @@ async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
     mock_preview.assert_awaited_once_with(
         thread_root,
         client=ctx.client,
-        trusted_sender_ids=frozenset(
-            {"@mindroom_general:localhost", "@mindroom_router:localhost"},
-        ),
+        config=ctx.config,
+        runtime_paths=ctx.runtime_paths,
     )
     mock_warning.assert_called_once()
 
@@ -2143,11 +2141,11 @@ async def test_matrix_message_read_room_includes_notice_events() -> None:
         event: nio.Event,
         _client: nio.AsyncClient,
         *,
-        trusted_sender_ids: frozenset[str],
+        config: Config,
+        runtime_paths: object,
     ) -> dict[str, object]:
-        assert trusted_sender_ids == frozenset(
-            {"@mindroom_general:localhost", "@mindroom_router:localhost"},
-        )
+        assert config is ctx.config
+        assert runtime_paths == ctx.runtime_paths
         return extracted_messages[event.event_id]
 
     with (

@@ -16,10 +16,9 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import (
     check_rate_limit,
     message_preview,
-    thread_root_body_preview,
 )
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
-from mindroom.matrix.identity import active_internal_sender_ids
+from mindroom.matrix.client_visible_messages import thread_root_body_preview
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -342,7 +341,6 @@ class MatrixRoomTools(Toolkit):
             )
 
         threads_list: list[dict[str, Any]] = []
-        trusted_sender_ids = active_internal_sender_ids(context.config, context.runtime_paths)
         for event in thread_roots:
             thread_info: dict[str, Any] = {
                 "thread_id": event.event_id,
@@ -352,7 +350,8 @@ class MatrixRoomTools(Toolkit):
             thread_info["body_preview"] = await thread_root_body_preview(
                 event,
                 client=context.client,
-                trusted_sender_ids=trusted_sender_ids,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
             )
             thread_info["reply_count"] = self._thread_reply_count(event)
 

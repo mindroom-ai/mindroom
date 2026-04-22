@@ -26,7 +26,6 @@ from mindroom.custom_tools.attachments import (
 from mindroom.custom_tools.matrix_helpers import (
     check_rate_limit,
     message_preview,
-    thread_root_body_preview,
 )
 from mindroom.interactive import (
     add_reaction_buttons,
@@ -42,9 +41,13 @@ from mindroom.matrix.client_delivery import (
     send_message_result,
 )
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
-from mindroom.matrix.identity import active_internal_sender_ids
+from mindroom.matrix.client_visible_messages import (
+    extract_visible_message as extract_and_resolve_message,
+)
+from mindroom.matrix.client_visible_messages import (
+    thread_root_body_preview,
+)
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -496,12 +499,12 @@ class MatrixMessageTools(Toolkit):
                 response=str(response),
             )
 
-        trusted_sender_ids = active_internal_sender_ids(context.config, context.runtime_paths)
         resolved = [
             await extract_and_resolve_message(
                 event,
                 context.client,
-                trusted_sender_ids=trusted_sender_ids,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
             )
             for event in reversed(response.chunk)
             if isinstance(event, self._VISIBLE_ROOM_MESSAGE_EVENT_TYPES)
@@ -593,11 +596,11 @@ class MatrixMessageTools(Toolkit):
                 event_type=type(event).__name__,
             )
             return None
-        trusted_sender_ids = active_internal_sender_ids(context.config, context.runtime_paths)
         body_preview = await thread_root_body_preview(
             event,
             client=context.client,
-            trusted_sender_ids=trusted_sender_ids,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
         )
 
         payload = {

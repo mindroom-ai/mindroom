@@ -12,6 +12,11 @@ import mindroom.matrix.message_content as message_content_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY
+from mindroom.matrix.client_visible_messages import (
+    extract_visible_edit_body,
+    resolve_visible_event_source,
+    thread_root_body_preview,
+)
 from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.message_content import (
     _clear_mxc_cache,
@@ -487,6 +492,119 @@ class TestResolvedMessageExtraction:
             )
             == "hello\n\n⏳ Preparing isolated worker..."
         )
+
+    @pytest.mark.asyncio
+    async def test_resolve_visible_event_source_trusts_runtime_sender_ids(self, tmp_path: Path) -> None:
+        """High-level visible-source resolution should derive trust from runtime config."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        current_domain = config.get_domain(runtime_paths)
+        event_source = {
+            "sender": f"@mindroom_general:{current_domain}",
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello\n\n⏳ Preparing isolated worker...",
+                "io.mindroom.visible_body": "hello",
+            },
+        }
+
+        resolved_source, visible_body = await resolve_visible_event_source(
+            event_source,
+            None,
+            fallback_body="hello",
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+        assert resolved_source == event_source
+        assert visible_body == "hello"
+
+    @pytest.mark.asyncio
+    async def test_extract_visible_edit_body_trusts_runtime_sender_ids(self, tmp_path: Path) -> None:
+        """High-level edit extraction should derive trusted visible-body rules from runtime config."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        current_domain = config.get_domain(runtime_paths)
+
+        body, content = await extract_visible_edit_body(
+            {
+                "sender": f"@mindroom_general:{current_domain}",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "* Preview edit",
+                    "m.new_content": {
+                        "msgtype": "m.text",
+                        "body": "hello\n\n⏳ Preparing isolated worker...",
+                        "io.mindroom.visible_body": "hello",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+                },
+            },
+            None,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+        assert body == "hello"
+        assert content == {
+            "msgtype": "m.text",
+            "body": "hello",
+            "io.mindroom.visible_body": "hello",
+        }
+
+    @pytest.mark.asyncio
+    async def test_thread_root_body_preview_uses_runtime_sender_ids_for_bundled_edits(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Thread previews should resolve trusted bundled edits without raw trusted-sender plumbing."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        current_domain = config.get_domain(runtime_paths)
+        event = _make_message_event(
+            body="Original root",
+            content={"msgtype": "m.text", "body": "Original root"},
+            event_id="$thread-root",
+            sender="@user:example.com",
+        )
+        event.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": {
+                    "event_id": "$thread-root-edit",
+                    "sender": f"@mindroom_general:{current_domain}",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "* Edited body\n\n⏳ Preparing isolated worker...",
+                        "msgtype": "m.text",
+                        "m.new_content": {
+                            "body": "Edited body\n\n⏳ Preparing isolated worker...",
+                            "msgtype": "m.text",
+                            "io.mindroom.visible_body": "Edited body",
+                        },
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-root"},
+                    },
+                },
+            },
+        }
+
+        preview = await thread_root_body_preview(
+            event,
+            client=_make_client(),
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+        assert preview == "Edited body"
 
 
 class TestDownloadMxcText:
