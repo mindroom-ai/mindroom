@@ -106,10 +106,10 @@ class _ToolStreamState:
 
 @dataclass(slots=True)
 class _AssistantTextStreamState:
-    """Buffer only the newest trailing assistant chunk after streaming has started."""
+    """Keep the emitted assistant prefix plus one buffered uncommitted suffix."""
 
     emitted_text: str = ""
-    pending_delta: str | None = None
+    buffered_suffix: str = ""
 
 
 def _load_config(
@@ -1067,11 +1067,11 @@ def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> 
 
 def _flush_pending_assistant_delta(assistant_state: _AssistantTextStreamState) -> str | None:
     """Flush the buffered assistant delta once it is safe to expose."""
-    pending_delta = assistant_state.pending_delta
+    pending_delta = assistant_state.buffered_suffix
     if not pending_delta:
         return None
     assistant_state.emitted_text = f"{assistant_state.emitted_text}{pending_delta}"
-    assistant_state.pending_delta = None
+    assistant_state.buffered_suffix = ""
     return pending_delta
 
 
@@ -1080,20 +1080,17 @@ def _extract_stream_deltas(
     tool_state: _ToolStreamState,
     assistant_state: _AssistantTextStreamState,
 ) -> list[str]:
-    """Extract SSE deltas while letting a final completion replace one buffered text chunk."""
+    """Extract SSE deltas while letting a final completion replace the buffered suffix."""
     deltas: list[str] = []
 
     if isinstance(event, RunContentEvent):
         if event.content:
-            if not assistant_state.emitted_text and assistant_state.pending_delta is None:
+            if not assistant_state.emitted_text and not assistant_state.buffered_suffix:
                 first_delta = str(event.content)
                 assistant_state.emitted_text = first_delta
                 deltas.append(first_delta)
                 return deltas
-            flushed_delta = _flush_pending_assistant_delta(assistant_state)
-            if flushed_delta:
-                deltas.append(flushed_delta)
-            assistant_state.pending_delta = str(event.content)
+            assistant_state.buffered_suffix = f"{assistant_state.buffered_suffix}{event.content}"
         return deltas
 
     if isinstance(event, RunCompletedEvent) and event.content is not None:
@@ -1101,17 +1098,14 @@ def _extract_stream_deltas(
         if final_text.startswith(assistant_state.emitted_text):
             delta = final_text[len(assistant_state.emitted_text) :] or None
             assistant_state.emitted_text = final_text
-            assistant_state.pending_delta = None
+            assistant_state.buffered_suffix = ""
             if delta:
                 deltas.append(delta)
             return deltas
         assistant_state.emitted_text = final_text
-        assistant_state.pending_delta = None
+        assistant_state.buffered_suffix = ""
         return deltas
 
-    flushed_delta = _flush_pending_assistant_delta(assistant_state)
-    if flushed_delta:
-        deltas.append(flushed_delta)
     delta = _extract_stream_text(event, tool_state)
     if delta:
         deltas.append(delta)

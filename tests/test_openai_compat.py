@@ -1405,7 +1405,7 @@ class TestStreamingCompletion:
 
         assert deltas == ["hello"]
         assert assistant_state.emitted_text == "hello"
-        assert assistant_state.pending_delta is None
+        assert assistant_state.buffered_suffix == ""
 
     def test_streaming_corrective_final_content_can_replace_stale_buffered_tail(
         self,
@@ -1440,6 +1440,87 @@ class TestStreamingCompletion:
             if "content" in chunk["choices"][0]["delta"]
         ]
         assert "".join(contents) == "hello"
+
+    def test_streaming_corrective_final_content_can_replace_multiple_buffered_chunks(
+        self,
+        app_client: TestClient,
+    ) -> None:
+        """A final corrective body should replace the full buffered assistant suffix, not one chunk."""
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="he")
+            yield RunContentEvent(content="llx")
+            yield RunContentEvent(content="y")
+            yield RunCompletedEvent(content="hello")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.strip().split("\n\n")
+            if line.startswith("data: {")
+        ]
+        contents = [
+            chunk["choices"][0]["delta"].get("content", "")
+            for chunk in chunks
+            if "content" in chunk["choices"][0]["delta"]
+        ]
+        assert "".join(contents) == "hello"
+
+    def test_streaming_corrective_final_content_can_replace_buffered_suffix_across_tool_events(
+        self,
+        app_client: TestClient,
+    ) -> None:
+        """Tool events should not force out a stale buffered suffix before the final correction arrives."""
+        from agno.models.response import ToolExecution  # noqa: PLC0415
+        from agno.run.agent import ToolCallStartedEvent  # noqa: PLC0415
+
+        tool_started = ToolExecution(
+            tool_name="search",
+            tool_args={"query": "X"},
+            tool_call_id="tc-stream-corrective-1",
+        )
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="hel")
+            yield RunContentEvent(content="lx")
+            yield ToolCallStartedEvent(tool=tool_started)
+            yield RunCompletedEvent(content="hello")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n\n")
+        contents = []
+        for line in lines:
+            text = line.removeprefix("data: ")
+            if text == "[DONE]":
+                continue
+            chunk = json.loads(text)
+            delta = chunk["choices"][0]["delta"]
+            if "content" in delta:
+                contents.append(delta["content"])
+
+        full_content = "".join(contents)
+        assert '<tool id="1" state="start">search(query=X)</tool>' in full_content
+        assert full_content.replace('<tool id="1" state="start">search(query=X)</tool>', "") == "hello"
 
     def test_streaming_first_event_error_returns_500(self, app_client: TestClient) -> None:
         """If first stream event is an error string, return HTTP 500 instead of SSE."""
