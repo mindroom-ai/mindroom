@@ -200,6 +200,18 @@ class TestHelperFunctions:
         )
         assert is_agent_id(f"@mindroom_general_oldns:{domain}", self.config, runtime_paths) is True
 
+    def test_matrix_id_agent_name_trusts_persisted_current_username_drift(self, tmp_path: Path) -> None:
+        """MatrixID.agent_name should use the same live drift-aware identity seam."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        domain = self.config.get_domain(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw")
+        state.save(runtime_paths=runtime_paths)
+
+        drifted_id = MatrixID.parse(f"@mindroom_general_oldns:{domain}")
+        assert drifted_id.agent_name(self.config, runtime_paths) == "general"
+
     def test_extract_agent_name_ignores_removed_persisted_username(self, tmp_path: Path) -> None:
         """Persisted usernames for removed agents must not stay live-managed."""
         self.config = _bind_runtime_paths(self.config, tmp_path)

@@ -1239,6 +1239,31 @@ def test_sender_authorization_trusts_persisted_current_internal_accounts(tmp_pat
     assert is_authorized_sender("@mindroom_assistant_oldns:example.com", config, "!room:example.com") is True
 
 
+def test_available_agents_in_room_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
+    """Room agent discovery should keep current managed agents visible after username drift."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw")
+    state.save(runtime_paths=runtime_paths)
+
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_assistant_oldns:example.com", "Assistant", None)
+
+    available_agents = mindroom.authorization.get_available_agents_in_room(room, config, runtime_paths)
+    assert [agent.full_id for agent in available_agents] == ["@mindroom_assistant_oldns:example.com"]
+
+
 def test_resolve_alias_method() -> None:
     """Test the resolve_alias helper directly."""
     auth = AuthorizationConfig(

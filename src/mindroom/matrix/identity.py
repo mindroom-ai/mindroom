@@ -112,7 +112,7 @@ class MatrixID:
         return f"@{self.username}:{self.domain}"
 
     def agent_name(self, config: Config, runtime_paths: RuntimePaths) -> str | None:
-        """Extract agent name if this is a configured agent ID.
+        """Extract agent name if this is one current live managed agent-like ID.
 
         Only IDs whose domain matches the explicit runtime domain are recognised.
         A cross-domain ID like ``@mindroom_assistant:evil.com`` is never
@@ -137,6 +137,10 @@ class MatrixID:
         # respond to router's error messages (e.g., when schedule parsing fails).
         if name == ROUTER_AGENT_NAME or name in config.agents or name in config.teams:
             return name
+        persisted_usernames = managed_account_usernames(runtime_paths)
+        for account_key, active_name in _active_managed_agent_account_names(config).items():
+            if persisted_usernames.get(account_key) == self.username:
+                return active_name
         return None
 
     def __str__(self) -> str:
@@ -200,17 +204,7 @@ def extract_agent_name(sender_id: str, config: Config, runtime_paths: RuntimePat
     if not sender_id.startswith("@") or ":" not in sender_id:
         return None
     mid = MatrixID.parse(sender_id)
-    agent_name = mid.agent_name(config, runtime_paths)
-    if agent_name is not None:
-        return agent_name
-    if mid.domain != config.get_domain(runtime_paths):
-        return None
-
-    persisted_usernames = managed_account_usernames(runtime_paths)
-    for account_key, active_name in _active_managed_agent_account_names(config).items():
-        if persisted_usernames.get(account_key) == mid.username:
-            return active_name
-    return None
+    return mid.agent_name(config, runtime_paths)
 
 
 def _active_managed_account_keys(config: Config) -> frozenset[str]:
