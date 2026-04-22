@@ -381,9 +381,16 @@ def _install_real_elapsed_wait_for_ready(
     backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
 
 
-def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:  # noqa: PLR0915
+def test_kubernetes_backend_ensures_worker_service_and_deployment(tmp_path: Path) -> None:  # noqa: PLR0915
     """Ensuring one worker should create a service/deployment pair on shared storage."""
-    backend, apps_api, core_api = _backend(owner_deployment_name="mindroom-demo")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        owner_deployment_name="mindroom-demo",
+    )
     worker_key = _TEST_SCOPED_WORKER_KEY_A
 
     handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
@@ -596,8 +603,12 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert not local_credentials_path.exists()
 
 
-def test_kubernetes_backend_uses_provided_validation_snapshot() -> None:
+def test_kubernetes_backend_uses_provided_validation_snapshot(tmp_path: Path) -> None:
     """Worker env should reflect the authoritative snapshot passed into the backend."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
     custom_snapshot = {
         "worker_only": {
             "config_fields": [],
@@ -607,6 +618,7 @@ def test_kubernetes_backend_uses_provided_validation_snapshot() -> None:
         },
     }
     backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
         owner_deployment_name="mindroom-demo",
         tool_validation_snapshot=custom_snapshot,
     )
@@ -1513,7 +1525,7 @@ def test_kubernetes_backend_recreate_metadata_patch_failure_is_normalized(tmp_pa
 
 
 def test_kubernetes_backend_ready_metadata_patch_failure_is_normalized(tmp_path: Path) -> None:
-    """A failed ready-status patch should emit failed progress and persist failed worker state."""
+    """A failed ready-status patch should fail ensure_worker without tearing down a healthy worker."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
@@ -1570,11 +1582,61 @@ def test_kubernetes_backend_ready_metadata_patch_failure_is_normalized(tmp_path:
 
     worker_id = next(iter(apps_api.deployments))
     deployment = apps_api.deployments[worker_id]
-    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
-    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == "ready patch failed"
-    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "2"
-    assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "11.0"
+    assert deployment.spec.replicas == 1
+    assert worker_id in core_api.services
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] != "failed"
     assert [event.phase for event in events] == ["cold_start", "failed"]
+
+
+@pytest.mark.parametrize(
+    ("failure_target", "error_message"),
+    [
+        ("apply_deployment", "deployment reconcile failed"),
+        ("apply_service", "service apply failed"),
+    ],
+)
+def test_kubernetes_backend_warm_reconcile_failures_are_non_destructive(
+    tmp_path: Path,
+    failure_target: str,
+    error_message: str,
+) -> None:
+    """Warm reconcile failures should fail ensure_worker without tearing down the existing worker."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    if failure_target == "apply_deployment":
+
+        def apply_deployment_with_failure(**_kwargs: object) -> object:
+            msg = error_message
+            raise RuntimeError(msg)
+
+        backend._resources.apply_deployment = apply_deployment_with_failure
+    else:
+
+        def apply_service_with_failure(worker_id: str) -> None:
+            _ = worker_id
+            msg = error_message
+            raise RuntimeError(msg)
+
+        backend._resources.apply_service = apply_service_with_failure
+
+    events: list[WorkerReadyProgress] = []
+    with pytest.raises(WorkerBackendError, match=error_message):
+        backend.ensure_worker(
+            WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
+            now=11.0,
+            progress_sink=events.append,
+        )
+
+    deployment = apps_api.deployments[handle.worker_id]
+    assert deployment.spec.replicas == 1
+    assert handle.worker_id in core_api.services
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] != "failed"
+    assert [event.phase for event in events] == []
 
 
 @pytest.mark.parametrize(

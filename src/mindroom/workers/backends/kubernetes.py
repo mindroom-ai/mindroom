@@ -376,6 +376,7 @@ class KubernetesWorkerBackend:
                 should_report_progress = should_restart or existing is None or not self._deployment_ready(existing)
                 poll_reporter: Callable[[float], None] | None = None
                 finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = _noop_finalize_progress
+                destructive_failure_allowed = current_handle is None or current_handle.status != "ready"
                 if should_report_progress:
                     poll_reporter, finalize_progress = _build_progress_reporter(
                         worker_key=worker_key,
@@ -393,6 +394,7 @@ class KubernetesWorkerBackend:
                         private_agent_names=spec.private_agent_names,
                     )
                     startup_triggered = should_restart or deployment_apply.recreated
+                    destructive_failure_allowed = startup_triggered
                     if startup_triggered and not should_report_progress:
                         poll_reporter, finalize_progress = _build_progress_reporter(
                             worker_key=worker_key,
@@ -426,13 +428,14 @@ class KubernetesWorkerBackend:
                         deployment_ready_fn=self._deployment_ready,
                         on_poll_tick=poll_reporter,
                     )
+                    destructive_failure_allowed = False
                     final_annotations = dict(annotations)
                     final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
                     self._resources.patch_deployment(worker_id, annotations=final_annotations)
                 except Exception as exc:
                     failure_reason = str(exc)
                     finalize_progress("failed", failure_reason)
-                    if self._resources.read_deployment(worker_id) is not None:
+                    if destructive_failure_allowed and self._resources.read_deployment(worker_id) is not None:
                         self.record_failure(
                             worker_key,
                             failure_reason,
