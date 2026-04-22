@@ -2,7 +2,6 @@
 name: mindroom-docs
 description: MindRoom documentation corpus for accurate product, configuration, and workflow guidance.
 metadata: '{openclaw:{always:true}}'
-user-invocable: true
 ---
 
 # MindRoom Docs

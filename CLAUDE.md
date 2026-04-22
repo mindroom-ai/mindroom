@@ -86,7 +86,7 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 | `matrix/mentions.py` | Matrix mention formatting |
 | `matrix/typing.py` | Typing indicator utilities |
 | `matrix/avatar.py` | Avatar management |
-| `commands/` | Chat command parsing (`!help`, `!schedule`, `!skill`, etc.) |
+| `commands/` | Chat command parsing (`!help`, `!schedule`, `!config`, etc.) |
 | `commands/config_commands.py` | Chat-based config commands (`!config`) |
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
 | `voice_handler.py` | Voice message download, transcription, and command recognition |

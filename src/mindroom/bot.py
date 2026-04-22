@@ -507,7 +507,6 @@ class AgentBot:
                 runtime=self._runtime_view,
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
-                storage_path=self.storage_path,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
                 conversation_cache=self._conversation_cache,

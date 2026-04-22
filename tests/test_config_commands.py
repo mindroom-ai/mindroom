@@ -242,17 +242,13 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         client=AsyncMock(),
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
-        storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value=None),
-        send_skill_command_response=AsyncMock(return_value=None),
-        run_skill_command_tool=AsyncMock(return_value=""),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(
@@ -284,17 +280,13 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         client=AsyncMock(),
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
-        send_skill_command_response=AsyncMock(return_value=None),
-        run_skill_command_tool=AsyncMock(return_value=""),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(
@@ -338,17 +330,13 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
         client=AsyncMock(),
         config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        requester_user_id_for_event=MagicMock(return_value="@admin:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
-        send_skill_command_response=AsyncMock(return_value=None),
-        run_skill_command_tool=AsyncMock(return_value=""),
         reload_plugins=reload_plugins,
     )
     await handle_command(
@@ -399,17 +387,13 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        requester_user_id_for_event=MagicMock(return_value="@telegram_admin:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
-        send_skill_command_response=AsyncMock(return_value=None),
-        run_skill_command_tool=AsyncMock(return_value=""),
         reload_plugins=reload_plugins,
     )
 
@@ -440,17 +424,13 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
         client=AsyncMock(),
         config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        requester_user_id_for_event=MagicMock(return_value="@admin:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
-        send_skill_command_response=AsyncMock(return_value=None),
-        run_skill_command_tool=AsyncMock(return_value=""),
         reload_plugins=reload_plugins,
     )
 
@@ -475,17 +455,13 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         client=AsyncMock(),
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$preview"),
-        send_skill_command_response=AsyncMock(return_value=None),
-        run_skill_command_tool=AsyncMock(return_value=""),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(
@@ -559,17 +535,13 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         client=AsyncMock(),
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        storage_path=tmp_path,
         logger=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$preview"),
-        send_skill_command_response=AsyncMock(return_value=None),
-        run_skill_command_tool=AsyncMock(return_value=""),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(

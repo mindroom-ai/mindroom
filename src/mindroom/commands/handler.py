@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import inspect
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.agents import build_agent_toolkit, get_agent_toolkit_names
-from mindroom.authorization import get_available_agents_for_sender_authoritative
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help
@@ -15,7 +12,6 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
-from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.scheduling import (
     SchedulingRuntime,
     cancel_all_scheduled_tasks,
@@ -25,54 +21,21 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
-from mindroom.tool_system.metadata import TOOL_METADATA, ToolMetadata
-from mindroom.tool_system.runtime_context import (
-    ToolDispatchContext,
-    runtime_context_from_dispatch_context,
-    tool_runtime_context,
-)
-from mindroom.tool_system.worker_routing import (
-    ToolExecutionIdentity,
-    tool_execution_identity,
-)
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
-    from pathlib import Path
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
     import structlog
-    from agno.tools.function import Function
-    from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
     from mindroom.hooks.types import HookMatrixAdmin
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
-    from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.plugins import PluginReloadResult
 
 logger = get_logger(__name__)
-
-_SPECIAL_TOOLKIT_FUNCTION_NAMES = {
-    "compact_context": frozenset({"compact_context"}),
-    "delegate": frozenset({"delegate_task"}),
-    "dynamic_tools": frozenset({"list_toolkits", "load_tools", "unload_tools"}),
-    "memory": frozenset(
-        {"add_memory", "search_memories", "list_memories", "get_memory", "update_memory", "delete_memory"},
-    ),
-    "self_config": frozenset({"get_own_config", "update_own_config"}),
-}
-_TOOLKIT_INFRASTRUCTURE_FUNCTION_NAMES = frozenset(
-    {
-        "close",
-        "connect",
-        "get_async_functions",
-        "get_functions",
-        "register",
-    },
-)
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
@@ -117,17 +80,13 @@ class CommandHandlerContext:
     client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
-    storage_path: Path
     logger: structlog.stdlib.BoundLogger
     derive_conversation_context: DeriveConversationContext
     conversation_cache: ConversationCacheProtocol
     event_cache: ConversationEventCache
-    requester_user_id_for_event: Callable[[CommandEvent], str]
     build_message_target: Callable[..., MessageTarget]
     record_handled_turn: Callable[[HandledTurnState], None]
     send_response: Callable[..., Awaitable[str | None]]
-    send_skill_command_response: Callable[..., Awaitable[str | None]]
-    run_skill_command_tool: Callable[..., Awaitable[str]]
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
 
@@ -224,378 +183,6 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     plugin_label = "plugin" if plugin_count == 1 else "plugins"
     active_plugins = ", ".join(result.active_plugin_names) if result.active_plugin_names else "none"
     return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
-
-
-async def _resolve_skill_command_agent(  # noqa: C901
-    skill_name: str,
-    *,
-    client: nio.AsyncClient,
-    config: Config,
-    room: nio.MatrixRoom,
-    mentioned_agents: list[MatrixID],
-    requester_user_id: str,
-    runtime_paths: RuntimePaths,
-) -> tuple[str | None, str | None]:
-    requested = skill_name.strip().lower()
-    mentioned_names: list[str] = []
-    for mid in mentioned_agents:
-        name = mid.agent_name(config, runtime_paths)
-        if not name or name == ROUTER_AGENT_NAME:
-            continue
-        mentioned_names.append(name)
-    unique_mentions = list(dict.fromkeys(mentioned_names))
-    if len(unique_mentions) > 1:
-        return None, f"❌ Multiple agents mentioned: {', '.join(unique_mentions)}. Mention only one."
-
-    agents_in_room = await get_available_agents_for_sender_authoritative(
-        client,
-        room,
-        requester_user_id,
-        config,
-        runtime_paths,
-    )
-    candidate_names: list[str] = []
-    for mid in agents_in_room:
-        name = mid.agent_name(config, runtime_paths)
-        if not name:
-            continue
-        if name not in config.agents:
-            continue
-        allowlist = {skill.lower() for skill in config.get_agent(name).skills}
-        if requested in allowlist:
-            candidate_names.append(name)
-    candidate_names = list(dict.fromkeys(candidate_names))
-
-    if unique_mentions:
-        target = unique_mentions[0]
-        if target not in candidate_names:
-            return None, f"❌ Agent '{target}' does not have skill '{skill_name}' enabled in this room."
-        return target, None
-
-    if len(candidate_names) == 1:
-        return candidate_names[0], None
-
-    if not candidate_names:
-        return None, f"❌ No agents in this room have skill '{skill_name}' enabled."
-
-    return None, (
-        f"❌ Multiple agents have skill '{skill_name}': {', '.join(candidate_names)}. "
-        "Mention one with @mindroom_<agent>."
-    )
-
-
-def _collect_agent_toolkits(
-    config: Config,
-    agent_name: str,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> tuple[list[tuple[str, Toolkit]], dict[str, Exception]]:
-    tool_names = get_agent_toolkit_names(agent_name, config)
-    if not tool_names:
-        return [], {}
-
-    worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
-    agent_runtime = resolve_agent_runtime(
-        agent_name,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-        create=True,
-    )
-    toolkits: list[tuple[str, Toolkit]] = []
-    build_errors: dict[str, Exception] = {}
-    for tool_name in tool_names:
-        try:
-            toolkit = build_agent_toolkit(
-                tool_name=tool_name,
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                worker_tools=worker_tools,
-                agent_runtime=agent_runtime,
-                execution_identity=execution_identity,
-            )
-            if toolkit is None:
-                continue
-            toolkits.append((tool_name, toolkit))
-        except ValueError as exc:
-            build_errors[tool_name] = exc
-            logger.warning(
-                "Failed to load tool for skill dispatch",
-                tool=tool_name,
-                agent=agent_name,
-                error=str(exc),
-            )
-        except ImportError as exc:
-            build_errors[tool_name] = exc
-            logger.warning(
-                "Failed to load tool for skill dispatch",
-                tool=tool_name,
-                agent=agent_name,
-                error=str(exc),
-            )
-    return toolkits, build_errors
-
-
-def _toolkit_declared_function_names(tool_name: str) -> frozenset[str]:
-    metadata = TOOL_METADATA.get(tool_name)
-    special_function_names = _SPECIAL_TOOLKIT_FUNCTION_NAMES.get(tool_name)
-    if special_function_names is not None:
-        return special_function_names
-    if metadata is None:
-        return frozenset()
-    if metadata.function_names:
-        return frozenset(metadata.function_names)
-    toolkit_type = _toolkit_type_for_declared_function_names(metadata)
-    if not isinstance(toolkit_type, type):
-        return frozenset()
-    return frozenset(
-        name
-        for name, value in inspect.getmembers(toolkit_type, callable)
-        if callable(value)
-        and not name.startswith("_")
-        and name != "__init__"
-        and name not in _TOOLKIT_INFRASTRUCTURE_FUNCTION_NAMES
-    )
-
-
-def _toolkit_type_for_declared_function_names(metadata: ToolMetadata) -> type[Toolkit] | None:
-    factory = metadata.factory
-    if factory is None:
-        return None
-    try:
-        toolkit_type = factory()
-    except Exception:
-        return None
-    return toolkit_type if isinstance(toolkit_type, type) else None
-
-
-def _matching_tool_build_errors(
-    command_tool: str,
-    build_errors: dict[str, Exception],
-) -> list[tuple[str, Exception]]:
-    if "." in command_tool:
-        toolkit_name, _ = command_tool.split(".", 1)
-        error = build_errors.get(toolkit_name)
-        return [(toolkit_name, error)] if error is not None else []
-
-    direct_tool_error = build_errors.get(command_tool)
-    if direct_tool_error is not None:
-        return [(command_tool, direct_tool_error)]
-
-    return [
-        (toolkit_name, error)
-        for toolkit_name, error in build_errors.items()
-        if command_tool in _toolkit_declared_function_names(toolkit_name)
-    ]
-
-
-def _format_toolkit_candidates(
-    loaded_toolkits: set[str],
-    failed_toolkits: list[tuple[str, Exception]],
-) -> str:
-    labels = sorted(loaded_toolkits)
-    labels.extend(f"{tool_name} (failed: {error})" for tool_name, error in sorted(failed_toolkits))
-    return ", ".join(labels)
-
-
-def _resolve_tool_dispatch_target(  # noqa: C901, PLR0911, PLR0912
-    toolkits: list[tuple[str, Toolkit]],
-    build_errors: dict[str, Exception],
-    command_tool: str,
-) -> tuple[Function | None, Toolkit | None, str | None]:
-    if not command_tool:
-        return None, None, "Missing command-tool for tool dispatch."
-
-    if "." in command_tool:
-        toolkit_name, function_name = command_tool.split(".", 1)
-        toolkit_error = build_errors.get(toolkit_name)
-        if toolkit_error is not None:
-            return None, None, f"Tool '{command_tool}' failed: {toolkit_error}"
-        for registered_name, toolkit in toolkits:
-            if registered_name != toolkit_name:
-                continue
-            function = toolkit.functions.get(function_name) or toolkit.async_functions.get(function_name)
-            if function:
-                return function, toolkit, None
-        return None, None, f"Tool '{toolkit_name}' does not expose '{function_name}'."
-
-    matches: list[tuple[Function, Toolkit, str]] = []
-    for registered_name, toolkit in toolkits:
-        function = toolkit.functions.get(command_tool) or toolkit.async_functions.get(command_tool)
-        if function:
-            matches.append((function, toolkit, registered_name))
-
-    matching_build_errors = _matching_tool_build_errors(command_tool, build_errors)
-    if len(matches) == 1 and not matching_build_errors:
-        function, toolkit, _ = matches[0]
-        return function, toolkit, None
-
-    if matches:
-        toolkit_names = _format_toolkit_candidates(
-            {name for _, _, name in matches},
-            matching_build_errors,
-        )
-        return None, None, f"Command tool '{command_tool}' is ambiguous across toolkits: {toolkit_names}."
-
-    for registered_name, toolkit in toolkits:
-        if registered_name != command_tool:
-            continue
-        functions = {**toolkit.functions, **toolkit.async_functions}
-        if not functions:
-            return None, None, f"Tool '{command_tool}' has no callable functions."
-        if len(functions) == 1:
-            return next(iter(functions.values())), toolkit, None
-        return None, None, f"Tool '{command_tool}' exposes multiple functions; specify one."
-
-    if len(matching_build_errors) == 1:
-        _, error = matching_build_errors[0]
-        return None, None, f"Tool '{command_tool}' failed: {error}"
-    if len(matching_build_errors) > 1:
-        joined_errors = "; ".join(f"{tool_name}: {error}" for tool_name, error in matching_build_errors)
-        return None, None, f"Tool '{command_tool}' failed: {joined_errors}"
-
-    return None, None, f"Tool '{command_tool}' not found for this agent."
-
-
-@dataclass(frozen=True)
-class _ToolCallArguments:
-    """Prepared arguments for a tool call."""
-
-    args: tuple[object, ...]
-    kwargs: dict[str, object]
-    error: str | None = None
-
-
-def _prepare_tool_call_arguments(  # noqa: PLR0911
-    entrypoint: Callable[..., object] | None,
-    base_args: Mapping[str, object],
-) -> _ToolCallArguments:
-    if entrypoint is None:
-        return _ToolCallArguments((), {}, "Tool entrypoint is missing.")
-
-    signature = inspect.signature(entrypoint)
-    params = list(signature.parameters.values())
-    has_var_kw = any(param.kind == param.VAR_KEYWORD for param in params)
-    if has_var_kw:
-        return _ToolCallArguments((), dict(base_args), None)
-
-    kwargs = {key: value for key, value in base_args.items() if key in signature.parameters}
-    if kwargs:
-        missing = [
-            param.name
-            for param in params
-            if param.default is param.empty
-            and param.kind
-            in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            )
-            and param.name not in kwargs
-        ]
-        if missing:
-            return _ToolCallArguments((), {}, f"Tool requires parameters: {', '.join(missing)}.")
-        return _ToolCallArguments((), kwargs, None)
-
-    if not params:
-        return _ToolCallArguments((), {}, None)
-
-    if len(params) == 1 and params[0].kind in (
-        inspect.Parameter.POSITIONAL_ONLY,
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-    ):
-        return _ToolCallArguments((base_args.get("command", ""),), {}, None)
-
-    missing = [
-        param.name
-        for param in params
-        if param.default is param.empty
-        and param.kind
-        in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        )
-    ]
-    if missing:
-        return _ToolCallArguments((), {}, f"Tool requires parameters: {', '.join(missing)}.")
-    return _ToolCallArguments((), {}, None)
-
-
-async def _maybe_await(value: object) -> object:
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
-async def _run_skill_command_tool(
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    storage_path: Path | None = None,
-    command_tool: str,
-    skill_name: str,
-    args_text: str,
-    dispatch_context: ToolDispatchContext,
-    command_name: str = "skill",
-) -> str:
-    effective_runtime_paths = (
-        runtime_paths
-        if storage_path is None or storage_path == runtime_paths.storage_root
-        else replace(runtime_paths, storage_root=storage_path)
-    )
-
-    try:
-        with (
-            tool_runtime_context(runtime_context_from_dispatch_context(dispatch_context)),
-            tool_execution_identity(
-                dispatch_context.execution_identity,
-            ),
-        ):
-            toolkits, build_errors = _collect_agent_toolkits(
-                config,
-                agent_name,
-                effective_runtime_paths,
-                execution_identity=dispatch_context.execution_identity,
-            )
-            function, toolkit, error = _resolve_tool_dispatch_target(toolkits, build_errors, command_tool)
-            if error:
-                return f"❌ {error}"
-            assert function is not None
-
-            base_args = {
-                "command": args_text,
-                "commandName": command_name,
-                "skillName": skill_name,
-            }
-            entrypoint = function.entrypoint
-            call_args = _prepare_tool_call_arguments(entrypoint, base_args)
-            if call_args.error:
-                return f"❌ {call_args.error}"
-            assert entrypoint is not None
-
-            if toolkit and toolkit.requires_connect:
-                await _maybe_await(toolkit.connect())
-                try:
-                    result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
-                finally:
-                    await _maybe_await(toolkit.close())
-            else:
-                result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
-    except Exception as exc:
-        logger.warning(
-            "Skill command tool dispatch failed",
-            agent=agent_name,
-            tool=command_tool,
-            error=str(exc),
-        )
-        return f"❌ Tool '{command_tool}' failed: {exc}"
-
-    if result is None or result == "":
-        return "✅ Tool completed."
-    return str(result)
 
 
 async def handle_command(  # noqa: C901, PLR0912, PLR0915

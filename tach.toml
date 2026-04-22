@@ -1858,7 +1858,6 @@ expose = [
     "get_skill_snapshot",
     "get_user_skills_dir",
     "list_skill_listings",
-    "resolve_skill_command_spec",
     "resolve_skill_listing",
     "set_plugin_skill_roots",
     "skill_can_edit",

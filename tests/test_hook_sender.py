@@ -50,7 +50,6 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     install_runtime_cache_support,
-    install_send_skill_command_response_mock,
     orchestrator_runtime_paths,
     replace_turn_controller_deps,
     replace_turn_policy_deps,
@@ -1714,70 +1713,6 @@ async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: 
     )
 
     bot._turn_policy.plan_turn.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_hook_dispatch_skill_command_preserves_source_envelope_in_runtime(tmp_path: Path) -> None:
-    """Skill-command responses should inherit hook provenance and synthetic depth."""
-    bot = _hook_bot(tmp_path)
-    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
-    event = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$hook-skill",
-            "sender": "@mindroom_router:localhost",
-            "origin_server_ts": 1234567890,
-            "content": {
-                "msgtype": "m.text",
-                "body": "!skill demo summarize",
-                "com.mindroom.source_kind": "hook_dispatch",
-                "com.mindroom.hook_source": "origin-plugin:message:received",
-                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
-            },
-        },
-    )
-    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=event)
-    bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=MessageContext(
-            am_i_mentioned=False,
-            is_thread=False,
-            thread_id=None,
-            thread_history=[],
-            mentioned_agents=[],
-            has_non_agent_mentions=False,
-        ),
-    )
-    bot._send_skill_command_response = AsyncMock(return_value="$skill-reply")
-    install_send_skill_command_response_mock(bot, bot._send_skill_command_response)
-
-    async def fake_handle_command(
-        *,
-        context: object,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
-        command: object,
-        requester_user_id: str,
-    ) -> None:
-        del command
-        await context.send_skill_command_response(
-            room_id=room.room_id,
-            reply_to_event_id=event.event_id,
-            thread_id=None,
-            thread_history=[],
-            prompt="Use demo skill",
-            agent_name="code",
-            user_id=requester_user_id,
-            reply_to_event=event,
-        )
-
-    with patch("mindroom.turn_controller.handle_command", new=fake_handle_command):
-        await bot._turn_controller._dispatch_text_message(
-            room,
-            _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
-        )
-
-    source_envelope = bot._send_skill_command_response.await_args.kwargs["source_envelope"]
-    assert source_envelope.hook_source == "origin-plugin:message:received"
-    assert source_envelope.message_received_depth == 1
 
 
 @pytest.mark.asyncio

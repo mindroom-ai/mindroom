@@ -47,7 +47,6 @@ __all__ = [
     "install_generate_response_mock",
     "install_runtime_cache_support",
     "install_send_response_mock",
-    "install_send_skill_command_response_mock",
     "make_conversation_cache_mock",
     "make_event_cache_mock",
     "make_event_cache_write_coordinator_mock",
@@ -734,13 +733,6 @@ def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
     bot._delivery_gateway.edit_text = AsyncMock(side_effect=_edit_text)
     replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
-
-
-def install_send_skill_command_response_mock(bot: RuntimeBot, send_skill_command_response: AsyncMock) -> None:
-    """Route skill-command dispatch through one test mock on the real owner."""
-    wrap_extracted_collaborators(bot, "_response_runner")
-    bot._response_runner.send_skill_command_response = send_skill_command_response
-    replace_turn_controller_deps(bot, response_runner=bot._response_runner)
 
 
 @pytest.fixture
