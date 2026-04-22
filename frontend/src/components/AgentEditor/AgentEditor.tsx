@@ -1895,7 +1895,7 @@ export function AgentEditor() {
           defaultValue: defaultCompressToolResults,
           helperText: `Compress tool results in history to save context (global default: ${
             defaultCompressToolResults ? "on" : "off"
-          })`,
+          }). On Anthropic/Vertex Claude, enabling this can invalidate prompt-cache prefixes.`,
           onChange: (value) =>
             handleFieldChange("compress_tool_results", value),
         }}

@@ -247,7 +247,7 @@ describe("AgentEditor", () => {
 
     expect(
       screen.getByText(
-        "Compress tool results in history to save context (global default: off)",
+        "Compress tool results in history to save context (global default: off). On Anthropic/Vertex Claude, enabling this can invalidate prompt-cache prefixes.",
       ),
     ).toBeInTheDocument();
   });
