@@ -338,7 +338,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.logging_config",
-    "mindroom.tool_system",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
@@ -1170,6 +1169,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
+    "mindroom",
     "mindroom.avatar_generation",
     "mindroom.cli.banner",
     "mindroom.cli.config",
