@@ -200,7 +200,17 @@ def extract_agent_name(sender_id: str, config: Config, runtime_paths: RuntimePat
     if not sender_id.startswith("@") or ":" not in sender_id:
         return None
     mid = MatrixID.parse(sender_id)
-    return mid.agent_name(config, runtime_paths)
+    agent_name = mid.agent_name(config, runtime_paths)
+    if agent_name is not None:
+        return agent_name
+    if mid.domain != config.get_domain(runtime_paths):
+        return None
+
+    persisted_usernames = managed_account_usernames(runtime_paths)
+    for account_key, active_name in _active_managed_agent_account_names(config).items():
+        if persisted_usernames.get(account_key) == mid.username:
+            return active_name
+    return None
 
 
 def _active_managed_account_keys(config: Config) -> frozenset[str]:
@@ -211,6 +221,14 @@ def _active_managed_account_keys(config: Config) -> frozenset[str]:
     if config.mindroom_user is not None:
         account_keys.add("agent_user")
     return frozenset(account_keys)
+
+
+def _active_managed_agent_account_names(config: Config) -> dict[str, str]:
+    """Return active persisted Matrix account keys mapped to agent/team/router names."""
+    account_names = {f"agent_{ROUTER_AGENT_NAME}": ROUTER_AGENT_NAME}
+    account_names.update({f"agent_{agent_name}": agent_name for agent_name in config.agents})
+    account_names.update({f"agent_{team_name}": team_name for team_name in config.teams})
+    return account_names
 
 
 def _configured_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> set[str]:

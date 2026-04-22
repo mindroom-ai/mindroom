@@ -1194,6 +1194,51 @@ def test_effective_sender_trusts_persisted_current_internal_accounts(tmp_path: P
     )
 
 
+def test_reply_permissions_bypass_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
+    """Current managed accounts should bypass reply allowlists even when their username drifted."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": False,
+            "agent_reply_permissions": {"assistant": ["@alice:example.com"]},
+        },
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_sender_allowed_for_agent_reply("@mindroom_assistant_oldns:example.com", "assistant", config) is True
+
+
+def test_sender_authorization_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
+    """Current managed accounts should stay authorized for room ingress when their username drifted."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": False},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_authorized_sender("@mindroom_assistant_oldns:example.com", config, "!room:example.com") is True
+
+
 def test_resolve_alias_method() -> None:
     """Test the resolve_alias helper directly."""
     auth = AuthorizationConfig(

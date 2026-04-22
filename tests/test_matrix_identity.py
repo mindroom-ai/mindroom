@@ -17,6 +17,7 @@ from mindroom.matrix.identity import (
     extract_agent_name,
     is_agent_id,
 )
+from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -179,3 +180,34 @@ class TestHelperFunctions:
         assert extract_agent_name(f"@mindroom_general:{domain}", self.config, runtime_paths) == "general"
         assert extract_agent_name(f"@user:{domain}", self.config, runtime_paths) is None
         assert extract_agent_name("invalid", self.config, runtime_paths) is None
+
+    def test_extract_agent_name_trusts_persisted_current_username_drift(self, tmp_path: Path) -> None:
+        """Persisted usernames for current managed agents should resolve to their agent name."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        domain = self.config.get_domain(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw")
+        state.save(runtime_paths=runtime_paths)
+
+        assert (
+            extract_agent_name(
+                f"@mindroom_general_oldns:{domain}",
+                self.config,
+                runtime_paths,
+            )
+            == "general"
+        )
+        assert is_agent_id(f"@mindroom_general_oldns:{domain}", self.config, runtime_paths) is True
+
+    def test_extract_agent_name_ignores_removed_persisted_username(self, tmp_path: Path) -> None:
+        """Persisted usernames for removed agents must not stay live-managed."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        domain = self.config.get_domain(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_removed", "mindroom_removed", "pw")
+        state.save(runtime_paths=runtime_paths)
+
+        assert extract_agent_name(f"@mindroom_removed:{domain}", self.config, runtime_paths) is None
+        assert is_agent_id(f"@mindroom_removed:{domain}", self.config, runtime_paths) is False
