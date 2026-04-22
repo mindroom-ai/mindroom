@@ -2642,6 +2642,107 @@ class TestTeamCompletion:
         run_input = mock_team.arun.call_args.args[0]
         assert run_input == "Build it"
 
+    def test_team_streaming_appends_safe_suffix_from_run_completed(self, team_app_client: TestClient) -> None:
+        """Team SSE should append the safe unseen suffix from a terminal completion event."""
+        from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent  # noqa: PLC0415
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="hel")
+            yield TeamRunCompletedEvent(content="hello")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.strip().split("\n\n")
+            if line.startswith("data: {")
+        ]
+        contents = [
+            chunk["choices"][0]["delta"].get("content", "")
+            for chunk in chunks
+            if "content" in chunk["choices"][0]["delta"]
+        ]
+        assert "".join(contents) == "hello"
+
+    def test_team_streaming_does_not_rewrite_emitted_prefix_from_run_completed(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """Team SSE must not rewrite already-emitted prefix text from a terminal completion event."""
+        from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent  # noqa: PLC0415
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="hx")
+            yield TeamRunCompletedEvent(content="hi")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.strip().split("\n\n")
+            if line.startswith("data: {")
+        ]
+        contents = [
+            chunk["choices"][0]["delta"].get("content", "")
+            for chunk in chunks
+            if "content" in chunk["choices"][0]["delta"]
+        ]
+        assert "".join(contents) == "hx"
+
     def test_team_streaming_falls_back_to_final_team_run_output(self, team_app_client: TestClient) -> None:
         """Providers that yield a final TeamRunOutput in stream mode should still emit content."""
         from agno.run.team import TeamRunOutput  # noqa: PLC0415

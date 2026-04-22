@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import typing
+from copy import deepcopy
 from dataclasses import dataclass
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
@@ -73,8 +74,8 @@ class ResponseHookService:
         draft = ResponseDraft(
             response_text=response_text,
             response_kind=response_kind,
-            tool_trace=tool_trace,
-            extra_content=extra_content,
+            tool_trace=deepcopy(tool_trace) if tool_trace is not None else None,
+            extra_content=deepcopy(extra_content) if extra_content is not None else None,
             envelope=envelope,
         )
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_BEFORE_RESPONSE):
@@ -209,6 +210,7 @@ def _late_failure_with_visible_response(
 def _late_delivery_failure_outcome(
     *,
     tracked_event_id: str | None,
+    tracked_event_was_visible: bool,
     existing_event_id: str | None,
     existing_event_is_placeholder: bool,
     placeholder_event_id: str | None,
@@ -235,6 +237,19 @@ def _late_delivery_failure_outcome(
         and existing_event_is_placeholder
         and tracked_event_id == existing_event_id
     ):
+        if tracked_event_was_visible:
+            return _late_failure_with_preserved_stream(
+                cancelled=cancelled,
+                event_id=tracked_event_id,
+                reason=(
+                    failure_reason
+                    or (
+                        "delivery_result_missing_after_visible_placeholder_stream_cancel"
+                        if cancelled
+                        else "delivery_result_missing_after_visible_placeholder_stream"
+                    )
+                ),
+            )
         return _late_failure_without_visible(
             cancelled=cancelled,
             reason=(
@@ -614,6 +629,20 @@ class DeliveryGateway:
             return FinalDeliveryOutcome.suppression_cleanup_failed(
                 last_physical_stream_event_id=event_id,
                 failure_reason=str(error),
+                tool_trace=tool_trace or (),
+                extra_content=extra_content,
+            )
+        except Exception as error:
+            self.deps.logger.exception(
+                "Failed to redact visible response during cleanup",
+                room_id=room_id,
+                event_id=event_id,
+                response_kind=response_kind,
+                correlation_id=correlation_id,
+            )
+            return FinalDeliveryOutcome.suppression_cleanup_failed(
+                last_physical_stream_event_id=event_id,
+                failure_reason=str(error) or failure_reason or f"failed to redact suppressed response {event_id}",
                 tool_trace=tool_trace or (),
                 extra_content=extra_content,
             )
@@ -1275,6 +1304,13 @@ class DeliveryGateway:
                 )
                 return await self.emit_terminal_outcome_hooks(
                     outcome=recovered_outcome,
+                    correlation_id=request.correlation_id,
+                    envelope=request.response_envelope,
+                    response_kind=request.response_kind,
+                )
+            if not final_outcome.emits_after_response:
+                return await self.emit_terminal_outcome_hooks(
+                    outcome=final_outcome,
                     correlation_id=request.correlation_id,
                     envelope=request.response_envelope,
                     response_kind=request.response_kind,

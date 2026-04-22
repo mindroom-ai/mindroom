@@ -148,6 +148,9 @@ async def block_secret_reads(ctx):
 | `compaction:before` | Observer | `CompactionHookContext` | After the compacted message set is prepared and before the compacted session is persisted | None (frozen) |
 | `compaction:after` | Observer | `CompactionHookContext` | After compaction is persisted, with before/after token counts and the generated summary | None (frozen) |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
+
+`message:before_response` only runs for AI-generated replies.
+Command confirmations, routing rejections, and dispatch-failure error messages are delivered as `response_kind="system"` and may emit `message:after_response` / `message:cancelled` without a preceding `message:before_response`.
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |

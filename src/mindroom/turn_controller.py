@@ -668,7 +668,7 @@ class TurnController:
                     target=target,
                     existing_event_id=None,
                     response_text=response_text,
-                    response_kind=("team" if self.deps.agent_name in self.deps.runtime.config.teams else "ai"),
+                    response_kind="system",
                     response_envelope=response_envelope,
                     correlation_id=event.event_id,
                     tool_trace=None,
@@ -949,13 +949,12 @@ class TurnController:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
         )
-        response_kind = "team" if self.deps.agent_name in self.deps.runtime.config.teams else "ai"
         final_outcome = await self.deps.delivery_gateway.deliver_final(
             FinalDeliveryRequest(
                 target=target,
                 existing_event_id=None,
                 response_text=error_text,
-                response_kind=response_kind,
+                response_kind="system",
                 response_envelope=response_envelope,
                 correlation_id=correlation_id,
                 tool_trace=None,
@@ -1017,7 +1016,7 @@ class TurnController:
                     existing_event_id=None,
                     existing_event_is_placeholder=False,
                     response_text=action.rejection_message,
-                    response_kind=("team" if self.deps.agent_name in self.deps.runtime.config.teams else "ai"),
+                    response_kind="system",
                     response_envelope=dispatch.envelope,
                     correlation_id=dispatch.correlation_id,
                     tool_trace=None,

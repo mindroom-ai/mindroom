@@ -631,3 +631,62 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
     assert outcome.visible_response_event_id == "$placeholder"
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].visible_response_event_id == "$placeholder"
+
+
+@pytest.mark.asyncio
+async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_after_cleanup_attempt(
+    tmp_path: Path,
+) -> None:
+    """Redaction exceptions should still canonicalize to suppression_cleanup_failed."""
+    cancelled_seen: list[CancelledResponseInfo] = []
+
+    @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+    async def suppress_response(ctx: BeforeResponseContext) -> None:
+        ctx.draft.suppress = True
+
+    @hook(EVENT_MESSAGE_CANCELLED)
+    async def on_cancelled(ctx: CancelledResponseContext) -> None:
+        cancelled_seen.append(ctx.info)
+
+    registry = HookRegistry.from_plugins(
+        [_plugin("test-suppression-cleanup-exception", [suppress_response, on_cancelled])],
+    )
+    config, response_hooks = _response_hook_service(tmp_path, registry)
+
+    async def redact_message_event(*, room_id: str, event_id: str, reason: str) -> bool:
+        del room_id, event_id, reason
+        assert cancelled_seen == []
+        message = "redaction transport failed"
+        raise RuntimeError(message)
+
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(side_effect=redact_message_event),
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    outcome = await gateway.deliver_final(
+        FinalDeliveryRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            existing_event_id="$placeholder",
+            existing_event_is_placeholder=True,
+            response_text="suppressed",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-suppressed-cleanup-exception",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert outcome.state == "suppression_cleanup_failed"
+    assert outcome.visible_response_event_id == "$placeholder"
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].visible_response_event_id == "$placeholder"

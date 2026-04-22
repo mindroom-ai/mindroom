@@ -171,6 +171,16 @@ def _visible_body_state_for_text(
     return text, "visible_body"
 
 
+def _stream_state_has_visible_body(stream_state: StreamDeliveryState | None) -> bool:
+    """Return whether streaming already exposed real visible body text."""
+    if stream_state is None:
+        return False
+    if stream_state.finalization_outcome is not None:
+        return stream_state.finalization_outcome.has_rendered_visible_body
+    _, visible_body_state = _visible_body_state_for_text(stream_state.accumulated_text)
+    return visible_body_state == "visible_body"
+
+
 def _stream_transport_outcome_from_delivery_exception(
     *,
     error: StreamingDeliveryError | StreamingDeliveryCancelled,
@@ -1517,6 +1527,7 @@ class ResponseRunner:
             thinking_msg = "🤝 Team Response: Thinking..."
 
         run_message_id: str | None = None
+        stream_transport_outcome: StreamTransportOutcome | None = None
 
         def note_task_cancelled(failure_reason: str) -> None:
             nonlocal delivery_failure_reason
@@ -1599,6 +1610,11 @@ class ResponseRunner:
             final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=_late_delivery_failure_outcome(
                     tracked_event_id=tracked_event_id,
+                    tracked_event_was_visible=(
+                        stream_transport_outcome.has_rendered_visible_body
+                        if stream_transport_outcome is not None
+                        else False
+                    ),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                     placeholder_event_id=run_message_id if request.existing_event_id is None else None,
@@ -1612,6 +1628,11 @@ class ResponseRunner:
             final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=_late_delivery_failure_outcome(
                     tracked_event_id=tracked_event_id,
+                    tracked_event_was_visible=(
+                        stream_transport_outcome.has_rendered_visible_body
+                        if stream_transport_outcome is not None
+                        else False
+                    ),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                     placeholder_event_id=run_message_id if request.existing_event_id is None else None,
@@ -2575,6 +2596,7 @@ class ResponseRunner:
             final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=_late_delivery_failure_outcome(
                     tracked_event_id=tracked_event_id,
+                    tracked_event_was_visible=_stream_state_has_visible_body(stream_state),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                     placeholder_event_id=run_message_id if request.existing_event_id is None else None,
@@ -2588,6 +2610,7 @@ class ResponseRunner:
             final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=_late_delivery_failure_outcome(
                     tracked_event_id=tracked_event_id,
+                    tracked_event_was_visible=_stream_state_has_visible_body(stream_state),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                     placeholder_event_id=run_message_id if request.existing_event_id is None else None,

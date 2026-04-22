@@ -25,6 +25,7 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
+from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
@@ -109,6 +110,30 @@ class _AssistantTextStreamState:
     """Track assistant text already exposed to the SSE client."""
 
     emitted_text: str = ""
+
+
+def _record_assistant_delta(delta: str, assistant_state: _AssistantTextStreamState) -> list[str]:
+    """Append streamed assistant text to the emitted prefix."""
+    if not delta:
+        return []
+    assistant_state.emitted_text = f"{assistant_state.emitted_text}{delta}"
+    return [delta]
+
+
+def _project_final_assistant_text(
+    final_text: str,
+    assistant_state: _AssistantTextStreamState,
+) -> list[str]:
+    """Project canonical final text onto SSE without rewriting emitted bytes."""
+    prior_emitted_text = assistant_state.emitted_text
+    assistant_state.emitted_text = final_text
+    if final_text and not prior_emitted_text:
+        return [final_text]
+    if final_text.startswith(prior_emitted_text):
+        suffix = final_text[len(prior_emitted_text) :]
+        if suffix:
+            return [suffix]
+    return []
 
 
 def _load_config(
@@ -1076,36 +1101,21 @@ def _extract_stream_deltas(
     `RunCompletedEvent.content` to append an unseen suffix when it cleanly
     extends the emitted prefix, and otherwise keep the already-emitted text.
     """
-    deltas: list[str] = []
-
     if isinstance(event, RunContentEvent):
         if event.content:
-            delta = str(event.content)
-            assistant_state.emitted_text = f"{assistant_state.emitted_text}{delta}"
-            deltas.append(delta)
-        return deltas
+            return _record_assistant_delta(str(event.content), assistant_state)
+        return []
 
     if isinstance(event, RunCompletedEvent) and event.content is not None:
-        final_text = str(event.content)
-        prior_emitted_text = assistant_state.emitted_text
-        assistant_state.emitted_text = final_text
-        if final_text and not prior_emitted_text:
-            deltas.append(final_text)
-            return deltas
-        if final_text.startswith(prior_emitted_text):
-            suffix = final_text[len(prior_emitted_text) :]
-            if suffix:
-                deltas.append(suffix)
-        return deltas
+        return _project_final_assistant_text(str(event.content), assistant_state)
 
     if isinstance(event, str):
-        assistant_state.emitted_text = f"{assistant_state.emitted_text}{event}"
-        return [event]
+        return _record_assistant_delta(event, assistant_state)
 
     delta = _extract_stream_text(event, tool_state)
     if delta:
-        deltas.append(delta)
-    return deltas
+        return [delta]
+    return []
 
 
 async def _stream_completion(
@@ -1579,6 +1589,30 @@ def _classify_team_event(
     return None
 
 
+def _extract_team_stream_deltas(
+    event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput,
+    tool_state: _ToolStreamState,
+    assistant_state: _AssistantTextStreamState,
+) -> list[str]:
+    """Extract team SSE deltas using the same safe suffix-extension rule as agent SSE."""
+    if isinstance(event, TeamContentEvent) and event.content:
+        return _record_assistant_delta(str(event.content), assistant_state)
+
+    if isinstance(event, TeamRunCompletedEvent) and event.content is not None:
+        return _project_final_assistant_text(str(event.content), assistant_state)
+
+    if isinstance(event, (TeamRunOutput, RunOutput)):
+        final_text = _format_team_output(event).strip()
+        if not final_text:
+            return []
+        return _project_final_assistant_text(final_text, assistant_state)
+
+    delta = _classify_team_event(event, tool_state)
+    if delta is not None:
+        return [delta]
+    return []
+
+
 def _finalize_pending_tools(tool_state: _ToolStreamState) -> str | None:
     """Build done tags for tool calls that started but never completed."""
     if not tool_state.tool_ids_by_call_id:
@@ -1610,6 +1644,7 @@ async def _team_stream_event_generator(
     ``first_event`` is guaranteed to be non-error.
     """
     tool_state = _ToolStreamState()
+    assistant_state = _AssistantTextStreamState()
 
     def _chunk(content: str) -> str:
         return f"data: {_chunk_json(completion_id, created, model_id, delta={'content': content})}\n\n"
@@ -1618,9 +1653,8 @@ async def _team_stream_event_generator(
     yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
     # 2. First event (guaranteed non-error by preflight)
-    text = _classify_team_event(first_event, tool_state)
-    if text:
-        yield _chunk(text)
+    for delta in _extract_team_stream_deltas(first_event, tool_state, assistant_state):
+        yield _chunk(delta)
 
     # 3. Remaining events
     try:
@@ -1633,9 +1667,8 @@ async def _team_stream_event_generator(
                 yield _chunk("Team execution failed.")
                 break
 
-            text = _classify_team_event(event, tool_state)
-            if text:
-                yield _chunk(text)
+            for delta in _extract_team_stream_deltas(event, tool_state, assistant_state):
+                yield _chunk(delta)
     except Exception:
         logger.exception("Team stream failed during iteration", team=team_name)
         pending = _finalize_pending_tools(tool_state)

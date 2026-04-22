@@ -56,6 +56,36 @@ def _error_resolution() -> TurnDeliveryResolution:
     )
 
 
+def _command_handler_context(
+    tmp_path: Path,
+    *,
+    config: object | None = None,
+    send_response: AsyncMock | None = None,
+    reload_plugins: AsyncMock | None = None,
+) -> CommandHandlerContext:
+    return CommandHandlerContext(
+        client=AsyncMock(),
+        config=(
+            config
+            if config is not None
+            else SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"]))
+        ),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        storage_path=tmp_path,
+        logger=MagicMock(),
+        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
+        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
+        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        record_handled_turn=MagicMock(),
+        send_response=send_response or AsyncMock(return_value=_final_visible_resolution("$reply")),
+        send_skill_command_response=AsyncMock(return_value=_error_resolution()),
+        run_skill_command_tool=AsyncMock(return_value=""),
+        reload_plugins=reload_plugins,
+    )
+
+
 class TestCommandParser:
     """Test config command parsing."""
 
@@ -503,6 +533,108 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
         context.send_response.await_args.args[2]
         == "❌ Plugin reload failed: Plugin hooks module not found: /tmp/demo/hooks.py"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "patch_target", "patch_return_value"),
+    [
+        (
+            Command(
+                type=CommandType.SCHEDULE,
+                args={"full_text": "in 5 minutes Check deployment"},
+                raw_text="!schedule",
+            ),
+            "mindroom.commands.handler.schedule_task",
+            ("task123", "✅ Scheduled: 5 minutes from now"),
+        ),
+        (
+            Command(
+                type=CommandType.CANCEL_SCHEDULE,
+                args={"cancel_all": False, "task_id": "task123"},
+                raw_text="!cancel_schedule task123",
+            ),
+            "mindroom.commands.handler.cancel_scheduled_task",
+            "✅ Cancelled task `task123`",
+        ),
+        (
+            Command(
+                type=CommandType.EDIT_SCHEDULE,
+                args={"task_id": "task123", "full_text": "in 10 minutes Check deployment"},
+                raw_text="!edit_schedule task123 in 10 minutes Check deployment",
+            ),
+            "mindroom.commands.handler.edit_scheduled_task",
+            "✅ Updated task `task123`.\n\nUpdated schedule",
+        ),
+    ],
+)
+async def test_mutating_command_records_handled_turn_when_reply_delivery_fails(
+    tmp_path: Path,
+    command: Command,
+    patch_target: str,
+    patch_return_value: object,
+) -> None:
+    """Commands that already changed state must not replay if their confirmation reply fails."""
+    context = _command_handler_context(
+        tmp_path,
+        config=SimpleNamespace(
+            authorization=AuthorizationConfig(global_users=["@admin:example.org"]),
+            agents={},
+            teams={},
+        ),
+        send_response=AsyncMock(return_value=_error_resolution()),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@alice:example.org",
+        event_id="$event",
+        source={"content": {"body": command.raw_text}},
+    )
+
+    with (
+        patch("mindroom.commands.handler.check_agent_mentioned", return_value=([], None, None)),
+        patch(patch_target, new=AsyncMock(return_value=patch_return_value)),
+    ):
+        await handle_command(
+            context=context,
+            room=room,
+            event=event,
+            command=command,
+            requester_user_id="@alice:example.org",
+        )
+
+    context.record_handled_turn.assert_called_once_with(HandledTurnState.from_source_event_id("$event"))
+
+
+@pytest.mark.asyncio
+async def test_reload_plugins_records_handled_turn_when_reply_delivery_fails(tmp_path: Path) -> None:
+    """Successful plugin reloads must not replay if the confirmation reply never lands."""
+    reload_plugins = AsyncMock(
+        return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 0),
+    )
+    context = _command_handler_context(
+        tmp_path,
+        send_response=AsyncMock(return_value=_error_resolution()),
+        reload_plugins=reload_plugins,
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@admin:example.org",
+        event_id="$event",
+        source={"content": {"body": "!reload-plugins"}},
+    )
+    command = Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text="!reload-plugins")
+
+    await handle_command(
+        context=context,
+        room=room,
+        event=event,
+        command=command,
+        requester_user_id="@admin:example.org",
+    )
+
+    reload_plugins.assert_awaited_once()
+    context.record_handled_turn.assert_called_once_with(HandledTurnState.from_source_event_id("$event"))
 
 
 @pytest.mark.asyncio
