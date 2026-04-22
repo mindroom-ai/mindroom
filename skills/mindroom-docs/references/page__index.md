@@ -102,26 +102,26 @@ mindroom run
 
 ## Features
 
-| Feature                      | Description                                                                 |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| **Agents**                   | Single-specialty actors with specific tools and instructions                |
-| **Teams**                    | Collaborative bundles of agents (coordinate or collaborate modes)           |
-| **Router**                   | Built-in traffic director that routes messages to the right agent           |
-| **Memory**                   | Mem0-inspired memory system with agent and team scopes                      |
-| **Knowledge Bases**          | File-backed RAG indexing with per-agent base assignment                     |
-| **Tools**                    | 100+ integrations for external services                                     |
-| **Skills**                   | OpenClaw-compatible skills system for extended agent capabilities           |
-| **Scheduling**               | Schedule tasks with cron expressions or natural language                    |
-| **Voice**                    | Speech-to-text transcription for voice messages                             |
-| **Images**                   | Pass user-sent images to vision-capable AI models                           |
-| **File & Video Attachments** | Context-scoped file and video handling with attachment IDs                  |
-| **Cultures**                 | Shared evolving principles across groups of agents                          |
-| **Interactive Q&A**          | Clickable multiple-choice questions via Matrix reactions                    |
-| **Authorization**            | Fine-grained user and room access control                                   |
-| **OpenAI-Compatible API**    | Use agents from LibreChat, Open WebUI, or any OpenAI client                 |
-| **Streaming**                | Progressive message edits with presence-based gating and tool-call markers  |
-| **Chat Commands**            | Built-in `!help`, `!schedule`, and `!config` commands handled by the router |
-| **Hot Reload**               | Config changes are detected and agents restart automatically                |
+| Feature                      | Description                                                                                                                                                                                                |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Agents**                   | Single-specialty actors with specific tools and instructions                                                                                                                                               |
+| **Teams**                    | Collaborative bundles of agents (coordinate or collaborate modes)                                                                                                                                          |
+| **Router**                   | Built-in traffic director that routes messages to the right agent                                                                                                                                          |
+| **Memory**                   | Mem0-inspired memory system with agent and team scopes                                                                                                                                                     |
+| **Knowledge Bases**          | File-backed RAG indexing with per-agent base assignment                                                                                                                                                    |
+| **Tools**                    | 100+ integrations for external services                                                                                                                                                                    |
+| **Skills**                   | OpenClaw-compatible skills system for extended agent capabilities                                                                                                                                          |
+| **Scheduling**               | Schedule tasks with cron expressions or natural language                                                                                                                                                   |
+| **Voice**                    | Speech-to-text transcription for voice messages                                                                                                                                                            |
+| **Images**                   | Pass user-sent images to vision-capable AI models                                                                                                                                                          |
+| **File & Video Attachments** | Context-scoped file and video handling with attachment IDs                                                                                                                                                 |
+| **Cultures**                 | Shared evolving principles across groups of agents                                                                                                                                                         |
+| **Interactive Q&A**          | Clickable multiple-choice questions via Matrix reactions                                                                                                                                                   |
+| **Authorization**            | Fine-grained user and room access control                                                                                                                                                                  |
+| **OpenAI-Compatible API**    | Use agents from LibreChat, Open WebUI, or any OpenAI client                                                                                                                                                |
+| **Streaming**                | Progressive message edits with presence-based gating and tool-call markers                                                                                                                                 |
+| **Chat Commands**            | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands handled by the router |
+| **Hot Reload**               | Config changes are detected and agents restart automatically                                                                                                                                               |
 
 ## Architecture
 
@@ -158,7 +158,7 @@ mindroom run
 - [Image Messages](https://docs.mindroom.chat/images/index.md) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md) - Context-scoped file and video handling
 - [Streaming Responses](https://docs.mindroom.chat/streaming/index.md) - Progressive message edits with presence-based gating
-- [Chat Commands](https://docs.mindroom.chat/chat-commands/index.md) - Built-in `!help`, `!schedule`, and `!config` commands
+- [Chat Commands](https://docs.mindroom.chat/chat-commands/index.md) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/index.md) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/index.md) - Optional root Matrix Space for grouping managed rooms

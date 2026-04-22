@@ -126,7 +126,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!help`, `!schedule`, and `!config` commands handled by the router |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands handled by the router |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -164,7 +164,7 @@ mindroom run
 - [Image Messages](images.md) - Image analysis with vision models
 - [File & Video Attachments](attachments.md) - Context-scoped file and video handling
 - [Streaming Responses](streaming.md) - Progressive message edits with presence-based gating
-- [Chat Commands](chat-commands.md) - Built-in `!help`, `!schedule`, and `!config` commands
+- [Chat Commands](chat-commands.md) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands
 - [Interactive Q&A](interactive.md) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](authorization.md) - User and room access control
 - [Matrix Space](matrix-space.md) - Optional root Matrix Space for grouping managed rooms

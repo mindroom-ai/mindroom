@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from mindroom.commands.parsing import _COMMAND_DOCS, CommandType, command_parser, get_command_help
 
 
@@ -261,3 +263,15 @@ def test_get_command_help() -> None:
     skill_help = get_command_help("skill")
     assert "Available Commands" in skill_help
     assert "!skill" not in skill_help
+
+
+def test_docs_index_chat_commands_summary_lists_all_supported_commands() -> None:
+    """The docs index summary should stay in sync with the supported command set."""
+    docs_index = Path(__file__).resolve().parents[1] / "docs" / "index.md"
+    contents = docs_index.read_text(encoding="utf-8")
+    table_row = next(line for line in contents.splitlines() if line.startswith("| **Chat Commands** |"))
+    doc_link = next(line for line in contents.splitlines() if line.startswith("- [Chat Commands]("))
+
+    for syntax, _description in _COMMAND_DOCS.values():
+        assert syntax in table_row
+        assert syntax in doc_link
