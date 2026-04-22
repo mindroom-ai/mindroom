@@ -1430,6 +1430,162 @@ async def test_retargeted_sleeping_timer_flushes_under_current_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing() -> None:
+    """Immediate-flush telemetry should report the batch size before _flush clears pending."""
+    room = _make_room()
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
+        await gate.enqueue(
+            ("!room:localhost", None, "@user:localhost"),
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="first"),
+                room=room,
+                source_kind="message",
+            ),
+        )
+
+    immediate_flush_calls = [
+        call
+        for call in mock_emit.call_args_list
+        if call.args and call.args[0] == "coalescing_gate.enqueue" and call.kwargs.get("path") == "zero_debounce"
+    ]
+    assert len(immediate_flush_calls) == 1
+    assert immediate_flush_calls[0].kwargs["pending_count"] == 1
+    assert immediate_flush_calls[0].kwargs["flush_outcome"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_zero_debounce_with_upload_grace_logs_scheduled_grace_outcome() -> None:
+    """Zero debounce should not claim an immediate flush when upload grace delays dispatch."""
+    room = _make_room()
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.1,
+        is_shutting_down=lambda: False,
+    )
+
+    with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
+        await gate.enqueue(
+            ("!room:localhost", None, "@user:localhost"),
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="first"),
+                room=room,
+                source_kind="message",
+            ),
+        )
+
+    zero_debounce_calls = [
+        call
+        for call in mock_emit.call_args_list
+        if call.args and call.args[0] == "coalescing_gate.enqueue" and call.kwargs.get("path") == "zero_debounce"
+    ]
+    assert len(zero_debounce_calls) == 1
+    assert zero_debounce_calls[0].kwargs["flush_outcome"] == "scheduled_grace"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_for_dispatch_timing_events_include_explicit_scope(tmp_path: Path) -> None:
+    """Pre-dispatch handoff telemetry should carry the source-event timing scope explicitly."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    event = _text_event(event_id="$m1", body="hello")
+
+    with (
+        patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()),
+        patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
+    ):
+        await bot._turn_controller._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+            coalescing_key=(room.room_id, None, "@user:localhost"),
+        )
+
+    handoff_calls = [
+        call
+        for call in mock_emit.call_args_list
+        if call.args
+        and isinstance(call.args[0], str)
+        and call.args[0].startswith("ingress_handoff.enqueue_for_dispatch")
+    ]
+    assert handoff_calls
+    assert all(call.kwargs["timing_scope"] == "$m1" for call in handoff_calls)
+
+
+@pytest.mark.asyncio
+async def test_handle_coalesced_batch_timing_events_include_dispatch_scope(tmp_path: Path) -> None:
+    """Coalesced-batch telemetry emitted before dispatch should carry the batch event scope."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    batch = build_coalesced_batch(
+        (room.room_id, None, "@user:localhost"),
+        [
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="hello"),
+                room=room,
+                source_kind="message",
+            ),
+        ],
+    )
+
+    with (
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()),
+        patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
+    ):
+        await bot._turn_controller.handle_coalesced_batch(batch)
+
+    batch_calls = [
+        call
+        for call in mock_emit.call_args_list
+        if call.args and isinstance(call.args[0], str) and call.args[0].startswith("coalescing.handle_batch.")
+    ]
+    assert batch_calls
+    assert all(call.kwargs["timing_scope"] == "$m1" for call in batch_calls)
+
+
+@pytest.mark.asyncio
+async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
+    """Flush telemetry should not report success when dispatch_batch raises."""
+    room = _make_room()
+
+    async def failing_dispatch_batch(_batch: object) -> None:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    gate = CoalescingGate(
+        dispatch_batch=failing_dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    with (
+        patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit,
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        await gate.enqueue(
+            ("!room:localhost", None, "@user:localhost"),
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="first"),
+                room=room,
+                source_kind="message",
+            ),
+        )
+
+    flush_calls = [call for call in mock_emit.call_args_list if call.args and call.args[0] == "coalescing_gate.flush"]
+    assert len(flush_calls) == 1
+    assert flush_calls[0].kwargs["outcome"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
     """Drain pending debounce tasks when a bot is cleaned up."""
     bot = _make_bot(tmp_path, debounce_ms=1000)
