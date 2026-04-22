@@ -407,11 +407,11 @@ class TestResolvedMessageExtraction:
         )
         runtime_paths = runtime_paths_for(config)
         state = MatrixState()
-        state.add_account("agent_removed", "mindroom_removed", "pw")
+        state.add_account("agent_removed", "mindroom_removed", "pw", domain="legacy.example.com")
         state.save(runtime_paths=runtime_paths)
 
         event_source = {
-            "sender": "@mindroom_removed:localhost",
+            "sender": "@mindroom_removed:legacy.example.com",
             "content": {
                 "msgtype": "m.text",
                 "body": "hello\n\n⏳ Preparing isolated worker...",
@@ -436,11 +436,41 @@ class TestResolvedMessageExtraction:
         )
         runtime_paths = runtime_paths_for(config)
         state = MatrixState()
-        state.add_account("agent_general", "mindroom_general_oldns", "pw")
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="legacy.example.com")
         state.save(runtime_paths=runtime_paths)
 
         event_source = {
-            "sender": "@mindroom_general_oldns:localhost",
+            "sender": "@mindroom_general_oldns:legacy.example.com",
+            "content": {
+                "msgtype": "m.text",
+                "body": "hello\n\n⏳ Preparing isolated worker...",
+                "io.mindroom.visible_body": "hello",
+            },
+        }
+
+        assert (
+            visible_body_from_event_source(
+                event_source,
+                "hello",
+                trusted_sender_ids=historical_internal_sender_ids(config, runtime_paths),
+            )
+            == "hello"
+        )
+
+    def test_visible_body_from_event_source_trusts_previous_persisted_sender_ids(self, tmp_path: Path) -> None:
+        """Historical reads should keep trusting earlier persisted sender IDs after a rename."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_v1", "pw", domain="legacy.example.com")
+        state.add_account("agent_general", "mindroom_general_v2", "pw", domain="current.example.com")
+        state.save(runtime_paths=runtime_paths)
+
+        event_source = {
+            "sender": "@mindroom_general_v1:legacy.example.com",
             "content": {
                 "msgtype": "m.text",
                 "body": "hello\n\n⏳ Preparing isolated worker...",

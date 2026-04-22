@@ -289,6 +289,7 @@ async def _resolve_thread_history_from_event_sources_timed(
         required_thread_id=thread_id,
         event_cache=event_cache,
         room_id=room_id,
+        trusted_sender_ids=trusted_sender_ids,
     )
     messages = list(messages_by_event_id.values())
     sort_thread_messages_root_first(

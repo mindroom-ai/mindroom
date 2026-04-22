@@ -17,7 +17,7 @@ from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID, agent_username_localpart
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms, should_persist_invited_rooms
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.matrix.state import MatrixState, managed_account_usernames
+from mindroom.matrix.state import MatrixState, managed_account_known_sender_ids
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
@@ -35,9 +35,10 @@ def _get_all_known_bot_usernames(runtime_paths: RuntimePaths) -> set[str]:
 
     """
     return {
-        username
-        for key, username in managed_account_usernames(runtime_paths).items()
+        MatrixID.parse(sender_id).username
+        for key, sender_ids in managed_account_known_sender_ids(runtime_paths).items()
         if key != INTERNAL_USER_ACCOUNT_KEY
+        for sender_id in sender_ids
     }
 
 

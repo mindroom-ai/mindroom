@@ -490,6 +490,63 @@ class TestThreadHistory:
         client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_history_applies_trusted_canonical_body_from_internal_edit(self) -> None:
+        """Thread history should honor trusted visible-body metadata when applying latest edits."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        thread_event = self._make_text_event(
+            event_id="$reply",
+            sender="@mindroom_general:localhost",
+            body="Thinking...",
+            server_timestamp=2000,
+            source_content={
+                "body": "Thinking...",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+                "io.mindroom.stream_status": "pending",
+            },
+        )
+        newer_edit = self._make_text_event(
+            event_id="$edit_b",
+            sender="@mindroom_general:localhost",
+            body="* hello",
+            server_timestamp=3000,
+            source_content={
+                "body": "* hello",
+                "m.new_content": {
+                    "body": "hello\n\n⏳ Preparing isolated worker...",
+                    "io.mindroom.visible_body": "hello",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+                    "io.mindroom.stream_status": "completed",
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            },
+        )
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [newer_edit, thread_event, root_event]
+        page.end = None
+        client = MagicMock()
+        client.room_messages = AsyncMock(return_value=page)
+        event_cache = make_event_cache_mock()
+        event_cache.get_latest_edit.return_value = None
+
+        history = await fetch_thread_history(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            event_cache=event_cache,
+            trusted_sender_ids={"@mindroom_general:localhost"},
+        )
+
+        assert history[1].body == "hello"
+        assert history[1].content["body"] == "hello"
+        assert history[1].stream_status == "completed"
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_includes_notice_reply(self) -> None:
         """Thread history should keep notice messages in thread history."""
         root_event = self._make_text_event(

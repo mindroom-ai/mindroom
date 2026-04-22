@@ -15,6 +15,8 @@ class _MatrixAccount(BaseModel):
 
     username: str
     password: str
+    domain: str | None = None
+    known_user_ids: list[str] = Field(default_factory=list)
     device_id: str | None = None
     access_token: str | None = None
 
@@ -66,13 +68,25 @@ class MatrixState(BaseModel):
         username: str,
         password: str,
         *,
+        domain: str | None = None,
         device_id: str | None = None,
         access_token: str | None = None,
     ) -> None:
         """Add or update an account."""
+        existing_account = self.accounts.get(key)
+        effective_domain = domain if domain is not None else existing_account.domain if existing_account else None
+        known_user_ids: list[str] = []
+        if existing_account is not None:
+            known_user_ids.extend(_known_user_ids_for_account(existing_account))
+        if effective_domain is not None:
+            current_user_id = _matrix_user_id(username, effective_domain)
+            if current_user_id not in known_user_ids:
+                known_user_ids.append(current_user_id)
         self.accounts[key] = _MatrixAccount(
             username=username,
             password=password,
+            domain=effective_domain,
+            known_user_ids=known_user_ids,
             device_id=device_id,
             access_token=access_token,
         )
@@ -95,10 +109,32 @@ class MatrixState(BaseModel):
 
 
 def managed_account_usernames(runtime_paths: constants.RuntimePaths) -> dict[str, str]:
-    """Return persisted managed Matrix account usernames keyed by state account key."""
+    """Return current persisted managed Matrix usernames keyed by state account key."""
     state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
     state = _load_matrix_state_file_for_accounts(*_matrix_state_cache_key(state_file))
     return {key: account.username for key, account in state.accounts.items() if key.startswith("agent_")}
+
+
+def managed_account_sender_ids(runtime_paths: constants.RuntimePaths) -> dict[str, str]:
+    """Return current persisted managed Matrix sender IDs keyed by state account key."""
+    state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
+    state = _load_matrix_state_file_for_accounts(*_matrix_state_cache_key(state_file))
+    return {
+        key: sender_id
+        for key, account in state.accounts.items()
+        if key.startswith("agent_") and (sender_id := _current_sender_id(account)) is not None
+    }
+
+
+def managed_account_known_sender_ids(runtime_paths: constants.RuntimePaths) -> dict[str, tuple[str, ...]]:
+    """Return all known persisted managed Matrix sender IDs keyed by state account key."""
+    state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
+    state = _load_matrix_state_file_for_accounts(*_matrix_state_cache_key(state_file))
+    return {
+        key: tuple(_known_user_ids_for_account(account))
+        for key, account in state.accounts.items()
+        if key.startswith("agent_") and _known_user_ids_for_account(account)
+    }
 
 
 def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int | None, int | None]:
@@ -118,6 +154,27 @@ def _load_matrix_state_file_for_accounts(
     """Load Matrix state through a file-change-sensitive cache for account reads."""
     del mtime_ns, size
     return _load_matrix_state_file(state_file)
+
+
+def _matrix_user_id(username: str, domain: str) -> str:
+    """Build a Matrix user ID from one username and domain."""
+    return f"@{username}:{domain}"
+
+
+def _current_sender_id(account: _MatrixAccount) -> str | None:
+    """Return the current sender ID for one persisted account, if known."""
+    if account.domain is None:
+        return None
+    return _matrix_user_id(account.username, account.domain)
+
+
+def _known_user_ids_for_account(account: _MatrixAccount) -> list[str]:
+    """Return all known sender IDs for one persisted account in stable order."""
+    known_user_ids = list(dict.fromkeys(account.known_user_ids))
+    current_sender_id = _current_sender_id(account)
+    if current_sender_id is not None and current_sender_id not in known_user_ids:
+        known_user_ids.append(current_sender_id)
+    return known_user_ids
 
 
 def _load_matrix_state_file(state_file: Path) -> MatrixState:

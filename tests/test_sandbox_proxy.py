@@ -2275,7 +2275,7 @@ def test_worker_routed_tool_error_does_not_record_worker_failure(
     with (
         patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
         patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _ToolErrorClient),
-        pytest.raises(RuntimeError, match="FileNotFoundError: missing.txt"),
+        pytest.raises(RuntimeError, match=r"FileNotFoundError: missing\.txt"),
     ):
         entrypoint("missing.txt")
 
@@ -2341,7 +2341,72 @@ def test_worker_routed_worker_failure_records_worker_failure(
     with (
         patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
         patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _WorkerFailureClient),
-        pytest.raises(RuntimeError, match="Sandbox subprocess timed out."),
+        pytest.raises(RuntimeError, match=r"Sandbox subprocess timed out\."),
+    ):
+        entrypoint("missing.txt")
+
+    assert manager.touched == []
+    assert manager.failures == [(worker_target.worker_key, "Sandbox subprocess timed out.")]
+
+
+def test_worker_routed_legacy_structured_failure_records_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Structured failures without failure_kind should fail closed as worker failures."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    assert worker_target.worker_key is not None
+    manager = _TrackingWorkerManager()
+
+    class _LegacyFailureClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            del json, headers
+            assert url == "http://worker/api/sandbox-runner/execute"
+            return _FakeResponse(
+                {
+                    "ok": False,
+                    "error": "Sandbox subprocess timed out.",
+                },
+            )
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=worker_target,
+    )
+    entrypoint = tool.functions["read_file"].entrypoint
+    assert entrypoint is not None
+
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _LegacyFailureClient),
+        pytest.raises(RuntimeError, match=r"Sandbox subprocess timed out\."),
     ):
         entrypoint("missing.txt")
 

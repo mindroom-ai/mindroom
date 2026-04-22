@@ -48,9 +48,9 @@ def _bundled_replacement_candidates(event_source: object) -> list[dict[str, obje
             continue
         replacement_dict = cast("dict[str, object]", replacement)
         for candidate in (
-            replacement_dict,
-            replacement_dict.get("event"),
             replacement_dict.get("latest_event"),
+            replacement_dict.get("event"),
+            replacement_dict,
         ):
             candidates.extend(
                 [cast("dict[str, object]", candidate)] if isinstance(candidate, dict) else [],

@@ -8,7 +8,7 @@ import httpx
 import nio
 
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_homeserver, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix import provisioning
 from mindroom.matrix.client_session import (
@@ -110,10 +110,15 @@ def _save_agent_credentials(
     """
     state = MatrixState.load(runtime_paths=runtime_paths)
     agent_key = _account_key_for_agent(agent_name)
+    server_name = extract_server_name_from_homeserver(
+        runtime_matrix_homeserver(runtime_paths),
+        runtime_paths=runtime_paths,
+    )
     state.add_account(
         agent_key,
         username,
         password,
+        domain=server_name,
         device_id=device_id,
         access_token=access_token,
     )

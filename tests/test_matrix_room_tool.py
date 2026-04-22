@@ -535,6 +535,38 @@ async def test_threads_preview_prefers_trusted_canonical_body_from_bundled_repla
 
 
 @pytest.mark.asyncio
+async def test_threads_preview_prefers_nested_bundled_replacement_over_wrapper_preview() -> None:
+    """Threads should prefer nested bundled edits over stale wrapper previews."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    wrapper_replacement = _make_bundled_replacement(
+        event_id="$thread1",
+        body="wrapper body\n\n⏳ Preparing isolated worker...",
+        sender="@mindroom_general:localhost",
+    )
+    wrapper_replacement["latest_event"] = _make_bundled_replacement(
+        event_id="$thread1",
+        body="Edited body\n\n⏳ Preparing isolated worker...",
+        sender="@mindroom_general:localhost",
+        visible_body="Edited body",
+    )
+    event = _thread_event("$thread1", body="Original body", reply_count=3)
+    event.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 3},
+            "m.replace": wrapper_replacement,
+        },
+    }
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Edited body"
+
+
+@pytest.mark.asyncio
 async def test_threads_preview_prefers_trusted_visible_body_without_bundled_replacement() -> None:
     """Threads should use canonical visible-body metadata for trusted non-bundled roots too."""
     tool = MatrixRoomTools()

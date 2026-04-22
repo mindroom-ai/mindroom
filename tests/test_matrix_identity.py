@@ -187,7 +187,7 @@ class TestHelperFunctions:
         runtime_paths = runtime_paths_for(self.config)
         domain = self.config.get_domain(runtime_paths)
         state = MatrixState()
-        state.add_account("agent_general", "mindroom_general_oldns", "pw")
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=domain)
         state.save(runtime_paths=runtime_paths)
 
         assert (
@@ -206,10 +206,21 @@ class TestHelperFunctions:
         runtime_paths = runtime_paths_for(self.config)
         domain = self.config.get_domain(runtime_paths)
         state = MatrixState()
-        state.add_account("agent_general", "mindroom_general_oldns", "pw")
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=domain)
         state.save(runtime_paths=runtime_paths)
 
         drifted_id = MatrixID.parse(f"@mindroom_general_oldns:{domain}")
+        assert drifted_id.agent_name(self.config, runtime_paths) == "general"
+
+    def test_matrix_id_agent_name_trusts_current_persisted_sender_id_with_domain_drift(self, tmp_path: Path) -> None:
+        """MatrixID.agent_name should trust exact current persisted sender IDs across domain changes."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="legacy.example.com")
+        state.save(runtime_paths=runtime_paths)
+
+        drifted_id = MatrixID.parse("@mindroom_general_oldns:legacy.example.com")
         assert drifted_id.agent_name(self.config, runtime_paths) == "general"
 
     def test_extract_agent_name_ignores_removed_persisted_username(self, tmp_path: Path) -> None:
@@ -218,7 +229,7 @@ class TestHelperFunctions:
         runtime_paths = runtime_paths_for(self.config)
         domain = self.config.get_domain(runtime_paths)
         state = MatrixState()
-        state.add_account("agent_removed", "mindroom_removed", "pw")
+        state.add_account("agent_removed", "mindroom_removed", "pw", domain=domain)
         state.save(runtime_paths=runtime_paths)
 
         assert extract_agent_name(f"@mindroom_removed:{domain}", self.config, runtime_paths) is None

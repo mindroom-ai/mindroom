@@ -1139,7 +1139,7 @@ def test_effective_sender_does_not_trust_removed_persisted_internal_accounts(tmp
     )
     runtime_paths = _runtime_paths_for(config)
     state = MatrixState()
-    state.add_account("agent_removed", "mindroom_removed", "pw")
+    state.add_account("agent_removed", "mindroom_removed", "pw", domain="legacy.example.com")
     state.save(runtime_paths=runtime_paths)
 
     event_source = {
@@ -1151,11 +1151,11 @@ def test_effective_sender_does_not_trust_removed_persisted_internal_accounts(tmp
 
     assert (
         get_effective_sender_id_for_reply_permissions(
-            "@mindroom_removed:example.com",
+            "@mindroom_removed:legacy.example.com",
             event_source,
             config,
         )
-        == "@mindroom_removed:example.com"
+        == "@mindroom_removed:legacy.example.com"
     )
 
 
@@ -1174,7 +1174,7 @@ def test_effective_sender_trusts_persisted_current_internal_accounts(tmp_path: P
     )
     runtime_paths = _runtime_paths_for(config)
     state = MatrixState()
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw")
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
     event_source = {
@@ -1212,7 +1212,7 @@ def test_reply_permissions_bypass_trusts_persisted_current_internal_accounts(tmp
     )
     runtime_paths = _runtime_paths_for(config)
     state = MatrixState()
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw")
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
     assert is_sender_allowed_for_agent_reply("@mindroom_assistant_oldns:example.com", "assistant", config) is True
@@ -1233,10 +1233,45 @@ def test_sender_authorization_trusts_persisted_current_internal_accounts(tmp_pat
     )
     runtime_paths = _runtime_paths_for(config)
     state = MatrixState()
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw")
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
     assert is_authorized_sender("@mindroom_assistant_oldns:example.com", config, "!room:example.com") is True
+
+
+def test_effective_sender_trusts_persisted_current_internal_accounts_with_domain_drift(tmp_path: Path) -> None:
+    """Current managed accounts should stay trusted by exact persisted sender ID across domain changes."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="legacy.example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    event_source = {
+        "content": {
+            "body": "current relay",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
+        },
+    }
+
+    assert (
+        get_effective_sender_id_for_reply_permissions(
+            "@mindroom_assistant_oldns:legacy.example.com",
+            event_source,
+            config,
+        )
+        == "@alice:example.com"
+    )
 
 
 def test_available_agents_in_room_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
@@ -1254,7 +1289,7 @@ def test_available_agents_in_room_trusts_persisted_current_internal_accounts(tmp
     )
     runtime_paths = _runtime_paths_for(config)
     state = MatrixState()
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw")
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
     room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")

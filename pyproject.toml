@@ -235,7 +235,7 @@ lumalabs = [
   "lumaai",
 ]
 matrix_api = []
-matrix_e2ee = [
+matrix-e2ee = [
   "matrix-nio[e2e]>=0.25",
 ]
 matrix_message = []
@@ -305,7 +305,7 @@ self_config = [
   "pydantic>=2",
   "pyyaml>=6",
 ]
-sentence_transformers = [
+sentence-transformers = [
   "sentence-transformers",
 ]
 serpapi = [

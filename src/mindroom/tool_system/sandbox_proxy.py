@@ -478,10 +478,10 @@ def _record_proxy_response_failure_for_worker(
     if worker_handle is None:
         return
     manager = _get_worker_manager(runtime_paths, proxy_config)
-    if failure_kind == "worker":
-        manager.record_failure(worker_handle.worker_key, error)
+    if failure_kind == "tool":
+        manager.touch_worker(worker_handle.worker_key)
         return
-    manager.touch_worker(worker_handle.worker_key)
+    manager.record_failure(worker_handle.worker_key, error)
 
 
 def _make_progress_sink(
