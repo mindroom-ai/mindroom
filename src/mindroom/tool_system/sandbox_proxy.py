@@ -447,6 +447,24 @@ def _record_proxy_exception_for_worker(
     manager.record_failure(worker_handle.worker_key, str(exc))
 
 
+def _record_proxy_response_failure_for_worker(
+    *,
+    worker_handle: WorkerHandle | None,
+    runtime_paths: RuntimePaths,
+    proxy_config: SandboxProxyConfig,
+    error: str,
+    failure_kind: object,
+) -> None:
+    """Classify one structured runner failure response for worker health."""
+    if worker_handle is None:
+        return
+    manager = _get_worker_manager(runtime_paths, proxy_config)
+    if failure_kind == "worker":
+        manager.record_failure(worker_handle.worker_key, error)
+        return
+    manager.touch_worker(worker_handle.worker_key)
+
+
 def _make_progress_sink(
     pump: WorkerProgressPump,
     *,
@@ -647,8 +665,13 @@ def _call_proxy_sync(  # noqa: C901
             _get_worker_manager(runtime_paths, proxy_config).touch_worker(worker_handle.worker_key)
         return data.get("result")
     error = data.get("error") or "Sandbox execution failed."
-    if worker_handle is not None:
-        _get_worker_manager(runtime_paths, proxy_config).touch_worker(worker_handle.worker_key)
+    _record_proxy_response_failure_for_worker(
+        worker_handle=worker_handle,
+        runtime_paths=runtime_paths,
+        proxy_config=proxy_config,
+        error=str(error),
+        failure_kind=data.get("failure_kind"),
+    )
     raise RuntimeError(str(error))
 
 

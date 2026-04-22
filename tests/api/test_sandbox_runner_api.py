@@ -555,6 +555,92 @@ def test_public_startup_runtime_still_allows_python_execution_env(
     }
 
 
+@pytest.mark.asyncio
+async def test_execute_request_inprocess_marks_tool_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ordinary tool exceptions should be labeled as tool failures."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    class _FakeToolkit:
+        requires_connect = False
+
+    def _raising_entrypoint(*_args: object, **_kwargs: object) -> object:
+        missing_path = "missing.txt"
+        raise FileNotFoundError(missing_path)
+
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_resolve_entrypoint",
+        lambda **_kwargs: (_FakeToolkit(), _raising_entrypoint),
+    )
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="file",
+            function_name="read_file",
+            args=["missing.txt"],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+    )
+
+    assert response.ok is False
+    assert response.error == "Sandbox tool execution failed: FileNotFoundError: missing.txt"
+    assert response.failure_kind == "tool"
+
+
+def test_execute_request_subprocess_sync_marks_subprocess_timeouts_as_worker_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Subprocess failures should be labeled as worker failures."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    def _timeout(*_args: object, **_kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(cmd=["python"], timeout=5.0)
+
+    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", _timeout)
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="calculator",
+            function_name="add",
+            args=[1, 2],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+
+    assert response.ok is False
+    assert response.error == "Sandbox subprocess timed out."
+    assert response.failure_kind == "worker"
+
+
 def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2022,7 +2108,7 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "result": "ok", "error": None}
+    assert response.json() == {"ok": True, "result": "ok", "error": None, "failure_kind": None}
     assert prepare_calls == 1
 
 
@@ -3189,10 +3275,12 @@ def test_sandbox_runner_records_worker_initialization_failures(
             },
         )
 
-    assert execute_response.status_code == 400
-    detail = execute_response.json()["detail"]
-    assert "Failed to initialize worker 'worker-fail'" in detail
-    assert "boom" in detail
+    assert execute_response.status_code == 200
+    payload = execute_response.json()
+    assert payload["ok"] is False
+    assert payload["failure_kind"] == "worker"
+    assert "Failed to initialize worker 'worker-fail'" in payload["error"]
+    assert "boom" in payload["error"]
 
     workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)
     assert workers_response.status_code == 200
