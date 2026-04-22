@@ -259,6 +259,10 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.visible_body",
 ]
+visibility = [
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_room",
+]
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_message"
@@ -821,6 +825,17 @@ path = "mindroom.matrix.visible_body"
 depends_on = [
     "mindroom.constants",
     "mindroom.matrix.identity",
+]
+visibility = [
+    "mindroom.custom_tools.matrix_helpers",
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_room",
+    "mindroom.edit_regenerator",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.message_content",
+    "mindroom.matrix.stale_stream_cleanup",
 ]
 
 [[modules]]
