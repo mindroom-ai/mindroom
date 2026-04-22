@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
@@ -66,7 +67,7 @@ from mindroom.streaming import (
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
-from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.timing import DispatchPipelineTiming, emit_elapsed_timing, event_timing_scope, timed
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     resolve_tool_runtime_hook_bindings,
@@ -118,6 +119,10 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
+_RESPONSE_RUNTIME_PREP_TIMEOUT_SECONDS = 30.0
+_RUNTIME_PREP_TIMEOUT_RESPONSE_TEXT = (
+    "**[Response startup timed out before model execution. Please try again.]**"
+)
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
@@ -991,8 +996,11 @@ class ResponseRunner:
         self,
         agent_names: list[str],
         execution_identity: ToolExecutionIdentity | None,
+        *,
+        timing_scope: str | None = None,
     ) -> dict[str, Any]:
         """Ensure request-scoped knowledge managers for one response execution."""
+        started_at = time.monotonic()
         try:
             return await ensure_request_knowledge_managers(
                 agent_names,
@@ -1006,6 +1014,53 @@ class ResponseRunner:
                 agent_names=agent_names,
             )
             return {}
+        finally:
+            emit_elapsed_timing(
+                "prepare_response_runtime.request_knowledge_managers",
+                started_at,
+                agent_names=agent_names,
+                timing_scope=timing_scope,
+            )
+
+    async def _visible_runtime_prepare_timeout_delivery(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        response_kind: str,
+        on_delivery_started: Callable[[str | None], None] | None = None,
+    ) -> DeliveryResult | None:
+        """Turn one runtime-prepare timeout into a terminal visible placeholder update."""
+        if request.existing_event_id is None or not request.existing_event_is_placeholder:
+            return None
+
+        self.deps.logger.error(
+            "Response runtime preparation timed out",
+            agent_name=self.deps.agent_name,
+            response_kind=response_kind,
+            room_id=request.room_id,
+            reply_to_event_id=request.reply_to_event_id,
+            existing_event_id=request.existing_event_id,
+            timeout_seconds=_RESPONSE_RUNTIME_PREP_TIMEOUT_SECONDS,
+        )
+        if on_delivery_started is not None:
+            on_delivery_started(request.existing_event_id)
+        edited = await self.deps.delivery_gateway.edit_text(
+            EditTextRequest(
+                target=resolved_target,
+                event_id=request.existing_event_id,
+                new_text=_RUNTIME_PREP_TIMEOUT_RESPONSE_TEXT,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+            ),
+        )
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.note(runtime_prepare_timeout=True)
+            request.pipeline_timing.mark("response_complete")
+        return DeliveryResult(
+            event_id=request.existing_event_id if edited else None,
+            response_text=_RUNTIME_PREP_TIMEOUT_RESPONSE_TEXT,
+            delivery_kind="edited" if edited else None,
+        )
 
     async def generate_team_response_helper(
         self,
@@ -1636,6 +1691,7 @@ class ResponseRunner:
         request_knowledge_managers = await self._ensure_request_knowledge_managers(
             [self.deps.agent_name],
             tool_dispatch.execution_identity,
+            timing_scope=event_timing_scope(request.reply_to_event_id),
         )
         return _PreparedResponseRuntime(
             resolved_target=resolved_target,
@@ -1862,7 +1918,20 @@ class ResponseRunner:
 
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
-        runtime = await self.prepare_non_streaming_runtime(request)
+        resolved_target = self._resolve_request_target(request)
+        try:
+            async with asyncio.timeout(_RESPONSE_RUNTIME_PREP_TIMEOUT_SECONDS):
+                runtime = await self.prepare_non_streaming_runtime(request)
+        except TimeoutError:
+            timeout_delivery = await self._visible_runtime_prepare_timeout_delivery(
+                request,
+                resolved_target=resolved_target,
+                response_kind=response_kind,
+                on_delivery_started=on_delivery_started,
+            )
+            if timeout_delivery is not None:
+                return timeout_delivery
+            raise
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         response_envelope = self._response_envelope_for_request(
@@ -1998,7 +2067,20 @@ class ResponseRunner:
 
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
-        runtime = await self.prepare_streaming_runtime(request)
+        resolved_target = self._resolve_request_target(request)
+        try:
+            async with asyncio.timeout(_RESPONSE_RUNTIME_PREP_TIMEOUT_SECONDS):
+                runtime = await self.prepare_streaming_runtime(request)
+        except TimeoutError:
+            timeout_delivery = await self._visible_runtime_prepare_timeout_delivery(
+                request,
+                resolved_target=resolved_target,
+                response_kind=response_kind,
+                on_delivery_started=on_delivery_started,
+            )
+            if timeout_delivery is not None:
+                return timeout_delivery
+            raise
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         response_envelope = self._response_envelope_for_request(

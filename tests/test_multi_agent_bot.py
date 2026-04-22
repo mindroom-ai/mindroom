@@ -46,6 +46,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     RuntimePaths,
@@ -2047,6 +2048,58 @@ class TestAgentBot:
         assert delivery.event_id == "$terminal"
         assert delivery.delivery_kind == "sent"
         assert "Response interrupted by an error" in delivery.response_text
+
+    @pytest.mark.asyncio
+    async def test_process_and_respond_streaming_runtime_prepare_timeout_edits_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A stuck runtime startup should replace the placeholder with a terminal error."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        bot._handle_interactive_question = AsyncMock()
+        bot._edit_message = AsyncMock(return_value=True)
+        install_edit_message_mock(bot, bot._edit_message)
+
+        async def hang_runtime(*_args: object, **_kwargs: object) -> object:
+            await asyncio.Event().wait()
+
+        with (
+            patch(
+                "mindroom.response_runner.ensure_request_knowledge_managers",
+                new=AsyncMock(side_effect=hang_runtime),
+            ),
+            patch("mindroom.response_runner._RESPONSE_RUNTIME_PREP_TIMEOUT_SECONDS", 0.01),
+        ):
+            delivery = await bot._response_runner.process_and_respond_streaming(
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Please continue",
+                    reply_to_event_id="$event-timeout",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    existing_event_id="$placeholder",
+                    existing_event_is_placeholder=True,
+                ),
+            )
+
+        assert delivery.event_id == "$placeholder"
+        assert delivery.delivery_kind == "edited"
+        assert "Response startup timed out before model execution" in delivery.response_text
+        bot._edit_message.assert_awaited_once()
+        assert bot._edit_message.await_args.args == (
+            "!test:localhost",
+            "$placeholder",
+            delivery.response_text,
+            None,
+        )
+        assert bot._edit_message.await_args.kwargs["extra_content"] == {
+            STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
+        }
 
     @pytest.mark.asyncio
     async def test_process_and_respond_applies_before_and_after_hooks_non_streaming(
