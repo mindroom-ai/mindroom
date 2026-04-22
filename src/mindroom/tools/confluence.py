@@ -65,6 +65,14 @@ if TYPE_CHECKING:
     ],
     dependencies=["atlassian-python-api"],
     docs_url="https://docs.agno.com/tools/toolkits/others/confluence",
+    function_names=(
+        "create_page",
+        "get_all_page_from_space",
+        "get_all_space_detail",
+        "get_page_content",
+        "get_space_key",
+        "update_page",
+    ),
 )
 def confluence_tools() -> type[ConfluenceTools]:
     """Return Confluence tools for wiki management."""

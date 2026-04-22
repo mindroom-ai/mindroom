@@ -46,7 +46,7 @@ agents:
     knowledge_bases: [docs]
 ```
 
-Place files in `./knowledge_docs/` and they'll be indexed automatically on startup. When `watch: true`, new or modified files are re-indexed in real time.
+Place files in `./knowledge_docs/` and they'll be indexed automatically on startup. When `watch: true`, new or modified files are re-indexed in real time. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
 
 ## Configuration
 

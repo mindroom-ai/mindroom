@@ -112,15 +112,6 @@ class _AdditionalContextChunk:
     body: str
 
 
-@dataclass(frozen=True)
-class _AgentToolInitContext:
-    """Shared agent tool-init settings used across local and command-dispatch paths."""
-
-    workspace_path: Path | None
-    execution_scope: WorkerScope | None
-    routing_agent_is_private: bool
-
-
 _CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
 _PRIVATE_CULTURE_MANAGER_CACHE: WeakValueDictionary[
     tuple[str, str, tuple[str, str]],
@@ -405,43 +396,26 @@ def _build_registered_agent_tool(
     )
 
 
-def build_agent_tool_init_context(
+@timed("system_prompt_assembly.agent_create.model_instance")
+def _load_agent_model_instance(
     config: Config,
-    agent_name: str,
     runtime_paths: constants.RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> _AgentToolInitContext:
-    """Build the shared context that decides per-tool init overrides for one agent."""
-    agent_runtime = resolve_agent_runtime(
-        agent_name,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-        create=True,
-    )
-    return _tool_init_context_from_runtime(agent_runtime)
-
-
-def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> _AgentToolInitContext:
-    """Build tool-init settings from an already-resolved agent runtime."""
-    workspace_path = agent_runtime.tool_base_dir
-    return _AgentToolInitContext(
-        workspace_path=workspace_path,
-        execution_scope=agent_runtime.execution_scope,
-        routing_agent_is_private=agent_runtime.is_private,
-    )
+    model_name: str,
+) -> Model:
+    """Load one agent model while preserving prompt-assembly timing attribution."""
+    return model_loading.get_model_instance(config, runtime_paths, model_name)
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
-def build_agent_toolkit(  # noqa: PLR0911
+def build_agent_toolkit(  # noqa: C901, PLR0911
     tool_name: str,
     *,
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
+    agent_runtime: ResolvedAgentRuntime | None = None,
     tool_config_overrides: dict[str, object] | None = None,
-    tool_init_context: _AgentToolInitContext,
     execution_identity: ToolExecutionIdentity | None,
     session_id: str | None = None,
     delegation_depth: int = 0,
@@ -452,6 +426,14 @@ def build_agent_toolkit(  # noqa: PLR0911
     explicit ``delegate`` entry without valid delegation targets.
     """
     agent_config = config.get_agent(agent_name)
+    if agent_runtime is None:
+        agent_runtime = resolve_agent_runtime(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            create=True,
+        )
     storage_path = runtime_paths.storage_root
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     shared_storage_path = shared_storage_root(storage_path)
@@ -538,12 +520,12 @@ def build_agent_toolkit(  # noqa: PLR0911
         credentials_manager,
         shared_storage_path,
         worker_tools,
-        tool_init_context.execution_scope,
-        (config.get_worker_grantable_credentials() if tool_init_context.execution_scope is not None else None),
+        agent_runtime.execution_scope,
+        (config.get_worker_grantable_credentials() if agent_runtime.execution_scope is not None else None),
         agent_name,
         tool_config_overrides,
-        tool_init_context.workspace_path,
-        tool_init_context.routing_agent_is_private,
+        agent_runtime.tool_base_dir,
+        agent_runtime.is_private,
         execution_identity,
         config.get_agent_tool_runtime_overrides(agent_name, tool_name, runtime_paths=runtime_paths),
     )
@@ -1019,7 +1001,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths,
         list(resolved_tool_configs),
     )
-    tool_init_context = _tool_init_context_from_runtime(agent_runtime)
     workspace = agent_runtime.workspace
     tools: list[Toolkit] = []
     for tool_name in resolved_tool_configs:
@@ -1030,8 +1011,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 config=config,
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
+                agent_runtime=agent_runtime,
                 tool_config_overrides=resolved_tool_configs.get(tool_name),
-                tool_init_context=tool_init_context,
                 session_id=session_id,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
@@ -1109,7 +1090,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
-    model = model_loading.get_model_instance(config, runtime_paths, model_name)
+    model = _load_agent_model_instance(config, runtime_paths, model_name)
     logger.info(
         "create_agent",
         agent=agent_name,
@@ -1285,7 +1266,6 @@ def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
 
 
 __all__ = [
-    "build_agent_tool_init_context",
     "build_agent_toolkit",
     "create_agent",
     "create_session_storage",

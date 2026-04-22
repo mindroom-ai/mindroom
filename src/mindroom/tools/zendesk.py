@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["requests"],
     docs_url="https://docs.agno.com/tools/toolkits/others/zendesk",
+    function_names=("search_zendesk",),
 )
 def zendesk_tools() -> type[ZendeskTools]:
     """Return Zendesk tools for searching help center articles."""

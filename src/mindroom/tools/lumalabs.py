@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["lumaai"],
     docs_url="https://docs.agno.com/tools/toolkits/others/lumalabs",
+    function_names=("generate_video", "image_to_video"),
 )
 def lumalabs_tools() -> type[LumaLabTools]:
     """Return Luma Labs tools for 3D content creation and video generation."""

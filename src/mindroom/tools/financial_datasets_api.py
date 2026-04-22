@@ -30,6 +30,22 @@ if TYPE_CHECKING:
     ],
     dependencies=["requests"],  # Only standard dependency needed
     docs_url="https://docs.agno.com/tools/toolkits/others/financial_datasets",
+    function_names=(
+        "get_balance_sheets",
+        "get_cash_flow_statements",
+        "get_company_info",
+        "get_crypto_prices",
+        "get_earnings",
+        "get_financial_metrics",
+        "get_income_statements",
+        "get_insider_trades",
+        "get_institutional_ownership",
+        "get_news",
+        "get_sec_filings",
+        "get_segmented_financials",
+        "get_stock_prices",
+        "search_tickers",
+    ),
 )
 def financial_datasets_api_tools() -> type[FinancialDatasetsTools]:
     """Return Financial Datasets API tools for comprehensive financial data access."""

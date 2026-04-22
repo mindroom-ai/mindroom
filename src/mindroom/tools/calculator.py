@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     config_fields=[],
     dependencies=["agno"],  # From agno requirements
     docs_url="https://docs.agno.com/tools/toolkits/local/calculator",
+    function_names=("add", "divide", "exponentiate", "factorial", "is_prime", "multiply", "square_root", "subtract"),
 )
 def calculator_tools() -> type[CalculatorTools]:
     """Return calculator tools for mathematical operations."""

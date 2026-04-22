@@ -84,6 +84,12 @@ if TYPE_CHECKING:
     ),
     dependencies=["google-api-python-client", "google-auth-httplib2", "google-auth-oauthlib"],
     docs_url="https://docs.agno.com/tools/toolkits/others/google_sheets",
+    function_names=(
+        "create_duplicate_sheet",
+        "create_sheet",
+        "read_sheet",
+        "update_sheet",
+    ),
 )
 def google_sheets_tools() -> type[GoogleSheetsTools]:
     """Return Google Sheets tools for spreadsheet integration."""

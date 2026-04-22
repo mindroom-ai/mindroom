@@ -86,6 +86,13 @@ if TYPE_CHECKING:
     ],
     dependencies=["requests", "pytz"],
     docs_url="https://docs.agno.com/tools/toolkits/others/calcom",
+    function_names=(
+        "cancel_booking",
+        "create_booking",
+        "get_available_slots",
+        "get_upcoming_bookings",
+        "reschedule_booking",
+    ),
 )
 def cal_com_tools() -> type[CalComTools]:
     """Return Cal.com tools for calendar scheduling and booking management."""

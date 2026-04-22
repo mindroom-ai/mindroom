@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx", "beautifulsoup4"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/website",
+    function_names=("add_website_to_knowledge", "read_url"),
 )
 def website_tools() -> type[WebsiteTools]:
     """Return website tools for web scraping and content extraction."""

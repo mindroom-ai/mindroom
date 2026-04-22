@@ -328,6 +328,7 @@ memory:
 # MindRoom auto-installs that optional extra on first use.
 
 # Knowledge base configuration (optional)
+# Keys must be non-empty single path components, so do not use "", ., .., /, or \ in a knowledge base ID.
 knowledge_bases:
   docs:
     path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)

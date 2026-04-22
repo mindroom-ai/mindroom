@@ -74,6 +74,16 @@ if TYPE_CHECKING:
     dependencies=["requests"],
     docs_url="https://docs.agno.com/tools/toolkits/others/bitbucket",
     helper_text="Create an app password at [Bitbucket Settings](https://bitbucket.org/account/settings/app-passwords/)",
+    function_names=(
+        "create_repository",
+        "get_pull_request_changes",
+        "get_pull_request_details",
+        "get_repository_details",
+        "list_all_pull_requests",
+        "list_issues",
+        "list_repositories",
+        "list_repository_commits",
+    ),
 )
 def bitbucket_tools() -> type[BitbucketTools]:
     """Return Bitbucket tools for repository management."""

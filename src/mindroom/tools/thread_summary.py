@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     icon_color="text-cyan-500",
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
+    function_names=("set_thread_summary",),
 )
 def register_thread_summary_tools() -> type[ThreadSummaryTools]:
     """Return Matrix thread summary tools."""

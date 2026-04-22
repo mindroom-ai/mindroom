@@ -54,6 +54,16 @@ if TYPE_CHECKING:
     ],
     dependencies=["requests"],
     docs_url="https://docs.agno.com/tools/toolkits/social/zoom",
+    function_names=(
+        "delete_meeting",
+        "get_access_token",
+        "get_meeting",
+        "get_meeting_recordings",
+        "get_upcoming_meetings",
+        "instructions",
+        "list_meetings",
+        "schedule_meeting",
+    ),
 )
 def zoom_tools() -> type[ZoomTools]:
     """Return Zoom tools for video conferencing and meeting management."""

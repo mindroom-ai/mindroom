@@ -134,6 +134,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["tavily-python"],
     docs_url="https://docs.agno.com/tools/toolkits/search/tavily",
+    function_names=("extract_url_content", "web_search_using_tavily", "web_search_with_tavily"),
 )
 def tavily_tools() -> type[TavilyTools]:
     """Return Tavily tools for real-time web search."""

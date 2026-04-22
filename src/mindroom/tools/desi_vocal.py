@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     dependencies=["requests"],
     docs_url="https://docs.agno.com/tools/toolkits/others/desi_vocal",
     helper_text="Get an API key from [DesiVocal](https://desivocal.com/)",
+    function_names=("get_voices", "text_to_speech"),
 )
 def desi_vocal_tools() -> type[DesiVocalTools]:
     """Return DesiVocal tools for text-to-speech."""

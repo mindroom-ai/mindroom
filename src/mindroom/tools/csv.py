@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["duckdb"],
     docs_url="https://docs.agno.com/tools/toolkits/database/csv",
+    function_names=("get_columns", "list_csv_files", "query_csv_file", "read_csv_file"),
 )
 def csv_tools() -> type[CsvTools]:
     """Return CSV toolkit for data analysis and querying."""

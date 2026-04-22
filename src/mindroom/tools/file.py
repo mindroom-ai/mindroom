@@ -378,6 +378,17 @@ class MindRoomFileTools(AgnoFileTools):
     ],
     dependencies=["agno"],  # From agno requirements
     docs_url="https://docs.agno.com/tools/toolkits/local/file",
+    function_names=(
+        "check_escape",
+        "delete_file",
+        "list_files",
+        "read_file",
+        "read_file_chunk",
+        "replace_file_chunk",
+        "save_file",
+        "search_content",
+        "search_files",
+    ),
 )
 def file_tools() -> type[AgnoFileTools]:
     """Return file tools for local file operations."""

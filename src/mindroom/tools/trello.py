@@ -50,6 +50,15 @@ if TYPE_CHECKING:
     ],
     dependencies=["py-trello"],
     docs_url="https://docs.agno.com/tools/toolkits/others/trello",
+    function_names=(
+        "create_board",
+        "create_card",
+        "create_list",
+        "get_board_lists",
+        "get_cards",
+        "list_boards",
+        "move_card",
+    ),
 )
 def trello_tools() -> type[TrelloTools]:
     """Return Trello tools for project board management."""

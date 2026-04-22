@@ -44,6 +44,27 @@ if TYPE_CHECKING:
     ],
     dependencies=["e2b_code_interpreter"],
     docs_url="https://docs.agno.com/tools/toolkits/others/e2b",
+    function_names=(
+        "download_chart_data",
+        "download_file_from_sandbox",
+        "download_png_result",
+        "get_public_url",
+        "get_sandbox_status",
+        "kill_background_command",
+        "list_files",
+        "list_running_sandboxes",
+        "read_file_content",
+        "run_background_command",
+        "run_command",
+        "run_python_code",
+        "run_server",
+        "set_sandbox_timeout",
+        "shutdown_sandbox",
+        "stream_command",
+        "upload_file",
+        "watch_directory",
+        "write_file_content",
+    ),
 )
 def e2b_tools() -> type[E2BTools]:
     """Return E2B code execution tools for secure sandbox environments."""

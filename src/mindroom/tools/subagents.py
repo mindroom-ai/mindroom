@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     icon_color="text-teal-500",
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
+    function_names=("agents_list", "list_sessions", "sessions_send", "sessions_spawn"),
 )
 def subagents_tools() -> type[SubAgentsTools]:
     """Return sub-agents tools."""

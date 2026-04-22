@@ -136,6 +136,16 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/social/whatsapp",
+    function_names=(
+        "send_document",
+        "send_image",
+        "send_list_message",
+        "send_location",
+        "send_reaction",
+        "send_reply_buttons",
+        "send_template_message",
+        "send_text_message",
+    ),
 )
 def whatsapp_tools() -> type[WhatsAppTools]:
     """Return WhatsApp Business API tools for messaging."""

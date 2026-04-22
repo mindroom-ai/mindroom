@@ -86,6 +86,16 @@ if TYPE_CHECKING:
     ],
     dependencies=["googlemaps", "google-maps-places"],
     docs_url="https://docs.agno.com/tools/toolkits/others/google_maps",
+    function_names=(
+        "geocode_address",
+        "get_directions",
+        "get_distance_matrix",
+        "get_elevation",
+        "get_timezone",
+        "reverse_geocode",
+        "search_places",
+        "validate_address",
+    ),
 )
 def google_maps_tools() -> type[GoogleMapTools]:
     """Return Google Maps tools for location services."""

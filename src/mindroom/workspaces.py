@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping
+
     from mindroom.config.main import Config
 
 _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
@@ -54,6 +56,41 @@ def resolve_relative_path_within_root(
         msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
         raise ValueError(msg)
     return candidate
+
+
+def resolve_relative_path_within_root_preserving_leaf(
+    root: Path,
+    relative_path: str | Path,
+    *,
+    field_name: str,
+    root_label: str = "canonical root",
+) -> Path:
+    """Resolve one relative path under a canonical root without following the final component."""
+    lexical_root = root.expanduser()
+    resolved_root = lexical_root.resolve()
+    candidate_path = lexical_root / relative_path
+    relative = Path(relative_path)
+    if relative.is_absolute():
+        msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
+        raise ValueError(msg)
+    if relative == Path():
+        return resolved_root
+
+    current = lexical_root
+    for index, part in enumerate(relative.parts):
+        if part == "..":
+            msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
+            raise ValueError(msg)
+        current = current / part
+        if index < len(relative.parts) - 1 and current.is_symlink():
+            msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
+            raise ValueError(msg)
+
+    candidate_parent = candidate_path.parent.resolve()
+    if not candidate_parent.is_relative_to(resolved_root):
+        msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
+        raise ValueError(msg)
+    return candidate_path
 
 
 def resolve_workspace_relative_path(
@@ -137,6 +174,100 @@ def ensure_workspace_template(
         raise ValueError(msg)
     _copy_workspace_template(workspace_path, template_dir=_MIND_TEMPLATE_DIR, force=force)
     (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
+
+
+def _build_workspace_knowledge_links(
+    *,
+    workspace_root: Path,
+    knowledge_root: Path,
+    knowledge_paths: Mapping[str, Path],
+) -> dict[Path, Path]:
+    desired_links: dict[Path, Path] = {}
+    for base_id, target_path in knowledge_paths.items():
+        link_path = resolve_relative_path_within_root_preserving_leaf(
+            knowledge_root,
+            base_id,
+            field_name="workspace knowledge link",
+        )
+        resolved_target = target_path.expanduser().resolve()
+        if not resolved_target.is_relative_to(workspace_root):
+            continue
+        if resolved_target == link_path or resolved_target.is_relative_to(link_path):
+            continue
+        if link_path.is_relative_to(resolved_target):
+            continue
+        desired_links[link_path] = resolved_target
+    return desired_links
+
+
+def _remove_stale_workspace_knowledge_links(
+    knowledge_root: Path,
+    *,
+    protected_paths: Collection[Path],
+    workspace_root: Path,
+    desired_links: Mapping[Path, Path],
+) -> None:
+    for existing_path in knowledge_root.iterdir():
+        if (
+            existing_path.is_symlink()
+            and existing_path not in desired_links
+            and existing_path not in protected_paths
+            and existing_path.resolve().is_relative_to(workspace_root)
+        ):
+            existing_path.unlink()
+
+
+def _apply_workspace_knowledge_links(desired_links: Mapping[Path, Path]) -> None:
+    for link_path, resolved_target in desired_links.items():
+        if link_path.is_symlink():
+            if link_path.resolve() == resolved_target:
+                continue
+            link_path.unlink()
+        elif link_path.exists():
+            if link_path.resolve() == resolved_target:
+                continue
+            msg = f"Workspace knowledge link path already exists and is not a symlink: {link_path}"
+            raise ValueError(msg)
+        if resolved_target == link_path:
+            continue
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        link_path.symlink_to(resolved_target, target_is_directory=True)
+
+
+def ensure_workspace_knowledge_links(
+    workspace_path: Path,
+    *,
+    knowledge_paths: Mapping[str, Path],
+    protected_paths: Collection[Path] = (),
+) -> None:
+    """Expose canonical workspace-local paths for bound knowledge rooted inside the workspace.
+
+    Each knowledge base becomes visible under ``<workspace>/knowledge/<base_id>``.
+    Targets outside the workspace are intentionally excluded because the default
+    file-aware tools enforce workspace containment after resolving symlinks.
+    """
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    workspace_root = workspace_path.resolve()
+    knowledge_root = resolve_workspace_relative_path(
+        workspace_path,
+        "knowledge",
+        field_name="workspace knowledge root",
+    )
+    if not knowledge_paths and not knowledge_root.exists():
+        return
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    desired_links = _build_workspace_knowledge_links(
+        workspace_root=workspace_root,
+        knowledge_root=knowledge_root,
+        knowledge_paths=knowledge_paths,
+    )
+    _remove_stale_workspace_knowledge_links(
+        knowledge_root,
+        protected_paths=protected_paths,
+        workspace_root=workspace_root,
+        desired_links=desired_links,
+    )
+    _apply_workspace_knowledge_links(desired_links)
 
 
 def _private_root_name(agent_name: str, config: Config) -> str:

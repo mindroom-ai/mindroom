@@ -247,6 +247,7 @@ class _ProcessRecord:
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=[],
     docs_url="https://docs.agno.com/tools/toolkits/local/shell",
+    function_names=("check_shell_command", "kill_shell_command", "run_shell_command"),
 )
 def shell_tools() -> type[Toolkit]:  # noqa: C901
     """Return shell tools for command execution."""

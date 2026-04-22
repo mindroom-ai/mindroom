@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["crawl4ai"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/crawl4ai",
+    function_names=("crawl",),
 )
 def crawl4ai_tools() -> type[Crawl4aiTools]:
     """Return Crawl4AI tools for web crawling and scraping."""

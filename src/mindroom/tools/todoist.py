@@ -36,6 +36,15 @@ if TYPE_CHECKING:
     ],
     dependencies=["todoist-api-python"],
     docs_url="https://docs.agno.com/tools/toolkits/others/todoist",
+    function_names=(
+        "close_task",
+        "create_task",
+        "delete_task",
+        "get_active_tasks",
+        "get_projects",
+        "get_task",
+        "update_task",
+    ),
 )
 def todoist_tools() -> type[TodoistTools]:
     """Return Todoist tools for task management."""

@@ -53,6 +53,22 @@ if TYPE_CHECKING:
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/others/shopify",
     helper_text="Create a custom app in your [Shopify Admin](https://admin.shopify.com/) to get an access token",
+    function_names=(
+        "get_average_order_value",
+        "get_customer_order_history",
+        "get_inventory_levels",
+        "get_low_stock_products",
+        "get_order_analytics",
+        "get_orders",
+        "get_product_sales_breakdown",
+        "get_products",
+        "get_products_bought_together",
+        "get_repeat_customers",
+        "get_sales_by_date_range",
+        "get_sales_trends",
+        "get_shop_info",
+        "get_top_selling_products",
+    ),
 )
 def shopify_tools() -> type[ShopifyTools]:
     """Return Shopify tools for e-commerce analytics."""

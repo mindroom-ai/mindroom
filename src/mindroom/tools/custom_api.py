@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["requests"],
     docs_url="https://docs.agno.com/tools/toolkits/others/custom_api",
+    function_names=("make_request",),
 )
 def custom_api_tools() -> type[CustomApiTools]:
     """Return Custom API tools for making HTTP requests to external APIs."""

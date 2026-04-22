@@ -73,6 +73,14 @@ if TYPE_CHECKING:
     ],
     dependencies=["psycopg"],
     docs_url="https://docs.agno.com/tools/toolkits/others/postgres",
+    function_names=(
+        "describe_table",
+        "export_table_to_path",
+        "inspect_query",
+        "run_query",
+        "show_tables",
+        "summarize_table",
+    ),
 )
 def postgres_tools() -> type[PostgresTools]:
     """Return PostgreSQL tools for database operations."""

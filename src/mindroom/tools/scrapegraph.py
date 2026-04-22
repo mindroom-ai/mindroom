@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["scrapegraph-py"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/scrapegraph",
+    function_names=("agentic_crawler", "crawl", "markdownify", "scrape", "searchscraper", "smartscraper"),
 )
 def scrapegraph_tools() -> type[ScrapeGraphTools]:
     """Return ScrapeGraph tools for web data extraction."""

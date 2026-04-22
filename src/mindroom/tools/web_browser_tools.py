@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     ],
     dependencies=[],  # Uses standard library webbrowser module
     docs_url="https://docs.agno.com/tools/toolkits/others/web-browser",
+    function_names=("open_page",),
 )
 def web_browser_tools() -> type[WebBrowserTools]:
     """Return Web Browser Tools for opening URLs."""

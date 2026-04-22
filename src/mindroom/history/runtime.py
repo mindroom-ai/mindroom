@@ -56,6 +56,7 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
+    from agno.models.base import Model
     from agno.team import Team
 
     from mindroom.config.main import Config
@@ -68,6 +69,16 @@ logger = get_logger(__name__)
 
 _TEAM_STATE_ROOT_DIRNAME = "teams"
 _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
+
+
+@timed("system_prompt_assembly.history_prepare.compaction_model_init")
+def _load_compaction_model(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+) -> Model:
+    """Load the compaction model with dedicated history-preparation timing."""
+    return model_loading.get_model_instance(config, runtime_paths, model_name)
 
 
 @dataclass(frozen=True)
@@ -201,7 +212,7 @@ async def prepare_scope_history(
 
     if should_compact:
         assert execution_plan.summary_input_budget_tokens is not None
-        summary_model = model_loading.get_model_instance(
+        summary_model = _load_compaction_model(
             config,
             runtime_paths,
             execution_plan.compaction_model_name,

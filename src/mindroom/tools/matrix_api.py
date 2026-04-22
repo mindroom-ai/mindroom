@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         "when `event_context.include_profile` is requested). Full event `content` is intentionally "
         "omitted; use `get_event` when needed."
     ),
+    function_names=("matrix_api",),
 )
 def matrix_api_tools() -> type[MatrixApiTools]:
     """Return low-level Matrix API tools."""

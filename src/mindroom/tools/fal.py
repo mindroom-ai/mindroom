@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["fal-client"],  # From agno requirements
     docs_url="https://docs.agno.com/tools/toolkits/others/fal",  # URL without .md extension
+    function_names=("generate_media", "image_to_image", "on_queue_update"),
 )
 def fal_tools() -> type[FalTools]:
     """Return Fal tools for AI model serving and media generation."""

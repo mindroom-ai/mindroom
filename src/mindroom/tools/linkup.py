@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["linkup-sdk"],
     docs_url="https://docs.agno.com/tools/toolkits/search/linkup",
+    function_names=("web_search_with_linkup",),
 )
 def linkup_tools() -> type[LinkupTools]:
     """Return Linkup tools for web search."""
