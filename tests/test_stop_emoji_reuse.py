@@ -16,6 +16,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.runtime import USER_STOP_CANCEL_MSG
 from mindroom.stop import StopManager
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -112,7 +113,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         mock_handle_reaction.assert_not_called()
 
         # The task should have been cancelled
-        task.cancel.assert_called_once()
+        task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
 
 
 @pytest.mark.asyncio
@@ -177,7 +178,7 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
         await bot._on_reaction(room, reaction_event)
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
-    task.cancel.assert_called_once()
+    task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
     bot._send_response.assert_awaited_once_with(
         "!test:example.com",
         "$message:example.com",
@@ -248,7 +249,7 @@ async def test_stop_emoji_acknowledgement_stays_in_thread(tmp_path: Path) -> Non
         await bot._on_reaction(room, reaction_event)
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
-    task.cancel.assert_called_once()
+    task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
     bot._send_response.assert_awaited_once_with(
         "!test:example.com",
         "$message:example.com",

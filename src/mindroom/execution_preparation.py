@@ -16,6 +16,7 @@ from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
+    STREAM_STATUS_INTERRUPTED,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     RuntimePaths,
@@ -246,7 +247,7 @@ def _classify_partial_reply(
         return None
 
     partial_kind: _PartialReplyKind | None = None
-    if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}:
+    if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED}:
         partial_kind = _PartialReplyKind.INTERRUPTED
     elif status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
         event_id = msg.event_id
@@ -262,7 +263,7 @@ def _classify_partial_reply(
 
 
 def _clean_partial_reply_body(body: str) -> str:
-    """Strip streaming markers and status notes from partial reply text."""
+    """Strip live status notes before the canonical interrupted replay marker is added."""
     return clean_partial_reply_text(body)
 
 

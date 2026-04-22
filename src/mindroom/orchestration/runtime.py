@@ -7,12 +7,12 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
 from mindroom import constants
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, request_task_cancel, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import (
@@ -40,12 +40,26 @@ STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
 _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
+USER_STOP_CANCEL_MSG = "user_stop"
 SYNC_RESTART_CANCEL_MSG = "sync_restart"
+
+CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
+
+
+def classify_cancel_source(exc: asyncio.CancelledError) -> CancelSource:
+    """Return the visible cancellation provenance for one CancelledError."""
+    if len(exc.args) == 0:
+        return "interrupted"
+    if exc.args[0] == USER_STOP_CANCEL_MSG:
+        return "user_stop"
+    if exc.args[0] == SYNC_RESTART_CANCEL_MSG:
+        return "sync_restart"
+    return "interrupted"
 
 
 def is_sync_restart_cancel(exc: asyncio.CancelledError) -> bool:
     """Return whether one cancellation was caused by a sync restart."""
-    return len(exc.args) > 0 and exc.args[0] == SYNC_RESTART_CANCEL_MSG
+    return classify_cancel_source(exc) == "sync_restart"
 
 
 def matrix_sync_startup_timeout_seconds(runtime_paths: RuntimePaths) -> float:
@@ -101,10 +115,7 @@ async def cancel_task(
     """Cancel a detached task and wait for it to finish."""
     if task is None:
         return
-    if cancel_msg is None:
-        task.cancel()
-    else:
-        task.cancel(msg=cancel_msg)
+    request_task_cancel(task, cancel_msg=cancel_msg)
     with suppress(*suppress_exceptions):
         await task
 
@@ -170,7 +181,7 @@ class _SyncIteration:
                     last_sync_time=bot.last_sync_time.isoformat() if bot.last_sync_time is not None else None,
                 )
 
-            sync_task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+            request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
             with suppress(asyncio.CancelledError):
                 await sync_task
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
@@ -205,13 +216,16 @@ class _SyncIteration:
             {self.sync_task, self.watchdog_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if self.sync_task in done and not self.sync_task.cancelled():
-            await self.sync_task  # raises if sync_forever failed; returns if clean
-            return
-        if self.watchdog_task in done:
+        if self.sync_task in done:
+            if not self.sync_task.cancelled():
+                await self.sync_task  # raises if sync_forever failed; returns if clean
+                return
+            # Let the watchdog surface its stalled-sync error when it initiated the
+            # cancellation; otherwise preserve the original sync-task cancellation.
             await self.watchdog_task
-        else:
             await self.sync_task
+            return
+        await self.watchdog_task
 
     async def cancel(self) -> None:
         """Cancel child tasks without masking the original failure."""
@@ -221,7 +235,7 @@ class _SyncIteration:
                 continue
             setattr(self, attr, None)
             if attr == "sync_task":
-                task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+                request_task_cancel(task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
             else:
                 task.cancel()
             try:

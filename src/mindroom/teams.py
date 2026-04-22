@@ -31,7 +31,7 @@ from mindroom import ai_runtime, model_loading
 from mindroom.agents import create_agent, get_team_session
 from mindroom.ai import build_matrix_run_metadata
 from mindroom.authorization import get_available_agents_in_room
-from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME, build_cancelled_error
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
@@ -1140,7 +1140,7 @@ def _is_cancellation_boilerplate(content: str) -> bool:
 
 def _raise_team_run_cancelled(reason: str | None) -> NoReturn:
     """Raise the canonical team cancellation error."""
-    raise asyncio.CancelledError(reason or "Run cancelled")
+    raise build_cancelled_error(reason)
 
 
 def materialize_exact_team_members(

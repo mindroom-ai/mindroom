@@ -6,7 +6,8 @@ import asyncio
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NoReturn
+from html import escape
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from mindroom import interactive
 from mindroom.constants import (
@@ -23,7 +24,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.runtime import is_sync_restart_cancel
+from mindroom.orchestration.runtime import CancelSource, classify_cancel_source
 from mindroom.streaming_delivery import (
     StreamInputChunk,
     _consume_stream_with_progress_supervision,
@@ -57,9 +58,12 @@ _PROGRESS_PLACEHOLDER = "Thinking..."
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
 _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
+_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
+INTERRUPTED_RESPONSE_NOTE = _INTERRUPTED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _StreamInputChunk = StreamInputChunk
+_TerminalStreamStatus = Literal["completed", "cancelled", "error", "interrupted"]
 
 
 class StreamingDeliveryError(Exception):
@@ -120,6 +124,7 @@ def is_interrupted_partial_reply(text: object) -> bool:
     return trimmed_text.endswith(
         (
             _CANCELLED_RESPONSE_NOTE,
+            _INTERRUPTED_RESPONSE_NOTE,
             _RESTART_INTERRUPTED_RESPONSE_NOTE,
             " [cancelled]",
             " [error]",
@@ -135,6 +140,7 @@ def clean_partial_reply_text(text: str) -> str:
         " [cancelled]",
         " [error]",
         _CANCELLED_RESPONSE_NOTE,
+        _INTERRUPTED_RESPONSE_NOTE,
         _RESTART_INTERRUPTED_RESPONSE_NOTE,
     ):
         if cleaned.endswith(marker):
@@ -155,7 +161,6 @@ def build_restart_interrupted_body(text: str) -> str:
         return _RESTART_INTERRUPTED_RESPONSE_NOTE
     return f"{stripped_text}\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}"
 
-
 @dataclass(frozen=True)
 class _CommittedDeliveryState:
     """One frozen non-terminal stream state that definitely reached Matrix."""
@@ -163,6 +168,44 @@ class _CommittedDeliveryState:
     accumulated_text: str
     tool_trace: list[ToolTraceEntry]
     placeholder_progress_sent: bool
+
+
+def build_cancelled_response_update(
+    text: str,
+    *,
+    cancel_source: CancelSource,
+) -> tuple[str, _TerminalStreamStatus]:
+    """Return the final visible body and stream status for one cancellation source."""
+    if cancel_source == "sync_restart":
+        return build_restart_interrupted_body(text), STREAM_STATUS_ERROR
+
+    note = _CANCELLED_RESPONSE_NOTE if cancel_source == "user_stop" else _INTERRUPTED_RESPONSE_NOTE
+    # Generic interruptions keep their distinct visible note, but reuse an
+    # existing terminal wire status so older clients do not misclassify them.
+    stream_status = STREAM_STATUS_CANCELLED if cancel_source == "user_stop" else STREAM_STATUS_ERROR
+    stripped_text = text.rstrip()
+    if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
+        return note, stream_status
+    return f"{stripped_text}\n\n{note}", stream_status
+
+
+def _log_stream_cancellation(
+    *,
+    exc: asyncio.CancelledError,
+    cancel_source: CancelSource,
+    message_id: str | None,
+) -> None:
+    """Log one streaming cancellation with its resolved provenance."""
+    if cancel_source == "sync_restart":
+        logger.info("Streaming response interrupted by sync restart", message_id=message_id)
+    elif cancel_source == "user_stop":
+        logger.info("Streaming response cancelled by user", message_id=message_id)
+    else:
+        logger.warning(
+            "Streaming response interrupted — traceback for diagnosis",
+            message_id=message_id,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
 
 
 @dataclass(frozen=True)
@@ -302,6 +345,7 @@ class StreamingResponse:
         *,
         cancelled: bool = False,
         restart_interrupted: bool = False,
+        cancel_source: CancelSource | None = None,
         error: Exception | None = None,
     ) -> None:
         """Send final message update."""
@@ -310,24 +354,26 @@ class StreamingResponse:
             stripped_text = self.accumulated_text.rstrip()
             error_note = _format_stream_error_note(error)
             self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
-        elif restart_interrupted:
-            self.accumulated_text = build_restart_interrupted_body(self.accumulated_text)
-        elif cancelled:
-            stripped_text = self.accumulated_text.rstrip()
-            self.accumulated_text = (
-                f"{stripped_text}\n\n{_CANCELLED_RESPONSE_NOTE}" if stripped_text else _CANCELLED_RESPONSE_NOTE
-            )
+            final_stream_status = STREAM_STATUS_ERROR
+        else:
+            resolved_cancel_source = cancel_source
+            if resolved_cancel_source is None:
+                if restart_interrupted:
+                    resolved_cancel_source = "sync_restart"
+                elif cancelled:
+                    resolved_cancel_source = "user_stop"
+            final_stream_status = STREAM_STATUS_COMPLETED
+            if resolved_cancel_source is not None:
+                self.accumulated_text, final_stream_status = build_cancelled_response_update(
+                    self.accumulated_text,
+                    cancel_source=resolved_cancel_source,
+                )
 
         # When a placeholder message exists but no real text arrived,
         # still edit the message to finalize the stream status.
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
-        final_stream_status = STREAM_STATUS_COMPLETED
-        if error is not None or restart_interrupted:
-            final_stream_status = STREAM_STATUS_ERROR
-        elif cancelled:
-            final_stream_status = STREAM_STATUS_CANCELLED
         send_succeeded = await self._send_or_edit_message(
             client,
             is_final=True,
@@ -695,16 +741,9 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                         delivery_cleanup_error,
                         tool_trace_collector=tool_trace_collector,
                     ) from delivery_cleanup_error
-            if is_sync_restart_cancel(exc):
-                logger.info("Streaming response interrupted by sync restart", message_id=streaming.event_id)
-                await streaming.finalize(client, restart_interrupted=True)
-            else:
-                logger.warning(
-                    "Streaming response cancelled — traceback for diagnosis",
-                    message_id=streaming.event_id,
-                    exc_info=True,
-                )
-                await streaming.finalize(client, cancelled=True)
+            cancel_source = classify_cancel_source(exc)
+            _log_stream_cancellation(exc=exc, cancel_source=cancel_source, message_id=streaming.event_id)
+            await streaming.finalize(client, cancel_source=cancel_source)
             raise
         except Exception as e:
             delivery_error = e.error if isinstance(e, _NonTerminalDeliveryError) else e

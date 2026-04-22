@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -25,6 +27,7 @@ from agno.tools.function import Function
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
+from mindroom.constants import MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS
 from mindroom.history.storage import clear_force_compaction_state, update_scope_seen_event_ids, write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.hooks import CompactionHookContext, emit
@@ -708,12 +711,25 @@ async def _generate_compaction_summary(
     timing_scope: str | None = None,
 ) -> SessionSummary:
     del timing_scope
-    response = await model.aresponse(
-        messages=[
-            Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
-            Message(role="user", content=summary_input),
-        ],
+    response_task = asyncio.create_task(
+        model.aresponse(
+            messages=[
+                Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
+                Message(role="user", content=summary_input),
+            ],
+        ),
     )
+    try:
+        done, _ = await asyncio.wait({response_task}, timeout=MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS)
+        if response_task not in done:
+            msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS}s"
+            raise RuntimeError(msg)
+        response = response_task.result()
+    finally:
+        if not response_task.done():
+            response_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(asyncio.shield(response_task), timeout=2.0)
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
     if not normalized_text:

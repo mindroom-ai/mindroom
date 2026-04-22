@@ -32,6 +32,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     ROUTER_AGENT_NAME,
     RuntimePaths,
+    build_cancelled_error,
 )
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -360,7 +361,7 @@ def _extract_interrupted_partial_text(
 
 def _raise_agent_run_cancelled(reason: str | None) -> NoReturn:
     """Raise the canonical agent cancellation error."""
-    raise asyncio.CancelledError(reason or "Run cancelled")
+    raise build_cancelled_error(reason)
 
 
 def _get_model_config(

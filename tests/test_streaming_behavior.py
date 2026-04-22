@@ -19,11 +19,17 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.constants import (
+    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
+)
+from mindroom.history.interrupted_replay import (
+    _INTERRUPTED_RESPONSE_MARKER,
+    InterruptedReplaySnapshot,
+    render_interrupted_replay_content,
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -31,10 +37,11 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
+from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
+    INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
@@ -67,6 +74,22 @@ IN_PROGRESS_MARKER = " ⋯"
 async def _aiter(*events: object) -> AsyncIterator[object]:
     for event in events:
         yield event
+
+
+def _render_cleaned_interrupted_replay(body: str) -> str:
+    return render_interrupted_replay_content(
+        InterruptedReplaySnapshot(
+            user_message="",
+            partial_text=clean_partial_reply_text(body),
+            completed_tools=(),
+            interrupted_tools=(),
+            seen_event_ids=(),
+            source_event_id=None,
+            source_event_ids=(),
+            source_event_prompts=(),
+            response_event_id=None,
+        ),
+    )
 
 
 def _make_matrix_client_mock() -> AsyncMock:
@@ -515,6 +538,12 @@ class TestStreamingBehavior:
         assert not is_interrupted_partial_reply("Finished answer")
         assert not is_interrupted_partial_reply(None)
 
+    def test_is_interrupted_partial_reply_recognises_all_three_variants(self) -> None:
+        """Interrupted partial-reply detection should recognize every live cancel note."""
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{INTERRUPTED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply(build_restart_interrupted_body("Draft answer"))
+
     def test_clean_partial_reply_text_strips_shared_markers(self) -> None:
         """Shared partial-reply cleanup should normalize cancelled/error/placeholder bodies."""
         assert clean_partial_reply_text(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == "Draft answer"
@@ -523,6 +552,24 @@ class TestStreamingBehavior:
         )
         assert clean_partial_reply_text(PROGRESS_PLACEHOLDER) == ""
         assert clean_partial_reply_text("...") == ""
+
+    def test_clean_partial_reply_text_normalises_user_stop_label_to_interrupted_marker(self) -> None:
+        """User-stop labels should collapse to the canonical interrupted replay marker."""
+        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == (
+            f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
+        )
+
+    def test_clean_partial_reply_text_normalises_restart_label_to_interrupted_marker(self) -> None:
+        """Restart labels should collapse to the canonical interrupted replay marker."""
+        assert _render_cleaned_interrupted_replay(build_restart_interrupted_body("Draft answer")) == (
+            f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
+        )
+
+    def test_clean_partial_reply_text_normalises_new_interrupted_label_to_interrupted_marker(self) -> None:
+        """Generic interruption labels should collapse to the canonical interrupted replay marker."""
+        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{INTERRUPTED_RESPONSE_NOTE}") == (
+            f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
+        )
 
     @pytest.mark.asyncio
     async def test_throttled_send_uses_ramp_interval(self) -> None:
@@ -1082,7 +1129,7 @@ class TestStreamingBehavior:
 
         async def cancelling_stream() -> AsyncIterator[str]:
             yield "Partial answer"
-            raise asyncio.CancelledError
+            raise asyncio.CancelledError(USER_STOP_CANCEL_MSG)
 
         with (
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
@@ -1104,6 +1151,46 @@ class TestStreamingBehavior:
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER not in edited_texts[0]
         assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
+
+    @pytest.mark.asyncio
+    async def test_interrupted_stream_preserves_partial_text_with_suffix(self) -> None:
+        """Generic interruptions should not render as user-cancelled."""
+        mock_client = _make_matrix_client_mock()
+        edited_texts: list[str] = []
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent:
+            edited_texts.append(new_text)
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
+
+        async def interrupted_stream() -> AsyncIterator[str]:
+            yield "Partial answer"
+            raise asyncio.CancelledError
+
+        with (
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=interrupted_stream(),
+                existing_event_id="$thinking_123",
+                room_mode=True,
+            )
+
+        assert len(edited_texts) == 2
+        assert edited_texts[-1] == f"Partial answer\n\n{INTERRUPTED_RESPONSE_NOTE}"
 
     @pytest.mark.asyncio
     async def test_cancelled_stream_reports_existing_event_id_to_callback(self) -> None:
@@ -1215,6 +1302,64 @@ class TestStreamingBehavior:
         final_content, final_text = edited_messages[-1]
         assert final_text == build_restart_interrupted_body("Partial answer")
         assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+
+    @pytest.mark.asyncio
+    async def test_cancel_sources_reuse_compatible_terminal_stream_statuses(self) -> None:
+        """Generic interruptions must not introduce a new wire-level stream status."""
+        mock_client = _make_matrix_client_mock()
+        observed_statuses: dict[str, str] = {}
+
+        cases = (
+            ("user_stop", USER_STOP_CANCEL_MSG, STREAM_STATUS_CANCELLED),
+            ("interrupted", None, STREAM_STATUS_ERROR),
+            ("sync_restart", SYNC_RESTART_CANCEL_MSG, STREAM_STATUS_ERROR),
+        )
+
+        for label, cancel_message, expected_status in cases:
+            edited_messages: list[dict[str, object]] = []
+
+            async def record_edit(
+                _client: object,
+                _room_id: str,
+                _event_id: str,
+                new_content: dict[str, object],
+                _new_text: str,
+                *,
+                _edited_messages: list[dict[str, object]] = edited_messages,
+            ) -> DeliveredMatrixEvent:
+                _edited_messages.append(new_content)
+                return DeliveredMatrixEvent(event_id="$edit", content_sent=new_content)
+
+            async def cancelling_stream(
+                *,
+                _cancel_message: str | None = cancel_message,
+            ) -> AsyncIterator[str]:
+                yield "Partial answer"
+                if _cancel_message is None:
+                    raise asyncio.CancelledError
+                raise asyncio.CancelledError(_cancel_message)
+
+            with (
+                patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+                pytest.raises(asyncio.CancelledError),
+            ):
+                await send_streaming_response(
+                    client=mock_client,
+                    room_id="!test:localhost",
+                    reply_to_event_id="$original_123",
+                    thread_id=None,
+                    sender_domain="localhost",
+                    config=self.config,
+                    runtime_paths=runtime_paths_for(self.config),
+                    response_stream=cancelling_stream(),
+                    existing_event_id="$thinking_123",
+                    room_mode=True,
+                )
+
+            observed_statuses[label] = str(edited_messages[-1][STREAM_STATUS_KEY])
+            assert observed_statuses[label] == expected_status
+
+        assert set(observed_statuses.values()) == {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}
 
     @pytest.mark.asyncio
     async def test_stream_error_preserves_partial_text_and_appends_error_hint(self) -> None:

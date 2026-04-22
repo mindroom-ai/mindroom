@@ -43,6 +43,7 @@ from mindroom.history import PreparedHistoryState, prepare_history_for_run
 from mindroom.history.compaction import (
     _build_summary_input,
     _emit_compaction_hook,
+    _generate_compaction_summary,
     estimate_agent_static_tokens,
     estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
@@ -685,6 +686,133 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     assert prepared.replays_persisted_history is False
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].summary == "merged summary"
+
+
+@pytest.mark.asyncio
+async def test_compaction_call_timeout_raises_runtime_error() -> None:
+    class _SlowSummaryModel(FakeModel):
+        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            await asyncio.sleep(0.05)
+            return ModelResponse(content="merged summary")
+
+    with (
+        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS", 0.01),
+        pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
+    ):
+        await _generate_compaction_summary(
+            model=_SlowSummaryModel(id="summary-model", provider="fake"),
+            summary_input="Current prompt",
+        )
+
+
+@pytest.mark.asyncio
+async def test_compaction_provider_timeout_propagates_unchanged() -> None:
+    class _ProviderTimeoutModel(FakeModel):
+        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            msg = "provider timeout"
+            raise TimeoutError(msg)
+
+    with pytest.raises(TimeoutError, match="provider timeout"):
+        await _generate_compaction_summary(
+            model=_ProviderTimeoutModel(id="summary-model", provider="fake"),
+            summary_input="Current prompt",
+        )
+
+
+@pytest.mark.asyncio
+async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelled() -> None:
+    class _BlockingSummaryModel(FakeModel):
+        def __init__(self, *, model_id: str, provider: str) -> None:
+            super().__init__(id=model_id, provider=provider)
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.response_task: asyncio.Task[object] | None = None
+
+        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            self.response_task = asyncio.current_task()
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+            raise AssertionError
+
+    model = _BlockingSummaryModel(model_id="summary-model", provider="fake")
+    summary_task = asyncio.create_task(
+        _generate_compaction_summary(
+            model=model,
+            summary_input="Current prompt",
+        ),
+    )
+
+    await asyncio.wait_for(model.started.wait(), timeout=0.1)
+    summary_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(summary_task, timeout=0.1)
+
+    await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
+    assert model.response_task is not None
+    assert model.response_task.done() is True
+    assert model.response_task.cancelled() is True
+
+
+@pytest.mark.asyncio
+async def test_compaction_call_timeout_falls_back_in_runtime(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _SlowSummaryModel(FakeModel):
+        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            await asyncio.sleep(0.05)
+            return ModelResponse(content="merged summary")
+
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+            _completed_run("run-3"),
+            _completed_run("run-4"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=_SlowSummaryModel(id="summary-model", provider="fake"),
+        ),
+        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS", 0.01),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert len(persisted.runs) == 4
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert prepared.compaction_outcomes == []
+    assert "Compaction failed; continuing without compaction" in capsys.readouterr().out
 
 
 def test_compaction_hook_events_are_registered() -> None:

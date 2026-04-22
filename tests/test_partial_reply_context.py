@@ -15,6 +15,7 @@ from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
+    STREAM_STATUS_INTERRUPTED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
@@ -27,11 +28,17 @@ from mindroom.execution_preparation import (
     _get_unseen_messages_for_sender,
     _PartialReplyKind,
 )
+from mindroom.history.interrupted_replay import (
+    _INTERRUPTED_RESPONSE_MARKER,
+    InterruptedReplaySnapshot,
+    render_interrupted_replay_content,
+)
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.client_visible_messages import _stream_status_from_content
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
+    _INTERRUPTED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
     _RESTART_INTERRUPTED_RESPONSE_NOTE,
     StreamingResponse,
@@ -76,6 +83,22 @@ def _get_unseen_messages(
         seen_event_ids=seen_event_ids,
         current_event_id=current_event_id,
         active_event_ids=active_event_ids,
+    )
+
+
+def _render_normalized_interrupted_replay(body: str) -> str:
+    return render_interrupted_replay_content(
+        InterruptedReplaySnapshot(
+            user_message="",
+            partial_text=_clean_partial_reply_body(body),
+            completed_tools=(),
+            interrupted_tools=(),
+            seen_event_ids=(),
+            source_event_id=None,
+            source_event_ids=(),
+            source_event_prompts=(),
+            response_event_id=None,
+        ),
     )
 
 
@@ -151,6 +174,16 @@ class TestClassifyPartialReply:
         assert (
             _classify_partial_reply(
                 _make_visible_message(body="Partial answer", stream_status=STREAM_STATUS_ERROR),
+                active_event_ids=set(),
+            )
+            is _PartialReplyKind.INTERRUPTED
+        )
+
+    def test_interrupted_metadata_is_interrupted(self) -> None:
+        """Treat generic interrupted messages as interrupted partial replies."""
+        assert (
+            _classify_partial_reply(
+                _make_visible_message(body="Partial answer", stream_status=STREAM_STATUS_INTERRUPTED),
                 active_event_ids=set(),
             )
             is _PartialReplyKind.INTERRUPTED
@@ -238,6 +271,7 @@ class TestClassifyPartialReply:
         "body",
         [
             f"Legacy partial\n\n{_CANCELLED_RESPONSE_NOTE}",
+            f"Legacy partial\n\n{_INTERRUPTED_RESPONSE_NOTE}",
             f"Legacy partial\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}",
             "Legacy partial\n\n**[Response interrupted by an error: boom]**",
             "Legacy partial [cancelled]",
@@ -272,6 +306,7 @@ class TestCleanPartialReplyBody:
         ("body", "expected"),
         [
             (f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}", "Partial answer"),
+            (f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}", "Partial answer"),
             (f"Partial answer\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}", "Partial answer"),
             ("Partial answer [cancelled]", "Partial answer"),
             ("Partial answer [error]", "Partial answer"),
@@ -287,6 +322,19 @@ class TestCleanPartialReplyBody:
         """Keep long partial-reply content once markers are removed."""
         result = _clean_partial_reply_body("x" * 5000)
         assert result == "x" * 5000
+
+    def test_replay_text_byte_identical_across_cancel_sources(self) -> None:
+        """Canonical interrupted replay text must stay byte-identical across cancel sources."""
+        rendered = [
+            _render_normalized_interrupted_replay(f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}").encode("utf-8"),
+            _render_normalized_interrupted_replay(f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}").encode("utf-8"),
+            _render_normalized_interrupted_replay(
+                f"Partial answer\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}",
+            ).encode("utf-8"),
+        ]
+
+        assert rendered[0] == rendered[1] == rendered[2]
+        assert rendered[0] == f"Partial answer\n\n{_INTERRUPTED_RESPONSE_MARKER}".encode()
 
 
 class TestUnseenMessagesPartialReplies:
