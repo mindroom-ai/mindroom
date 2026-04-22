@@ -1,7 +1,7 @@
-import { useMemo } from 'react';
-import { listSkills } from '@/services/skillsService';
-import { SkillSummary } from '@/types/skills';
-import { useFetchData } from './useFetchData';
+import { useMemo } from "react";
+import { listSkills } from "@/services/skillsService";
+import { SkillSummary } from "@/types/skills";
+import { useFetchData } from "./useFetchData";
 
 const DEFAULT: SkillSummary[] = [];
 

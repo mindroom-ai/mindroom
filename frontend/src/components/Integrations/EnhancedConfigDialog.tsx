@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect } from "react";
 import {
   Loader2,
   Info,
@@ -8,11 +8,11 @@ import {
   AlertCircle,
   Key,
   Lock,
-} from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Checkbox } from '@/components/ui/checkbox';
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -20,14 +20,14 @@ import {
   DialogHeader,
   DialogTitle,
   DialogFooter,
-} from '@/components/ui/dialog';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Separator } from '@/components/ui/separator';
-import { Badge } from '@/components/ui/badge';
-import { useToast } from '@/components/ui/use-toast';
-import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
-import { cn } from '@/lib/utils';
-import type { WorkerScope } from '@/types/config';
+} from "@/components/ui/dialog";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/components/ui/use-toast";
+import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import type { WorkerScope } from "@/types/config";
 
 interface ConfigField {
   name: string;
@@ -76,7 +76,9 @@ export function EnhancedConfigDialog({
   agentName,
   executionScope,
 }: EnhancedConfigDialogProps) {
-  const [configValues, setConfigValues] = useState<Record<string, string | boolean>>({});
+  const [configValues, setConfigValues] = useState<
+    Record<string, string | boolean>
+  >({});
   const [loading, setLoading] = useState(false);
   const [loadingExisting, setLoadingExisting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -126,28 +128,32 @@ export function EnhancedConfigDialog({
           withAgentExecutionScope(
             `${API_BASE_URL}/api/credentials/${service}`,
             agentName,
-            executionScope
-          )
+            executionScope,
+          ),
         );
         if (response.ok) {
           const data = await response.json();
           if (data.credentials) {
             // Merge existing credentials with defaults
             const defaults: Record<string, string | boolean> = {};
-            fieldsToUse.forEach(field => {
+            fieldsToUse.forEach((field) => {
               if (data.credentials[field.name] !== undefined) {
                 // Keep boolean values as boolean, convert others to string
-                if (field.type === 'boolean') {
+                if (field.type === "boolean") {
                   defaults[field.name] =
                     data.credentials[field.name] === true ||
-                    data.credentials[field.name] === 'true';
+                    data.credentials[field.name] === "true";
                 } else {
                   defaults[field.name] = String(data.credentials[field.name]);
                 }
-              } else if (field.default !== undefined && field.default !== null) {
+              } else if (
+                field.default !== undefined &&
+                field.default !== null
+              ) {
                 // Use default value with proper type
-                if (field.type === 'boolean') {
-                  defaults[field.name] = field.default === true || field.default === 'true';
+                if (field.type === "boolean") {
+                  defaults[field.name] =
+                    field.default === true || field.default === "true";
                 } else {
                   defaults[field.name] = String(field.default);
                 }
@@ -159,15 +165,16 @@ export function EnhancedConfigDialog({
           }
         }
       } catch (error) {
-        console.log('No existing credentials found');
+        console.log("No existing credentials found");
       }
 
       // If no existing credentials, just use defaults
       const defaults: Record<string, string | boolean> = {};
-      fieldsToUse.forEach(field => {
+      fieldsToUse.forEach((field) => {
         if (field.default !== undefined && field.default !== null) {
-          if (field.type === 'boolean') {
-            defaults[field.name] = field.default === true || field.default === 'true';
+          if (field.type === "boolean") {
+            defaults[field.name] =
+              field.default === true || field.default === "true";
           } else {
             defaults[field.name] = String(field.default);
           }
@@ -180,9 +187,12 @@ export function EnhancedConfigDialog({
     loadExistingCredentials();
   }, [service, open, configFields, agentName, executionScope]); // Use stable dependencies
 
-  const validateField = (field: ConfigField, value: string | boolean): string | null => {
+  const validateField = (
+    field: ConfigField,
+    value: string | boolean,
+  ): string | null => {
     // Boolean fields don't need validation
-    if (field.type === 'boolean') {
+    if (field.type === "boolean") {
       return null;
     }
 
@@ -190,16 +200,22 @@ export function EnhancedConfigDialog({
       return `${field.label} is required`;
     }
 
-    if (value && field.validation && typeof value === 'string') {
-      if (field.type === 'number') {
+    if (value && field.validation && typeof value === "string") {
+      if (field.type === "number") {
         const numValue = Number(value);
         if (isNaN(numValue)) {
           return `${field.label} must be a number`;
         }
-        if (field.validation.min !== undefined && numValue < field.validation.min) {
+        if (
+          field.validation.min !== undefined &&
+          numValue < field.validation.min
+        ) {
           return `${field.label} must be at least ${field.validation.min}`;
         }
-        if (field.validation.max !== undefined && numValue > field.validation.max) {
+        if (
+          field.validation.max !== undefined &&
+          numValue > field.validation.max
+        ) {
           return `${field.label} must be at most ${field.validation.max}`;
         }
       }
@@ -222,7 +238,7 @@ export function EnhancedConfigDialog({
   const handleSave = async () => {
     // Validate all fields
     const errors: Record<string, string> = {};
-    filteredFields.forEach(field => {
+    filteredFields.forEach((field) => {
       const error = validateField(field, configValues[field.name]);
       if (error) {
         errors[field.name] = error;
@@ -232,9 +248,9 @@ export function EnhancedConfigDialog({
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
       toast({
-        title: 'Validation Error',
-        description: 'Please fix the errors before saving.',
-        variant: 'destructive',
+        title: "Validation Error",
+        description: "Please fix the errors before saving.",
+        variant: "destructive",
       });
       return;
     }
@@ -246,15 +262,15 @@ export function EnhancedConfigDialog({
         withAgentExecutionScope(
           `${API_BASE_URL}/api/credentials/${service}`,
           agentName,
-          executionScope
+          executionScope,
         ),
         {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             credentials: configValues,
           }),
-        }
+        },
       );
 
       if (!response.ok) {
@@ -262,9 +278,9 @@ export function EnhancedConfigDialog({
       }
 
       toast({
-        title: 'Success!',
+        title: "Success!",
         description: `${displayName} has been ${
-          isEditing ? 'updated' : 'configured'
+          isEditing ? "updated" : "configured"
         } successfully.`,
       });
 
@@ -272,9 +288,12 @@ export function EnhancedConfigDialog({
       onClose();
     } catch (error) {
       toast({
-        title: 'Configuration Failed',
-        description: error instanceof Error ? error.message : 'Failed to save configuration',
-        variant: 'destructive',
+        title: "Configuration Failed",
+        description:
+          error instanceof Error
+            ? error.message
+            : "Failed to save configuration",
+        variant: "destructive",
       });
     } finally {
       setLoading(false);
@@ -283,10 +302,10 @@ export function EnhancedConfigDialog({
 
   const getFieldIcon = (field: ConfigField) => {
     if (
-      field.type === 'password' ||
-      field.name.toLowerCase().includes('token') ||
-      field.name.toLowerCase().includes('key') ||
-      field.name.toLowerCase().includes('secret')
+      field.type === "password" ||
+      field.name.toLowerCase().includes("token") ||
+      field.name.toLowerCase().includes("key") ||
+      field.name.toLowerCase().includes("secret")
     ) {
       return Key;
     }
@@ -294,7 +313,7 @@ export function EnhancedConfigDialog({
   };
 
   const togglePasswordVisibility = (fieldName: string) => {
-    setShowPassword(prev => ({ ...prev, [fieldName]: !prev[fieldName] }));
+    setShowPassword((prev) => ({ ...prev, [fieldName]: !prev[fieldName] }));
   };
 
   return (
@@ -303,15 +322,17 @@ export function EnhancedConfigDialog({
         <DialogHeader className="space-y-3">
           <div className="flex items-center space-x-3">
             {Icon && (
-              <div className={cn('p-2 rounded-lg bg-muted', iconColor)}>
+              <div className={cn("p-2 rounded-lg bg-muted", iconColor)}>
                 <Icon className="h-5 w-5" />
               </div>
             )}
             <div>
               <DialogTitle className="text-xl">
-                {isEditing ? 'Edit' : 'Configure'} {displayName}
+                {isEditing ? "Edit" : "Configure"} {displayName}
               </DialogTitle>
-              <DialogDescription className="mt-1">{description}</DialogDescription>
+              <DialogDescription className="mt-1">
+                {description}
+              </DialogDescription>
             </div>
           </div>
 
@@ -319,8 +340,8 @@ export function EnhancedConfigDialog({
           <Alert className="border-muted">
             <Shield className="h-4 w-4" />
             <AlertDescription className="text-xs">
-              Your credentials are encrypted and stored securely. They are never shared with third
-              parties.
+              Your credentials are encrypted and stored securely. They are never
+              shared with third parties.
             </AlertDescription>
           </Alert>
 
@@ -339,7 +360,7 @@ export function EnhancedConfigDialog({
             <Button
               variant="outline"
               className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-950/20 dark:to-amber-950/20 hover:from-orange-100 hover:to-amber-100 dark:hover:from-orange-950/30 dark:hover:to-amber-950/30 border-orange-200 dark:border-orange-800"
-              onClick={() => window.open(docsUrl, '_blank')}
+              onClick={() => window.open(docsUrl, "_blank")}
             >
               <ExternalLink className="h-4 w-4" />
               View Official Documentation
@@ -352,7 +373,9 @@ export function EnhancedConfigDialog({
         {loadingExisting ? (
           <div className="flex flex-col items-center justify-center py-12 space-y-3">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">Loading configuration...</p>
+            <p className="text-sm text-muted-foreground">
+              Loading configuration...
+            </p>
           </div>
         ) : (
           <>
@@ -360,7 +383,9 @@ export function EnhancedConfigDialog({
               {filteredFields.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-8 text-center">
                   <CheckCircle className="h-12 w-12 text-green-500 mb-3" />
-                  <p className="text-sm text-muted-foreground">This service is fully configured.</p>
+                  <p className="text-sm text-muted-foreground">
+                    This service is fully configured.
+                  </p>
                   <p className="text-xs text-muted-foreground mt-1">
                     No additional configuration is required.
                   </p>
@@ -369,30 +394,42 @@ export function EnhancedConfigDialog({
                 filteredFields.map((field, index) => {
                   const FieldIcon = getFieldIcon(field);
                   const isPasswordField =
-                    field.type === 'password' ||
-                    field.name.toLowerCase().includes('token') ||
-                    field.name.toLowerCase().includes('key') ||
-                    field.name.toLowerCase().includes('secret');
+                    field.type === "password" ||
+                    field.name.toLowerCase().includes("token") ||
+                    field.name.toLowerCase().includes("key") ||
+                    field.name.toLowerCase().includes("secret");
                   const hasError = !!fieldErrors[field.name];
 
                   return (
                     <div key={field.name} className="space-y-2">
                       {index > 0 && <Separator className="my-4" />}
 
-                      {field.type === 'boolean' ? (
+                      {field.type === "boolean" ? (
                         <div className="flex items-center space-x-3 p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
                           <Checkbox
                             id={field.name}
                             checked={configValues[field.name] === true}
-                            onCheckedChange={checked => handleFieldChange(field, checked === true)}
+                            onCheckedChange={(checked) =>
+                              handleFieldChange(field, checked === true)
+                            }
                             className="h-5 w-5"
                           />
-                          <label htmlFor={field.name} className="flex-1 cursor-pointer select-none">
+                          <label
+                            htmlFor={field.name}
+                            className="flex-1 cursor-pointer select-none"
+                          >
                             <div className="flex items-center space-x-2">
-                              {FieldIcon && <FieldIcon className="h-4 w-4 text-muted-foreground" />}
-                              <span className="font-medium text-sm">{field.label}</span>
+                              {FieldIcon && (
+                                <FieldIcon className="h-4 w-4 text-muted-foreground" />
+                              )}
+                              <span className="font-medium text-sm">
+                                {field.label}
+                              </span>
                               {field.required && (
-                                <Badge variant="secondary" className="ml-2 text-xs px-1.5 py-0">
+                                <Badge
+                                  variant="secondary"
+                                  className="ml-2 text-xs px-1.5 py-0"
+                                >
                                   Required
                                 </Badge>
                               )}
@@ -410,14 +447,19 @@ export function EnhancedConfigDialog({
                             <Label
                               htmlFor={field.name}
                               className={cn(
-                                'flex items-center space-x-2',
-                                hasError && 'text-destructive'
+                                "flex items-center space-x-2",
+                                hasError && "text-destructive",
                               )}
                             >
-                              {FieldIcon && <FieldIcon className="h-4 w-4 text-muted-foreground" />}
+                              {FieldIcon && (
+                                <FieldIcon className="h-4 w-4 text-muted-foreground" />
+                              )}
                               <span>{field.label}</span>
                               {field.required && (
-                                <Badge variant="secondary" className="ml-2 text-xs px-1.5 py-0">
+                                <Badge
+                                  variant="secondary"
+                                  className="ml-2 text-xs px-1.5 py-0"
+                                >
                                   Required
                                 </Badge>
                               )}
@@ -433,20 +475,23 @@ export function EnhancedConfigDialog({
                               id={field.name}
                               type={
                                 isPasswordField && !showPassword[field.name]
-                                  ? 'password'
-                                  : field.type === 'number'
-                                    ? 'number'
-                                    : 'text'
+                                  ? "password"
+                                  : field.type === "number"
+                                    ? "number"
+                                    : "text"
                               }
                               placeholder={field.placeholder}
-                              value={(configValues[field.name] as string) || ''}
-                              onChange={e => handleFieldChange(field, e.target.value)}
+                              value={(configValues[field.name] as string) || ""}
+                              onChange={(e) =>
+                                handleFieldChange(field, e.target.value)
+                              }
                               min={field.validation?.min}
                               max={field.validation?.max}
                               className={cn(
-                                'pr-10',
-                                hasError && 'border-destructive focus-visible:ring-destructive',
-                                isPasswordField && 'font-mono'
+                                "pr-10",
+                                hasError &&
+                                  "border-destructive focus-visible:ring-destructive",
+                                isPasswordField && "font-mono",
                               )}
                             />
 
@@ -456,7 +501,9 @@ export function EnhancedConfigDialog({
                                 variant="ghost"
                                 size="icon"
                                 className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
-                                onClick={() => togglePasswordVisibility(field.name)}
+                                onClick={() =>
+                                  togglePasswordVisibility(field.name)
+                                }
                               >
                                 {showPassword[field.name] ? (
                                   <Lock className="h-4 w-4 text-muted-foreground" />
@@ -470,13 +517,15 @@ export function EnhancedConfigDialog({
                           {hasError && (
                             <div className="flex items-center space-x-1 text-destructive">
                               <AlertCircle className="h-3 w-3" />
-                              <p className="text-xs">{fieldErrors[field.name]}</p>
+                              <p className="text-xs">
+                                {fieldErrors[field.name]}
+                              </p>
                             </div>
                           )}
 
                           {field.validation && (
                             <p className="text-xs text-muted-foreground">
-                              {field.type === 'number' &&
+                              {field.type === "number" &&
                                 field.validation.min !== undefined &&
                                 field.validation.max !== undefined &&
                                 `Value must be between ${field.validation.min} and ${field.validation.max}`}
@@ -522,7 +571,7 @@ export function EnhancedConfigDialog({
                       Saving...
                     </>
                   ) : (
-                    <>{isEditing ? 'Update' : 'Save'} Configuration</>
+                    <>{isEditing ? "Update" : "Save"} Configuration</>
                   )}
                 </Button>
               </div>

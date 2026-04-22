@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -10,15 +10,21 @@ import {
   RefreshCw,
   Save,
   Trash2,
-} from 'lucide-react';
-import { API_ENDPOINTS, fetchJSON } from '@/lib/api';
-import { cn } from '@/lib/utils';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-import { useToast } from '@/components/ui/use-toast';
+} from "lucide-react";
+import { API_ENDPOINTS, fetchJSON } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/components/ui/use-toast";
 
 interface CredentialStatusResponse {
   service: string;
@@ -37,10 +43,10 @@ interface ServiceStatus {
   keyNames: string[];
 }
 
-const EMPTY_JSON = '{}';
+const EMPTY_JSON = "{}";
 const SERVICE_NAME_PATTERN = /^[a-zA-Z0-9:_-]+$/;
 const PARTIAL_STATUS_ERROR =
-  'Some service statuses could not be loaded. You can still edit credentials.';
+  "Some service statuses could not be loaded. You can still edit credentials.";
 
 function formatServiceJson(credentials: Record<string, unknown>): string {
   if (Object.keys(credentials).length === 0) {
@@ -59,10 +65,10 @@ function normalizeStatus(status: CredentialStatusResponse): ServiceStatus {
 
 function validateServiceName(service: string): string | null {
   if (!service.trim()) {
-    return 'Service name is required';
+    return "Service name is required";
   }
   if (!SERVICE_NAME_PATTERN.test(service)) {
-    return 'Service name can only include letters, numbers, colon, underscore, and hyphen';
+    return "Service name can only include letters, numbers, colon, underscore, and hyphen";
   }
   return null;
 }
@@ -71,8 +77,8 @@ export function Credentials() {
   const { toast } = useToast();
 
   const [services, setServices] = useState<ServiceStatus[]>([]);
-  const [selectedService, setSelectedService] = useState('');
-  const [newServiceName, setNewServiceName] = useState('');
+  const [selectedService, setSelectedService] = useState("");
+  const [newServiceName, setNewServiceName] = useState("");
   const [jsonDraft, setJsonDraft] = useState(EMPTY_JSON);
   const [loadedDraft, setLoadedDraft] = useState(EMPTY_JSON);
   const [isLoadingServices, setIsLoadingServices] = useState(true);
@@ -83,13 +89,14 @@ export function Credentials() {
   const [isJsonVisible, setIsJsonVisible] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestCredentialsRequestRef = useRef(0);
-  const selectedServiceRef = useRef('');
+  const selectedServiceRef = useRef("");
 
   const sortedServices = useMemo(
     () => [...services].sort((a, b) => a.service.localeCompare(b.service)),
-    [services]
+    [services],
   );
-  const hasUnsavedChanges = Boolean(selectedService) && jsonDraft !== loadedDraft;
+  const hasUnsavedChanges =
+    Boolean(selectedService) && jsonDraft !== loadedDraft;
 
   useEffect(() => {
     selectedServiceRef.current = selectedService;
@@ -102,15 +109,19 @@ export function Credentials() {
   const loadServices = useCallback(async () => {
     setIsLoadingServices(true);
     try {
-      const serviceNames = await fetchJSON<string[]>(API_ENDPOINTS.credentials.list);
+      const serviceNames = await fetchJSON<string[]>(
+        API_ENDPOINTS.credentials.list,
+      );
       const statusResults = await Promise.allSettled(
-        serviceNames.map(service =>
-          fetchJSON<CredentialStatusResponse>(API_ENDPOINTS.credentials.status(service))
-        )
+        serviceNames.map((service) =>
+          fetchJSON<CredentialStatusResponse>(
+            API_ENDPOINTS.credentials.status(service),
+          ),
+        ),
       );
       const statuses = serviceNames.map((service, index) => {
         const result = statusResults[index];
-        if (result.status === 'fulfilled') {
+        if (result.status === "fulfilled") {
           return normalizeStatus(result.value);
         }
         return {
@@ -120,13 +131,16 @@ export function Credentials() {
         };
       });
       setServices(statuses);
-      if (statusResults.some(result => result.status === 'rejected')) {
+      if (statusResults.some((result) => result.status === "rejected")) {
         setError(PARTIAL_STATUS_ERROR);
       } else {
         setError(null);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load credential services';
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Failed to load credential services";
       setError(message);
     } finally {
       setIsLoadingServices(false);
@@ -139,7 +153,9 @@ export function Credentials() {
     setIsLoadingCredentials(true);
     setError(null);
     try {
-      const data = await fetchJSON<CredentialGetResponse>(API_ENDPOINTS.credentials.get(service));
+      const data = await fetchJSON<CredentialGetResponse>(
+        API_ENDPOINTS.credentials.get(service),
+      );
       if (
         requestId !== latestCredentialsRequestRef.current ||
         selectedServiceRef.current !== service
@@ -156,7 +172,8 @@ export function Credentials() {
       ) {
         return;
       }
-      const message = err instanceof Error ? err.message : 'Failed to load credentials';
+      const message =
+        err instanceof Error ? err.message : "Failed to load credentials";
       setError(message);
       setJsonDraft(EMPTY_JSON);
       setLoadedDraft(EMPTY_JSON);
@@ -177,13 +194,16 @@ export function Credentials() {
   useEffect(() => {
     if (sortedServices.length === 0) {
       latestCredentialsRequestRef.current += 1;
-      setSelectedService('');
+      setSelectedService("");
       setJsonDraft(EMPTY_JSON);
       setLoadedDraft(EMPTY_JSON);
       setIsLoadingCredentials(false);
       return;
     }
-    if (!selectedService || !sortedServices.some(service => service.service === selectedService)) {
+    if (
+      !selectedService ||
+      !sortedServices.some((service) => service.service === selectedService)
+    ) {
       setSelectedService(sortedServices[0].service);
     }
   }, [selectedService, sortedServices]);
@@ -208,7 +228,7 @@ export function Credentials() {
       }
       setSelectedService(service);
     },
-    [hasUnsavedChanges, selectedService]
+    [hasUnsavedChanges, selectedService],
   );
 
   const handleCreateService = useCallback(() => {
@@ -218,13 +238,13 @@ export function Credentials() {
       setError(validationError);
       return;
     }
-    if (services.some(service => service.service === candidate)) {
+    if (services.some((service) => service.service === candidate)) {
       setError(`Service '${candidate}' already exists`);
       setSelectedService(candidate);
       return;
     }
     setError(null);
-    setServices(previous => [
+    setServices((previous) => [
       ...previous,
       {
         service: candidate,
@@ -235,16 +255,18 @@ export function Credentials() {
     setSelectedService(candidate);
     setJsonDraft(EMPTY_JSON);
     setLoadedDraft(EMPTY_JSON);
-    setNewServiceName('');
+    setNewServiceName("");
   }, [newServiceName, services]);
 
   const refreshSelectedStatus = useCallback(async (service: string) => {
     try {
       const status = await fetchJSON<CredentialStatusResponse>(
-        API_ENDPOINTS.credentials.status(service)
+        API_ENDPOINTS.credentials.status(service),
       );
-      setServices(previous => {
-        const withoutCurrent = previous.filter(item => item.service !== service);
+      setServices((previous) => {
+        const withoutCurrent = previous.filter(
+          (item) => item.service !== service,
+        );
         return [...withoutCurrent, normalizeStatus(status)];
       });
     } catch {
@@ -267,12 +289,12 @@ export function Credentials() {
     try {
       parsed = JSON.parse(jsonDraft);
     } catch {
-      setError('Credentials must be valid JSON');
+      setError("Credentials must be valid JSON");
       return;
     }
 
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      setError('Credentials must be a JSON object');
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      setError("Credentials must be a JSON object");
       return;
     }
 
@@ -280,8 +302,8 @@ export function Credentials() {
     setError(null);
     try {
       await fetchJSON(API_ENDPOINTS.credentials.set(selectedService), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ credentials: parsed }),
       });
       const formatted = formatServiceJson(parsed as Record<string, unknown>);
@@ -289,16 +311,17 @@ export function Credentials() {
       setLoadedDraft(formatted);
       await refreshSelectedStatus(selectedService);
       toast({
-        title: 'Credentials saved',
+        title: "Credentials saved",
         description: `Updated credentials for '${selectedService}'.`,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to save credentials';
+      const message =
+        err instanceof Error ? err.message : "Failed to save credentials";
       setError(message);
       toast({
-        title: 'Save failed',
+        title: "Save failed",
         description: message,
-        variant: 'destructive',
+        variant: "destructive",
       });
     } finally {
       setIsSaving(false);
@@ -316,23 +339,26 @@ export function Credentials() {
     setError(null);
     try {
       await fetchJSON(API_ENDPOINTS.credentials.delete(selectedService), {
-        method: 'DELETE',
+        method: "DELETE",
       });
-      setServices(previous => previous.filter(service => service.service !== selectedService));
-      setSelectedService('');
+      setServices((previous) =>
+        previous.filter((service) => service.service !== selectedService),
+      );
+      setSelectedService("");
       setJsonDraft(EMPTY_JSON);
       setLoadedDraft(EMPTY_JSON);
       toast({
-        title: 'Credentials deleted',
+        title: "Credentials deleted",
         description: `Removed credentials for '${selectedService}'.`,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to delete credentials';
+      const message =
+        err instanceof Error ? err.message : "Failed to delete credentials";
       setError(message);
       toast({
-        title: 'Delete failed',
+        title: "Delete failed",
         description: message,
-        variant: 'destructive',
+        variant: "destructive",
       });
     } finally {
       setIsDeleting(false);
@@ -349,20 +375,22 @@ export function Credentials() {
       const response = await fetchJSON<{ message?: string }>(
         API_ENDPOINTS.credentials.test(selectedService),
         {
-          method: 'POST',
-        }
+          method: "POST",
+        },
       );
       toast({
-        title: 'Credentials check',
-        description: response.message ?? `Credentials exist for '${selectedService}'.`,
+        title: "Credentials check",
+        description:
+          response.message ?? `Credentials exist for '${selectedService}'.`,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Credentials test failed';
+      const message =
+        err instanceof Error ? err.message : "Credentials test failed";
       setError(message);
       toast({
-        title: 'Test failed',
+        title: "Test failed",
         description: message,
-        variant: 'destructive',
+        variant: "destructive",
       });
     } finally {
       setIsTesting(false);
@@ -373,7 +401,9 @@ export function Credentials() {
     if (
       selectedService &&
       hasUnsavedChanges &&
-      !window.confirm(`Discard unsaved changes for '${selectedService}' and refresh?`)
+      !window.confirm(
+        `Discard unsaved changes for '${selectedService}' and refresh?`,
+      )
     ) {
       return;
     }
@@ -390,8 +420,8 @@ export function Credentials() {
     }
     await navigator.clipboard?.writeText(jsonDraft);
     toast({
-      title: 'Copied credentials JSON',
-      description: 'Copied in cleartext. Handle clipboard contents carefully.',
+      title: "Copied credentials JSON",
+      description: "Copied in cleartext. Handle clipboard contents carefully.",
     });
   }, [jsonDraft, selectedService, toast]);
 
@@ -402,14 +432,16 @@ export function Credentials() {
           <CardHeader className="pb-3">
             <CardTitle className="text-xl">Credentials Manager</CardTitle>
             <CardDescription>
-              Manage raw credential payloads by service name (for tools, model aliases, and private
-              integrations).
+              Manage raw credential payloads by service name (for tools, model
+              aliases, and private integrations).
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="outline">Services: {sortedServices.length}</Badge>
-              {selectedService ? <Badge variant="default">Active: {selectedService}</Badge> : null}
+              {selectedService ? (
+                <Badge variant="default">Active: {selectedService}</Badge>
+              ) : null}
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)] gap-4">
@@ -421,7 +453,9 @@ export function Credentials() {
                   <div className="flex gap-2">
                     <Input
                       value={newServiceName}
-                      onChange={event => setNewServiceName(event.target.value)}
+                      onChange={(event) =>
+                        setNewServiceName(event.target.value)
+                      }
                       placeholder="new_service_name"
                     />
                     <Button variant="outline" onClick={handleCreateService}>
@@ -432,13 +466,16 @@ export function Credentials() {
 
                   <div className="space-y-1 overflow-auto pr-1 flex-1 min-h-0">
                     {isLoadingServices ? (
-                      <p className="text-sm text-muted-foreground">Loading services...</p>
+                      <p className="text-sm text-muted-foreground">
+                        Loading services...
+                      </p>
                     ) : sortedServices.length === 0 ? (
                       <p className="text-sm text-muted-foreground">
-                        No services found yet. Add one and save JSON credentials.
+                        No services found yet. Add one and save JSON
+                        credentials.
                       </p>
                     ) : (
-                      sortedServices.map(service => {
+                      sortedServices.map((service) => {
                         const isActive = service.service === selectedService;
                         return (
                           <button
@@ -446,21 +483,31 @@ export function Credentials() {
                             type="button"
                             onClick={() => handleSelectService(service.service)}
                             className={cn(
-                              'w-full rounded-md border p-2 text-left transition-colors',
+                              "w-full rounded-md border p-2 text-left transition-colors",
                               isActive
-                                ? 'border-primary bg-primary/5'
-                                : 'border-border hover:border-primary/40 hover:bg-muted/40'
+                                ? "border-primary bg-primary/5"
+                                : "border-border hover:border-primary/40 hover:bg-muted/40",
                             )}
                           >
                             <div className="flex items-center justify-between gap-2">
-                              <code className="text-xs font-medium">{service.service}</code>
-                              <Badge variant={service.hasCredentials ? 'default' : 'secondary'}>
-                                {service.hasCredentials ? 'Configured' : 'Empty'}
+                              <code className="text-xs font-medium">
+                                {service.service}
+                              </code>
+                              <Badge
+                                variant={
+                                  service.hasCredentials
+                                    ? "default"
+                                    : "secondary"
+                                }
+                              >
+                                {service.hasCredentials
+                                  ? "Configured"
+                                  : "Empty"}
                               </Badge>
                             </div>
                             {service.keyNames.length > 0 ? (
                               <p className="mt-1 text-xs text-muted-foreground truncate">
-                                Keys: {service.keyNames.join(', ')}
+                                Keys: {service.keyNames.join(", ")}
                               </p>
                             ) : null}
                           </button>
@@ -483,7 +530,7 @@ export function Credentials() {
                         Editing <code>{selectedService}</code>
                       </>
                     ) : (
-                      'Select or create a service to edit credentials'
+                      "Select or create a service to edit credentials"
                     )}
                   </CardDescription>
                 </CardHeader>
@@ -491,14 +538,14 @@ export function Credentials() {
                   <div className="flex items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50/80 p-2 text-xs text-amber-900 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-200">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <p>
-                      Credentials are hidden by default for safer screen sharing. Showing or copying
-                      exposes cleartext secrets.
+                      Credentials are hidden by default for safer screen
+                      sharing. Showing or copying exposes cleartext secrets.
                     </p>
                   </div>
                   <div className="flex justify-end">
                     <Button
                       variant="outline"
-                      onClick={() => setIsJsonVisible(previous => !previous)}
+                      onClick={() => setIsJsonVisible((previous) => !previous)}
                       disabled={!selectedService || isLoadingCredentials}
                     >
                       {isJsonVisible ? (
@@ -506,35 +553,39 @@ export function Credentials() {
                       ) : (
                         <Eye className="h-4 w-4 mr-2" />
                       )}
-                      {isJsonVisible ? 'Hide' : 'Show'}
+                      {isJsonVisible ? "Hide" : "Show"}
                     </Button>
                   </div>
                   <div className="relative">
                     <Textarea
                       value={jsonDraft}
-                      onChange={event => setJsonDraft(event.target.value)}
+                      onChange={(event) => setJsonDraft(event.target.value)}
                       disabled={!selectedService || isLoadingCredentials}
                       className={cn(
-                        'font-mono min-h-[320px] transition-[filter] duration-150',
+                        "font-mono min-h-[320px] transition-[filter] duration-150",
                         selectedService &&
                           !isJsonVisible &&
-                          'blur-sm pointer-events-none select-none'
+                          "blur-sm pointer-events-none select-none",
                       )}
                       placeholder='{"api_key":"..."}'
                     />
                     {selectedService && !isJsonVisible ? (
                       <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md bg-background/10">
                         <p className="rounded-md border bg-background/90 px-3 py-1 text-xs text-muted-foreground shadow-sm">
-                          Credentials hidden for screen sharing. Click Show to reveal.
+                          Credentials hidden for screen sharing. Click Show to
+                          reveal.
                         </p>
                       </div>
                     ) : null}
                   </div>
 
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={handleSave} disabled={!selectedService || isSaving}>
+                    <Button
+                      onClick={handleSave}
+                      disabled={!selectedService || isSaving}
+                    >
                       <Save className="h-4 w-4 mr-2" />
-                      {isSaving ? 'Saving...' : 'Save'}
+                      {isSaving ? "Saving..." : "Save"}
                     </Button>
                     <Button
                       variant="outline"
@@ -542,7 +593,7 @@ export function Credentials() {
                       disabled={!selectedService || isTesting}
                     >
                       <FlaskConical className="h-4 w-4 mr-2" />
-                      {isTesting ? 'Testing...' : 'Test'}
+                      {isTesting ? "Testing..." : "Test"}
                     </Button>
                     <Button variant="outline" onClick={handleRefresh}>
                       <RefreshCw className="h-4 w-4 mr-2" />
@@ -562,7 +613,7 @@ export function Credentials() {
                       disabled={!selectedService || isDeleting}
                     >
                       <Trash2 className="h-4 w-4 mr-2" />
-                      {isDeleting ? 'Deleting...' : 'Delete'}
+                      {isDeleting ? "Deleting..." : "Delete"}
                     </Button>
                   </div>
                 </CardContent>
@@ -573,7 +624,9 @@ export function Credentials() {
 
         {error ? (
           <Card className="border-destructive/30">
-            <CardContent className="py-3 text-sm text-destructive">{error}</CardContent>
+            <CardContent className="py-3 text-sm text-destructive">
+              {error}
+            </CardContent>
           </Card>
         ) : null}
       </div>

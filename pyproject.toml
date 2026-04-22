@@ -7,9 +7,6 @@ name = "mindroom"
 description = "A universal interface for AI agents with persistent memory, where every conversation has a home"
 readme = "README.md"
 license = "Apache-2.0"
-authors = [
-  { name = "mindroom team" },
-]
 requires-python = ">=3.12"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
@@ -53,352 +50,354 @@ dependencies = [
   "uvicorn>=0.35",
   "watchfiles>=1",
 ]
-
-optional-dependencies.agentql = [
+[[project.authors]]
+name = "mindroom team"
+[project.optional-dependencies]
+agentql = [
   "agentql",
   "playwright",
 ]
-optional-dependencies.airflow = [  ]
-optional-dependencies.apify = [
+airflow = []
+apify = [
   "apify-client>=1.12.2; platform_machine!='aarch64'",
 ]
-optional-dependencies.arxiv = [
+arxiv = [
   "arxiv",
   "pypdf",
 ]
-optional-dependencies.attachments = [  ]
-optional-dependencies.aws_lambda = [
+attachments = []
+aws_lambda = [
   "boto3>=1.40.8",
 ]
-optional-dependencies.aws_ses = [
+aws_ses = [
   "boto3>=1.40.8",
 ]
-optional-dependencies.baidusearch = [
+baidusearch = [
   "baidusearch",
   "pycountry",
 ]
-optional-dependencies.bitbucket = [
+bitbucket = [
   "requests",
 ]
-optional-dependencies.brandfetch = [
+brandfetch = [
   "httpx>=0.27",
 ]
-optional-dependencies.brightdata = [
+brightdata = [
   "requests",
 ]
-optional-dependencies.browser = [
+browser = [
   "playwright",
 ]
-optional-dependencies.browserbase = [
+browserbase = [
   "browserbase",
   "playwright",
 ]
-optional-dependencies.cal_com = [
+cal_com = [
   "pytz",
   "requests",
 ]
-optional-dependencies.calculator = [  ]
-optional-dependencies.cartesia = [
+calculator = []
+cartesia = [
   "cartesia",
 ]
-optional-dependencies.claude_agent = [
+claude_agent = [
   "claude-agent-sdk>=0.1.35",
 ]
-optional-dependencies.clickup = [
+clickup = [
   "requests",
 ]
-optional-dependencies.coding = [  ]
-optional-dependencies.compact_context = [  ]
-optional-dependencies.composio = [
+coding = []
+compact_context = []
+composio = [
   "composio-agno",
 ]
-optional-dependencies.config_manager = [
+config_manager = [
   "pydantic>=2",
   "pyyaml>=6",
 ]
-optional-dependencies.confluence = [
+confluence = [
   "atlassian-python-api",
 ]
-optional-dependencies.crawl4ai = [
+crawl4ai = [
   "crawl4ai>=0.7.3",
 ]
-optional-dependencies.csv = [
+csv = [
   "duckdb",
 ]
-optional-dependencies.custom_api = [
+custom_api = [
   "requests",
 ]
-optional-dependencies.dalle = [
+dalle = [
   "openai",
 ]
-optional-dependencies.daytona = [
+daytona = [
   "daytona",
 ]
-optional-dependencies.delegate = [  ]
-optional-dependencies.desi_vocal = [
+delegate = []
+desi_vocal = [
   "requests",
 ]
-optional-dependencies.discord = [
+discord = [
   "requests",
 ]
-optional-dependencies.docker = [
+docker = [
   "docker",
 ]
-optional-dependencies.duckdb = [
+duckdb = [
   "duckdb",
 ]
-optional-dependencies.duckduckgo = [
+duckduckgo = [
   "ddgs",
 ]
-optional-dependencies.dynamic_tools = [  ]
-optional-dependencies.e2b = [
+dynamic_tools = []
+e2b = [
   "e2b-code-interpreter",
 ]
-optional-dependencies.eleven_labs = [
+eleven_labs = [
   "elevenlabs",
 ]
-optional-dependencies.email = [  ]
-optional-dependencies.exa = [
+email = []
+exa = [
   "exa-py",
 ]
-optional-dependencies.fal = [
+fal = [
   "fal-client",
 ]
-optional-dependencies.file = [  ]
-optional-dependencies.file_generation = [
+file = []
+file_generation = [
   "reportlab",
 ]
-optional-dependencies.financial_datasets_api = [
+financial_datasets_api = [
   "requests",
 ]
-optional-dependencies.firecrawl = [
+firecrawl = [
   "firecrawl-py>=3",
 ]
-optional-dependencies.gemini = [
+gemini = [
   "google-genai",
 ]
-optional-dependencies.giphy = [
+giphy = [
   "httpx>=0.27",
 ]
-optional-dependencies.github = [
+github = [
   "pygithub>=2.5",
 ]
-optional-dependencies.gmail = [
+gmail = [
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
   "google-auth-oauthlib>=1.2.2",
 ]
-optional-dependencies.google_bigquery = [
+google_bigquery = [
   "google-cloud-bigquery",
 ]
-optional-dependencies.google_calendar = [
+google_calendar = [
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
   "google-auth-oauthlib>=1.2.2",
 ]
-optional-dependencies.google_maps = [
+google_maps = [
   "google-maps-places",
   "googlemaps",
 ]
-optional-dependencies.google_sheets = [
+google_sheets = [
   "google-api-python-client>=2.178",
   "google-auth-httplib2>=0.2",
   "google-auth-oauthlib>=1.2.2",
 ]
-optional-dependencies.googlesearch = [
+googlesearch = [
   "ddgs",
 ]
-optional-dependencies.groq = [
+groq = [
   "groq>=0.31",
 ]
-optional-dependencies.hackernews = [
+hackernews = [
   "httpx>=0.27",
 ]
-optional-dependencies.homeassistant = [
+homeassistant = [
   "httpx>=0.27",
 ]
-optional-dependencies.jina = [
+jina = [
   "httpx>=0.27",
   "pydantic>=2",
 ]
-optional-dependencies.jira = [
+jira = [
   "jira>=3.10.5",
 ]
-optional-dependencies.linear = [
+linear = [
   "requests",
 ]
-optional-dependencies.linkup = [
+linkup = [
   "linkup-sdk>=0.2.8",
 ]
-optional-dependencies.lumalabs = [
+lumalabs = [
   "lumaai",
 ]
-optional-dependencies.matrix_api = [  ]
-optional-dependencies.matrix_e2ee = [
+matrix_api = []
+matrix_e2ee = [
   "matrix-nio[e2e]>=0.25",
 ]
-optional-dependencies.matrix_message = [  ]
-optional-dependencies.matrix_room = [  ]
-optional-dependencies.mem0 = [
+matrix_message = []
+matrix_room = []
+mem0 = [
   "mem0ai>=0.1.115",
 ]
-optional-dependencies.memory = [  ]
-optional-dependencies.modelslabs = [
+memory = []
+modelslabs = [
   "requests",
 ]
-optional-dependencies.moviepy_video_tools = [
+moviepy_video_tools = [
   "moviepy",
 ]
-optional-dependencies.neo4j = [
+neo4j = [
   "neo4j",
 ]
-optional-dependencies.newspaper = [
+newspaper = [
   "lxml-html-clean",
   "newspaper4k",
 ]
-optional-dependencies.notion = [
+notion = [
   "notion-client",
 ]
-optional-dependencies.openai = [
+openai = [
   "openai",
 ]
-optional-dependencies.openbb = [
+openbb = [
   "openbb",
 ]
-optional-dependencies.openclaw_compat = [  ]
-optional-dependencies.openweather = [
+openclaw_compat = []
+openweather = [
   "requests",
 ]
-optional-dependencies.oxylabs = [
+oxylabs = [
   "oxylabs",
 ]
-optional-dependencies.pandas = [
+pandas = [
   "pandas>=2.2",
 ]
-optional-dependencies.postgres = [
+postgres = [
   "psycopg[binary]",
 ]
-optional-dependencies.pubmed = [
+pubmed = [
   "httpx>=0.27",
 ]
-optional-dependencies.python = [  ]
-optional-dependencies.reasoning = [  ]
-optional-dependencies.reddit = [
+python = []
+reasoning = []
+reddit = [
   "praw",
 ]
-optional-dependencies.redshift = [
+redshift = [
   "redshift-connector",
 ]
-optional-dependencies.replicate = [
+replicate = [
   "replicate>=1.0.7",
 ]
-optional-dependencies.resend = [
+resend = [
   "resend",
 ]
-optional-dependencies.scheduler = [  ]
-optional-dependencies.scrapegraph = [
+scheduler = []
+scrapegraph = [
   "scrapegraph-py",
 ]
-optional-dependencies.searxng = [  ]
-optional-dependencies.self_config = [
+searxng = []
+self_config = [
   "pydantic>=2",
   "pyyaml>=6",
 ]
-optional-dependencies.sentence_transformers = [
+sentence_transformers = [
   "sentence-transformers",
 ]
-optional-dependencies.serpapi = [
+serpapi = [
   "google-search-results>=2.4.2",
 ]
-optional-dependencies.serper = [
+serper = [
   "requests",
 ]
-optional-dependencies.shell = [  ]
-optional-dependencies.shopify = [
+shell = []
+shopify = [
   "httpx>=0.27",
 ]
-optional-dependencies.slack = [
+slack = [
   "slack-sdk",
 ]
-optional-dependencies.sleep = [  ]
-optional-dependencies.spider = [
+sleep = []
+spider = [
   "spider-client",
 ]
-optional-dependencies.spotify = [
+spotify = [
   "httpx>=0.27",
   "spotipy>=2.25.1",
 ]
-optional-dependencies.sql = [
+sql = [
   "sqlalchemy",
 ]
-optional-dependencies.subagents = [  ]
-# NOTE: not a tool extra — this is for SaaS platform JWT auth (api/main.py),
-# kept optional to avoid pulling in heavy transitive deps (pyiceberg, pyroaring).
-optional-dependencies.supabase = [
+subagents = []
+supabase = [
   "supabase>=2.18.1",
 ]
-optional-dependencies.tavily = [
+tavily = [
   "tavily-python",
 ]
-optional-dependencies.telegram = [
+telegram = [
   "httpx>=0.27",
 ]
-optional-dependencies.thread_summary = [  ]
-optional-dependencies.thread_tags = [  ]
-optional-dependencies.todoist = [
+thread_summary = []
+thread_tags = []
+todoist = [
   "todoist-api-python",
 ]
-optional-dependencies.trafilatura = [
+trafilatura = [
   "trafilatura",
 ]
-optional-dependencies.trello = [
+trello = [
   "py-trello",
 ]
-optional-dependencies.twilio = [
+twilio = [
   "twilio",
 ]
-optional-dependencies.unsplash = [  ]
-optional-dependencies.visualization = [
+unsplash = []
+visualization = [
   "matplotlib",
 ]
-optional-dependencies.web_browser_tools = [  ]
-optional-dependencies.webex = [
+web_browser_tools = []
+webex = [
   "webexpythonsdk",
 ]
-optional-dependencies.website = [
+website = [
   "beautifulsoup4",
   "httpx>=0.27",
 ]
-optional-dependencies.whatsapp = [
+whatsapp = [
   "httpx>=0.27",
 ]
-optional-dependencies.wikipedia = [
+wikipedia = [
   "wikipedia",
 ]
-optional-dependencies.x = [
+x = [
   "tweepy",
 ]
-optional-dependencies.yfinance = [
+yfinance = [
   "yfinance",
 ]
-optional-dependencies.youtube = [
+youtube = [
   "youtube-transcript-api",
 ]
-optional-dependencies.zendesk = [
+zendesk = [
   "requests",
 ]
-optional-dependencies.zep = [
+zep = [
   "zep-cloud>=3.3",
 ]
-optional-dependencies.zoom = [
+zoom = [
   "requests",
 ]
-urls.documentation = "https://github.com/mindroom-ai/mindroom"
-urls.homepage = "https://github.com/mindroom-ai/mindroom"
-urls.repository = "https://github.com/mindroom-ai/mindroom"
-scripts.mindroom = "mindroom.cli.main:main"
+[project.scripts]
+mindroom = "mindroom.cli.main:main"
+[project.urls]
+documentation = "https://github.com/mindroom-ai/mindroom"
+homepage = "https://github.com/mindroom-ai/mindroom"
+repository = "https://github.com/mindroom-ai/mindroom"
 
 [dependency-groups]
 dev = [
@@ -422,60 +421,85 @@ dev = [
   "zensical",
 ]
 
-[tool.hatch.version]
-source = "vcs"
-
-[tool.hatch.version.raw-options]
-version_scheme = "no-guess-dev"
-
 [tool.hatch.build.targets.wheel]
 packages = [ "src/mindroom" ]
-
-[tool.hatch.build.targets.wheel.hooks.custom]
-
 [tool.hatch.build.targets.wheel.force-include]
-"skills" = "mindroom/_bundled_skills"
+skills = "mindroom/_bundled_skills"
+[tool.hatch.build.targets.wheel.hooks.custom]
+[tool.hatch.version]
+source = "vcs"
+[tool.hatch.version.raw-options]
+version_scheme = "no-guess-dev"
 
 [tool.ruff]
 target-version = "py312"
 line-length = 120
-
-lint.select = [
+[tool.ruff.lint]
+select = [
   "ALL",
 ]
-lint.ignore = [
-  "B905",    # `zip()` without an explicit `strict=` parameter
-  "BLE001",  # Do not catch blind exception
-  "D107",    # Missing docstring in `__init__`
-  "D401",    # First line of docstring should be in imperative mood
-  "D402",    # First line should not be the function's signature
-  "E501",    # Line too long
-  "FBT001",  # Boolean-typed positional argument in function definition
-  "FBT002",  # Boolean default value
-  "FBT003",  # Boolean positional value in call
-  "FIX002",  # Line contains TODO
-  "G004",    # Logging statement uses f-string
-  "PD901",   # df is a bad variable name. Be kinder to your future self.
-  "PLR0913", # Too many arguments to function call (N > 5)
-  "PLR2004", # Magic value used
-  "PLW0603", # Using the global statement to update `X` is discouraged
-  "S101",    # Use of assert detected
-  "S603",    # `subprocess` call: check for execution of untrusted input
-  "S607",    # Starting a process with a partial executable path
-  "SLF001",  # Private member accessed
-  "T20",     # flake8-print
-  "TD002",   # Missing author in TODO; try: `# TODO(<author_name>): ...`
-  "TD003",   # Missing issue link on the line following this TODO
+ignore = [
+  "ASYNC240", # Async pathlib guidance is too broad for this asyncio codebase/tests
+  "ASYNC250", # Blocking input in async manual tests is intentional
+  "B905",     # `zip()` without an explicit `strict=` parameter
+  "BLE001",   # Do not catch blind exception
+  "D107",     # Missing docstring in `__init__`
+  "D401",     # First line of docstring should be in imperative mood
+  "D402",     # First line should not be the function's signature
+  "E501",     # Line too long
+  "FBT001",   # Boolean-typed positional argument in function definition
+  "FBT002",   # Boolean default value
+  "FBT003",   # Boolean positional value in call
+  "FIX002",   # Line contains TODO
+  "G004",     # Logging statement uses f-string
+  "PLR0913",  # Too many arguments to function call (N > 5)
+  "PLR2004",  # Magic value used
+  "PLW0108",  # Lambda warnings from dependency injection and test doubles are not actionable here
+  "PLW0603",  # Using the global statement to update `X` is discouraged
+  "PYI034",   # `Self` guidance is not useful in concrete test doubles
+  "S101",     # Use of assert detected
+  "S603",     # `subprocess` call: check for execution of untrusted input
+  "S607",     # Starting a process with a partial executable path
+  "SLF001",   # Private member accessed
+  "T20",      # flake8-print
+  "TD002",    # Missing author in TODO; try: `# TODO(<author_name>): ...`
+  "TD003",    # Missing issue link on the line following this TODO
+  "UP042",    # `StrEnum` migration is outside the scope of hook maintenance
+  "UP047",    # PEP 695 type-parameter migration is outside the scope of hook maintenance
 ]
-lint.per-file-ignores.".github/scripts/*" = [
+per-file-ignores.".github/scripts/*" = [
   "INP001", # Part of an implicit namespace package (standalone scripts)
 ]
-lint.per-file-ignores."cluster/k8s/kind/*" = [
+per-file-ignores."cluster/k8s/kind/*" = [
   "INP001", # Part of an implicit namespace package (namespace package for python -m invocation)
 ]
-lint.per-file-ignores."src/mindroom/tools/*" = [
-  "PLC0415", #`import` should be at the top-level of a file"
+per-file-ignores."src/mindroom/tools/*" = [
+  "PLC0415", # `import` should be at the top-level of a file"
 ]
+
+[tool.ty.environment]
+python-version = "3.12"
+[[tool.ty.overrides]]
+include = [ "tests/" ]
+[tool.ty.overrides.rules]
+# Mock patterns cause many false positives in tests (e.g., mock.call_args
+# returns _Call | None, attribute access on MagicMock, passing mocks as
+# typed arguments).
+call-non-callable = "ignore"
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+no-matching-overload = "ignore"
+not-iterable = "ignore"
+not-subscriptable = "ignore"
+too-many-positional-arguments = "ignore"
+unresolved-attribute = "ignore"
+unsupported-operator = "ignore"
+[tool.ty.rules]
+deprecated = "ignore"  # FastAPI on_event deprecation; refactor to lifespan separately
+[tool.ty.src]
+include = [ "src", "tests" ]
+[tool.ty.terminal]
+error-on-warning = true
 
 [tool.pytest.ini_options]
 testpaths = [ "tests" ]
@@ -506,32 +530,3 @@ exclude_lines = [
   "if TYPE_CHECKING",
   "if __name__ == .__main__.:",
 ]
-
-[tool.ty.environment]
-python-version = "3.12"
-
-[tool.ty.src]
-include = [ "src", "tests" ]
-
-[tool.ty.rules]
-deprecated = "ignore" # FastAPI on_event deprecation; refactor to lifespan separately
-
-[tool.ty.terminal]
-error-on-warning = true
-
-[[tool.ty.overrides]]
-include = [ "tests/" ]
-
-[tool.ty.overrides.rules]
-# Mock patterns cause many false positives in tests (e.g., mock.call_args
-# returns _Call | None, attribute access on MagicMock, passing mocks as
-# typed arguments).
-call-non-callable = "ignore"
-invalid-argument-type = "ignore"
-invalid-assignment = "ignore"
-no-matching-overload = "ignore"
-not-iterable = "ignore"
-not-subscriptable = "ignore"
-too-many-positional-arguments = "ignore"
-unresolved-attribute = "ignore"
-unsupported-operator = "ignore"

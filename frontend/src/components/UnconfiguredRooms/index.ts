@@ -1,1 +1,1 @@
-export { UnconfiguredRooms } from './UnconfiguredRooms';
+export { UnconfiguredRooms } from "./UnconfiguredRooms";

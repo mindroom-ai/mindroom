@@ -719,11 +719,12 @@ async def prepare_bound_team_execution_context(
         current_sender_id=current_sender_id,
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
-        estimate_static_tokens_fn=lambda prepared_prompt,
-        replay_fallback_prompt: estimate_preparation_static_tokens_for_team(
-            team,
-            full_prompt=prepared_prompt,
-            fallback_full_prompt=replay_fallback_prompt,
+        estimate_static_tokens_fn=lambda prepared_prompt, replay_fallback_prompt: (
+            estimate_preparation_static_tokens_for_team(
+                team,
+                full_prompt=prepared_prompt,
+                fallback_full_prompt=replay_fallback_prompt,
+            )
         ),
         render_messages_text_fn=render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,

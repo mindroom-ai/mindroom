@@ -879,14 +879,13 @@ class ThreadSyncWritePolicy:
             redacted_event_ids = room_redactions.get(room_id, ())
             self._cache_ops.queue_room_cache_update(
                 room_id,
-                lambda room_id=room_id,
-                plain_events=plain_events,
-                threaded_events=threaded_events,
-                redacted_event_ids=redacted_event_ids: self._persist_room_sync_timeline_updates(
-                    room_id,
-                    plain_events,
-                    threaded_events,
-                    redacted_event_ids,
+                lambda room_id=room_id, plain_events=plain_events, threaded_events=threaded_events, redacted_event_ids=redacted_event_ids: (
+                    self._persist_room_sync_timeline_updates(
+                        room_id,
+                        plain_events,
+                        threaded_events,
+                        redacted_event_ids,
+                    )
                 ),
                 name="matrix_cache_sync_timeline",
             )

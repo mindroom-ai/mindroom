@@ -1,9 +1,9 @@
-import { useConfigStore } from '@/store/configStore';
-import type { Agent } from '@/types/config';
-import { Bot, MapPin } from 'lucide-react';
-import { pluralize } from '@/lib/utils';
-import { ListPanel, ListItem } from '@/components/shared/ListPanel';
-import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
+import { useConfigStore } from "@/store/configStore";
+import type { Agent } from "@/types/config";
+import { Bot, MapPin } from "lucide-react";
+import { pluralize } from "@/lib/utils";
+import { ListPanel, ListItem } from "@/components/shared/ListPanel";
+import { ItemCard, ItemCardBadge } from "@/components/shared/ItemCard";
 
 // Extend Agent type to be compatible with ListItem
 interface AgentListItem extends ListItem {
@@ -15,16 +15,17 @@ interface AgentListItem extends ListItem {
 }
 
 export function AgentList() {
-  const { agents, selectedAgentId, selectAgent, createAgent } = useConfigStore();
+  const { agents, selectedAgentId, selectAgent, createAgent } =
+    useConfigStore();
 
   const handleCreateAgent = (agentName?: string) => {
-    const newAgent: Omit<Agent, 'id'> = {
-      display_name: agentName || 'New Agent',
-      role: 'A new agent that needs configuration',
+    const newAgent: Omit<Agent, "id"> = {
+      display_name: agentName || "New Agent",
+      role: "A new agent that needs configuration",
       tools: [],
       skills: [],
       instructions: [],
-      rooms: ['lobby'],
+      rooms: ["lobby"],
     };
     createAgent(newAgent);
   };
@@ -32,13 +33,13 @@ export function AgentList() {
   const renderAgent = (agent: AgentListItem, isSelected: boolean) => {
     const badges: ItemCardBadge[] = [
       {
-        content: pluralize(agent.tools.length, 'tool'),
-        variant: 'secondary' as const,
+        content: pluralize(agent.tools.length, "tool"),
+        variant: "secondary" as const,
         icon: Bot,
       },
       {
-        content: pluralize(agent.rooms.length, 'room'),
-        variant: 'secondary' as const,
+        content: pluralize(agent.rooms.length, "room"),
+        variant: "secondary" as const,
         icon: MapPin,
       },
     ];

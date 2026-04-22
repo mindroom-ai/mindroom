@@ -2,10 +2,10 @@
  * Central registry for all integrations
  */
 
-import { IntegrationProvider } from './types';
-import { googleIntegration } from './google';
-import { spotifyIntegration } from './spotify';
-import { homeAssistantIntegration } from './homeassistant';
+import { IntegrationProvider } from "./types";
+import { googleIntegration } from "./google";
+import { spotifyIntegration } from "./spotify";
+import { homeAssistantIntegration } from "./homeassistant";
 
 // Export all integration providers
 export const integrationProviders: Record<string, IntegrationProvider> = {
@@ -20,7 +20,7 @@ export type {
   IntegrationConfig,
   IntegrationProvider,
   IntegrationScope,
-} from './types';
+} from "./types";
 
 // Helper function to get all integrations
 export function getAllIntegrations(): IntegrationProvider[] {
@@ -28,6 +28,8 @@ export function getAllIntegrations(): IntegrationProvider[] {
 }
 
 // Helper function to get integration by ID
-export function getIntegrationById(id: string): IntegrationProvider | undefined {
+export function getIntegrationById(
+  id: string,
+): IntegrationProvider | undefined {
   return integrationProviders[id];
 }

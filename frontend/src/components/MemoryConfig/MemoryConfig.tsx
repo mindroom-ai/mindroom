@@ -1,62 +1,62 @@
-import { useEffect, useState } from 'react';
-import { Brain } from 'lucide-react';
+import { useEffect, useState } from "react";
+import { Brain } from "lucide-react";
 
-import type { Config as MindRoomConfig } from '@/types/config';
-import { EditorPanel } from '@/components/shared/EditorPanel';
-import { FieldGroup } from '@/components/shared/FieldGroup';
-import { Input } from '@/components/ui/input';
+import type { Config as MindRoomConfig } from "@/types/config";
+import { EditorPanel } from "@/components/shared/EditorPanel";
+import { FieldGroup } from "@/components/shared/FieldGroup";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { useConfigStore } from '@/store/configStore';
+} from "@/components/ui/select";
+import { useConfigStore } from "@/store/configStore";
 
 const EMBEDDER_PROVIDERS = [
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'ollama', label: 'Ollama' },
-  { value: 'sentence_transformers', label: 'Sentence Transformers' },
+  { value: "openai", label: "OpenAI" },
+  { value: "ollama", label: "Ollama" },
+  { value: "sentence_transformers", label: "Sentence Transformers" },
 ];
 
 const MEMORY_BACKENDS = [
-  { value: 'mem0', label: 'Mem0 (vector)' },
-  { value: 'file', label: 'File (markdown)' },
+  { value: "mem0", label: "Mem0 (vector)" },
+  { value: "file", label: "File (markdown)" },
 ];
 
 const DEFAULT_MODELS: Record<string, string> = {
-  openai: 'text-embedding-3-small',
-  ollama: 'nomic-embed-text',
-  sentence_transformers: 'sentence-transformers/all-MiniLM-L6-v2',
+  openai: "text-embedding-3-small",
+  ollama: "nomic-embed-text",
+  sentence_transformers: "sentence-transformers/all-MiniLM-L6-v2",
 };
 
 const DEFAULT_HOSTS: Record<string, string> = {
-  openai: '',
-  ollama: 'http://localhost:11434',
-  sentence_transformers: '',
+  openai: "",
+  ollama: "http://localhost:11434",
+  sentence_transformers: "",
 };
 
 const MODEL_PLACEHOLDERS: Record<string, string> = {
-  openai: 'e.g. text-embedding-3-small',
-  ollama: 'e.g. nomic-embed-text',
-  sentence_transformers: 'e.g. sentence-transformers/all-MiniLM-L6-v2',
+  openai: "e.g. text-embedding-3-small",
+  ollama: "e.g. nomic-embed-text",
+  sentence_transformers: "e.g. sentence-transformers/all-MiniLM-L6-v2",
 };
 
-type MemorySettings = MindRoomConfig['memory'];
+type MemorySettings = MindRoomConfig["memory"];
 
 const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
-  backend: 'mem0',
+  backend: "mem0",
   team_reads_member_memory: false,
   embedder: {
-    provider: 'openai',
+    provider: "openai",
     config: {
-      model: 'text-embedding-3-small',
-      host: '',
+      model: "text-embedding-3-small",
+      host: "",
     },
   },
   file: {
-    path: '',
+    path: "",
     max_entrypoint_lines: 200,
   },
   auto_flush: {
@@ -73,7 +73,7 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
       max_sessions_per_agent_per_cycle: 3,
     },
     extractor: {
-      no_reply_token: 'NO_REPLY',
+      no_reply_token: "NO_REPLY",
       max_messages_per_flush: 20,
       max_chars_per_flush: 12000,
       max_extraction_seconds: 30,
@@ -85,7 +85,9 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   },
 };
 
-function normalizeMemorySettings(memory: MindRoomConfig['memory'] | undefined): MemorySettings {
+function normalizeMemorySettings(
+  memory: MindRoomConfig["memory"] | undefined,
+): MemorySettings {
   const merged: MemorySettings = {
     ...DEFAULT_MEMORY_SETTINGS,
     ...(memory || {}),
@@ -112,7 +114,8 @@ function normalizeMemorySettings(memory: MindRoomConfig['memory'] | undefined): 
         ...DEFAULT_MEMORY_SETTINGS.auto_flush?.extractor,
         ...(memory?.auto_flush?.extractor || {}),
         include_memory_context: {
-          ...DEFAULT_MEMORY_SETTINGS.auto_flush?.extractor?.include_memory_context,
+          ...DEFAULT_MEMORY_SETTINGS.auto_flush?.extractor
+            ?.include_memory_context,
           ...(memory?.auto_flush?.extractor?.include_memory_context || {}),
         },
       },
@@ -120,7 +123,7 @@ function normalizeMemorySettings(memory: MindRoomConfig['memory'] | undefined): 
   };
 
   if (!merged.embedder.config.host) {
-    merged.embedder.config.host = DEFAULT_HOSTS[merged.embedder.provider] || '';
+    merged.embedder.config.host = DEFAULT_HOSTS[merged.embedder.provider] || "";
   }
   return merged;
 }
@@ -131,37 +134,40 @@ function parseInteger(value: string, fallback: number): number {
 }
 
 function parseBoolean(value: string): boolean {
-  return value === 'true';
+  return value === "true";
 }
 
 function providerHelperText(provider: string): string {
-  if (provider === 'ollama') {
-    return 'Local embeddings using Ollama';
+  if (provider === "ollama") {
+    return "Local embeddings using Ollama";
   }
-  if (provider === 'openai') {
-    return 'OpenAI or any OpenAI-compatible API (set Base URL below)';
+  if (provider === "openai") {
+    return "OpenAI or any OpenAI-compatible API (set Base URL below)";
   }
-  if (provider === 'sentence_transformers') {
-    return 'Fully local embeddings using the sentence-transformers Python runtime';
+  if (provider === "sentence_transformers") {
+    return "Fully local embeddings using the sentence-transformers Python runtime";
   }
-  return 'Choose your embedding provider';
+  return "Choose your embedding provider";
 }
 
 function shouldShowHostField(provider: string): boolean {
-  return provider !== 'sentence_transformers';
+  return provider !== "sentence_transformers";
 }
 
-function defaultEmbedderConfig(provider: string): MemorySettings['embedder']['config'] {
+function defaultEmbedderConfig(
+  provider: string,
+): MemorySettings["embedder"]["config"] {
   return {
-    model: DEFAULT_MODELS[provider] || '',
-    host: DEFAULT_HOSTS[provider] || '',
+    model: DEFAULT_MODELS[provider] || "",
+    host: DEFAULT_HOSTS[provider] || "",
   };
 }
 
 export function MemoryConfig() {
-  const { config, updateMemoryConfig, saveConfig, isDirty, isLoading } = useConfigStore();
+  const { config, updateMemoryConfig, saveConfig, isDirty, isLoading } =
+    useConfigStore();
   const [localConfig, setLocalConfig] = useState<MemorySettings>(() =>
-    normalizeMemorySettings(config?.memory)
+    normalizeMemorySettings(config?.memory),
   );
 
   useEffect(() => {
@@ -173,7 +179,7 @@ export function MemoryConfig() {
     updateMemoryConfig(nextConfig);
   };
 
-  const handleBackendChange = (backend: 'mem0' | 'file') => {
+  const handleBackendChange = (backend: "mem0" | "file") => {
     applyMemoryConfig({ ...localConfig, backend });
   };
 
@@ -234,7 +240,9 @@ export function MemoryConfig() {
     });
   };
 
-  const updateAutoFlush = (updates: Partial<NonNullable<MemorySettings['auto_flush']>>) => {
+  const updateAutoFlush = (
+    updates: Partial<NonNullable<MemorySettings["auto_flush"]>>,
+  ) => {
     applyMemoryConfig({
       ...localConfig,
       auto_flush: {
@@ -245,7 +253,9 @@ export function MemoryConfig() {
   };
 
   const updateAutoFlushBatch = (
-    updates: Partial<NonNullable<NonNullable<MemorySettings['auto_flush']>['batch']>>
+    updates: Partial<
+      NonNullable<NonNullable<MemorySettings["auto_flush"]>["batch"]>
+    >,
   ) => {
     updateAutoFlush({
       batch: {
@@ -256,7 +266,9 @@ export function MemoryConfig() {
   };
 
   const updateAutoFlushExtractor = (
-    updates: Partial<NonNullable<NonNullable<MemorySettings['auto_flush']>['extractor']>>
+    updates: Partial<
+      NonNullable<NonNullable<MemorySettings["auto_flush"]>["extractor"]>
+    >,
   ) => {
     updateAutoFlush({
       extractor: {
@@ -270,10 +282,10 @@ export function MemoryConfig() {
     updates: Partial<
       NonNullable<
         NonNullable<
-          NonNullable<MemorySettings['auto_flush']>['extractor']
-        >['include_memory_context']
+          NonNullable<MemorySettings["auto_flush"]>["extractor"]
+        >["include_memory_context"]
       >
-    >
+    >,
   ) => {
     updateAutoFlushExtractor({
       include_memory_context: {
@@ -302,8 +314,8 @@ export function MemoryConfig() {
       <div className="space-y-6">
         <div className="space-y-2">
           <p className="text-sm text-muted-foreground">
-            Configure the embedder for agent memory storage and retrieval. You can also choose the
-            memory backend and auto-flush behavior.
+            Configure the embedder for agent memory storage and retrieval. You
+            can also choose the memory backend and auto-flush behavior.
           </p>
         </div>
 
@@ -315,14 +327,19 @@ export function MemoryConfig() {
             htmlFor="memory-backend"
           >
             <Select
-              value={localConfig.backend || 'mem0'}
-              onValueChange={value => handleBackendChange(value as 'mem0' | 'file')}
+              value={localConfig.backend || "mem0"}
+              onValueChange={(value) =>
+                handleBackendChange(value as "mem0" | "file")
+              }
             >
-              <SelectTrigger id="memory-backend" className="transition-colors hover:border-ring">
+              <SelectTrigger
+                id="memory-backend"
+                className="transition-colors hover:border-ring"
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {MEMORY_BACKENDS.map(backend => (
+                {MEMORY_BACKENDS.map((backend) => (
                   <SelectItem key={backend.value} value={backend.value}>
                     {backend.label}
                   </SelectItem>
@@ -338,7 +355,7 @@ export function MemoryConfig() {
           >
             <Select
               value={String(localConfig.team_reads_member_memory ?? false)}
-              onValueChange={value =>
+              onValueChange={(value) =>
                 applyMemoryConfig({
                   ...localConfig,
                   team_reads_member_memory: parseBoolean(value),
@@ -364,12 +381,18 @@ export function MemoryConfig() {
             required
             htmlFor="provider"
           >
-            <Select value={localConfig.embedder.provider} onValueChange={handleProviderChange}>
-              <SelectTrigger id="provider" className="transition-colors hover:border-ring">
+            <Select
+              value={localConfig.embedder.provider}
+              onValueChange={handleProviderChange}
+            >
+              <SelectTrigger
+                id="provider"
+                className="transition-colors hover:border-ring"
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {EMBEDDER_PROVIDERS.map(provider => (
+                {EMBEDDER_PROVIDERS.map((provider) => (
                   <SelectItem key={provider.value} value={provider.value}>
                     {provider.label}
                   </SelectItem>
@@ -388,39 +411,46 @@ export function MemoryConfig() {
               id="model"
               type="text"
               value={localConfig.embedder.config.model}
-              onChange={e => handleModelChange(e.target.value)}
-              placeholder={MODEL_PLACEHOLDERS[localConfig.embedder.provider] || 'Model name'}
+              onChange={(e) => handleModelChange(e.target.value)}
+              placeholder={
+                MODEL_PLACEHOLDERS[localConfig.embedder.provider] ||
+                "Model name"
+              }
               className="transition-colors hover:border-ring focus:border-ring"
             />
           </FieldGroup>
 
           {shouldShowHostField(localConfig.embedder.provider) && (
             <FieldGroup
-              label={localConfig.embedder.provider === 'ollama' ? 'Ollama Host URL' : 'Base URL'}
-              helperText={
-                localConfig.embedder.provider === 'ollama'
-                  ? 'The URL where your Ollama server is running'
-                  : 'Leave empty for official OpenAI API, or set for OpenAI-compatible servers'
+              label={
+                localConfig.embedder.provider === "ollama"
+                  ? "Ollama Host URL"
+                  : "Base URL"
               }
-              required={localConfig.embedder.provider === 'ollama'}
+              helperText={
+                localConfig.embedder.provider === "ollama"
+                  ? "The URL where your Ollama server is running"
+                  : "Leave empty for official OpenAI API, or set for OpenAI-compatible servers"
+              }
+              required={localConfig.embedder.provider === "ollama"}
               htmlFor="host"
             >
               <Input
                 id="host"
                 type="url"
-                value={localConfig.embedder.config.host || ''}
-                onChange={e => handleHostChange(e.target.value)}
+                value={localConfig.embedder.config.host || ""}
+                onChange={(e) => handleHostChange(e.target.value)}
                 placeholder={
-                  localConfig.embedder.provider === 'ollama'
-                    ? 'http://localhost:11434'
-                    : 'https://api.openai.com/v1'
+                  localConfig.embedder.provider === "ollama"
+                    ? "http://localhost:11434"
+                    : "https://api.openai.com/v1"
                 }
                 className="transition-colors hover:border-ring focus:border-ring"
               />
             </FieldGroup>
           )}
 
-          {localConfig.backend === 'file' && (
+          {localConfig.backend === "file" && (
             <>
               <FieldGroup
                 label="File Memory Path"
@@ -430,8 +460,8 @@ export function MemoryConfig() {
                 <Input
                   id="file-memory-path"
                   type="text"
-                  value={localConfig.file?.path || ''}
-                  onChange={e => handleFilePathChange(e.target.value)}
+                  value={localConfig.file?.path || ""}
+                  onChange={(e) => handleFilePathChange(e.target.value)}
                   placeholder="./mindroom_data/memory_files"
                   className="transition-colors hover:border-ring focus:border-ring"
                 />
@@ -447,7 +477,7 @@ export function MemoryConfig() {
                   type="number"
                   min={1}
                   value={localConfig.file?.max_entrypoint_lines ?? 200}
-                  onChange={e =>
+                  onChange={(e) =>
                     applyMemoryConfig({
                       ...localConfig,
                       file: {
@@ -467,7 +497,9 @@ export function MemoryConfig() {
               >
                 <Select
                   value={String(localConfig.auto_flush?.enabled ?? false)}
-                  onValueChange={value => handleAutoFlushEnabled(parseBoolean(value))}
+                  onValueChange={(value) =>
+                    handleAutoFlushEnabled(parseBoolean(value))
+                  }
                 >
                   <SelectTrigger
                     id="auto-flush-enabled"
@@ -492,9 +524,12 @@ export function MemoryConfig() {
                   type="number"
                   min={5}
                   value={localConfig.auto_flush?.flush_interval_seconds ?? 1800}
-                  onChange={e =>
+                  onChange={(e) =>
                     updateAutoFlush({
-                      flush_interval_seconds: parseInteger(e.target.value, 1800),
+                      flush_interval_seconds: parseInteger(
+                        e.target.value,
+                        1800,
+                      ),
                     })
                   }
                   className="transition-colors hover:border-ring focus:border-ring"
@@ -511,7 +546,7 @@ export function MemoryConfig() {
                   type="number"
                   min={0}
                   value={localConfig.auto_flush?.idle_seconds ?? 120}
-                  onChange={e =>
+                  onChange={(e) =>
                     updateAutoFlush({
                       idle_seconds: parseInteger(e.target.value, 120),
                     })
@@ -530,7 +565,7 @@ export function MemoryConfig() {
                   type="number"
                   min={1}
                   value={localConfig.auto_flush?.max_dirty_age_seconds ?? 600}
-                  onChange={e =>
+                  onChange={(e) =>
                     updateAutoFlush({
                       max_dirty_age_seconds: parseInteger(e.target.value, 600),
                     })
@@ -549,7 +584,7 @@ export function MemoryConfig() {
                   type="number"
                   min={60}
                   value={localConfig.auto_flush?.stale_ttl_seconds ?? 86400}
-                  onChange={e =>
+                  onChange={(e) =>
                     updateAutoFlush({
                       stale_ttl_seconds: parseInteger(e.target.value, 86400),
                     })
@@ -567,10 +602,15 @@ export function MemoryConfig() {
                   id="max-cross-session-reprioritize"
                   type="number"
                   min={0}
-                  value={localConfig.auto_flush?.max_cross_session_reprioritize ?? 5}
-                  onChange={e =>
+                  value={
+                    localConfig.auto_flush?.max_cross_session_reprioritize ?? 5
+                  }
+                  onChange={(e) =>
                     updateAutoFlush({
-                      max_cross_session_reprioritize: parseInteger(e.target.value, 5),
+                      max_cross_session_reprioritize: parseInteger(
+                        e.target.value,
+                        5,
+                      ),
                     })
                   }
                   className="transition-colors hover:border-ring focus:border-ring"
@@ -587,7 +627,7 @@ export function MemoryConfig() {
                   type="number"
                   min={1}
                   value={localConfig.auto_flush?.retry_cooldown_seconds ?? 30}
-                  onChange={e =>
+                  onChange={(e) =>
                     updateAutoFlush({
                       retry_cooldown_seconds: parseInteger(e.target.value, 30),
                     })
@@ -605,10 +645,15 @@ export function MemoryConfig() {
                   id="max-retry-cooldown-seconds"
                   type="number"
                   min={1}
-                  value={localConfig.auto_flush?.max_retry_cooldown_seconds ?? 300}
-                  onChange={e =>
+                  value={
+                    localConfig.auto_flush?.max_retry_cooldown_seconds ?? 300
+                  }
+                  onChange={(e) =>
                     updateAutoFlush({
-                      max_retry_cooldown_seconds: parseInteger(e.target.value, 300),
+                      max_retry_cooldown_seconds: parseInteger(
+                        e.target.value,
+                        300,
+                      ),
                     })
                   }
                   className="transition-colors hover:border-ring focus:border-ring"
@@ -624,8 +669,10 @@ export function MemoryConfig() {
                   id="max-sessions-per-cycle"
                   type="number"
                   min={1}
-                  value={localConfig.auto_flush?.batch?.max_sessions_per_cycle ?? 10}
-                  onChange={e =>
+                  value={
+                    localConfig.auto_flush?.batch?.max_sessions_per_cycle ?? 10
+                  }
+                  onChange={(e) =>
                     updateAutoFlushBatch({
                       max_sessions_per_cycle: parseInteger(e.target.value, 10),
                     })
@@ -643,10 +690,16 @@ export function MemoryConfig() {
                   id="max-sessions-per-agent"
                   type="number"
                   min={1}
-                  value={localConfig.auto_flush?.batch?.max_sessions_per_agent_per_cycle ?? 3}
-                  onChange={e =>
+                  value={
+                    localConfig.auto_flush?.batch
+                      ?.max_sessions_per_agent_per_cycle ?? 3
+                  }
+                  onChange={(e) =>
                     updateAutoFlushBatch({
-                      max_sessions_per_agent_per_cycle: parseInteger(e.target.value, 3),
+                      max_sessions_per_agent_per_cycle: parseInteger(
+                        e.target.value,
+                        3,
+                      ),
                     })
                   }
                   className="transition-colors hover:border-ring focus:border-ring"
@@ -662,8 +715,11 @@ export function MemoryConfig() {
                   id="max-messages-per-flush"
                   type="number"
                   min={1}
-                  value={localConfig.auto_flush?.extractor?.max_messages_per_flush ?? 20}
-                  onChange={e =>
+                  value={
+                    localConfig.auto_flush?.extractor?.max_messages_per_flush ??
+                    20
+                  }
+                  onChange={(e) =>
                     updateAutoFlushExtractor({
                       max_messages_per_flush: parseInteger(e.target.value, 20),
                     })
@@ -681,8 +737,11 @@ export function MemoryConfig() {
                   id="max-chars-per-flush"
                   type="number"
                   min={1}
-                  value={localConfig.auto_flush?.extractor?.max_chars_per_flush ?? 12000}
-                  onChange={e =>
+                  value={
+                    localConfig.auto_flush?.extractor?.max_chars_per_flush ??
+                    12000
+                  }
+                  onChange={(e) =>
                     updateAutoFlushExtractor({
                       max_chars_per_flush: parseInteger(e.target.value, 12000),
                     })
@@ -700,8 +759,11 @@ export function MemoryConfig() {
                   id="max-extraction-seconds"
                   type="number"
                   min={1}
-                  value={localConfig.auto_flush?.extractor?.max_extraction_seconds ?? 30}
-                  onChange={e =>
+                  value={
+                    localConfig.auto_flush?.extractor?.max_extraction_seconds ??
+                    30
+                  }
+                  onChange={(e) =>
                     updateAutoFlushExtractor({
                       max_extraction_seconds: parseInteger(e.target.value, 30),
                     })
@@ -718,8 +780,11 @@ export function MemoryConfig() {
                 <Input
                   id="no-reply-token"
                   type="text"
-                  value={localConfig.auto_flush?.extractor?.no_reply_token ?? 'NO_REPLY'}
-                  onChange={e =>
+                  value={
+                    localConfig.auto_flush?.extractor?.no_reply_token ??
+                    "NO_REPLY"
+                  }
+                  onChange={(e) =>
                     updateAutoFlushExtractor({
                       no_reply_token: e.target.value,
                     })
@@ -738,9 +803,10 @@ export function MemoryConfig() {
                   type="number"
                   min={0}
                   value={
-                    localConfig.auto_flush?.extractor?.include_memory_context?.memory_snippets ?? 5
+                    localConfig.auto_flush?.extractor?.include_memory_context
+                      ?.memory_snippets ?? 5
                   }
-                  onChange={e =>
+                  onChange={(e) =>
                     updateAutoFlushExtractorContext({
                       memory_snippets: parseInteger(e.target.value, 5),
                     })
@@ -759,10 +825,10 @@ export function MemoryConfig() {
                   type="number"
                   min={1}
                   value={
-                    localConfig.auto_flush?.extractor?.include_memory_context?.snippet_max_chars ??
-                    400
+                    localConfig.auto_flush?.extractor?.include_memory_context
+                      ?.snippet_max_chars ?? 400
                   }
-                  onChange={e =>
+                  onChange={(e) =>
                     updateAutoFlushExtractorContext({
                       snippet_max_chars: parseInteger(e.target.value, 400),
                     })
@@ -774,13 +840,13 @@ export function MemoryConfig() {
           )}
         </div>
 
-        {localConfig.backend !== 'file' &&
-          localConfig.embedder.provider === 'openai' &&
+        {localConfig.backend !== "file" &&
+          localConfig.embedder.provider === "openai" &&
           !localConfig.embedder.config.host && (
             <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/30 rounded-lg shadow-sm">
               <p className="text-sm text-yellow-800 dark:text-yellow-300">
-                <strong>Note:</strong> You&apos;ll need to set the OPENAI_API_KEY environment
-                variable for this provider to work.
+                <strong>Note:</strong> You&apos;ll need to set the
+                OPENAI_API_KEY environment variable for this provider to work.
               </p>
             </div>
           )}
@@ -790,34 +856,41 @@ export function MemoryConfig() {
           <div className="space-y-2 text-sm">
             <div className="flex justify-between">
               <span className="text-muted-foreground">Backend:</span>
-              <span className="font-mono text-foreground">{localConfig.backend || 'mem0'}</span>
+              <span className="font-mono text-foreground">
+                {localConfig.backend || "mem0"}
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Provider:</span>
-              <span className="font-mono text-foreground">{localConfig.embedder.provider}</span>
+              <span className="font-mono text-foreground">
+                {localConfig.embedder.provider}
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Team Reads Members:</span>
               <span className="font-mono text-foreground">
-                {localConfig.team_reads_member_memory ? 'enabled' : 'disabled'}
+                {localConfig.team_reads_member_memory ? "enabled" : "disabled"}
               </span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Model:</span>
-              <span className="font-mono text-foreground">{localConfig.embedder.config.model}</span>
+              <span className="font-mono text-foreground">
+                {localConfig.embedder.config.model}
+              </span>
             </div>
-            {localConfig.backend === 'file' && (
+            {localConfig.backend === "file" && (
               <>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Auto Flush:</span>
                   <span className="font-mono text-foreground">
-                    {localConfig.auto_flush?.enabled ? 'enabled' : 'disabled'}
+                    {localConfig.auto_flush?.enabled ? "enabled" : "disabled"}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Batch Size:</span>
                   <span className="font-mono text-foreground">
-                    {localConfig.auto_flush?.batch?.max_sessions_per_cycle || 10}
+                    {localConfig.auto_flush?.batch?.max_sessions_per_cycle ||
+                      10}
                   </span>
                 </div>
               </>
@@ -825,7 +898,9 @@ export function MemoryConfig() {
             {localConfig.embedder.config.host && (
               <div className="flex justify-between">
                 <span className="text-muted-foreground">
-                  {localConfig.embedder.provider === 'ollama' ? 'Host:' : 'Base URL:'}
+                  {localConfig.embedder.provider === "ollama"
+                    ? "Host:"
+                    : "Base URL:"}
                 </span>
                 <span className="font-mono text-foreground">
                   {localConfig.embedder.config.host}

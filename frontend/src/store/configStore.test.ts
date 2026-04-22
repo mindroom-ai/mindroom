@@ -1,21 +1,21 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { waitFor } from '@testing-library/react';
-import { useConfigStore } from './configStore';
-import type { Agent, AgentPoliciesByAgent, Team, Config } from '@/types/config';
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { waitFor } from "@testing-library/react";
+import { useConfigStore } from "./configStore";
+import type { Agent, AgentPoliciesByAgent, Team, Config } from "@/types/config";
 
 // Mock fetch globally
 global.fetch = vi.fn();
 
 function makeAgentPolicy(
   agentName: string,
-  overrides: Partial<AgentPoliciesByAgent[string]> = {}
+  overrides: Partial<AgentPoliciesByAgent[string]> = {},
 ): AgentPoliciesByAgent[string] {
   return {
     agent_name: agentName,
     is_private: false,
     effective_execution_scope: null,
-    scope_label: 'unscoped',
-    scope_source: 'unscoped',
+    scope_label: "unscoped",
+    scope_source: "unscoped",
     dashboard_credentials_supported: true,
     team_eligibility_reason: null,
     private_knowledge_base_id: null,
@@ -35,7 +35,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-describe('configStore', () => {
+describe("configStore", () => {
   beforeEach(() => {
     // Reset store state
     useConfigStore.setState({
@@ -62,7 +62,7 @@ describe('configStore', () => {
       dirtyRoots: [],
       isLoading: false,
       diagnostics: [],
-      syncStatus: 'disconnected',
+      syncStatus: "disconnected",
       privateWorkerScopeBackups: {},
     });
 
@@ -70,23 +70,23 @@ describe('configStore', () => {
     vi.clearAllMocks();
   });
 
-  describe('loadConfig', () => {
-    it('should load configuration successfully', async () => {
+  describe("loadConfig", () => {
+    it("should load configuration successfully", async () => {
       const mockConfig = {
         agents: {
           test: {
-            display_name: 'Test Agent',
-            role: 'Test role',
-            tools: ['calculator'],
+            display_name: "Test Agent",
+            role: "Test role",
+            tools: ["calculator"],
             skills: [],
-            instructions: ['Test instruction'],
-            rooms: ['lobby'],
+            instructions: ["Test instruction"],
+            rooms: ["lobby"],
           },
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
       };
@@ -97,30 +97,38 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { test: makeAgentPolicy('test') } }),
+        json: async () => ({
+          agent_policies: { test: makeAgentPolicy("test") },
+        }),
       });
 
       const { loadConfig } = useConfigStore.getState();
       await loadConfig();
 
       const state = useConfigStore.getState();
-      expect(state.config).toEqual({ ...mockConfig, knowledge_bases: {}, cultures: {} });
+      expect(state.config).toEqual({
+        ...mockConfig,
+        knowledge_bases: {},
+        cultures: {},
+      });
       expect(state.agents).toHaveLength(1);
-      expect(state.agents[0].id).toBe('test');
-      expect(state.agents[0].display_name).toBe('Test Agent');
+      expect(state.agents[0].id).toBe("test");
+      expect(state.agents[0].display_name).toBe("Test Agent");
       expect(state.agents[0].learning).toBe(true);
-      expect(state.agents[0].learning_mode).toBe('always');
-      expect(state.agentPoliciesByAgent).toEqual({ test: makeAgentPolicy('test') });
-      expect(state.syncStatus).toBe('synced');
+      expect(state.agents[0].learning_mode).toBe("always");
+      expect(state.agentPoliciesByAgent).toEqual({
+        test: makeAgentPolicy("test"),
+      });
+      expect(state.syncStatus).toBe("synced");
     });
 
-    it('normalizes mixed tool entries when loading configuration', async () => {
+    it("normalizes mixed tool entries when loading configuration", async () => {
       const mockConfig = {
         agents: {
           test: {
-            display_name: 'Test Agent',
-            role: 'Test role',
-            tools: ['calculator', { shell: { sandbox: 'tight' } }],
+            display_name: "Test Agent",
+            role: "Test role",
+            tools: ["calculator", { shell: { sandbox: "tight" } }],
             skills: [],
             instructions: [],
             rooms: [],
@@ -128,12 +136,12 @@ describe('configStore', () => {
         },
         defaults: {
           markdown: true,
-          tools: [{ gmail: { label: 'support' } }, 'file'],
+          tools: [{ gmail: { label: "support" } }, "file"],
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
       };
@@ -144,23 +152,25 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { test: makeAgentPolicy('test') } }),
+        json: async () => ({
+          agent_policies: { test: makeAgentPolicy("test") },
+        }),
       });
 
       await useConfigStore.getState().loadConfig();
 
       const state = useConfigStore.getState();
-      expect(state.agents[0].tools).toEqual(['calculator', 'shell']);
-      expect(state.config?.agents.test.tools).toEqual(['calculator', 'shell']);
-      expect(state.config?.defaults.tools).toEqual(['gmail', 'file']);
+      expect(state.agents[0].tools).toEqual(["calculator", "shell"]);
+      expect(state.config?.agents.test.tools).toEqual(["calculator", "shell"]);
+      expect(state.config?.defaults.tools).toEqual(["gmail", "file"]);
     });
 
-    it('should apply global learning defaults when agent settings are omitted', async () => {
+    it("should apply global learning defaults when agent settings are omitted", async () => {
       const mockConfig = {
         agents: {
           test: {
-            display_name: 'Test Agent',
-            role: 'Test role',
+            display_name: "Test Agent",
+            role: "Test role",
             tools: [],
             skills: [],
             instructions: [],
@@ -169,12 +179,12 @@ describe('configStore', () => {
         },
         defaults: {
           learning: false,
-          learning_mode: 'agentic',
+          learning_mode: "agentic",
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
       };
@@ -185,7 +195,9 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { test: makeAgentPolicy('test') } }),
+        json: async () => ({
+          agent_policies: { test: makeAgentPolicy("test") },
+        }),
       });
 
       const { loadConfig } = useConfigStore.getState();
@@ -193,15 +205,15 @@ describe('configStore', () => {
 
       const state = useConfigStore.getState();
       expect(state.agents[0].learning).toBe(false);
-      expect(state.agents[0].learning_mode).toBe('agentic');
+      expect(state.agents[0].learning_mode).toBe("agentic");
     });
 
-    it('should preserve explicit learning=false from configuration', async () => {
+    it("should preserve explicit learning=false from configuration", async () => {
       const mockConfig = {
         agents: {
           test: {
-            display_name: 'Test Agent',
-            role: 'Test role',
+            display_name: "Test Agent",
+            role: "Test role",
             tools: [],
             skills: [],
             instructions: [],
@@ -211,8 +223,8 @@ describe('configStore', () => {
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
       };
@@ -223,7 +235,9 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { test: makeAgentPolicy('test') } }),
+        json: async () => ({
+          agent_policies: { test: makeAgentPolicy("test") },
+        }),
       });
 
       const { loadConfig } = useConfigStore.getState();
@@ -231,27 +245,27 @@ describe('configStore', () => {
 
       const state = useConfigStore.getState();
       expect(state.agents[0].learning).toBe(false);
-      expect(state.agents[0].learning_mode).toBe('always');
+      expect(state.agents[0].learning_mode).toBe("always");
     });
 
-    it('should preserve explicit learning_mode from configuration', async () => {
+    it("should preserve explicit learning_mode from configuration", async () => {
       const mockConfig = {
         agents: {
           test: {
-            display_name: 'Test Agent',
-            role: 'Test role',
+            display_name: "Test Agent",
+            role: "Test role",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
             learning: true,
-            learning_mode: 'agentic',
+            learning_mode: "agentic",
           },
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
       };
@@ -262,33 +276,35 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { test: makeAgentPolicy('test') } }),
+        json: async () => ({
+          agent_policies: { test: makeAgentPolicy("test") },
+        }),
       });
 
       const { loadConfig } = useConfigStore.getState();
       await loadConfig();
 
       const state = useConfigStore.getState();
-      expect(state.agents[0].learning_mode).toBe('agentic');
+      expect(state.agents[0].learning_mode).toBe("agentic");
     });
 
-    it('should preserve private agent configuration from the backend', async () => {
+    it("should preserve private agent configuration from the backend", async () => {
       const mockConfig = {
         agents: {
           mind: {
-            display_name: 'Mind',
-            role: 'Private assistant',
+            display_name: "Mind",
+            role: "Private assistant",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
             private: {
-              per: 'user',
-              root: 'mind_data',
-              context_files: ['SOUL.md'],
+              per: "user",
+              root: "mind_data",
+              context_files: ["SOUL.md"],
               knowledge: {
                 enabled: true,
-                path: 'memory',
+                path: "memory",
                 watch: true,
               },
             },
@@ -296,8 +312,8 @@ describe('configStore', () => {
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
       };
@@ -310,13 +326,14 @@ describe('configStore', () => {
         ok: true,
         json: async () => ({
           agent_policies: {
-            mind: makeAgentPolicy('mind', {
+            mind: makeAgentPolicy("mind", {
               is_private: true,
-              effective_execution_scope: 'user',
-              scope_label: 'private.per=user',
-              scope_source: 'private.per',
+              effective_execution_scope: "user",
+              scope_label: "private.per=user",
+              scope_source: "private.per",
               dashboard_credentials_supported: false,
-              team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+              team_eligibility_reason:
+                "Private agents cannot participate in teams yet.",
               request_scoped_workspace_enabled: true,
             }),
           },
@@ -328,130 +345,132 @@ describe('configStore', () => {
 
       const state = useConfigStore.getState();
       expect(state.agents[0].private).toEqual({
-        per: 'user',
-        root: 'mind_data',
-        context_files: ['SOUL.md'],
+        per: "user",
+        root: "mind_data",
+        context_files: ["SOUL.md"],
         knowledge: {
           enabled: true,
-          path: 'memory',
+          path: "memory",
           watch: true,
         },
       });
     });
 
-    it('should handle load errors', async () => {
+    it("should handle load errors", async () => {
       const existingConfig: Config = {
         memory: {
-          backend: 'mem0',
+          backend: "mem0",
           embedder: {
-            provider: 'openai',
-            config: { model: 'text-embedding-3-small' },
+            provider: "openai",
+            config: { model: "text-embedding-3-small" },
           },
         },
         models: {
-          default: { provider: 'ollama', id: 'test-model' },
+          default: { provider: "ollama", id: "test-model" },
         },
         agents: {
           assistant: {
-            display_name: 'Assistant',
-            role: 'Helpful',
+            display_name: "Assistant",
+            role: "Helpful",
             tools: [],
             skills: [],
             instructions: [],
-            rooms: ['lobby'],
+            rooms: ["lobby"],
           },
         },
         defaults: { markdown: true },
-        router: { model: 'default' },
+        router: { model: "default" },
       };
       const existingAgent: Agent = {
-        id: 'assistant',
-        display_name: 'Assistant',
-        role: 'Helpful',
+        id: "assistant",
+        display_name: "Assistant",
+        role: "Helpful",
         tools: [],
         skills: [],
         instructions: [],
-        rooms: ['lobby'],
+        rooms: ["lobby"],
       };
       useConfigStore.setState({
         config: existingConfig,
         agents: [existingAgent],
         rooms: [
           {
-            id: 'lobby',
-            display_name: 'Lobby',
-            description: '',
-            agents: ['assistant'],
+            id: "lobby",
+            display_name: "Lobby",
+            description: "",
+            agents: ["assistant"],
           },
         ],
-        selectedAgentId: 'assistant',
+        selectedAgentId: "assistant",
         isDirty: true,
         privateWorkerScopeBackups: {
-          assistant: 'shared',
+          assistant: "shared",
         },
         agentPoliciesByAgent: {
-          assistant: makeAgentPolicy('assistant'),
+          assistant: makeAgentPolicy("assistant"),
         },
       });
-      (global.fetch as any).mockRejectedValueOnce(new Error('Network error'));
+      (global.fetch as any).mockRejectedValueOnce(new Error("Network error"));
 
       const { loadConfig } = useConfigStore.getState();
       await loadConfig();
 
       const state = useConfigStore.getState();
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
       expect(state.config).toEqual(existingConfig);
       expect(state.agents).toEqual([existingAgent]);
       expect(state.rooms).toEqual([
         {
-          id: 'lobby',
-          display_name: 'Lobby',
-          description: '',
-          agents: ['assistant'],
+          id: "lobby",
+          display_name: "Lobby",
+          description: "",
+          agents: ["assistant"],
         },
       ]);
-      expect(state.selectedAgentId).toBe('assistant');
+      expect(state.selectedAgentId).toBe("assistant");
       expect(state.isDirty).toBe(true);
       expect(state.privateWorkerScopeBackups).toEqual({
-        assistant: 'shared',
+        assistant: "shared",
       });
       expect(state.agentPoliciesByAgent).toEqual({
-        assistant: makeAgentPolicy('assistant'),
+        assistant: makeAgentPolicy("assistant"),
       });
       expect(state.diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Network error',
+          kind: "global",
+          message: "Network error",
           blocking: true,
         },
       ]);
     });
 
-    it('stores backend validation issues and loads raw recovery source when load returns 422', async () => {
+    it("stores backend validation issues and loads raw recovery source when load returns 422", async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({
           agents: {
             assistant: {
-              display_name: 'Assistant',
-              role: 'Helpful',
+              display_name: "Assistant",
+              role: "Helpful",
               tools: [],
               skills: [],
               instructions: [],
-              rooms: ['lobby'],
+              rooms: ["lobby"],
             },
           },
           models: {
             default: {
-              provider: 'ollama',
-              id: 'test-model',
+              provider: "ollama",
+              id: "test-model",
             },
           },
         }),
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { assistant: makeAgentPolicy('assistant') } }),
+        json: async () => ({
+          agent_policies: { assistant: makeAgentPolicy("assistant") },
+        }),
       });
       await useConfigStore.getState().loadConfig();
 
@@ -461,9 +480,9 @@ describe('configStore', () => {
         json: async () => ({
           detail: [
             {
-              loc: ['plugins', 0],
-              msg: 'Plugin tools_module must be a string',
-              type: 'value_error',
+              loc: ["plugins", 0],
+              msg: "Plugin tools_module must be a string",
+              type: "value_error",
             },
           ],
         }),
@@ -471,47 +490,51 @@ describe('configStore', () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          source: 'agents:\n  assistant:\n    role: broken\n',
+          source: "agents:\n  assistant:\n    role: broken\n",
         }),
       });
 
       await useConfigStore.getState().loadConfig();
 
       const state = useConfigStore.getState();
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
       expect(state.config).toBeNull();
-      expect(state.recoveryConfigSource).toBe('agents:\n  assistant:\n    role: broken\n');
-      expect(state.recoveryConfigSourceOriginal).toBe('agents:\n  assistant:\n    role: broken\n');
+      expect(state.recoveryConfigSource).toBe(
+        "agents:\n  assistant:\n    role: broken\n",
+      );
+      expect(state.recoveryConfigSourceOriginal).toBe(
+        "agents:\n  assistant:\n    role: broken\n",
+      );
       expect(state.agents).toEqual([]);
       expect(state.rooms).toEqual([]);
       expect(state.agentPoliciesByAgent).toEqual({});
       expect(state.diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Configuration validation failed',
+          kind: "global",
+          message: "Configuration validation failed",
           blocking: true,
         },
         {
-          kind: 'validation',
+          kind: "validation",
           issue: {
-            loc: ['plugins', 0],
-            msg: 'Plugin tools_module must be a string',
-            type: 'value_error',
+            loc: ["plugins", 0],
+            msg: "Plugin tools_module must be a string",
+            type: "value_error",
           },
         },
       ]);
     });
 
-    it('surfaces raw recovery fetch failures instead of masking them as validation blockers', async () => {
+    it("surfaces raw recovery fetch failures instead of masking them as validation blockers", async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: false,
         status: 422,
         json: async () => ({
           detail: [
             {
-              loc: ['plugins', 0],
-              msg: 'Plugin tools_module must be a string',
-              type: 'value_error',
+              loc: ["plugins", 0],
+              msg: "Plugin tools_module must be a string",
+              type: "value_error",
             },
           ],
         }),
@@ -520,7 +543,8 @@ describe('configStore', () => {
         ok: false,
         status: 401,
         json: async () => ({
-          detail: 'Authentication required. Please log in to access this instance.',
+          detail:
+            "Authentication required. Please log in to access this instance.",
         }),
       });
 
@@ -529,18 +553,19 @@ describe('configStore', () => {
       expect(useConfigStore.getState()).toMatchObject({
         config: null,
         recoveryConfigSource: null,
-        syncStatus: 'error',
+        syncStatus: "error",
         diagnostics: [
           {
-            kind: 'global',
-            message: 'Authentication required. Please log in to access this instance.',
+            kind: "global",
+            message:
+              "Authentication required. Please log in to access this instance.",
             blocking: true,
           },
         ],
       });
     });
 
-    it('ignores stale successful load results after a newer 422 failure', async () => {
+    it("ignores stale successful load results after a newer 422 failure", async () => {
       const pendingConfigResponse = deferred<{
         ok: boolean;
         json: () => Promise<{
@@ -567,9 +592,9 @@ describe('configStore', () => {
           json: async () => ({
             detail: [
               {
-                loc: ['plugins', 0],
-                msg: 'Plugin tools_module must be a string',
-                type: 'value_error',
+                loc: ["plugins", 0],
+                msg: "Plugin tools_module must be a string",
+                type: "value_error",
               },
             ],
           }),
@@ -577,13 +602,13 @@ describe('configStore', () => {
         .mockResolvedValueOnce({
           ok: true,
           json: async () => ({
-            source: 'plugins:\n  - bad\n',
+            source: "plugins:\n  - bad\n",
           }),
         })
         .mockResolvedValueOnce({
           ok: true,
           json: async () => ({
-            agent_policies: { assistant: makeAgentPolicy('assistant') },
+            agent_policies: { assistant: makeAgentPolicy("assistant") },
           }),
         });
 
@@ -594,27 +619,27 @@ describe('configStore', () => {
 
       let state = useConfigStore.getState();
       expect(state.loadConfigRequestId).toBe(2);
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
       expect(state.config).toBeNull();
-      expect(state.recoveryConfigSource).toBe('plugins:\n  - bad\n');
+      expect(state.recoveryConfigSource).toBe("plugins:\n  - bad\n");
 
       pendingConfigResponse.resolve({
         ok: true,
         json: async () => ({
           agents: {
             assistant: {
-              display_name: 'Assistant',
-              role: 'Helpful',
+              display_name: "Assistant",
+              role: "Helpful",
               tools: [],
               skills: [],
               instructions: [],
-              rooms: ['lobby'],
+              rooms: ["lobby"],
             },
           },
           models: {
             default: {
-              provider: 'ollama',
-              id: 'test-model',
+              provider: "ollama",
+              id: "test-model",
             },
           },
         }),
@@ -624,29 +649,29 @@ describe('configStore', () => {
 
       state = useConfigStore.getState();
       expect(state.loadConfigRequestId).toBe(2);
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
       expect(state.config).toBeNull();
       expect(state.agents).toEqual([]);
       expect(state.rooms).toEqual([]);
       expect(state.agentPoliciesByAgent).toEqual({});
       expect(state.diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Configuration validation failed',
+          kind: "global",
+          message: "Configuration validation failed",
           blocking: true,
         },
         {
-          kind: 'validation',
+          kind: "validation",
           issue: {
-            loc: ['plugins', 0],
-            msg: 'Plugin tools_module must be a string',
-            type: 'value_error',
+            loc: ["plugins", 0],
+            msg: "Plugin tools_module must be a string",
+            type: "value_error",
           },
         },
       ]);
     });
 
-    it('invalidates in-flight policy refreshes when load returns 422', async () => {
+    it("invalidates in-flight policy refreshes when load returns 422", async () => {
       const pendingPolicyResponse = deferred<{
         ok: boolean;
         json: () => Promise<{ agent_policies: AgentPoliciesByAgent }>;
@@ -655,30 +680,30 @@ describe('configStore', () => {
       useConfigStore.setState({
         config: {
           memory: {
-            backend: 'mem0',
+            backend: "mem0",
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           models: {
-            default: { provider: 'ollama', id: 'test-model' },
+            default: { provider: "ollama", id: "test-model" },
           },
           agents: {},
           defaults: { markdown: true },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agentPoliciesByAgent: {
-          assistant: makeAgentPolicy('assistant'),
+          assistant: makeAgentPolicy("assistant"),
         },
       });
 
       (global.fetch as any).mockReturnValueOnce(pendingPolicyResponse.promise);
       const refreshPromise = useConfigStore.getState().refreshAgentPolicies([
         {
-          id: 'assistant',
-          display_name: 'Assistant',
-          role: 'Helpful',
+          id: "assistant",
+          display_name: "Assistant",
+          role: "Helpful",
           tools: [],
           skills: [],
           instructions: [],
@@ -694,9 +719,9 @@ describe('configStore', () => {
         json: async () => ({
           detail: [
             {
-              loc: ['plugins', 0],
-              msg: 'Plugin tools_module must be a string',
-              type: 'value_error',
+              loc: ["plugins", 0],
+              msg: "Plugin tools_module must be a string",
+              type: "value_error",
             },
           ],
         }),
@@ -704,7 +729,7 @@ describe('configStore', () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          source: 'plugins:\n  - bad\n',
+          source: "plugins:\n  - bad\n",
         }),
       });
 
@@ -713,14 +738,14 @@ describe('configStore', () => {
       let state = useConfigStore.getState();
       expect(state.agentPoliciesRequestId).toBe(2);
       expect(state.config).toBeNull();
-      expect(state.recoveryConfigSource).toBe('plugins:\n  - bad\n');
+      expect(state.recoveryConfigSource).toBe("plugins:\n  - bad\n");
       expect(state.agentPoliciesByAgent).toEqual({});
 
       pendingPolicyResponse.resolve({
         ok: true,
         json: async () => ({
           agent_policies: {
-            assistant: makeAgentPolicy('assistant'),
+            assistant: makeAgentPolicy("assistant"),
           },
         }),
       });
@@ -733,36 +758,36 @@ describe('configStore', () => {
       expect(state.agentPoliciesByAgent).toEqual({});
       expect(state.diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Configuration validation failed',
+          kind: "global",
+          message: "Configuration validation failed",
           blocking: true,
         },
         {
-          kind: 'validation',
+          kind: "validation",
           issue: {
-            loc: ['plugins', 0],
-            msg: 'Plugin tools_module must be a string',
-            type: 'value_error',
+            loc: ["plugins", 0],
+            msg: "Plugin tools_module must be a string",
+            type: "value_error",
           },
         },
       ]);
     });
 
-    it('preserves a newer dirty structured draft when a late load returns 422', async () => {
+    it("preserves a newer dirty structured draft when a late load returns 422", async () => {
       const existingConfig = {
         memory: {
-          backend: 'mem0',
+          backend: "mem0",
           embedder: {
-            provider: 'openai',
-            config: { model: 'text-embedding-3-small' },
+            provider: "openai",
+            config: { model: "text-embedding-3-small" },
           },
         },
         knowledge_bases: {},
         cultures: {},
         agents: {
           assistant: {
-            display_name: 'Assistant',
-            role: 'Original role',
+            display_name: "Assistant",
+            role: "Original role",
             tools: [],
             skills: [],
             instructions: [],
@@ -774,12 +799,12 @@ describe('configStore', () => {
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'existing-model',
+            provider: "ollama",
+            id: "existing-model",
           },
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       } satisfies Config;
       const pendingRawSourceResponse = deferred<{
@@ -792,15 +817,15 @@ describe('configStore', () => {
         config: existingConfig,
         agents: [
           {
-            id: 'assistant',
-            display_name: 'Assistant',
-            role: 'Original role',
+            id: "assistant",
+            display_name: "Assistant",
+            role: "Original role",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
             learning: true,
-            learning_mode: 'always',
+            learning_mode: "always",
           },
         ],
       });
@@ -812,9 +837,9 @@ describe('configStore', () => {
           json: async () => ({
             detail: [
               {
-                loc: ['plugins', 0],
-                msg: 'Plugin tools_module must be a string',
-                type: 'value_error',
+                loc: ["plugins", 0],
+                msg: "Plugin tools_module must be a string",
+                type: "value_error",
               },
             ],
           }),
@@ -822,42 +847,46 @@ describe('configStore', () => {
         .mockReturnValueOnce(pendingRawSourceResponse.promise);
 
       const loadPromise = useConfigStore.getState().loadConfig();
-      await waitFor(() => expect((global.fetch as any).mock.calls).toHaveLength(2));
+      await waitFor(() =>
+        expect((global.fetch as any).mock.calls).toHaveLength(2),
+      );
 
-      useConfigStore.getState().updateAgent('assistant', { role: 'Edited role' });
+      useConfigStore
+        .getState()
+        .updateAgent("assistant", { role: "Edited role" });
 
       pendingRawSourceResponse.resolve({
         ok: true,
         json: async () => ({
-          source: 'plugins:\n  - bad\n',
+          source: "plugins:\n  - bad\n",
         }),
       });
 
       await loadPromise;
 
       const state = useConfigStore.getState();
-      expect(state.agents[0].role).toBe('Edited role');
+      expect(state.agents[0].role).toBe("Edited role");
       expect(state.recoveryConfigSource).toBeNull();
       expect(state.isDirty).toBe(true);
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
       expect(state.diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Configuration validation failed',
+          kind: "global",
+          message: "Configuration validation failed",
           blocking: false,
         },
         {
-          kind: 'validation',
+          kind: "validation",
           issue: {
-            loc: ['plugins', 0],
-            msg: 'Plugin tools_module must be a string',
-            type: 'value_error',
+            loc: ["plugins", 0],
+            msg: "Plugin tools_module must be a string",
+            type: "value_error",
           },
         },
       ]);
     });
 
-    it('preserves newer recovery edits when a retry load returns 422', async () => {
+    it("preserves newer recovery edits when a retry load returns 422", async () => {
       const pendingRawSourceResponse = deferred<{
         ok: boolean;
         json: () => Promise<{ source: string }>;
@@ -866,14 +895,14 @@ describe('configStore', () => {
       useConfigStore.setState({
         diagnostics: [
           {
-            kind: 'global',
-            message: 'Configuration validation failed',
+            kind: "global",
+            message: "Configuration validation failed",
             blocking: true,
           },
         ],
-        syncStatus: 'error',
-        recoveryConfigSource: 'plugins:\n  - bad\n',
-        recoveryConfigSourceOriginal: 'plugins:\n  - bad\n',
+        syncStatus: "error",
+        recoveryConfigSource: "plugins:\n  - bad\n",
+        recoveryConfigSourceOriginal: "plugins:\n  - bad\n",
       });
 
       (global.fetch as any)
@@ -883,9 +912,9 @@ describe('configStore', () => {
           json: async () => ({
             detail: [
               {
-                loc: ['plugins', 0],
-                msg: 'Plugin tools_module must be a string',
-                type: 'value_error',
+                loc: ["plugins", 0],
+                msg: "Plugin tools_module must be a string",
+                type: "value_error",
               },
             ],
           }),
@@ -893,53 +922,57 @@ describe('configStore', () => {
         .mockReturnValueOnce(pendingRawSourceResponse.promise);
 
       const loadPromise = useConfigStore.getState().loadConfig();
-      await waitFor(() => expect((global.fetch as any).mock.calls).toHaveLength(2));
+      await waitFor(() =>
+        expect((global.fetch as any).mock.calls).toHaveLength(2),
+      );
 
-      useConfigStore.getState().updateRecoveryConfigSource('plugins:\n  - fixed\n');
+      useConfigStore
+        .getState()
+        .updateRecoveryConfigSource("plugins:\n  - fixed\n");
 
       pendingRawSourceResponse.resolve({
         ok: true,
         json: async () => ({
-          source: 'plugins:\n  - bad\n',
+          source: "plugins:\n  - bad\n",
         }),
       });
 
       await loadPromise;
 
       const state = useConfigStore.getState();
-      expect(state.recoveryConfigSource).toBe('plugins:\n  - fixed\n');
-      expect(state.recoveryConfigSourceOriginal).toBe('plugins:\n  - bad\n');
+      expect(state.recoveryConfigSource).toBe("plugins:\n  - fixed\n");
+      expect(state.recoveryConfigSourceOriginal).toBe("plugins:\n  - bad\n");
       expect(state.isDirty).toBe(true);
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
       expect(state.diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Configuration validation failed',
+          kind: "global",
+          message: "Configuration validation failed",
           blocking: true,
         },
         {
-          kind: 'validation',
+          kind: "validation",
           issue: {
-            loc: ['plugins', 0],
-            msg: 'Plugin tools_module must be a string',
-            type: 'value_error',
+            loc: ["plugins", 0],
+            msg: "Plugin tools_module must be a string",
+            type: "value_error",
           },
         },
       ]);
     });
 
-    it('exits recovery mode when a retry load succeeds after local recovery edits', async () => {
+    it("exits recovery mode when a retry load succeeds after local recovery edits", async () => {
       useConfigStore.setState({
         diagnostics: [
           {
-            kind: 'global',
-            message: 'Configuration validation failed',
+            kind: "global",
+            message: "Configuration validation failed",
             blocking: true,
           },
         ],
-        syncStatus: 'error',
-        recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed locally\n',
-        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        syncStatus: "error",
+        recoveryConfigSource: "agents:\n  helper:\n    role: Fixed locally\n",
+        recoveryConfigSourceOriginal: "agents:\n  helper:\n    role: Broken\n",
         isDirty: true,
         draftVersion: 1,
       });
@@ -950,8 +983,8 @@ describe('configStore', () => {
           json: async () => ({
             agents: {
               helper: {
-                display_name: 'Helper',
-                role: 'Fixed on disk',
+                display_name: "Helper",
+                role: "Fixed on disk",
                 tools: [],
                 skills: [],
                 instructions: [],
@@ -960,15 +993,17 @@ describe('configStore', () => {
             },
             models: {
               default: {
-                provider: 'ollama',
-                id: 'test-model',
+                provider: "ollama",
+                id: "test-model",
               },
             },
           }),
         })
         .mockResolvedValueOnce({
           ok: true,
-          json: async () => ({ agent_policies: { helper: makeAgentPolicy('helper') } }),
+          json: async () => ({
+            agent_policies: { helper: makeAgentPolicy("helper") },
+          }),
         });
 
       await useConfigStore.getState().loadConfig();
@@ -977,24 +1012,26 @@ describe('configStore', () => {
         recoveryConfigSource: null,
         recoveryConfigSourceOriginal: null,
         isDirty: false,
-        syncStatus: 'synced',
+        syncStatus: "synced",
         diagnostics: [],
       });
-      expect(useConfigStore.getState().config?.agents.helper.role).toBe('Fixed on disk');
+      expect(useConfigStore.getState().config?.agents.helper.role).toBe(
+        "Fixed on disk",
+      );
     });
 
-    it('saves raw recovery source and reloads the structured config', async () => {
+    it("saves raw recovery source and reloads the structured config", async () => {
       useConfigStore.setState({
         diagnostics: [
           {
-            kind: 'global',
-            message: 'Configuration validation failed',
+            kind: "global",
+            message: "Configuration validation failed",
             blocking: true,
           },
         ],
-        syncStatus: 'error',
-        recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed\n',
-        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        syncStatus: "error",
+        recoveryConfigSource: "agents:\n  helper:\n    role: Fixed\n",
+        recoveryConfigSourceOriginal: "agents:\n  helper:\n    role: Broken\n",
         isDirty: true,
       });
 
@@ -1008,8 +1045,8 @@ describe('configStore', () => {
           json: async () => ({
             agents: {
               helper: {
-                display_name: 'Helper',
-                role: 'Fixed',
+                display_name: "Helper",
+                role: "Fixed",
                 tools: [],
                 skills: [],
                 instructions: [],
@@ -1018,44 +1055,48 @@ describe('configStore', () => {
             },
             models: {
               default: {
-                provider: 'ollama',
-                id: 'test-model',
+                provider: "ollama",
+                id: "test-model",
               },
             },
           }),
         })
         .mockResolvedValueOnce({
           ok: true,
-          json: async () => ({ agent_policies: { helper: makeAgentPolicy('helper') } }),
+          json: async () => ({
+            agent_policies: { helper: makeAgentPolicy("helper") },
+          }),
         });
 
       const result = await useConfigStore.getState().saveRecoveryConfigSource();
 
-      expect(result).toEqual({ status: 'saved' });
-      expect((global.fetch as any).mock.calls[0][0]).toBe('/api/config/raw');
-      expect((global.fetch as any).mock.calls[1][0]).toBe('/api/config/load');
+      expect(result).toEqual({ status: "saved" });
+      expect((global.fetch as any).mock.calls[0][0]).toBe("/api/config/raw");
+      expect((global.fetch as any).mock.calls[1][0]).toBe("/api/config/load");
       expect(useConfigStore.getState()).toMatchObject({
         recoveryConfigSource: null,
         recoveryConfigSourceOriginal: null,
-        syncStatus: 'synced',
+        syncStatus: "synced",
         isDirty: false,
         diagnostics: [],
       });
-      expect(useConfigStore.getState().config?.agents.helper.role).toBe('Fixed');
+      expect(useConfigStore.getState().config?.agents.helper.role).toBe(
+        "Fixed",
+      );
     });
 
-    it('returns an error when the post-save recovery reload fails', async () => {
+    it("returns an error when the post-save recovery reload fails", async () => {
       useConfigStore.setState({
         diagnostics: [
           {
-            kind: 'global',
-            message: 'Configuration validation failed',
+            kind: "global",
+            message: "Configuration validation failed",
             blocking: true,
           },
         ],
-        syncStatus: 'error',
-        recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed\n',
-        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        syncStatus: "error",
+        recoveryConfigSource: "agents:\n  helper:\n    role: Fixed\n",
+        recoveryConfigSourceOriginal: "agents:\n  helper:\n    role: Broken\n",
         isDirty: true,
       });
 
@@ -1063,7 +1104,8 @@ describe('configStore', () => {
         .mockResolvedValueOnce({
           ok: true,
           headers: {
-            get: (name: string) => (name === 'x-mindroom-config-generation' ? '7' : null),
+            get: (name: string) =>
+              name === "x-mindroom-config-generation" ? "7" : null,
           },
           json: async () => ({ success: true }),
         })
@@ -1071,33 +1113,36 @@ describe('configStore', () => {
           ok: false,
           status: 401,
           json: async () => ({
-            detail: 'Authentication required. Please log in to access this instance.',
+            detail:
+              "Authentication required. Please log in to access this instance.",
           }),
         });
 
       const result = await useConfigStore.getState().saveRecoveryConfigSource();
 
       expect(result).toEqual({
-        status: 'error',
-        message: 'Authentication required. Please log in to access this instance.',
+        status: "error",
+        message:
+          "Authentication required. Please log in to access this instance.",
         diagnostics: [
           {
-            kind: 'global',
-            message: 'Authentication required. Please log in to access this instance.',
+            kind: "global",
+            message:
+              "Authentication required. Please log in to access this instance.",
             blocking: true,
           },
         ],
       });
       expect(useConfigStore.getState()).toMatchObject({
         committedGeneration: 7,
-        recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed\n',
-        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        recoveryConfigSource: "agents:\n  helper:\n    role: Fixed\n",
+        recoveryConfigSourceOriginal: "agents:\n  helper:\n    role: Broken\n",
         isDirty: true,
-        syncStatus: 'error',
+        syncStatus: "error",
       });
     });
 
-    it('preserves newer recovery edits when an older recovery save finishes later', async () => {
+    it("preserves newer recovery edits when an older recovery save finishes later", async () => {
       const pendingSaveResponse = deferred<{
         ok: boolean;
         json: () => Promise<{ success: boolean }>;
@@ -1106,14 +1151,14 @@ describe('configStore', () => {
       useConfigStore.setState({
         diagnostics: [
           {
-            kind: 'global',
-            message: 'Configuration validation failed',
+            kind: "global",
+            message: "Configuration validation failed",
             blocking: true,
           },
         ],
-        syncStatus: 'error',
-        recoveryConfigSource: 'agents:\n  helper:\n    role: Fixed\n',
-        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
+        syncStatus: "error",
+        recoveryConfigSource: "agents:\n  helper:\n    role: Fixed\n",
+        recoveryConfigSourceOriginal: "agents:\n  helper:\n    role: Broken\n",
         draftVersion: 1,
         isDirty: true,
       });
@@ -1123,7 +1168,9 @@ describe('configStore', () => {
       const savePromise = useConfigStore.getState().saveRecoveryConfigSource();
       useConfigStore
         .getState()
-        .updateRecoveryConfigSource('agents:\n  helper:\n    role: Newer fix\n');
+        .updateRecoveryConfigSource(
+          "agents:\n  helper:\n    role: Newer fix\n",
+        );
 
       pendingSaveResponse.resolve({
         ok: true,
@@ -1132,35 +1179,35 @@ describe('configStore', () => {
 
       const result = await savePromise;
 
-      expect(result).toEqual({ status: 'stale' });
+      expect(result).toEqual({ status: "stale" });
       expect((global.fetch as any).mock.calls).toHaveLength(1);
       expect(useConfigStore.getState()).toMatchObject({
-        recoveryConfigSource: 'agents:\n  helper:\n    role: Newer fix\n',
-        recoveryConfigSourceOriginal: 'agents:\n  helper:\n    role: Broken\n',
-        syncStatus: 'error',
+        recoveryConfigSource: "agents:\n  helper:\n    role: Newer fix\n",
+        recoveryConfigSourceOriginal: "agents:\n  helper:\n    role: Broken\n",
+        syncStatus: "error",
         isDirty: true,
       });
     });
 
-    it('loads config and records a non-blocking diagnostic when agent policy derivation fails during reload', async () => {
+    it("loads config and records a non-blocking diagnostic when agent policy derivation fails during reload", async () => {
       const existingConfig = {
         memory: {
-          backend: 'mem0',
+          backend: "mem0",
           embedder: {
-            provider: 'openai',
-            config: { model: 'text-embedding-3-small' },
+            provider: "openai",
+            config: { model: "text-embedding-3-small" },
           },
         },
         knowledge_bases: {},
         cultures: {},
         agents: {
           existing: {
-            display_name: 'Existing Agent',
-            role: 'Existing role',
-            tools: ['calculator'],
+            display_name: "Existing Agent",
+            role: "Existing role",
+            tools: ["calculator"],
             skills: [],
             instructions: [],
-            rooms: ['lobby'],
+            rooms: ["lobby"],
           },
         },
         defaults: {
@@ -1168,12 +1215,12 @@ describe('configStore', () => {
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'existing-model',
+            provider: "ollama",
+            id: "existing-model",
           },
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       } satisfies Config;
 
@@ -1181,38 +1228,38 @@ describe('configStore', () => {
         config: existingConfig,
         agents: [
           {
-            id: 'existing',
-            display_name: 'Existing Agent',
-            role: 'Existing role',
-            tools: ['calculator'],
+            id: "existing",
+            display_name: "Existing Agent",
+            role: "Existing role",
+            tools: ["calculator"],
             skills: [],
             instructions: [],
-            rooms: ['lobby'],
+            rooms: ["lobby"],
             learning: true,
-            learning_mode: 'always',
+            learning_mode: "always",
           },
         ],
         agentPoliciesByAgent: {
-          existing: makeAgentPolicy('existing'),
+          existing: makeAgentPolicy("existing"),
         },
-        syncStatus: 'synced',
+        syncStatus: "synced",
       });
 
       const replacementConfig = {
         agents: {
           replacement: {
-            display_name: 'Replacement Agent',
-            role: 'Replacement role',
-            tools: ['weather'],
+            display_name: "Replacement Agent",
+            role: "Replacement role",
+            tools: ["weather"],
             skills: [],
             instructions: [],
-            rooms: ['desk'],
+            rooms: ["desk"],
           },
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'replacement-model',
+            provider: "ollama",
+            id: "replacement-model",
           },
         },
       };
@@ -1224,7 +1271,7 @@ describe('configStore', () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: false,
         status: 500,
-        json: async () => ({ detail: 'boom' }),
+        json: async () => ({ detail: "boom" }),
       });
 
       await useConfigStore.getState().loadConfig();
@@ -1237,46 +1284,47 @@ describe('configStore', () => {
       });
       expect(state.agents).toEqual([
         {
-          id: 'replacement',
-          display_name: 'Replacement Agent',
-          role: 'Replacement role',
-          tools: ['weather'],
+          id: "replacement",
+          display_name: "Replacement Agent",
+          role: "Replacement role",
+          tools: ["weather"],
           skills: [],
           instructions: [],
-          rooms: ['desk'],
+          rooms: ["desk"],
           knowledge_bases: [],
           delegate_to: [],
           context_files: [],
           learning: true,
-          learning_mode: 'always',
+          learning_mode: "always",
         },
       ]);
       expect(state.agentPoliciesByAgent).toEqual({});
       expect(state.diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Failed to derive agent policies',
+          kind: "global",
+          message: "Failed to derive agent policies",
           blocking: false,
         },
       ]);
-      expect(state.syncStatus).toBe('synced');
+      expect(state.syncStatus).toBe("synced");
     });
   });
 
-  describe('refreshAgentPolicies', () => {
-    it('stores backend-derived agent policies', async () => {
+  describe("refreshAgentPolicies", () => {
+    it("stores backend-derived agent policies", async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({
           agent_policies: {
-            helper: makeAgentPolicy('helper'),
-            mind: makeAgentPolicy('mind', {
+            helper: makeAgentPolicy("helper"),
+            mind: makeAgentPolicy("mind", {
               is_private: true,
-              effective_execution_scope: 'user',
-              scope_label: 'private.per=user',
-              scope_source: 'private.per',
+              effective_execution_scope: "user",
+              scope_label: "private.per=user",
+              scope_source: "private.per",
               dashboard_credentials_supported: false,
-              team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+              team_eligibility_reason:
+                "Private agents cannot participate in teams yet.",
               request_scoped_workspace_enabled: true,
             }),
           },
@@ -1286,58 +1334,59 @@ describe('configStore', () => {
       useConfigStore.setState({
         config: {
           memory: {
-            backend: 'mem0',
+            backend: "mem0",
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           models: {
-            default: { provider: 'ollama', id: 'test-model' },
+            default: { provider: "ollama", id: "test-model" },
           },
           agents: {},
           defaults: { markdown: true },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
       });
 
       await useConfigStore.getState().refreshAgentPolicies([
         {
-          id: 'helper',
-          display_name: 'Helper',
-          role: 'Helps',
+          id: "helper",
+          display_name: "Helper",
+          role: "Helps",
           tools: [],
           skills: [],
           instructions: [],
           rooms: [],
         },
         {
-          id: 'mind',
-          display_name: 'Mind',
-          role: 'Private',
+          id: "mind",
+          display_name: "Mind",
+          role: "Private",
           tools: [],
           skills: [],
           instructions: [],
           rooms: [],
-          private: { per: 'user' },
+          private: { per: "user" },
         },
       ]);
 
       expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-        helper: makeAgentPolicy('helper'),
-        mind: makeAgentPolicy('mind', {
+        helper: makeAgentPolicy("helper"),
+        mind: makeAgentPolicy("mind", {
           is_private: true,
-          effective_execution_scope: 'user',
-          scope_label: 'private.per=user',
-          scope_source: 'private.per',
+          effective_execution_scope: "user",
+          scope_label: "private.per=user",
+          scope_source: "private.per",
           dashboard_credentials_supported: false,
-          team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+          team_eligibility_reason:
+            "Private agents cannot participate in teams yet.",
           request_scoped_workspace_enabled: true,
         }),
       });
     });
 
-    it('invalidates the current preview while a refresh is in flight', async () => {
+    it("invalidates the current preview while a refresh is in flight", async () => {
       const pendingResponse = deferred<{
         ok: boolean;
         json: () => Promise<{ agent_policies: AgentPoliciesByAgent }>;
@@ -1348,29 +1397,29 @@ describe('configStore', () => {
       useConfigStore.setState({
         config: {
           memory: {
-            backend: 'mem0',
+            backend: "mem0",
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           models: {
-            default: { provider: 'ollama', id: 'test-model' },
+            default: { provider: "ollama", id: "test-model" },
           },
           agents: {},
           defaults: { markdown: true },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agentPoliciesByAgent: {
-          helper: makeAgentPolicy('helper'),
+          helper: makeAgentPolicy("helper"),
         },
       });
 
       const refreshPromise = useConfigStore.getState().refreshAgentPolicies([
         {
-          id: 'helper',
-          display_name: 'Helper',
-          role: 'Helps',
+          id: "helper",
+          display_name: "Helper",
+          role: "Helps",
           tools: [],
           skills: [],
           instructions: [],
@@ -1385,7 +1434,7 @@ describe('configStore', () => {
         ok: true,
         json: async () => ({
           agent_policies: {
-            helper: makeAgentPolicy('helper'),
+            helper: makeAgentPolicy("helper"),
           },
         }),
       });
@@ -1393,44 +1442,44 @@ describe('configStore', () => {
       await refreshPromise;
 
       expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-        helper: makeAgentPolicy('helper'),
+        helper: makeAgentPolicy("helper"),
       });
       expect(useConfigStore.getState().agentPoliciesStale).toBe(false);
     });
 
-    it('clears policies and records a non-blocking diagnostic when refresh fails', async () => {
+    it("clears policies and records a non-blocking diagnostic when refresh fails", async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: false,
         status: 500,
-        json: async () => ({ detail: 'boom' }),
+        json: async () => ({ detail: "boom" }),
       });
 
       useConfigStore.setState({
         config: {
           memory: {
-            backend: 'mem0',
+            backend: "mem0",
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           models: {
-            default: { provider: 'ollama', id: 'test-model' },
+            default: { provider: "ollama", id: "test-model" },
           },
           agents: {},
           defaults: { markdown: true },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agentPoliciesByAgent: {
-          helper: makeAgentPolicy('helper'),
+          helper: makeAgentPolicy("helper"),
         },
       });
 
       await useConfigStore.getState().refreshAgentPolicies([
         {
-          id: 'helper',
-          display_name: 'Helper',
-          role: 'Helps',
+          id: "helper",
+          display_name: "Helper",
+          role: "Helps",
           tools: [],
           skills: [],
           instructions: [],
@@ -1441,22 +1490,22 @@ describe('configStore', () => {
       expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({});
       expect(useConfigStore.getState().diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Failed to derive agent policies',
+          kind: "global",
+          message: "Failed to derive agent policies",
           blocking: false,
         },
       ]);
     });
   });
 
-  describe('saveConfig', () => {
-    it('should save configuration successfully', async () => {
+  describe("saveConfig", () => {
+    it("should save configuration successfully", async () => {
       // Set up initial state with agents array
       const mockConfig: Config = {
         agents: {
           test: {
-            display_name: 'Test',
-            role: 'Test role',
+            display_name: "Test",
+            role: "Test role",
             tools: [],
             skills: [],
             instructions: [],
@@ -1466,9 +1515,9 @@ describe('configStore', () => {
         models: {},
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
@@ -1476,14 +1525,14 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       };
       const mockAgents = [
         {
-          id: 'test',
-          display_name: 'Test',
-          role: 'Test role',
+          id: "test",
+          display_name: "Test",
+          role: "Test role",
           tools: [],
           skills: [],
           instructions: [],
@@ -1494,7 +1543,7 @@ describe('configStore', () => {
         config: mockConfig,
         agents: mockAgents,
         isDirty: true,
-        syncStatus: 'synced',
+        syncStatus: "synced",
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
@@ -1507,11 +1556,11 @@ describe('configStore', () => {
       // The saveConfig removes the id field when saving
       const { id: _id, ...agentWithoutId } = mockAgents[0];
       expect(global.fetch).toHaveBeenCalledTimes(1);
-      expect(global.fetch).toHaveBeenNthCalledWith(1, '/api/config/save', {
-        method: 'PUT',
+      expect(global.fetch).toHaveBeenNthCalledWith(1, "/api/config/save", {
+        method: "PUT",
         headers: {
-          'Content-Type': 'application/json',
-          'x-mindroom-config-generation': '0',
+          "Content-Type": "application/json",
+          "x-mindroom-config-generation": "0",
         },
         body: JSON.stringify({
           ...mockConfig,
@@ -1521,17 +1570,17 @@ describe('configStore', () => {
 
       const state = useConfigStore.getState();
       expect(state.isDirty).toBe(false);
-      expect(state.syncStatus).toBe('synced');
+      expect(state.syncStatus).toBe("synced");
       expect(state.config?.agents).toEqual({ test: agentWithoutId });
     });
 
-    it('rebuilds mixed tool entries on save after config clones', async () => {
+    it("rebuilds mixed tool entries on save after config clones", async () => {
       const mockConfig = {
         agents: {
           test: {
-            display_name: 'Test Agent',
-            role: 'Test role',
-            tools: ['calculator', { shell: { sandbox: 'tight' } }],
+            display_name: "Test Agent",
+            role: "Test role",
+            tools: ["calculator", { shell: { sandbox: "tight" } }],
             skills: [],
             instructions: [],
             rooms: [],
@@ -1539,12 +1588,12 @@ describe('configStore', () => {
         },
         defaults: {
           markdown: true,
-          tools: [{ gmail: { label: 'support' } }, 'file'],
+          tools: [{ gmail: { label: "support" } }, "file"],
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
       };
@@ -1555,12 +1604,16 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { test: makeAgentPolicy('test') } }),
+        json: async () => ({
+          agent_policies: { test: makeAgentPolicy("test") },
+        }),
       });
 
       await useConfigStore.getState().loadConfig();
-      useConfigStore.getState().updateToolConfig('gmail', { enabled: true });
-      useConfigStore.getState().updateAgent('test', { tools: ['shell', 'browser'] });
+      useConfigStore.getState().updateToolConfig("gmail", { enabled: true });
+      useConfigStore
+        .getState()
+        .updateAgent("test", { tools: ["shell", "browser"] });
 
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
@@ -1570,42 +1623,48 @@ describe('configStore', () => {
       await useConfigStore.getState().saveConfig();
 
       const saveCall = (global.fetch as any).mock.calls[2];
-      expect(saveCall[0]).toBe('/api/config/save');
+      expect(saveCall[0]).toBe("/api/config/save");
       expect(saveCall[1]).toMatchObject({
-        method: 'PUT',
+        method: "PUT",
         headers: {
-          'Content-Type': 'application/json',
-          'x-mindroom-config-generation': '0',
+          "Content-Type": "application/json",
+          "x-mindroom-config-generation": "0",
         },
       });
       expect(JSON.parse(saveCall[1].body)).toMatchObject({
         defaults: {
           markdown: true,
-          tools: [{ gmail: { label: 'support' } }, 'file'],
+          tools: [{ gmail: { label: "support" } }, "file"],
         },
         agents: {
           test: {
-            tools: [{ shell: { sandbox: 'tight' } }, 'browser'],
+            tools: [{ shell: { sandbox: "tight" } }, "browser"],
           },
         },
         tools: {
           gmail: { enabled: true },
         },
       });
-      expect(useConfigStore.getState().config?.agents.test.tools).toEqual(['shell', 'browser']);
-      expect(useConfigStore.getState().config?.defaults.tools).toEqual(['gmail', 'file']);
+      expect(useConfigStore.getState().config?.agents.test.tools).toEqual([
+        "shell",
+        "browser",
+      ]);
+      expect(useConfigStore.getState().config?.defaults.tools).toEqual([
+        "gmail",
+        "file",
+      ]);
     });
 
-    it('stores backend validation issues without poisoning the global load error', async () => {
+    it("stores backend validation issues without poisoning the global load error", async () => {
       const mockConfig: Config = {
         models: {
-          default: { provider: 'test', id: 'test-model' },
+          default: { provider: "test", id: "test-model" },
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
@@ -1614,21 +1673,21 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       };
       const mockAgents = [
         {
-          id: 'mind',
-          display_name: 'Mind',
-          role: 'Assistant',
+          id: "mind",
+          display_name: "Mind",
+          role: "Assistant",
           tools: [],
           skills: [],
           instructions: [],
           rooms: [],
           private: {
-            per: 'user' as const,
-            root: '../outside',
+            per: "user" as const,
+            root: "../outside",
           },
         },
       ];
@@ -1644,9 +1703,9 @@ describe('configStore', () => {
         json: async () => ({
           detail: [
             {
-              loc: ['agents', 'mind', 'private', 'root'],
-              msg: 'private.root must stay within the private instance root',
-              type: 'value_error',
+              loc: ["agents", "mind", "private", "root"],
+              msg: "private.root must stay within the private instance root",
+              type: "value_error",
             },
           ],
         }),
@@ -1657,42 +1716,42 @@ describe('configStore', () => {
       const state = useConfigStore.getState();
       expect(state.diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Configuration validation failed',
+          kind: "global",
+          message: "Configuration validation failed",
           blocking: false,
         },
         {
-          kind: 'validation',
+          kind: "validation",
           issue: {
-            loc: ['agents', 'mind', 'private', 'root'],
-            msg: 'private.root must stay within the private instance root',
-            type: 'value_error',
+            loc: ["agents", "mind", "private", "root"],
+            msg: "private.root must stay within the private instance root",
+            type: "value_error",
           },
         },
       ]);
     });
 
-    it('ignores stale successful save results after a newer validation failure', async () => {
+    it("ignores stale successful save results after a newer validation failure", async () => {
       const pendingSaveResponse = deferred<{
         ok: boolean;
         json: () => Promise<{ success: true }>;
       }>();
       const config: Config = {
         models: {
-          default: { provider: 'test', id: 'test-model' },
+          default: { provider: "test", id: "test-model" },
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
         agents: {
           helper: {
-            display_name: 'Helper',
-            role: 'Helpful',
+            display_name: "Helper",
+            role: "Helpful",
             tools: [],
             skills: [],
             instructions: [],
@@ -1703,14 +1762,14 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       };
       const agents = [
         {
-          id: 'helper',
-          display_name: 'Helper',
-          role: 'Helpful',
+          id: "helper",
+          display_name: "Helper",
+          role: "Helpful",
           tools: [],
           skills: [],
           instructions: [],
@@ -1723,19 +1782,21 @@ describe('configStore', () => {
         isDirty: true,
       });
 
-      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise).mockResolvedValueOnce({
-        ok: false,
-        status: 422,
-        json: async () => ({
-          detail: [
-            {
-              loc: ['agents', 'helper', 'role'],
-              msg: 'role is required',
-              type: 'value_error',
-            },
-          ],
-        }),
-      });
+      (global.fetch as any)
+        .mockReturnValueOnce(pendingSaveResponse.promise)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 422,
+          json: async () => ({
+            detail: [
+              {
+                loc: ["agents", "helper", "role"],
+                msg: "role is required",
+                type: "value_error",
+              },
+            ],
+          }),
+        });
 
       const firstSavePromise = useConfigStore.getState().saveConfig();
       const secondSavePromise = useConfigStore.getState().saveConfig();
@@ -1744,20 +1805,20 @@ describe('configStore', () => {
 
       let state = useConfigStore.getState();
       expect(state.saveConfigRequestId).toBe(2);
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
       expect(state.isDirty).toBe(true);
       expect(state.diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Configuration validation failed',
+          kind: "global",
+          message: "Configuration validation failed",
           blocking: false,
         },
         {
-          kind: 'validation',
+          kind: "validation",
           issue: {
-            loc: ['agents', 'helper', 'role'],
-            msg: 'role is required',
-            type: 'value_error',
+            loc: ["agents", "helper", "role"],
+            msg: "role is required",
+            type: "value_error",
           },
         },
       ]);
@@ -1770,46 +1831,46 @@ describe('configStore', () => {
 
       state = useConfigStore.getState();
       expect(state.saveConfigRequestId).toBe(2);
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
       expect(state.isDirty).toBe(true);
       expect(state.diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Configuration validation failed',
+          kind: "global",
+          message: "Configuration validation failed",
           blocking: false,
         },
         {
-          kind: 'validation',
+          kind: "validation",
           issue: {
-            loc: ['agents', 'helper', 'role'],
-            msg: 'role is required',
-            type: 'value_error',
+            loc: ["agents", "helper", "role"],
+            msg: "role is required",
+            type: "value_error",
           },
         },
       ]);
     });
 
-    it('preserves newer draft edits when an older save finishes later', async () => {
+    it("preserves newer draft edits when an older save finishes later", async () => {
       const pendingSaveResponse = deferred<{
         ok: boolean;
         json: () => Promise<{ success: true }>;
       }>();
       const config: Config = {
         models: {
-          default: { provider: 'test', id: 'test-model' },
+          default: { provider: "test", id: "test-model" },
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
         agents: {
           helper: {
-            display_name: 'Helper',
-            role: 'Helpful',
+            display_name: "Helper",
+            role: "Helpful",
             tools: [],
             skills: [],
             instructions: [],
@@ -1820,14 +1881,14 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       };
       const agents = [
         {
-          id: 'helper',
-          display_name: 'Helper',
-          role: 'Helpful',
+          id: "helper",
+          display_name: "Helper",
+          role: "Helpful",
           tools: [],
           skills: [],
           instructions: [],
@@ -1839,14 +1900,16 @@ describe('configStore', () => {
         agents,
         isDirty: true,
         privateWorkerScopeBackups: {
-          helper: 'shared',
+          helper: "shared",
         },
       });
 
       (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
 
       const savePromise = useConfigStore.getState().saveConfig();
-      useConfigStore.getState().updateAgent('helper', { role: 'Still editing' });
+      useConfigStore
+        .getState()
+        .updateAgent("helper", { role: "Still editing" });
 
       pendingSaveResponse.resolve({
         ok: true,
@@ -1855,15 +1918,15 @@ describe('configStore', () => {
       await savePromise;
 
       const state = useConfigStore.getState();
-      expect(state.agents[0].role).toBe('Still editing');
+      expect(state.agents[0].role).toBe("Still editing");
       expect(state.isDirty).toBe(true);
       expect(state.privateWorkerScopeBackups).toEqual({
-        helper: 'shared',
+        helper: "shared",
       });
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
     });
 
-    it('retains unrelated validation diagnostics when a stale save is superseded by newer edits', async () => {
+    it("retains unrelated validation diagnostics when a stale save is superseded by newer edits", async () => {
       const pendingSaveResponse = deferred<{
         ok: boolean;
         json: () => Promise<{ success: true }>;
@@ -1871,8 +1934,8 @@ describe('configStore', () => {
       const config: Config = {
         agents: {
           helper: {
-            display_name: 'Helper',
-            role: '',
+            display_name: "Helper",
+            role: "",
             tools: [],
             skills: [],
             instructions: [],
@@ -1881,35 +1944,35 @@ describe('configStore', () => {
         },
         teams: {
           ops: {
-            display_name: '',
-            role: 'Runs ops',
-            agents: ['helper'],
+            display_name: "",
+            role: "Runs ops",
+            agents: ["helper"],
             rooms: [],
-            mode: 'coordinate',
+            mode: "coordinate",
           },
         },
         defaults: { markdown: true },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
         models: {
-          default: { provider: 'test', id: 'test-model' },
+          default: { provider: "test", id: "test-model" },
         },
-        router: { model: 'default' },
+        router: { model: "default" },
       };
       useConfigStore.setState({
         config,
         loadedConfig: config,
         agents: [
           {
-            id: 'helper',
-            display_name: 'Helper',
-            role: '',
+            id: "helper",
+            display_name: "Helper",
+            role: "",
             tools: [],
             skills: [],
             instructions: [],
@@ -1918,34 +1981,34 @@ describe('configStore', () => {
         ],
         teams: [
           {
-            id: 'ops',
-            display_name: '',
-            role: 'Runs ops',
-            agents: ['helper'],
+            id: "ops",
+            display_name: "",
+            role: "Runs ops",
+            agents: ["helper"],
             rooms: [],
-            mode: 'coordinate',
+            mode: "coordinate",
           },
         ],
         diagnostics: [
           {
-            kind: 'global',
-            message: 'Configuration validation failed',
+            kind: "global",
+            message: "Configuration validation failed",
             blocking: false,
           },
           {
-            kind: 'validation',
+            kind: "validation",
             issue: {
-              loc: ['agents', 'helper', 'role'],
-              msg: 'role is required',
-              type: 'value_error',
+              loc: ["agents", "helper", "role"],
+              msg: "role is required",
+              type: "value_error",
             },
           },
           {
-            kind: 'validation',
+            kind: "validation",
             issue: {
-              loc: ['teams', 'ops', 'display_name'],
-              msg: 'display_name is required',
-              type: 'value_error',
+              loc: ["teams", "ops", "display_name"],
+              msg: "display_name is required",
+              type: "value_error",
             },
           },
         ],
@@ -1955,45 +2018,45 @@ describe('configStore', () => {
       (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
 
       const savePromise = useConfigStore.getState().saveConfig();
-      useConfigStore.getState().updateAgent('helper', { role: 'Now valid' });
+      useConfigStore.getState().updateAgent("helper", { role: "Now valid" });
 
       pendingSaveResponse.resolve({
         ok: true,
         json: async () => ({ success: true }),
       });
 
-      expect(await savePromise).toEqual({ status: 'stale' });
+      expect(await savePromise).toEqual({ status: "stale" });
       expect(useConfigStore.getState().diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Configuration validation failed',
+          kind: "global",
+          message: "Configuration validation failed",
           blocking: false,
         },
         {
-          kind: 'validation',
+          kind: "validation",
           issue: {
-            loc: ['teams', 'ops', 'display_name'],
-            msg: 'display_name is required',
-            type: 'value_error',
+            loc: ["teams", "ops", "display_name"],
+            msg: "display_name is required",
+            type: "value_error",
           },
         },
       ]);
     });
 
-    it('preserves newer voice edits when an older save finishes later', async () => {
+    it("preserves newer voice edits when an older save finishes later", async () => {
       const pendingSaveResponse = deferred<{
         ok: boolean;
         json: () => Promise<{ success: true }>;
       }>();
       const config: Config = {
         models: {
-          default: { provider: 'test', id: 'test-model' },
+          default: { provider: "test", id: "test-model" },
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
@@ -2002,17 +2065,17 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
         voice: {
           enabled: false,
           visible_router_echo: false,
           stt: {
-            provider: 'openai',
-            model: 'whisper-1',
+            provider: "openai",
+            model: "whisper-1",
           },
           intelligence: {
-            model: 'default',
+            model: "default",
           },
         },
       };
@@ -2029,12 +2092,12 @@ describe('configStore', () => {
         enabled: true,
         visible_router_echo: true,
         stt: {
-          provider: 'openai',
-          model: 'whisper-1',
-          host: 'http://localhost:8080',
+          provider: "openai",
+          model: "whisper-1",
+          host: "http://localhost:8080",
         },
         intelligence: {
-          model: 'default',
+          model: "default",
         },
       });
 
@@ -2049,39 +2112,39 @@ describe('configStore', () => {
         enabled: true,
         visible_router_echo: true,
         stt: {
-          provider: 'openai',
-          model: 'whisper-1',
-          host: 'http://localhost:8080',
+          provider: "openai",
+          model: "whisper-1",
+          host: "http://localhost:8080",
         },
         intelligence: {
-          model: 'default',
+          model: "default",
         },
       });
       expect(state.isDirty).toBe(true);
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
     });
 
-    it('ignores successful load results while a dirty draft save is still in flight', async () => {
+    it("ignores successful load results while a dirty draft save is still in flight", async () => {
       const pendingSaveResponse = deferred<{
         ok: boolean;
         json: () => Promise<{ success: true }>;
       }>();
       const loadedConfig: Config = {
         models: {
-          default: { provider: 'test', id: 'old-model' },
+          default: { provider: "test", id: "old-model" },
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
         agents: {
           helper: {
-            display_name: 'Helper',
-            role: 'Helpful',
+            display_name: "Helper",
+            role: "Helpful",
             tools: [],
             skills: [],
             instructions: [],
@@ -2092,20 +2155,20 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       };
       const draftConfig: Config = {
         ...loadedConfig,
         models: {
-          default: { provider: 'test', id: 'new-model' },
+          default: { provider: "test", id: "new-model" },
         },
       };
       const agents = [
         {
-          id: 'helper',
-          display_name: 'Helper',
-          role: 'Helpful',
+          id: "helper",
+          display_name: "Helper",
+          role: "Helpful",
           tools: [],
           skills: [],
           instructions: [],
@@ -2117,7 +2180,7 @@ describe('configStore', () => {
         config: draftConfig,
         agents,
         isDirty: true,
-        dirtyRoots: ['models'],
+        dirtyRoots: ["models"],
       });
 
       (global.fetch as any)
@@ -2130,7 +2193,9 @@ describe('configStore', () => {
         })
         .mockResolvedValueOnce({
           ok: true,
-          json: async () => ({ agent_policies: { helper: makeAgentPolicy('helper') } }),
+          json: async () => ({
+            agent_policies: { helper: makeAgentPolicy("helper") },
+          }),
         });
 
       const savePromise = useConfigStore.getState().saveConfig();
@@ -2139,10 +2204,10 @@ describe('configStore', () => {
       await loadPromise;
 
       let state = useConfigStore.getState();
-      expect(state.config?.models.default.id).toBe('new-model');
-      expect(state.loadedConfig?.models.default.id).toBe('old-model');
+      expect(state.config?.models.default.id).toBe("new-model");
+      expect(state.loadedConfig?.models.default.id).toBe("old-model");
       expect(state.isDirty).toBe(true);
-      expect(state.syncStatus).toBe('syncing');
+      expect(state.syncStatus).toBe("syncing");
 
       pendingSaveResponse.resolve({
         ok: true,
@@ -2151,18 +2216,18 @@ describe('configStore', () => {
       await savePromise;
 
       state = useConfigStore.getState();
-      expect(state.config?.models.default.id).toBe('new-model');
-      expect(state.loadedConfig?.models.default.id).toBe('new-model');
+      expect(state.config?.models.default.id).toBe("new-model");
+      expect(state.loadedConfig?.models.default.id).toBe("new-model");
       expect(state.isDirty).toBe(false);
-      expect(state.syncStatus).toBe('synced');
+      expect(state.syncStatus).toBe("synced");
     });
 
-    it('saves against the latest loaded config for untouched sections', async () => {
+    it("saves against the latest loaded config for untouched sections", async () => {
       const loadedConfig: Config = {
         agents: {
           assistant: {
-            display_name: 'Assistant',
-            role: 'Original role',
+            display_name: "Assistant",
+            role: "Original role",
             tools: [],
             skills: [],
             instructions: [],
@@ -2170,13 +2235,13 @@ describe('configStore', () => {
           },
         },
         models: {
-          default: { provider: 'test', id: 'test-model' },
+          default: { provider: "test", id: "test-model" },
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
@@ -2184,17 +2249,17 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
         voice: {
           enabled: false,
           visible_router_echo: true,
           stt: {
-            provider: 'openai',
-            model: 'whisper-1',
+            provider: "openai",
+            model: "whisper-1",
           },
           intelligence: {
-            model: 'default',
+            model: "default",
           },
         },
       };
@@ -2210,9 +2275,9 @@ describe('configStore', () => {
         config: staleDraftConfig,
         agents: [
           {
-            id: 'assistant',
-            display_name: 'Assistant',
-            role: 'Edited role',
+            id: "assistant",
+            display_name: "Assistant",
+            role: "Edited role",
             tools: [],
             skills: [],
             instructions: [],
@@ -2220,7 +2285,7 @@ describe('configStore', () => {
           },
         ],
         isDirty: true,
-        dirtyRoots: ['agents'],
+        dirtyRoots: ["agents"],
       });
 
       (global.fetch as any).mockResolvedValueOnce({
@@ -2232,16 +2297,18 @@ describe('configStore', () => {
 
       const saveBody = JSON.parse((global.fetch as any).mock.calls[0][1].body);
       expect(saveBody.voice.visible_router_echo).toBe(true);
-      expect(saveBody.agents.assistant.role).toBe('Edited role');
-      expect(useConfigStore.getState().config?.voice?.visible_router_echo).toBe(true);
+      expect(saveBody.agents.assistant.role).toBe("Edited role");
+      expect(useConfigStore.getState().config?.voice?.visible_router_echo).toBe(
+        true,
+      );
     });
 
-    it('clears validation issues for fields edited after a failed save while keeping unrelated ones', async () => {
+    it("clears validation issues for fields edited after a failed save while keeping unrelated ones", async () => {
       const config: Config = {
         agents: {
           helper: {
-            display_name: 'Helper',
-            role: '',
+            display_name: "Helper",
+            role: "",
             tools: [],
             skills: [],
             instructions: [],
@@ -2250,47 +2317,47 @@ describe('configStore', () => {
         },
         teams: {
           ops: {
-            display_name: '',
-            role: 'Runs ops',
-            agents: ['helper'],
+            display_name: "",
+            role: "Runs ops",
+            agents: ["helper"],
             rooms: [],
-            mode: 'coordinate',
+            mode: "coordinate",
           },
         },
         defaults: { markdown: true },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
         models: {
-          default: { provider: 'test', id: 'test-model' },
+          default: { provider: "test", id: "test-model" },
         },
-        router: { model: 'default' },
+        router: { model: "default" },
       };
       const diagnostics = [
         {
-          kind: 'global' as const,
-          message: 'Configuration validation failed',
+          kind: "global" as const,
+          message: "Configuration validation failed",
           blocking: false,
         },
         {
-          kind: 'validation' as const,
+          kind: "validation" as const,
           issue: {
-            loc: ['agents', 'helper', 'role'],
-            msg: 'role is required',
-            type: 'value_error',
+            loc: ["agents", "helper", "role"],
+            msg: "role is required",
+            type: "value_error",
           },
         },
         {
-          kind: 'validation' as const,
+          kind: "validation" as const,
           issue: {
-            loc: ['teams', 'ops', 'display_name'],
-            msg: 'display_name is required',
-            type: 'value_error',
+            loc: ["teams", "ops", "display_name"],
+            msg: "display_name is required",
+            type: "value_error",
           },
         },
       ];
@@ -2299,9 +2366,9 @@ describe('configStore', () => {
         config,
         agents: [
           {
-            id: 'helper',
-            display_name: 'Helper',
-            role: '',
+            id: "helper",
+            display_name: "Helper",
+            role: "",
             tools: [],
             skills: [],
             instructions: [],
@@ -2310,43 +2377,43 @@ describe('configStore', () => {
         ],
         teams: [
           {
-            id: 'ops',
-            display_name: '',
-            role: 'Runs ops',
-            agents: ['helper'],
+            id: "ops",
+            display_name: "",
+            role: "Runs ops",
+            agents: ["helper"],
             rooms: [],
-            mode: 'coordinate',
+            mode: "coordinate",
           },
         ],
         diagnostics,
-        syncStatus: 'error',
+        syncStatus: "error",
       });
 
-      useConfigStore.getState().updateAgent('helper', { role: 'Now valid' });
+      useConfigStore.getState().updateAgent("helper", { role: "Now valid" });
 
       expect(useConfigStore.getState().diagnostics).toEqual([
         {
-          kind: 'global',
-          message: 'Configuration validation failed',
+          kind: "global",
+          message: "Configuration validation failed",
           blocking: false,
         },
         {
-          kind: 'validation',
+          kind: "validation",
           issue: {
-            loc: ['teams', 'ops', 'display_name'],
-            msg: 'display_name is required',
-            type: 'value_error',
+            loc: ["teams", "ops", "display_name"],
+            msg: "display_name is required",
+            type: "value_error",
           },
         },
       ]);
     });
 
-    it('refreshes agent policies after a successful save when preview state is stale', async () => {
+    it("refreshes agent policies after a successful save when preview state is stale", async () => {
       const mockConfig: Config = {
         agents: {
           helper: {
-            display_name: 'Helper',
-            role: 'Helps',
+            display_name: "Helper",
+            role: "Helps",
             tools: [],
             skills: [],
             instructions: [],
@@ -2356,9 +2423,9 @@ describe('configStore', () => {
         models: {},
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
@@ -2366,14 +2433,14 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       };
       const mockAgents = [
         {
-          id: 'helper',
-          display_name: 'Helper',
-          role: 'Helps',
+          id: "helper",
+          display_name: "Helper",
+          role: "Helps",
           tools: [],
           skills: [],
           instructions: [],
@@ -2397,7 +2464,7 @@ describe('configStore', () => {
           ok: true,
           json: async () => ({
             agent_policies: {
-              helper: makeAgentPolicy('helper'),
+              helper: makeAgentPolicy("helper"),
             },
           }),
         });
@@ -2406,71 +2473,79 @@ describe('configStore', () => {
 
       await waitFor(() => {
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-          helper: makeAgentPolicy('helper'),
+          helper: makeAgentPolicy("helper"),
         });
       });
 
       expect(useConfigStore.getState().agentPoliciesStale).toBe(false);
-      expect(global.fetch).toHaveBeenNthCalledWith(1, '/api/config/save', expect.any(Object));
-      expect(global.fetch).toHaveBeenNthCalledWith(2, '/api/config/agent-policies', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          defaults: mockConfig.defaults,
-          agents: {
-            helper: {
-              display_name: 'Helper',
-              role: 'Helps',
-              tools: [],
-              skills: [],
-              instructions: [],
-              rooms: [],
-              knowledge_bases: [],
-              delegate_to: [],
-              context_files: [],
-              learning: true,
-              learning_mode: 'always',
+      expect(global.fetch).toHaveBeenNthCalledWith(
+        1,
+        "/api/config/save",
+        expect.any(Object),
+      );
+      expect(global.fetch).toHaveBeenNthCalledWith(
+        2,
+        "/api/config/agent-policies",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            defaults: mockConfig.defaults,
+            agents: {
+              helper: {
+                display_name: "Helper",
+                role: "Helps",
+                tools: [],
+                skills: [],
+                instructions: [],
+                rooms: [],
+                knowledge_bases: [],
+                delegate_to: [],
+                context_files: [],
+                learning: true,
+                learning_mode: "always",
+              },
             },
-          },
-        }),
-      });
+          }),
+        },
+      );
     });
   });
 
-  describe('updateAgent', () => {
-    it('clears legacy worker_scope when private state is enabled', () => {
+  describe("updateAgent", () => {
+    it("clears legacy worker_scope when private state is enabled", () => {
       useConfigStore.setState({
         agents: [
           {
-            id: 'mind',
-            display_name: 'Mind',
-            role: 'Assistant',
+            id: "mind",
+            display_name: "Mind",
+            role: "Assistant",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            worker_scope: 'user_agent',
+            worker_scope: "user_agent",
           },
         ],
         isDirty: false,
       });
 
-      useConfigStore.getState().updateAgent('mind', {
-        private: { per: 'user_agent' },
+      useConfigStore.getState().updateAgent("mind", {
+        private: { per: "user_agent" },
       });
 
       const state = useConfigStore.getState();
       expect(state.agents[0].worker_scope).toBeUndefined();
-      expect(state.agents[0].private).toEqual({ per: 'user_agent' });
+      expect(state.agents[0].private).toEqual({ per: "user_agent" });
     });
 
-    it('defaults private knowledge path when enabling it from an empty state', () => {
+    it("defaults private knowledge path when enabling it from an empty state", () => {
       useConfigStore.setState({
         agents: [
           {
-            id: 'mind',
-            display_name: 'Mind',
-            role: 'Assistant',
+            id: "mind",
+            display_name: "Mind",
+            role: "Assistant",
             tools: [],
             skills: [],
             instructions: [],
@@ -2480,9 +2555,9 @@ describe('configStore', () => {
         isDirty: false,
       });
 
-      useConfigStore.getState().updateAgent('mind', {
+      useConfigStore.getState().updateAgent("mind", {
         private: {
-          per: 'user',
+          per: "user",
           knowledge: { enabled: true, watch: true },
         },
       });
@@ -2490,56 +2565,56 @@ describe('configStore', () => {
       const state = useConfigStore.getState();
       expect(state.agents[0].private?.knowledge).toEqual({
         enabled: true,
-        path: 'memory',
+        path: "memory",
         watch: true,
       });
     });
 
-    it('restores the backed-up worker_scope when private mode is disabled', () => {
+    it("restores the backed-up worker_scope when private mode is disabled", () => {
       useConfigStore.setState({
         agents: [
           {
-            id: 'mind',
-            display_name: 'Mind',
-            role: 'Assistant',
+            id: "mind",
+            display_name: "Mind",
+            role: "Assistant",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            worker_scope: 'user_agent',
+            worker_scope: "user_agent",
           },
         ],
         isDirty: false,
       });
 
-      useConfigStore.getState().setAgentPrivateEnabled('mind', true);
-      useConfigStore.getState().setAgentPrivateEnabled('mind', false);
+      useConfigStore.getState().setAgentPrivateEnabled("mind", true);
+      useConfigStore.getState().setAgentPrivateEnabled("mind", false);
 
       const state = useConfigStore.getState();
       expect(state.agents[0].private).toBeUndefined();
-      expect(state.agents[0].worker_scope).toBe('user_agent');
+      expect(state.agents[0].worker_scope).toBe("user_agent");
       expect(state.privateWorkerScopeBackups).toEqual({});
     });
 
-    it('preserves the private-toggle worker_scope backup across failed saves', async () => {
+    it("preserves the private-toggle worker_scope backup across failed saves", async () => {
       const mockConfig: Config = {
         agents: {
           mind: {
-            display_name: 'Mind',
-            role: 'Assistant',
+            display_name: "Mind",
+            role: "Assistant",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            worker_scope: 'user_agent',
+            worker_scope: "user_agent",
           },
         },
         models: {},
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
@@ -2547,7 +2622,7 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       };
 
@@ -2555,55 +2630,55 @@ describe('configStore', () => {
         config: mockConfig,
         agents: [
           {
-            id: 'mind',
-            display_name: 'Mind',
-            role: 'Assistant',
+            id: "mind",
+            display_name: "Mind",
+            role: "Assistant",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            worker_scope: 'user_agent',
+            worker_scope: "user_agent",
           },
         ],
         isDirty: false,
       });
 
-      useConfigStore.getState().setAgentPrivateEnabled('mind', true);
+      useConfigStore.getState().setAgentPrivateEnabled("mind", true);
       (global.fetch as any).mockResolvedValueOnce({
         ok: false,
         status: 500,
-        statusText: 'Internal Server Error',
-        json: async () => ({ detail: 'save failed' }),
+        statusText: "Internal Server Error",
+        json: async () => ({ detail: "save failed" }),
       });
 
       await useConfigStore.getState().saveConfig();
-      useConfigStore.getState().setAgentPrivateEnabled('mind', false);
+      useConfigStore.getState().setAgentPrivateEnabled("mind", false);
 
       const state = useConfigStore.getState();
-      expect(state.syncStatus).toBe('error');
+      expect(state.syncStatus).toBe("error");
       expect(state.agents[0].private).toBeUndefined();
-      expect(state.agents[0].worker_scope).toBe('user_agent');
+      expect(state.agents[0].worker_scope).toBe("user_agent");
     });
 
-    it('clears the private-toggle worker_scope backup after a successful save', async () => {
+    it("clears the private-toggle worker_scope backup after a successful save", async () => {
       const mockConfig: Config = {
         agents: {
           mind: {
-            display_name: 'Mind',
-            role: 'Assistant',
+            display_name: "Mind",
+            role: "Assistant",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            worker_scope: 'user_agent',
+            worker_scope: "user_agent",
           },
         },
         models: {},
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-ada-002',
+              model: "text-embedding-ada-002",
             },
           },
         },
@@ -2611,7 +2686,7 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       };
 
@@ -2619,62 +2694,62 @@ describe('configStore', () => {
         config: mockConfig,
         agents: [
           {
-            id: 'mind',
-            display_name: 'Mind',
-            role: 'Assistant',
+            id: "mind",
+            display_name: "Mind",
+            role: "Assistant",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            worker_scope: 'user_agent',
+            worker_scope: "user_agent",
           },
         ],
         isDirty: false,
       });
 
-      useConfigStore.getState().setAgentPrivateEnabled('mind', true);
+      useConfigStore.getState().setAgentPrivateEnabled("mind", true);
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({ success: true }),
       });
 
       await useConfigStore.getState().saveConfig();
-      useConfigStore.getState().setAgentPrivateEnabled('mind', false);
+      useConfigStore.getState().setAgentPrivateEnabled("mind", false);
 
       const state = useConfigStore.getState();
-      expect(state.syncStatus).toBe('synced');
+      expect(state.syncStatus).toBe("synced");
       expect(state.agents[0].private).toBeUndefined();
       expect(state.agents[0].worker_scope).toBeUndefined();
     });
 
-    it('keeps draft team membership when backend eligibility marks an edited agent unsupported', async () => {
+    it("keeps draft team membership when backend eligibility marks an edited agent unsupported", async () => {
       useConfigStore.setState({
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           agents: {},
           defaults: { markdown: true },
           models: {},
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agents: [
           {
-            id: 'leader',
-            display_name: 'Leader',
-            role: 'Lead',
+            id: "leader",
+            display_name: "Leader",
+            role: "Lead",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
           },
           {
-            id: 'helper',
-            display_name: 'Helper',
-            role: 'Help',
+            id: "helper",
+            display_name: "Helper",
+            role: "Help",
             tools: [],
             skills: [],
             instructions: [],
@@ -2683,17 +2758,17 @@ describe('configStore', () => {
         ],
         teams: [
           {
-            id: 'duo',
-            display_name: 'Duo',
-            role: 'Two agents',
-            agents: ['leader', 'helper'],
+            id: "duo",
+            display_name: "Duo",
+            role: "Two agents",
+            agents: ["leader", "helper"],
             rooms: [],
-            mode: 'coordinate',
+            mode: "coordinate",
           },
         ],
         agentPoliciesByAgent: {
-          leader: makeAgentPolicy('leader'),
-          helper: makeAgentPolicy('helper'),
+          leader: makeAgentPolicy("leader"),
+          helper: makeAgentPolicy("helper"),
         },
       });
 
@@ -2701,60 +2776,65 @@ describe('configStore', () => {
         ok: true,
         json: async () => ({
           agent_policies: {
-            leader: makeAgentPolicy('leader', {
+            leader: makeAgentPolicy("leader", {
               is_private: true,
-              effective_execution_scope: 'user',
-              scope_label: 'private.per=user',
-              scope_source: 'private.per',
+              effective_execution_scope: "user",
+              scope_label: "private.per=user",
+              scope_source: "private.per",
               dashboard_credentials_supported: false,
-              team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+              team_eligibility_reason:
+                "Private agents cannot participate in teams yet.",
               request_scoped_workspace_enabled: true,
             }),
-            helper: makeAgentPolicy('helper'),
+            helper: makeAgentPolicy("helper"),
           },
         }),
       });
 
-      useConfigStore.getState().updateAgent('leader', {
-        private: { per: 'user' },
+      useConfigStore.getState().updateAgent("leader", {
+        private: { per: "user" },
       });
 
       await waitFor(() => {
-        expect(useConfigStore.getState().teams[0].agents).toEqual(['leader', 'helper']);
+        expect(useConfigStore.getState().teams[0].agents).toEqual([
+          "leader",
+          "helper",
+        ]);
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-          leader: makeAgentPolicy('leader', {
+          leader: makeAgentPolicy("leader", {
             is_private: true,
-            effective_execution_scope: 'user',
-            scope_label: 'private.per=user',
-            scope_source: 'private.per',
+            effective_execution_scope: "user",
+            scope_label: "private.per=user",
+            scope_source: "private.per",
             dashboard_credentials_supported: false,
-            team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+            team_eligibility_reason:
+              "Private agents cannot participate in teams yet.",
             request_scoped_workspace_enabled: true,
           }),
-          helper: makeAgentPolicy('helper'),
+          helper: makeAgentPolicy("helper"),
         });
       });
     });
 
-    it('does not refresh agent policies for non-policy agent edits', async () => {
+    it("does not refresh agent policies for non-policy agent edits", async () => {
       useConfigStore.setState({
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           agents: {},
           defaults: { markdown: true },
           models: {},
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agents: [
           {
-            id: 'leader',
-            display_name: 'Leader',
-            role: 'Lead',
+            id: "leader",
+            display_name: "Leader",
+            role: "Lead",
             tools: [],
             skills: [],
             instructions: [],
@@ -2764,79 +2844,83 @@ describe('configStore', () => {
         ],
       });
 
-      useConfigStore.getState().updateAgent('leader', {
-        display_name: 'Updated Leader',
+      useConfigStore.getState().updateAgent("leader", {
+        display_name: "Updated Leader",
       });
 
       await Promise.resolve();
 
       expect(global.fetch).not.toHaveBeenCalled();
-      expect(useConfigStore.getState().agents[0].display_name).toBe('Updated Leader');
+      expect(useConfigStore.getState().agents[0].display_name).toBe(
+        "Updated Leader",
+      );
     });
 
-    it('does not refresh agent policies for private workspace edits that keep private mode enabled', async () => {
+    it("does not refresh agent policies for private workspace edits that keep private mode enabled", async () => {
       useConfigStore.setState({
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           agents: {},
           defaults: { markdown: true },
           models: {},
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agents: [
           {
-            id: 'mind',
-            display_name: 'Mind',
-            role: 'Private',
+            id: "mind",
+            display_name: "Mind",
+            role: "Private",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
             private: {
-              per: 'user',
-              root: 'mind_data',
+              per: "user",
+              root: "mind_data",
             },
           },
         ],
       });
 
-      useConfigStore.getState().updateAgent('mind', {
+      useConfigStore.getState().updateAgent("mind", {
         private: {
-          per: 'user',
-          root: 'updated_root',
+          per: "user",
+          root: "updated_root",
         },
       });
 
       await Promise.resolve();
 
       expect(global.fetch).not.toHaveBeenCalled();
-      expect(useConfigStore.getState().agents[0].private?.root).toBe('updated_root');
+      expect(useConfigStore.getState().agents[0].private?.root).toBe(
+        "updated_root",
+      );
     });
 
-    it('keeps draft team membership when delegation now reaches a private agent', async () => {
+    it("keeps draft team membership when delegation now reaches a private agent", async () => {
       useConfigStore.setState({
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           agents: {},
           defaults: { markdown: true },
           models: {},
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agents: [
           {
-            id: 'leader',
-            display_name: 'Leader',
-            role: 'Lead',
+            id: "leader",
+            display_name: "Leader",
+            role: "Lead",
             tools: [],
             skills: [],
             instructions: [],
@@ -2844,45 +2928,46 @@ describe('configStore', () => {
             delegate_to: [],
           },
           {
-            id: 'helper',
-            display_name: 'Helper',
-            role: 'Help',
+            id: "helper",
+            display_name: "Helper",
+            role: "Help",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
           },
           {
-            id: 'mind',
-            display_name: 'Mind',
-            role: 'Private',
+            id: "mind",
+            display_name: "Mind",
+            role: "Private",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            private: { per: 'user' },
+            private: { per: "user" },
           },
         ],
         teams: [
           {
-            id: 'duo',
-            display_name: 'Duo',
-            role: 'Two agents',
-            agents: ['leader', 'helper'],
+            id: "duo",
+            display_name: "Duo",
+            role: "Two agents",
+            agents: ["leader", "helper"],
             rooms: [],
-            mode: 'coordinate',
+            mode: "coordinate",
           },
         ],
         agentPoliciesByAgent: {
-          leader: makeAgentPolicy('leader'),
-          helper: makeAgentPolicy('helper'),
-          mind: makeAgentPolicy('mind', {
+          leader: makeAgentPolicy("leader"),
+          helper: makeAgentPolicy("helper"),
+          mind: makeAgentPolicy("mind", {
             is_private: true,
-            effective_execution_scope: 'user',
-            scope_label: 'private.per=user',
-            scope_source: 'private.per',
+            effective_execution_scope: "user",
+            scope_label: "private.per=user",
+            scope_source: "private.per",
             dashboard_credentials_supported: false,
-            team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+            team_eligibility_reason:
+              "Private agents cannot participate in teams yet.",
             request_scoped_workspace_enabled: true,
           }),
         },
@@ -2892,50 +2977,55 @@ describe('configStore', () => {
         ok: true,
         json: async () => ({
           agent_policies: {
-            leader: makeAgentPolicy('leader', {
+            leader: makeAgentPolicy("leader", {
               team_eligibility_reason:
                 "Delegates to private agent 'mind', so it cannot participate in teams yet.",
             }),
-            helper: makeAgentPolicy('helper'),
-            mind: makeAgentPolicy('mind', {
+            helper: makeAgentPolicy("helper"),
+            mind: makeAgentPolicy("mind", {
               is_private: true,
-              effective_execution_scope: 'user',
-              scope_label: 'private.per=user',
-              scope_source: 'private.per',
+              effective_execution_scope: "user",
+              scope_label: "private.per=user",
+              scope_source: "private.per",
               dashboard_credentials_supported: false,
-              team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+              team_eligibility_reason:
+                "Private agents cannot participate in teams yet.",
               request_scoped_workspace_enabled: true,
             }),
           },
         }),
       });
 
-      useConfigStore.getState().updateAgent('leader', {
-        delegate_to: ['mind'],
+      useConfigStore.getState().updateAgent("leader", {
+        delegate_to: ["mind"],
       });
 
       await waitFor(() => {
-        expect(useConfigStore.getState().teams[0].agents).toEqual(['leader', 'helper']);
+        expect(useConfigStore.getState().teams[0].agents).toEqual([
+          "leader",
+          "helper",
+        ]);
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-          leader: makeAgentPolicy('leader', {
+          leader: makeAgentPolicy("leader", {
             team_eligibility_reason:
               "Delegates to private agent 'mind', so it cannot participate in teams yet.",
           }),
-          helper: makeAgentPolicy('helper'),
-          mind: makeAgentPolicy('mind', {
+          helper: makeAgentPolicy("helper"),
+          mind: makeAgentPolicy("mind", {
             is_private: true,
-            effective_execution_scope: 'user',
-            scope_label: 'private.per=user',
-            scope_source: 'private.per',
+            effective_execution_scope: "user",
+            scope_label: "private.per=user",
+            scope_source: "private.per",
             dashboard_credentials_supported: false,
-            team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+            team_eligibility_reason:
+              "Private agents cannot participate in teams yet.",
             request_scoped_workspace_enabled: true,
           }),
         });
       });
     });
 
-    it('drops stale policy immediately when a policy-affecting edit triggers refresh', async () => {
+    it("drops stale policy immediately when a policy-affecting edit triggers refresh", async () => {
       const pendingResponse = deferred<{
         ok: boolean;
         json: () => Promise<{ agent_policies: AgentPoliciesByAgent }>;
@@ -2947,20 +3037,20 @@ describe('configStore', () => {
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           agents: {},
           defaults: { markdown: true },
           models: {},
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agents: [
           {
-            id: 'leader',
-            display_name: 'Leader',
-            role: 'Lead',
+            id: "leader",
+            display_name: "Leader",
+            role: "Lead",
             tools: [],
             skills: [],
             instructions: [],
@@ -2968,32 +3058,33 @@ describe('configStore', () => {
             delegate_to: [],
           },
           {
-            id: 'mind',
-            display_name: 'Mind',
-            role: 'Private',
+            id: "mind",
+            display_name: "Mind",
+            role: "Private",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            private: { per: 'user' },
+            private: { per: "user" },
           },
         ],
         agentPoliciesByAgent: {
-          leader: makeAgentPolicy('leader'),
-          mind: makeAgentPolicy('mind', {
+          leader: makeAgentPolicy("leader"),
+          mind: makeAgentPolicy("mind", {
             is_private: true,
-            effective_execution_scope: 'user',
-            scope_label: 'private.per=user',
-            scope_source: 'private.per',
+            effective_execution_scope: "user",
+            scope_label: "private.per=user",
+            scope_source: "private.per",
             dashboard_credentials_supported: false,
-            team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+            team_eligibility_reason:
+              "Private agents cannot participate in teams yet.",
             request_scoped_workspace_enabled: true,
           }),
         },
       });
 
-      useConfigStore.getState().updateAgent('leader', {
-        delegate_to: ['mind'],
+      useConfigStore.getState().updateAgent("leader", {
+        delegate_to: ["mind"],
       });
 
       expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({});
@@ -3003,17 +3094,18 @@ describe('configStore', () => {
         ok: true,
         json: async () => ({
           agent_policies: {
-            leader: makeAgentPolicy('leader', {
+            leader: makeAgentPolicy("leader", {
               team_eligibility_reason:
                 "Delegates to private agent 'mind', so it cannot participate in teams yet.",
             }),
-            mind: makeAgentPolicy('mind', {
+            mind: makeAgentPolicy("mind", {
               is_private: true,
-              effective_execution_scope: 'user',
-              scope_label: 'private.per=user',
-              scope_source: 'private.per',
+              effective_execution_scope: "user",
+              scope_label: "private.per=user",
+              scope_source: "private.per",
               dashboard_credentials_supported: false,
-              team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+              team_eligibility_reason:
+                "Private agents cannot participate in teams yet.",
               request_scoped_workspace_enabled: true,
             }),
           },
@@ -3022,17 +3114,18 @@ describe('configStore', () => {
 
       await waitFor(() => {
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-          leader: makeAgentPolicy('leader', {
+          leader: makeAgentPolicy("leader", {
             team_eligibility_reason:
               "Delegates to private agent 'mind', so it cannot participate in teams yet.",
           }),
-          mind: makeAgentPolicy('mind', {
+          mind: makeAgentPolicy("mind", {
             is_private: true,
-            effective_execution_scope: 'user',
-            scope_label: 'private.per=user',
-            scope_source: 'private.per',
+            effective_execution_scope: "user",
+            scope_label: "private.per=user",
+            scope_source: "private.per",
             dashboard_credentials_supported: false,
-            team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+            team_eligibility_reason:
+              "Private agents cannot participate in teams yet.",
             request_scoped_workspace_enabled: true,
           }),
         });
@@ -3041,54 +3134,54 @@ describe('configStore', () => {
     });
   });
 
-  describe('agent operations', () => {
+  describe("agent operations", () => {
     beforeEach(() => {
       // Set up agents
       const agents: Agent[] = [
         {
-          id: 'agent1',
-          display_name: 'Agent 1',
-          role: 'Role 1',
+          id: "agent1",
+          display_name: "Agent 1",
+          role: "Role 1",
           tools: [],
           skills: [],
           instructions: [],
           rooms: [],
         },
         {
-          id: 'agent2',
-          display_name: 'Agent 2',
-          role: 'Role 2',
-          tools: ['calculator'],
+          id: "agent2",
+          display_name: "Agent 2",
+          role: "Role 2",
+          tools: ["calculator"],
           skills: [],
-          instructions: ['Test'],
-          rooms: ['lobby'],
+          instructions: ["Test"],
+          rooms: ["lobby"],
         },
       ];
       useConfigStore.setState({ agents });
     });
 
-    it('should select agent', () => {
+    it("should select agent", () => {
       const { selectAgent } = useConfigStore.getState();
-      selectAgent('agent2');
+      selectAgent("agent2");
 
       const state = useConfigStore.getState();
-      expect(state.selectedAgentId).toBe('agent2');
+      expect(state.selectedAgentId).toBe("agent2");
     });
 
-    it('should update agent', () => {
+    it("should update agent", () => {
       const { updateAgent } = useConfigStore.getState();
-      updateAgent('agent1', { display_name: 'Updated Agent' });
+      updateAgent("agent1", { display_name: "Updated Agent" });
 
       const state = useConfigStore.getState();
-      const updatedAgent = state.agents.find(a => a.id === 'agent1');
-      expect(updatedAgent?.display_name).toBe('Updated Agent');
+      const updatedAgent = state.agents.find((a) => a.id === "agent1");
+      expect(updatedAgent?.display_name).toBe("Updated Agent");
       expect(state.isDirty).toBe(true);
     });
 
-    it('should create new agent', () => {
+    it("should create new agent", () => {
       const newAgentData = {
-        display_name: 'New Agent',
-        role: 'New role',
+        display_name: "New Agent",
+        role: "New role",
         tools: [],
         skills: [],
         instructions: [],
@@ -3101,17 +3194,17 @@ describe('configStore', () => {
       const state = useConfigStore.getState();
       expect(state.agents).toHaveLength(3);
       const newAgent = state.agents[2];
-      expect(newAgent.display_name).toBe('New Agent');
+      expect(newAgent.display_name).toBe("New Agent");
       expect(newAgent.learning).toBe(true);
-      expect(newAgent.learning_mode).toBe('always');
+      expect(newAgent.learning_mode).toBe("always");
       expect(state.selectedAgentId).toBe(newAgent.id);
       expect(state.isDirty).toBe(true);
     });
 
-    it('should create new agent with learning values from global defaults', () => {
+    it("should create new agent with learning values from global defaults", () => {
       const newAgentData = {
-        display_name: 'New Agent',
-        role: 'New role',
+        display_name: "New Agent",
+        role: "New role",
         tools: [],
         skills: [],
         instructions: [],
@@ -3121,8 +3214,8 @@ describe('configStore', () => {
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           models: {},
@@ -3130,9 +3223,9 @@ describe('configStore', () => {
           defaults: {
             markdown: true,
             learning: false,
-            learning_mode: 'agentic',
+            learning_mode: "agentic",
           },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
       });
 
@@ -3142,16 +3235,16 @@ describe('configStore', () => {
       const state = useConfigStore.getState();
       const newAgent = state.agents[state.agents.length - 1];
       expect(newAgent?.learning).toBe(false);
-      expect(newAgent?.learning_mode).toBe('agentic');
+      expect(newAgent?.learning_mode).toBe("agentic");
     });
 
-    it('refreshes agent policies when creating a standard shared agent', async () => {
+    it("refreshes agent policies when creating a standard shared agent", async () => {
       useConfigStore.setState({
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           models: {},
@@ -3159,7 +3252,7 @@ describe('configStore', () => {
           defaults: {
             markdown: true,
           },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
       });
 
@@ -3167,14 +3260,14 @@ describe('configStore', () => {
         ok: true,
         json: async () => ({
           agent_policies: {
-            new_agent: makeAgentPolicy('new_agent'),
+            new_agent: makeAgentPolicy("new_agent"),
           },
         }),
       });
 
       useConfigStore.getState().createAgent({
-        display_name: 'New Agent',
-        role: 'New role',
+        display_name: "New Agent",
+        role: "New role",
         tools: [],
         skills: [],
         instructions: [],
@@ -3185,18 +3278,18 @@ describe('configStore', () => {
 
       await waitFor(() => {
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-          new_agent: makeAgentPolicy('new_agent'),
+          new_agent: makeAgentPolicy("new_agent"),
         });
       });
     });
 
-    it('refreshes agent policies when creating a private agent draft', async () => {
+    it("refreshes agent policies when creating a private agent draft", async () => {
       useConfigStore.setState({
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           models: {},
@@ -3204,7 +3297,7 @@ describe('configStore', () => {
           defaults: {
             markdown: true,
           },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
       });
 
@@ -3212,13 +3305,14 @@ describe('configStore', () => {
         ok: true,
         json: async () => ({
           agent_policies: {
-            new_agent: makeAgentPolicy('new_agent', {
+            new_agent: makeAgentPolicy("new_agent", {
               is_private: true,
-              effective_execution_scope: 'user',
-              scope_label: 'private.per=user',
-              scope_source: 'private.per',
+              effective_execution_scope: "user",
+              scope_label: "private.per=user",
+              scope_source: "private.per",
               dashboard_credentials_supported: false,
-              team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+              team_eligibility_reason:
+                "Private agents cannot participate in teams yet.",
               request_scoped_workspace_enabled: true,
             }),
           },
@@ -3226,77 +3320,80 @@ describe('configStore', () => {
       });
 
       useConfigStore.getState().createAgent({
-        display_name: 'New Agent',
-        role: 'New role',
+        display_name: "New Agent",
+        role: "New role",
         tools: [],
         skills: [],
         instructions: [],
         rooms: [],
-        private: { per: 'user' },
+        private: { per: "user" },
       });
 
       await waitFor(() => {
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-          new_agent: makeAgentPolicy('new_agent', {
+          new_agent: makeAgentPolicy("new_agent", {
             is_private: true,
-            effective_execution_scope: 'user',
-            scope_label: 'private.per=user',
-            scope_source: 'private.per',
+            effective_execution_scope: "user",
+            scope_label: "private.per=user",
+            scope_source: "private.per",
             dashboard_credentials_supported: false,
-            team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+            team_eligibility_reason:
+              "Private agents cannot participate in teams yet.",
             request_scoped_workspace_enabled: true,
           }),
         });
       });
     });
 
-    it('should delete agent', () => {
+    it("should delete agent", () => {
       useConfigStore.setState({
         cultures: [
           {
-            id: 'engineering',
-            description: 'Engineering standards',
-            agents: ['agent1', 'agent2'],
-            mode: 'automatic',
+            id: "engineering",
+            description: "Engineering standards",
+            agents: ["agent1", "agent2"],
+            mode: "automatic",
           },
         ],
         teams: [
           {
-            id: 'team1',
-            display_name: 'Team 1',
-            role: 'Test team',
-            agents: ['agent1', 'agent2'],
+            id: "team1",
+            display_name: "Team 1",
+            role: "Test team",
+            agents: ["agent1", "agent2"],
             rooms: [],
-            mode: 'coordinate',
+            mode: "coordinate",
           },
         ],
       });
       const { deleteAgent } = useConfigStore.getState();
-      deleteAgent('agent1');
+      deleteAgent("agent1");
 
       const state = useConfigStore.getState();
       expect(state.agents).toHaveLength(1);
-      expect(state.agents[0].id).toBe('agent2');
-      expect(state.cultures[0].agents).toEqual(['agent2']);
-      expect(state.teams[0].agents).toEqual(['agent2']);
+      expect(state.agents[0].id).toBe("agent2");
+      expect(state.cultures[0].agents).toEqual(["agent2"]);
+      expect(state.teams[0].agents).toEqual(["agent2"]);
       expect(state.isDirty).toBe(true);
-      expect(state.dirtyRoots).toEqual(expect.arrayContaining(['agents', 'teams', 'cultures']));
+      expect(state.dirtyRoots).toEqual(
+        expect.arrayContaining(["agents", "teams", "cultures"]),
+      );
     });
 
-    it('serializes dependent team and culture removals after deleteAgent', async () => {
+    it("serializes dependent team and culture removals after deleteAgent", async () => {
       const mockConfig = {
         agents: {
           agent1: {
-            display_name: 'Agent 1',
-            role: 'Role 1',
+            display_name: "Agent 1",
+            role: "Role 1",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
           },
           agent2: {
-            display_name: 'Agent 2',
-            role: 'Role 2',
+            display_name: "Agent 2",
+            role: "Role 2",
             tools: [],
             skills: [],
             instructions: [],
@@ -3305,31 +3402,31 @@ describe('configStore', () => {
         },
         teams: {
           team1: {
-            display_name: 'Team 1',
-            role: 'Test team',
-            agents: ['agent1', 'agent2'],
+            display_name: "Team 1",
+            role: "Test team",
+            agents: ["agent1", "agent2"],
             rooms: [],
-            mode: 'coordinate',
+            mode: "coordinate",
           },
         },
         cultures: {
           engineering: {
-            description: 'Engineering standards',
-            agents: ['agent1', 'agent2'],
-            mode: 'automatic',
+            description: "Engineering standards",
+            agents: ["agent1", "agent2"],
+            mode: "automatic",
           },
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'test',
+              model: "test",
             },
           },
         },
@@ -3337,7 +3434,7 @@ describe('configStore', () => {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       };
 
@@ -3346,18 +3443,18 @@ describe('configStore', () => {
         config: mockConfig as Config,
         agents: [
           {
-            id: 'agent1',
-            display_name: 'Agent 1',
-            role: 'Role 1',
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Role 1",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
           },
           {
-            id: 'agent2',
-            display_name: 'Agent 2',
-            role: 'Role 2',
+            id: "agent2",
+            display_name: "Agent 2",
+            role: "Role 2",
             tools: [],
             skills: [],
             instructions: [],
@@ -3366,44 +3463,46 @@ describe('configStore', () => {
         ],
         teams: [
           {
-            id: 'team1',
-            display_name: 'Team 1',
-            role: 'Test team',
-            agents: ['agent1', 'agent2'],
+            id: "team1",
+            display_name: "Team 1",
+            role: "Test team",
+            agents: ["agent1", "agent2"],
             rooms: [],
-            mode: 'coordinate',
+            mode: "coordinate",
           },
         ],
         cultures: [
           {
-            id: 'engineering',
-            description: 'Engineering standards',
-            agents: ['agent1', 'agent2'],
-            mode: 'automatic',
+            id: "engineering",
+            description: "Engineering standards",
+            agents: ["agent1", "agent2"],
+            mode: "automatic",
           },
         ],
       });
 
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { agent2: makeAgentPolicy('agent2') } }),
+        json: async () => ({
+          agent_policies: { agent2: makeAgentPolicy("agent2") },
+        }),
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        headers: { get: () => '1' },
+        headers: { get: () => "1" },
         json: async () => ({}),
       });
 
-      useConfigStore.getState().deleteAgent('agent1');
+      useConfigStore.getState().deleteAgent("agent1");
       await waitFor(() => {
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-          agent2: makeAgentPolicy('agent2'),
+          agent2: makeAgentPolicy("agent2"),
         });
       });
       await useConfigStore.getState().saveConfig();
 
       const saveCall = (global.fetch as any).mock.calls[1];
-      expect(saveCall[0]).toBe('/api/config/save');
+      expect(saveCall[0]).toBe("/api/config/save");
       expect(JSON.parse(saveCall[1].body)).toMatchObject({
         agents: {
           agent2: mockConfig.agents.agent2,
@@ -3411,25 +3510,25 @@ describe('configStore', () => {
         teams: {
           team1: {
             ...mockConfig.teams.team1,
-            agents: ['agent2'],
+            agents: ["agent2"],
           },
         },
         cultures: {
           engineering: {
             ...mockConfig.cultures.engineering,
-            agents: ['agent2'],
+            agents: ["agent2"],
           },
         },
       });
     });
 
-    it('refreshes agent policies when deleting an unrelated shared agent', async () => {
+    it("refreshes agent policies when deleting an unrelated shared agent", async () => {
       useConfigStore.setState({
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           models: {},
@@ -3437,22 +3536,22 @@ describe('configStore', () => {
           defaults: {
             markdown: true,
           },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agents: [
           {
-            id: 'agent1',
-            display_name: 'Agent 1',
-            role: 'Role 1',
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Role 1",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
           },
           {
-            id: 'agent2',
-            display_name: 'Agent 2',
-            role: 'Role 2',
+            id: "agent2",
+            display_name: "Agent 2",
+            role: "Role 2",
             tools: [],
             skills: [],
             instructions: [],
@@ -3465,27 +3564,27 @@ describe('configStore', () => {
         ok: true,
         json: async () => ({
           agent_policies: {
-            agent2: makeAgentPolicy('agent2'),
+            agent2: makeAgentPolicy("agent2"),
           },
         }),
       });
 
-      useConfigStore.getState().deleteAgent('agent1');
+      useConfigStore.getState().deleteAgent("agent1");
 
       await waitFor(() => {
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-          agent2: makeAgentPolicy('agent2'),
+          agent2: makeAgentPolicy("agent2"),
         });
       });
     });
 
-    it('refreshes agent policies when deleting an agent referenced by delegation', async () => {
+    it("refreshes agent policies when deleting an agent referenced by delegation", async () => {
       useConfigStore.setState({
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
-              config: { model: 'text-embedding-3-small' },
+              provider: "openai",
+              config: { model: "text-embedding-3-small" },
             },
           },
           models: {},
@@ -3493,42 +3592,43 @@ describe('configStore', () => {
           defaults: {
             markdown: true,
           },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agents: [
           {
-            id: 'leader',
-            display_name: 'Leader',
-            role: 'Lead',
+            id: "leader",
+            display_name: "Leader",
+            role: "Lead",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            delegate_to: ['mind'],
+            delegate_to: ["mind"],
           },
           {
-            id: 'mind',
-            display_name: 'Mind',
-            role: 'Private',
+            id: "mind",
+            display_name: "Mind",
+            role: "Private",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            private: { per: 'user' },
+            private: { per: "user" },
           },
         ],
         agentPoliciesByAgent: {
-          leader: makeAgentPolicy('leader', {
+          leader: makeAgentPolicy("leader", {
             team_eligibility_reason:
               "Delegates to private agent 'mind', so it cannot participate in teams yet.",
           }),
-          mind: makeAgentPolicy('mind', {
+          mind: makeAgentPolicy("mind", {
             is_private: true,
-            effective_execution_scope: 'user',
-            scope_label: 'private.per=user',
-            scope_source: 'private.per',
+            effective_execution_scope: "user",
+            scope_label: "private.per=user",
+            scope_source: "private.per",
             dashboard_credentials_supported: false,
-            team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+            team_eligibility_reason:
+              "Private agents cannot participate in teams yet.",
             request_scoped_workspace_enabled: true,
           }),
         },
@@ -3538,23 +3638,23 @@ describe('configStore', () => {
         ok: true,
         json: async () => ({
           agent_policies: {
-            leader: makeAgentPolicy('leader'),
+            leader: makeAgentPolicy("leader"),
           },
         }),
       });
 
-      useConfigStore.getState().deleteAgent('mind');
+      useConfigStore.getState().deleteAgent("mind");
 
       await waitFor(() => {
         expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
-          leader: makeAgentPolicy('leader'),
+          leader: makeAgentPolicy("leader"),
         });
       });
     });
   });
 
-  describe('dirty state', () => {
-    it('should mark state as dirty', () => {
+  describe("dirty state", () => {
+    it("should mark state as dirty", () => {
       const { markDirty } = useConfigStore.getState();
       markDirty();
 
@@ -3563,69 +3663,69 @@ describe('configStore', () => {
     });
   });
 
-  describe('teams', () => {
+  describe("teams", () => {
     beforeEach(() => {
       const mockTeams: Team[] = [
         {
-          id: 'team1',
-          display_name: 'Team 1',
-          role: 'Test team 1',
-          agents: ['agent1', 'agent2'],
-          rooms: ['room1'],
-          mode: 'coordinate',
+          id: "team1",
+          display_name: "Team 1",
+          role: "Test team 1",
+          agents: ["agent1", "agent2"],
+          rooms: ["room1"],
+          mode: "coordinate",
         },
         {
-          id: 'team2',
-          display_name: 'Team 2',
-          role: 'Test team 2',
-          agents: ['agent3'],
-          rooms: ['room2'],
-          mode: 'collaborate',
-          model: 'gpt4',
+          id: "team2",
+          display_name: "Team 2",
+          role: "Test team 2",
+          agents: ["agent3"],
+          rooms: ["room2"],
+          mode: "collaborate",
+          model: "gpt4",
         },
       ];
 
       useConfigStore.setState({
         teams: mockTeams,
-        selectedTeamId: 'team1',
+        selectedTeamId: "team1",
       });
     });
 
-    it('should select team', () => {
+    it("should select team", () => {
       const { selectTeam } = useConfigStore.getState();
-      selectTeam('team2');
+      selectTeam("team2");
 
       const state = useConfigStore.getState();
-      expect(state.selectedTeamId).toBe('team2');
+      expect(state.selectedTeamId).toBe("team2");
     });
 
-    it('should update team', () => {
+    it("should update team", () => {
       const { updateTeam } = useConfigStore.getState();
-      updateTeam('team1', { display_name: 'Updated Team' });
+      updateTeam("team1", { display_name: "Updated Team" });
 
       const state = useConfigStore.getState();
-      const updatedTeam = state.teams.find(t => t.id === 'team1');
-      expect(updatedTeam?.display_name).toBe('Updated Team');
+      const updatedTeam = state.teams.find((t) => t.id === "team1");
+      expect(updatedTeam?.display_name).toBe("Updated Team");
       expect(state.isDirty).toBe(true);
     });
 
-    it('normalizes empty team compaction overrides away', () => {
+    it("normalizes empty team compaction overrides away", () => {
       const { updateTeam } = useConfigStore.getState();
-      updateTeam('team1', { compaction: {} });
+      updateTeam("team1", { compaction: {} });
 
       const state = useConfigStore.getState();
-      const updatedTeam = state.teams.find(team => team.id === 'team1');
+      const updatedTeam = state.teams.find((team) => team.id === "team1");
       expect(updatedTeam?.compaction).toBeUndefined();
     });
 
-    it('should create new team', () => {
+    it("should create new team", () => {
       const { createTeam } = useConfigStore.getState();
       const newTeamData = {
-        display_name: 'New Team',
-        role: 'New team role',
-        agents: ['agent1'],
-        rooms: ['lobby'],
-        mode: 'coordinate' as const,
+        display_name: "New Team",
+        role: "New team role",
+        agents: ["agent1"],
+        rooms: ["lobby"],
+        mode: "coordinate" as const,
       };
 
       createTeam(newTeamData);
@@ -3633,113 +3733,123 @@ describe('configStore', () => {
       const state = useConfigStore.getState();
       expect(state.teams).toHaveLength(3);
       const newTeam = state.teams[2];
-      expect(newTeam.display_name).toBe('New Team');
-      expect(newTeam.id).toBe('new_team');
-      expect(state.selectedTeamId).toBe('new_team');
+      expect(newTeam.display_name).toBe("New Team");
+      expect(newTeam.id).toBe("new_team");
+      expect(state.selectedTeamId).toBe("new_team");
       expect(state.isDirty).toBe(true);
     });
 
-    it('should delete team', () => {
+    it("should delete team", () => {
       const { deleteTeam } = useConfigStore.getState();
-      deleteTeam('team1');
+      deleteTeam("team1");
 
       const state = useConfigStore.getState();
       expect(state.teams).toHaveLength(1);
-      expect(state.teams[0].id).toBe('team2');
+      expect(state.teams[0].id).toBe("team2");
       expect(state.selectedTeamId).toBe(null);
       expect(state.isDirty).toBe(true);
     });
   });
 
-  describe('cultures', () => {
+  describe("cultures", () => {
     beforeEach(() => {
       useConfigStore.setState({
         cultures: [
           {
-            id: 'engineering',
-            description: 'Engineering standards',
-            agents: ['agent1'],
-            mode: 'automatic',
+            id: "engineering",
+            description: "Engineering standards",
+            agents: ["agent1"],
+            mode: "automatic",
           },
           {
-            id: 'support',
-            description: 'Support playbooks',
-            agents: ['agent2'],
-            mode: 'manual',
+            id: "support",
+            description: "Support playbooks",
+            agents: ["agent2"],
+            mode: "manual",
           },
         ],
-        selectedCultureId: 'engineering',
+        selectedCultureId: "engineering",
       });
     });
 
-    it('should select culture', () => {
+    it("should select culture", () => {
       const { selectCulture } = useConfigStore.getState();
-      selectCulture('support');
+      selectCulture("support");
 
       const state = useConfigStore.getState();
-      expect(state.selectedCultureId).toBe('support');
+      expect(state.selectedCultureId).toBe("support");
     });
 
-    it('should update culture and enforce unique agent assignment', () => {
+    it("should update culture and enforce unique agent assignment", () => {
       const { updateCulture } = useConfigStore.getState();
-      updateCulture('support', { agents: ['agent1', 'agent2'], mode: 'agentic' });
+      updateCulture("support", {
+        agents: ["agent1", "agent2"],
+        mode: "agentic",
+      });
 
       const state = useConfigStore.getState();
-      expect(state.cultures.find(culture => culture.id === 'support')?.mode).toBe('agentic');
-      expect(state.cultures.find(culture => culture.id === 'support')?.agents).toEqual([
-        'agent1',
-        'agent2',
-      ]);
-      expect(state.cultures.find(culture => culture.id === 'engineering')?.agents).toEqual([]);
+      expect(
+        state.cultures.find((culture) => culture.id === "support")?.mode,
+      ).toBe("agentic");
+      expect(
+        state.cultures.find((culture) => culture.id === "support")?.agents,
+      ).toEqual(["agent1", "agent2"]);
+      expect(
+        state.cultures.find((culture) => culture.id === "engineering")?.agents,
+      ).toEqual([]);
       expect(state.isDirty).toBe(true);
     });
 
-    it('should create new culture', () => {
+    it("should create new culture", () => {
       const { createCulture } = useConfigStore.getState();
       createCulture({
-        description: 'Product knowledge',
-        agents: ['agent3'],
-        mode: 'automatic',
+        description: "Product knowledge",
+        agents: ["agent3"],
+        mode: "automatic",
       });
 
       const state = useConfigStore.getState();
       expect(state.cultures).toHaveLength(3);
-      const newCulture = state.cultures.find(culture => culture.id === 'product_knowledge');
-      expect(newCulture?.description).toBe('Product knowledge');
-      expect(state.selectedCultureId).toBe('product_knowledge');
+      const newCulture = state.cultures.find(
+        (culture) => culture.id === "product_knowledge",
+      );
+      expect(newCulture?.description).toBe("Product knowledge");
+      expect(state.selectedCultureId).toBe("product_knowledge");
       expect(state.isDirty).toBe(true);
     });
 
-    it('should delete culture', () => {
+    it("should delete culture", () => {
       const { deleteCulture } = useConfigStore.getState();
-      deleteCulture('engineering');
+      deleteCulture("engineering");
 
       const state = useConfigStore.getState();
       expect(state.cultures).toHaveLength(1);
-      expect(state.cultures[0].id).toBe('support');
+      expect(state.cultures[0].id).toBe("support");
       expect(state.selectedCultureId).toBe(null);
       expect(state.isDirty).toBe(true);
     });
   });
 
-  describe('room models', () => {
-    it('should update room models', () => {
+  describe("room models", () => {
+    it("should update room models", () => {
       useConfigStore.setState({
         config: {
-          memory: { embedder: { provider: 'openai', config: { model: 'test' } } },
+          memory: {
+            embedder: { provider: "openai", config: { model: "test" } },
+          },
           models: {},
           agents: {},
           defaults: {
             markdown: true,
           },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
       });
 
       const { updateRoomModels } = useConfigStore.getState();
       const roomModels = {
-        lobby: 'gpt4',
-        dev: 'claude',
+        lobby: "gpt4",
+        dev: "claude",
       };
 
       updateRoomModels(roomModels);
@@ -3750,15 +3860,15 @@ describe('configStore', () => {
     });
   });
 
-  describe('memory config', () => {
-    it('should update memory configuration', () => {
+  describe("memory config", () => {
+    it("should update memory configuration", () => {
       useConfigStore.setState({
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
+              provider: "openai",
               config: {
-                model: 'text-embedding-ada-002',
+                model: "text-embedding-ada-002",
               },
             },
           },
@@ -3767,34 +3877,38 @@ describe('configStore', () => {
           defaults: {
             markdown: true,
           },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
       });
 
       const { updateMemoryConfig } = useConfigStore.getState();
       const newMemoryConfig = {
-        provider: 'ollama',
-        model: 'nomic-embed-text',
-        host: 'http://localhost:11434',
+        provider: "ollama",
+        model: "nomic-embed-text",
+        host: "http://localhost:11434",
       };
 
       updateMemoryConfig(newMemoryConfig);
 
       const state = useConfigStore.getState();
-      expect(state.config?.memory.embedder.provider).toBe('ollama');
-      expect(state.config?.memory.embedder.config.model).toBe('nomic-embed-text');
-      expect(state.config?.memory.embedder.config.host).toBe('http://localhost:11434');
+      expect(state.config?.memory.embedder.provider).toBe("ollama");
+      expect(state.config?.memory.embedder.config.model).toBe(
+        "nomic-embed-text",
+      );
+      expect(state.config?.memory.embedder.config.host).toBe(
+        "http://localhost:11434",
+      );
       expect(state.isDirty).toBe(true);
     });
 
-    it('should handle memory config without host', () => {
+    it("should handle memory config without host", () => {
       useConfigStore.setState({
         config: {
           memory: {
             embedder: {
-              provider: 'openai',
+              provider: "openai",
               config: {
-                model: 'text-embedding-ada-002',
+                model: "text-embedding-ada-002",
               },
             },
           },
@@ -3803,40 +3917,44 @@ describe('configStore', () => {
           defaults: {
             markdown: true,
           },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
       });
 
       const { updateMemoryConfig } = useConfigStore.getState();
       const newMemoryConfig = {
-        provider: 'openai',
-        model: 'text-embedding-3-small',
+        provider: "openai",
+        model: "text-embedding-3-small",
       };
 
       updateMemoryConfig(newMemoryConfig);
 
       const state = useConfigStore.getState();
-      expect(state.config?.memory.embedder.provider).toBe('openai');
-      expect(state.config?.memory.embedder.config.model).toBe('text-embedding-3-small');
+      expect(state.config?.memory.embedder.provider).toBe("openai");
+      expect(state.config?.memory.embedder.config.model).toBe(
+        "text-embedding-3-small",
+      );
       expect(state.config?.memory.embedder.config.host).toBeUndefined();
     });
   });
 
-  describe('knowledge bases', () => {
-    it('should preserve git settings when updating base path or watch', () => {
+  describe("knowledge bases", () => {
+    it("should preserve git settings when updating base path or watch", () => {
       useConfigStore.setState({
         config: {
-          memory: { embedder: { provider: 'openai', config: { model: 'test' } } },
+          memory: {
+            embedder: { provider: "openai", config: { model: "test" } },
+          },
           knowledge_bases: {
             docs: {
-              path: './docs',
+              path: "./docs",
               watch: true,
               chunk_size: 5000,
               chunk_overlap: 0,
               git: {
-                repo_url: 'https://github.com/pipefunc/pipefunc',
-                branch: 'main',
-                include_patterns: ['docs/**'],
+                repo_url: "https://github.com/pipefunc/pipefunc",
+                branch: "main",
+                include_patterns: ["docs/**"],
               },
             },
           },
@@ -3845,181 +3963,187 @@ describe('configStore', () => {
           defaults: {
             markdown: true,
           },
-          router: { model: 'default' },
+          router: { model: "default" },
         } as Config,
       });
 
       const { updateKnowledgeBase } = useConfigStore.getState();
-      updateKnowledgeBase('docs', { path: './docs-sync', watch: false });
+      updateKnowledgeBase("docs", { path: "./docs-sync", watch: false });
 
       const state = useConfigStore.getState();
       expect(state.config?.knowledge_bases?.docs).toEqual({
-        path: './docs-sync',
+        path: "./docs-sync",
         watch: false,
         chunk_size: 5000,
         chunk_overlap: 0,
         git: {
-          repo_url: 'https://github.com/pipefunc/pipefunc',
-          branch: 'main',
-          include_patterns: ['docs/**'],
+          repo_url: "https://github.com/pipefunc/pipefunc",
+          branch: "main",
+          include_patterns: ["docs/**"],
         },
       });
       expect(state.isDirty).toBe(true);
     });
 
-    it('should remove deleted knowledge base from all agent assignments', () => {
+    it("should remove deleted knowledge base from all agent assignments", () => {
       useConfigStore.setState({
         config: {
-          memory: { embedder: { provider: 'openai', config: { model: 'test' } } },
+          memory: {
+            embedder: { provider: "openai", config: { model: "test" } },
+          },
           knowledge_bases: {
-            legal: { path: './legal', watch: true },
-            research: { path: './research', watch: true },
+            legal: { path: "./legal", watch: true },
+            research: { path: "./research", watch: true },
           },
           models: {},
           agents: {
             agent1: {
-              display_name: 'Agent 1',
-              role: 'Test agent',
+              display_name: "Agent 1",
+              role: "Test agent",
               tools: [],
               skills: [],
               instructions: [],
               rooms: [],
-              knowledge_bases: ['research', 'legal'],
+              knowledge_bases: ["research", "legal"],
             },
             agent2: {
-              display_name: 'Agent 2',
-              role: 'Test agent 2',
+              display_name: "Agent 2",
+              role: "Test agent 2",
               tools: [],
               skills: [],
               instructions: [],
               rooms: [],
-              knowledge_bases: ['research'],
+              knowledge_bases: ["research"],
             },
           },
           defaults: {
             markdown: true,
           },
-          router: { model: 'default' },
+          router: { model: "default" },
         },
         agents: [
           {
-            id: 'agent1',
-            display_name: 'Agent 1',
-            role: 'Test agent',
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            knowledge_bases: ['research', 'legal'],
+            knowledge_bases: ["research", "legal"],
           },
           {
-            id: 'agent2',
-            display_name: 'Agent 2',
-            role: 'Test agent 2',
+            id: "agent2",
+            display_name: "Agent 2",
+            role: "Test agent 2",
             tools: [],
             skills: [],
             instructions: [],
             rooms: [],
-            knowledge_bases: ['research'],
+            knowledge_bases: ["research"],
           },
         ],
       });
 
       const { deleteKnowledgeBase } = useConfigStore.getState();
-      deleteKnowledgeBase('research');
+      deleteKnowledgeBase("research");
 
       const state = useConfigStore.getState();
       expect(state.config?.knowledge_bases).toEqual({
-        legal: { path: './legal', watch: true },
+        legal: { path: "./legal", watch: true },
       });
-      expect(state.agents.find(agent => agent.id === 'agent1')?.knowledge_bases).toEqual(['legal']);
-      expect(state.agents.find(agent => agent.id === 'agent2')?.knowledge_bases).toEqual([]);
-      expect(state.config?.agents.agent1.knowledge_bases).toEqual(['legal']);
+      expect(
+        state.agents.find((agent) => agent.id === "agent1")?.knowledge_bases,
+      ).toEqual(["legal"]);
+      expect(
+        state.agents.find((agent) => agent.id === "agent2")?.knowledge_bases,
+      ).toEqual([]);
+      expect(state.config?.agents.agent1.knowledge_bases).toEqual(["legal"]);
       expect(state.config?.agents.agent2.knowledge_bases).toEqual([]);
       expect(state.isDirty).toBe(true);
     });
   });
 
-  describe('rooms', () => {
+  describe("rooms", () => {
     beforeEach(() => {
       const mockRooms = [
         {
-          id: 'lobby',
-          display_name: 'Lobby',
-          description: 'Main room',
-          agents: ['agent1'],
-          model: 'default',
+          id: "lobby",
+          display_name: "Lobby",
+          description: "Main room",
+          agents: ["agent1"],
+          model: "default",
         },
         {
-          id: 'dev',
-          display_name: 'Dev Room',
-          description: 'Development room',
-          agents: ['agent2'],
+          id: "dev",
+          display_name: "Dev Room",
+          description: "Development room",
+          agents: ["agent2"],
         },
       ];
 
       const mockAgents = [
         {
-          id: 'agent1',
-          display_name: 'Agent 1',
-          role: 'Test agent',
+          id: "agent1",
+          display_name: "Agent 1",
+          role: "Test agent",
           tools: [],
           skills: [],
           instructions: [],
-          rooms: ['lobby'],
+          rooms: ["lobby"],
         },
         {
-          id: 'agent2',
-          display_name: 'Agent 2',
-          role: 'Test agent 2',
+          id: "agent2",
+          display_name: "Agent 2",
+          role: "Test agent 2",
           tools: [],
           skills: [],
           instructions: [],
-          rooms: ['dev'],
+          rooms: ["dev"],
         },
       ];
 
       useConfigStore.setState({
         rooms: mockRooms,
         agents: mockAgents,
-        selectedRoomId: 'lobby',
+        selectedRoomId: "lobby",
       });
     });
 
-    it('should select room', () => {
+    it("should select room", () => {
       const { selectRoom } = useConfigStore.getState();
-      selectRoom('dev');
+      selectRoom("dev");
 
       const state = useConfigStore.getState();
-      expect(state.selectedRoomId).toBe('dev');
+      expect(state.selectedRoomId).toBe("dev");
     });
 
-    it('should update room', () => {
+    it("should update room", () => {
       const { updateRoom } = useConfigStore.getState();
-      updateRoom('lobby', { display_name: 'Updated Lobby' });
+      updateRoom("lobby", { display_name: "Updated Lobby" });
 
       const state = useConfigStore.getState();
-      const updatedRoom = state.rooms.find(r => r.id === 'lobby');
-      expect(updatedRoom?.display_name).toBe('Updated Lobby');
+      const updatedRoom = state.rooms.find((r) => r.id === "lobby");
+      expect(updatedRoom?.display_name).toBe("Updated Lobby");
       expect(state.isDirty).toBe(true);
     });
 
-    it('should update agents when room agents change', () => {
+    it("should update agents when room agents change", () => {
       const { updateRoom } = useConfigStore.getState();
-      updateRoom('lobby', { agents: ['agent1', 'agent2'] });
+      updateRoom("lobby", { agents: ["agent1", "agent2"] });
 
       const state = useConfigStore.getState();
-      const agent2 = state.agents.find(a => a.id === 'agent2');
-      expect(agent2?.rooms).toContain('lobby');
+      const agent2 = state.agents.find((a) => a.id === "agent2");
+      expect(agent2?.rooms).toContain("lobby");
       expect(state.isDirty).toBe(true);
     });
 
-    it('should create new room', () => {
+    it("should create new room", () => {
       const { createRoom } = useConfigStore.getState();
       const newRoomData = {
-        display_name: 'New Room',
-        description: 'Test room',
-        agents: ['agent1'],
+        display_name: "New Room",
+        description: "Test room",
+        agents: ["agent1"],
       };
 
       createRoom(newRoomData);
@@ -4027,65 +4151,65 @@ describe('configStore', () => {
       const state = useConfigStore.getState();
       expect(state.rooms).toHaveLength(3);
       const newRoom = state.rooms[2];
-      expect(newRoom.display_name).toBe('New Room');
-      expect(newRoom.id).toBe('new_room');
-      expect(state.selectedRoomId).toBe('new_room');
+      expect(newRoom.display_name).toBe("New Room");
+      expect(newRoom.id).toBe("new_room");
+      expect(state.selectedRoomId).toBe("new_room");
 
       // Check that agent1 now has new_room in its rooms
-      const agent1 = state.agents.find(a => a.id === 'agent1');
-      expect(agent1?.rooms).toContain('new_room');
+      const agent1 = state.agents.find((a) => a.id === "agent1");
+      expect(agent1?.rooms).toContain("new_room");
       expect(state.isDirty).toBe(true);
     });
 
-    it('should delete room and update agents', () => {
+    it("should delete room and update agents", () => {
       const { deleteRoom } = useConfigStore.getState();
-      deleteRoom('lobby');
+      deleteRoom("lobby");
 
       const state = useConfigStore.getState();
       expect(state.rooms).toHaveLength(1);
-      expect(state.rooms[0].id).toBe('dev');
+      expect(state.rooms[0].id).toBe("dev");
 
       // Check that agent1 no longer has lobby in its rooms
-      const agent1 = state.agents.find(a => a.id === 'agent1');
-      expect(agent1?.rooms).not.toContain('lobby');
+      const agent1 = state.agents.find((a) => a.id === "agent1");
+      expect(agent1?.rooms).not.toContain("lobby");
       expect(state.selectedRoomId).toBe(null);
       expect(state.isDirty).toBe(true);
     });
 
-    it('should add agent to room', () => {
+    it("should add agent to room", () => {
       const { addAgentToRoom } = useConfigStore.getState();
-      addAgentToRoom('dev', 'agent1');
+      addAgentToRoom("dev", "agent1");
 
       const state = useConfigStore.getState();
-      const devRoom = state.rooms.find(r => r.id === 'dev');
-      expect(devRoom?.agents).toContain('agent1');
+      const devRoom = state.rooms.find((r) => r.id === "dev");
+      expect(devRoom?.agents).toContain("agent1");
 
-      const agent1 = state.agents.find(a => a.id === 'agent1');
-      expect(agent1?.rooms).toContain('dev');
+      const agent1 = state.agents.find((a) => a.id === "agent1");
+      expect(agent1?.rooms).toContain("dev");
       expect(state.isDirty).toBe(true);
     });
 
-    it('should remove agent from room', () => {
+    it("should remove agent from room", () => {
       const { removeAgentFromRoom } = useConfigStore.getState();
-      removeAgentFromRoom('lobby', 'agent1');
+      removeAgentFromRoom("lobby", "agent1");
 
       const state = useConfigStore.getState();
-      const lobbyRoom = state.rooms.find(r => r.id === 'lobby');
-      expect(lobbyRoom?.agents).not.toContain('agent1');
+      const lobbyRoom = state.rooms.find((r) => r.id === "lobby");
+      expect(lobbyRoom?.agents).not.toContain("agent1");
 
-      const agent1 = state.agents.find(a => a.id === 'agent1');
-      expect(agent1?.rooms).not.toContain('lobby');
+      const agent1 = state.agents.find((a) => a.id === "agent1");
+      expect(agent1?.rooms).not.toContain("lobby");
       expect(state.isDirty).toBe(true);
     });
   });
 
-  describe('saveConfig with teams', () => {
-    it('should save configuration with teams and room models', async () => {
+  describe("saveConfig with teams", () => {
+    it("should save configuration with teams and room models", async () => {
       const mockConfig: Config = {
         agents: {
           agent1: {
-            display_name: 'Agent 1',
-            role: 'Test agent',
+            display_name: "Agent 1",
+            role: "Test agent",
             tools: [],
             skills: [],
             instructions: [],
@@ -4094,36 +4218,36 @@ describe('configStore', () => {
         },
         teams: {
           team1: {
-            display_name: 'Team 1',
-            role: 'Test team',
-            agents: ['agent1'],
-            rooms: ['lobby'],
-            mode: 'coordinate',
+            display_name: "Team 1",
+            role: "Test team",
+            agents: ["agent1"],
+            rooms: ["lobby"],
+            mode: "coordinate",
           },
         },
         room_models: {
-          lobby: 'default',
+          lobby: "default",
         },
         memory: {
           embedder: {
-            provider: 'ollama',
+            provider: "ollama",
             config: {
-              model: 'nomic-embed-text',
-              host: 'http://localhost:11434',
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
             },
           },
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
         defaults: {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
       };
 
@@ -4131,9 +4255,9 @@ describe('configStore', () => {
         config: mockConfig,
         agents: [
           {
-            id: 'agent1',
-            display_name: 'Agent 1',
-            role: 'Test agent',
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
             tools: [],
             skills: [],
             instructions: [],
@@ -4142,21 +4266,21 @@ describe('configStore', () => {
         ],
         teams: [
           {
-            id: 'team1',
-            display_name: 'Team 1',
-            role: 'Test team',
-            agents: ['agent1'],
-            rooms: ['lobby'],
-            mode: 'coordinate',
+            id: "team1",
+            display_name: "Team 1",
+            role: "Test team",
+            agents: ["agent1"],
+            rooms: ["lobby"],
+            mode: "coordinate",
           },
         ],
         rooms: [
           {
-            id: 'lobby',
-            display_name: 'Lobby',
-            description: '',
-            agents: ['agent1'],
-            model: 'default',
+            id: "lobby",
+            display_name: "Lobby",
+            description: "",
+            agents: ["agent1"],
+            model: "default",
           },
         ],
       });
@@ -4170,29 +4294,32 @@ describe('configStore', () => {
       await saveConfig();
 
       expect(global.fetch).toHaveBeenCalledTimes(1);
-      expect(global.fetch).toHaveBeenNthCalledWith(1, '/api/config/save', {
-        method: 'PUT',
+      expect(global.fetch).toHaveBeenNthCalledWith(1, "/api/config/save", {
+        method: "PUT",
         headers: {
-          'Content-Type': 'application/json',
-          'x-mindroom-config-generation': '0',
+          "Content-Type": "application/json",
+          "x-mindroom-config-generation": "0",
         },
         body: JSON.stringify(mockConfig),
       });
 
       const state = useConfigStore.getState();
-      expect(state.syncStatus).toBe('synced');
+      expect(state.syncStatus).toBe("synced");
       expect(state.isDirty).toBe(false);
     });
   });
 
-  describe('tool overrides', () => {
-    it('normalizes structured tool entries on load and exposes remembered overrides', async () => {
+  describe("tool overrides", () => {
+    it("normalizes structured tool entries on load and exposes remembered overrides", async () => {
       const mockConfig = {
         agents: {
           openclaw: {
-            display_name: 'OpenClaw',
-            role: 'Coding agent',
-            tools: ['browser', { shell: { extra_env_passthrough: ['GITEA_TOKEN'] } }],
+            display_name: "OpenClaw",
+            role: "Coding agent",
+            tools: [
+              "browser",
+              { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
+            ],
             skills: [],
             instructions: [],
             rooms: [],
@@ -4200,21 +4327,21 @@ describe('configStore', () => {
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
         defaults: {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-3-small',
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -4226,25 +4353,30 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { openclaw: makeAgentPolicy('openclaw') } }),
+        json: async () => ({
+          agent_policies: { openclaw: makeAgentPolicy("openclaw") },
+        }),
       });
 
       await useConfigStore.getState().loadConfig();
 
       const state = useConfigStore.getState();
-      expect(state.agents[0].tools).toEqual(['browser', 'shell']);
-      expect(state.getAgentToolOverrides('openclaw', 'shell')).toEqual({
-        extra_env_passthrough: ['GITEA_TOKEN'],
+      expect(state.agents[0].tools).toEqual(["browser", "shell"]);
+      expect(state.getAgentToolOverrides("openclaw", "shell")).toEqual({
+        extra_env_passthrough: ["GITEA_TOKEN"],
       });
     });
 
-    it('updates overrides, marks the draft dirty, and rebuilds structured tool entries on save', async () => {
+    it("updates overrides, marks the draft dirty, and rebuilds structured tool entries on save", async () => {
       const mockConfig = {
         agents: {
           openclaw: {
-            display_name: 'OpenClaw',
-            role: 'Coding agent',
-            tools: ['browser', { shell: { extra_env_passthrough: ['GITEA_TOKEN'] } }],
+            display_name: "OpenClaw",
+            role: "Coding agent",
+            tools: [
+              "browser",
+              { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
+            ],
             skills: [],
             instructions: [],
             rooms: [],
@@ -4252,21 +4384,21 @@ describe('configStore', () => {
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
         defaults: {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-3-small',
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -4278,18 +4410,22 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { openclaw: makeAgentPolicy('openclaw') } }),
+        json: async () => ({
+          agent_policies: { openclaw: makeAgentPolicy("openclaw") },
+        }),
       });
 
       await useConfigStore.getState().loadConfig();
-      useConfigStore.getState().updateAgentToolOverrides('openclaw', 'shell', {
-        shell_path_prepend: ['/run/wrappers/bin'],
+      useConfigStore.getState().updateAgentToolOverrides("openclaw", "shell", {
+        shell_path_prepend: ["/run/wrappers/bin"],
       });
 
       expect(useConfigStore.getState().isDirty).toBe(true);
-      expect(useConfigStore.getState().getAgentToolOverrides('openclaw', 'shell')).toEqual({
-        extra_env_passthrough: ['GITEA_TOKEN'],
-        shell_path_prepend: ['/run/wrappers/bin'],
+      expect(
+        useConfigStore.getState().getAgentToolOverrides("openclaw", "shell"),
+      ).toEqual({
+        extra_env_passthrough: ["GITEA_TOKEN"],
+        shell_path_prepend: ["/run/wrappers/bin"],
       });
 
       (global.fetch as any).mockResolvedValueOnce({
@@ -4300,12 +4436,12 @@ describe('configStore', () => {
       await useConfigStore.getState().saveConfig();
 
       const saveCall = (global.fetch as any).mock.calls[2];
-      expect(saveCall[0]).toBe('/api/config/save');
+      expect(saveCall[0]).toBe("/api/config/save");
       expect(saveCall[1]).toMatchObject({
-        method: 'PUT',
+        method: "PUT",
         headers: {
-          'Content-Type': 'application/json',
-          'x-mindroom-config-generation': '0',
+          "Content-Type": "application/json",
+          "x-mindroom-config-generation": "0",
         },
       });
       expect(JSON.parse(saveCall[1].body)).toMatchObject({
@@ -4313,11 +4449,11 @@ describe('configStore', () => {
           openclaw: {
             ...mockConfig.agents.openclaw,
             tools: [
-              'browser',
+              "browser",
               {
                 shell: {
-                  extra_env_passthrough: ['GITEA_TOKEN'],
-                  shell_path_prepend: ['/run/wrappers/bin'],
+                  extra_env_passthrough: ["GITEA_TOKEN"],
+                  shell_path_prepend: ["/run/wrappers/bin"],
                 },
               },
             ],
@@ -4327,47 +4463,47 @@ describe('configStore', () => {
       });
     });
 
-    it('preserves remembered overrides when updateRoom replaces the config object', async () => {
+    it("preserves remembered overrides when updateRoom replaces the config object", async () => {
       const mockConfig = {
         agents: {
           openclaw: {
-            display_name: 'OpenClaw',
-            role: 'Coding agent',
+            display_name: "OpenClaw",
+            role: "Coding agent",
             tools: [
-              'browser',
+              "browser",
               {
                 shell: {
-                  extra_env_passthrough: ['GITEA_TOKEN'],
-                  shell_path_prepend: ['/run/wrappers/bin'],
+                  extra_env_passthrough: ["GITEA_TOKEN"],
+                  shell_path_prepend: ["/run/wrappers/bin"],
                 },
               },
             ],
             skills: [],
             instructions: [],
-            rooms: ['lobby'],
+            rooms: ["lobby"],
           },
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
           claude: {
-            provider: 'anthropic',
-            id: 'claude-sonnet-4-6',
+            provider: "anthropic",
+            id: "claude-sonnet-4-6",
           },
         },
         defaults: {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-3-small',
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -4379,15 +4515,19 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { openclaw: makeAgentPolicy('openclaw') } }),
+        json: async () => ({
+          agent_policies: { openclaw: makeAgentPolicy("openclaw") },
+        }),
       });
 
       await useConfigStore.getState().loadConfig();
-      useConfigStore.getState().updateRoom('lobby', { model: 'claude' });
+      useConfigStore.getState().updateRoom("lobby", { model: "claude" });
 
-      expect(useConfigStore.getState().getAgentToolOverrides('openclaw', 'shell')).toEqual({
-        extra_env_passthrough: ['GITEA_TOKEN'],
-        shell_path_prepend: ['/run/wrappers/bin'],
+      expect(
+        useConfigStore.getState().getAgentToolOverrides("openclaw", "shell"),
+      ).toEqual({
+        extra_env_passthrough: ["GITEA_TOKEN"],
+        shell_path_prepend: ["/run/wrappers/bin"],
       });
 
       (global.fetch as any).mockResolvedValueOnce({
@@ -4398,22 +4538,22 @@ describe('configStore', () => {
       await useConfigStore.getState().saveConfig();
 
       const saveCall = (global.fetch as any).mock.calls[2];
-      expect(saveCall[0]).toBe('/api/config/save');
+      expect(saveCall[0]).toBe("/api/config/save");
       expect(JSON.parse(saveCall[1].body)).toMatchObject({
         ...mockConfig,
         room_models: {
-          lobby: 'claude',
+          lobby: "claude",
         },
       });
     });
 
-    it('collapses an empty override object back to a plain string entry on save', async () => {
+    it("collapses an empty override object back to a plain string entry on save", async () => {
       const mockConfig = {
         agents: {
           openclaw: {
-            display_name: 'OpenClaw',
-            role: 'Coding agent',
-            tools: [{ shell: { extra_env_passthrough: ['GITEA_TOKEN'] } }],
+            display_name: "OpenClaw",
+            role: "Coding agent",
+            tools: [{ shell: { extra_env_passthrough: ["GITEA_TOKEN"] } }],
             skills: [],
             instructions: [],
             rooms: [],
@@ -4421,21 +4561,21 @@ describe('configStore', () => {
         },
         models: {
           default: {
-            provider: 'ollama',
-            id: 'test-model',
+            provider: "ollama",
+            id: "test-model",
           },
         },
         defaults: {
           markdown: true,
         },
         router: {
-          model: 'default',
+          model: "default",
         },
         memory: {
           embedder: {
-            provider: 'openai',
+            provider: "openai",
             config: {
-              model: 'text-embedding-3-small',
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -4447,11 +4587,13 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ agent_policies: { openclaw: makeAgentPolicy('openclaw') } }),
+        json: async () => ({
+          agent_policies: { openclaw: makeAgentPolicy("openclaw") },
+        }),
       });
 
       await useConfigStore.getState().loadConfig();
-      useConfigStore.getState().updateAgentToolOverrides('openclaw', 'shell', {
+      useConfigStore.getState().updateAgentToolOverrides("openclaw", "shell", {
         extra_env_passthrough: null,
       });
 
@@ -4463,19 +4605,19 @@ describe('configStore', () => {
       await useConfigStore.getState().saveConfig();
 
       const saveCall = (global.fetch as any).mock.calls[2];
-      expect(saveCall[0]).toBe('/api/config/save');
+      expect(saveCall[0]).toBe("/api/config/save");
       expect(saveCall[1]).toMatchObject({
-        method: 'PUT',
+        method: "PUT",
         headers: {
-          'Content-Type': 'application/json',
-          'x-mindroom-config-generation': '0',
+          "Content-Type": "application/json",
+          "x-mindroom-config-generation": "0",
         },
       });
       expect(JSON.parse(saveCall[1].body)).toMatchObject({
         agents: {
           openclaw: {
             ...mockConfig.agents.openclaw,
-            tools: ['shell'],
+            tools: ["shell"],
           },
         },
         knowledge_bases: {},

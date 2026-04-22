@@ -358,8 +358,8 @@ async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thre
     """Plain replies to threaded targets should reuse the shared inherited-thread rule."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.side_effect = (
-        lambda room_id, event_id: "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
+    ctx.conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
+        "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
     )
     content = {
         "body": "bridged reply",
@@ -856,8 +856,8 @@ async def test_matrix_api_redact_transitive_plain_reply_target_records_thread_bo
     """Transitive-threaded redactions should reuse the shared resolver instead of cache-only lookup rows."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.side_effect = (
-        lambda room_id, event_id: "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
+    ctx.conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
+        "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
     )
     ctx.conversation_cache.get_event.side_effect = lambda room_id, event_id: _event_response(
         event_id=event_id,

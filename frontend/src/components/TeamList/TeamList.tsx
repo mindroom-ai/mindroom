@@ -1,8 +1,8 @@
-import { useConfigStore } from '@/store/configStore';
-import { Users, Bot, Settings } from 'lucide-react';
-import { pluralize } from '@/lib/utils';
-import { ListPanel, ListItem } from '@/components/shared/ListPanel';
-import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
+import { useConfigStore } from "@/store/configStore";
+import { Users, Bot, Settings } from "lucide-react";
+import { pluralize } from "@/lib/utils";
+import { ListPanel, ListItem } from "@/components/shared/ListPanel";
+import { ItemCard, ItemCardBadge } from "@/components/shared/ItemCard";
 
 // Extend Team type to be compatible with ListItem
 interface TeamListItem extends ListItem {
@@ -18,24 +18,24 @@ export function TeamList() {
 
   const handleCreateTeam = (teamName?: string) => {
     createTeam({
-      display_name: teamName || 'New Team',
-      role: 'New team description',
+      display_name: teamName || "New Team",
+      role: "New team description",
       agents: [],
       rooms: [],
-      mode: 'coordinate',
+      mode: "coordinate",
     });
   };
 
   const renderTeam = (team: TeamListItem, isSelected: boolean) => {
     const badges: ItemCardBadge[] = [
       {
-        content: pluralize(team.agents.length, 'agent'),
-        variant: 'secondary' as const,
+        content: pluralize(team.agents.length, "agent"),
+        variant: "secondary" as const,
         icon: Bot,
       },
       {
         content: `Mode: ${team.mode}`,
-        variant: 'outline' as const,
+        variant: "outline" as const,
         icon: Settings,
       },
     ];

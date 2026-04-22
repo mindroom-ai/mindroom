@@ -291,8 +291,8 @@ async def test_sessions_send_checks_target_room_thread_mode(
     send_mock = AsyncMock(return_value="$evt")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
     config = _make_config()
-    config.get_entity_thread_mode.side_effect = (
-        lambda _agent_name, _runtime_paths, room_id=None: "room" if room_id == "!target:localhost" else "thread"
+    config.get_entity_thread_mode.side_effect = lambda _agent_name, _runtime_paths, room_id=None: (
+        "room" if room_id == "!target:localhost" else "thread"
     )
     ctx = _make_context(tmp_path, config=config)
     target_session = create_session_id("!target:localhost", "$worker-thread:localhost")

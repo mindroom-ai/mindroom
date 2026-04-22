@@ -1,5 +1,5 @@
-import '@testing-library/jest-dom';
-import { vi, beforeEach, beforeAll } from 'vitest';
+import "@testing-library/jest-dom";
+import { vi, beforeEach, beforeAll } from "vitest";
 
 // Mock the fetch API
 global.fetch = vi.fn();

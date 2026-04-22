@@ -530,7 +530,7 @@ def build_message_content(
         "msgtype": "m.text",
         "body": body,
         "format": "org.matrix.custom.html",
-        "formatted_body": formatted_body if formatted_body else markdown_to_html(body),
+        "formatted_body": formatted_body or markdown_to_html(body),
     }
 
     # Add mentions if any

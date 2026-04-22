@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CalendarClock,
   Clock3,
@@ -8,23 +8,31 @@ import {
   RefreshCw,
   Repeat,
   Timer,
-} from 'lucide-react';
-import { useSwipeBack } from '@/hooks/useSwipeBack';
-import { cancelSchedule, listSchedules, updateSchedule } from '@/services/scheduleService';
-import type { ScheduleTask, ScheduleType, UpdateScheduleRequest } from '@/types/schedule';
-import { useToast } from '@/components/ui/use-toast';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
+} from "lucide-react";
+import { useSwipeBack } from "@/hooks/useSwipeBack";
+import {
+  cancelSchedule,
+  listSchedules,
+  updateSchedule,
+} from "@/services/scheduleService";
+import type {
+  ScheduleTask,
+  ScheduleType,
+  UpdateScheduleRequest,
+} from "@/types/schedule";
+import { useToast } from "@/components/ui/use-toast";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { Textarea } from '@/components/ui/textarea';
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import {
   EditorPanel,
   EditorPanelEmptyState,
@@ -33,7 +41,7 @@ import {
   type ItemCardBadge,
   ListPanel,
   type ListItem,
-} from '@/components/shared';
+} from "@/components/shared";
 
 interface ScheduleListItem extends ListItem, ScheduleTask {
   id: string;
@@ -75,36 +83,43 @@ function parseDateTimeInput(localDateTime: string): DateParts | null {
 }
 
 function formatDateTimeInput(parts: DateParts): string {
-  const year = String(parts.year).padStart(4, '0');
-  const month = String(parts.month).padStart(2, '0');
-  const day = String(parts.day).padStart(2, '0');
-  const hour = String(parts.hour).padStart(2, '0');
-  const minute = String(parts.minute).padStart(2, '0');
+  const year = String(parts.year).padStart(4, "0");
+  const month = String(parts.month).padStart(2, "0");
+  const day = String(parts.day).padStart(2, "0");
+  const hour = String(parts.hour).padStart(2, "0");
+  const minute = String(parts.minute).padStart(2, "0");
   return `${year}-${month}-${day}T${hour}:${minute}`;
 }
 
-function getDatePartsInTimezone(date: Date, timezone: string): DateParts | null {
+function getDatePartsInTimezone(
+  date: Date,
+  timezone: string,
+): DateParts | null {
   try {
-    const formatter = new Intl.DateTimeFormat('en-US', {
+    const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
       hour12: false,
     });
     const parts = formatter.formatToParts(date);
-    const map = new Map(parts.map(part => [part.type, part.value]));
-    const year = Number(map.get('year'));
-    const month = Number(map.get('month'));
-    const day = Number(map.get('day'));
-    const hour = Number(map.get('hour'));
-    const minute = Number(map.get('minute'));
-    const second = Number(map.get('second'));
+    const map = new Map(parts.map((part) => [part.type, part.value]));
+    const year = Number(map.get("year"));
+    const month = Number(map.get("month"));
+    const day = Number(map.get("day"));
+    const hour = Number(map.get("hour"));
+    const minute = Number(map.get("minute"));
+    const second = Number(map.get("second"));
 
-    if ([year, month, day, hour, minute, second].some(value => Number.isNaN(value))) {
+    if (
+      [year, month, day, hour, minute, second].some((value) =>
+        Number.isNaN(value),
+      )
+    ) {
       return null;
     }
 
@@ -126,10 +141,13 @@ function toBrowserLocalDateTimeInput(isoDate: string): string {
   });
 }
 
-function toTimezoneDateTimeInput(isoDate: string | null, timezone: string): string {
-  if (!isoDate) return '';
+function toTimezoneDateTimeInput(
+  isoDate: string | null,
+  timezone: string,
+): string {
+  if (!isoDate) return "";
   const date = new Date(isoDate);
-  if (Number.isNaN(date.getTime())) return '';
+  if (Number.isNaN(date.getTime())) return "";
 
   const parts = getDatePartsInTimezone(date, timezone);
   if (!parts) {
@@ -148,7 +166,7 @@ function getTimezoneOffsetMs(date: Date, timezone: string): number | null {
     parts.day,
     parts.hour,
     parts.minute,
-    parts.second
+    parts.second,
   );
   return timezoneWallClockAsUtc - date.getTime();
 }
@@ -164,7 +182,7 @@ function toUtcIso(localDateTime: string, timezone: string): string | null {
     parsed.day,
     parsed.hour,
     parsed.minute,
-    0
+    0,
   );
   let utcTimestamp = wallClockAsUtc;
 
@@ -186,19 +204,19 @@ function toUtcIso(localDateTime: string, timezone: string): string | null {
 }
 
 function formatDateTime(isoDate: string | null, timezone: string): string {
-  if (!isoDate) return 'Not set';
+  if (!isoDate) return "Not set";
   const date = new Date(isoDate);
-  if (Number.isNaN(date.getTime())) return 'Invalid date';
+  if (Number.isNaN(date.getTime())) return "Invalid date";
   try {
     return new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
+      dateStyle: "medium",
+      timeStyle: "short",
       timeZone: timezone,
     }).format(date);
   } catch {
     return new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
+      dateStyle: "medium",
+      timeStyle: "short",
     }).format(date);
   }
 }
@@ -211,17 +229,17 @@ function toDraft(task: ScheduleTask, timezone: string): ScheduleDraft {
     description: task.description,
     schedule_type: task.schedule_type,
     execute_at_input: toTimezoneDateTimeInput(task.execute_at, timezone),
-    cron_expression: task.cron_expression ?? '',
+    cron_expression: task.cron_expression ?? "",
   };
 }
 
 export function Schedules() {
   const { toast } = useToast();
   const [tasks, setTasks] = useState<ScheduleTask[]>([]);
-  const [timezone, setTimezone] = useState('UTC');
+  const [timezone, setTimezone] = useState("UTC");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ScheduleDraft | null>(null);
-  const [roomFilter, setRoomFilter] = useState<string>('all');
+  const [roomFilter, setRoomFilter] = useState<string>("all");
   const [isDirty, setIsDirty] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -229,21 +247,26 @@ export function Schedules() {
   const [error, setError] = useState<string | null>(null);
 
   const selectedTask = useMemo(
-    () => tasks.find(task => task.task_id === selectedTaskId) ?? null,
-    [tasks, selectedTaskId]
+    () => tasks.find((task) => task.task_id === selectedTaskId) ?? null,
+    [tasks, selectedTaskId],
   );
 
   const visibleTasks = useMemo(
-    () => (roomFilter === 'all' ? tasks : tasks.filter(task => task.room_id === roomFilter)),
-    [tasks, roomFilter]
+    () =>
+      roomFilter === "all"
+        ? tasks
+        : tasks.filter((task) => task.room_id === roomFilter),
+    [tasks, roomFilter],
   );
 
   const roomOptions = useMemo(() => {
     const uniqueRooms = new Map<string, string>();
-    tasks.forEach(task => {
+    tasks.forEach((task) => {
       uniqueRooms.set(task.room_id, task.room_alias || task.room_id);
     });
-    return Array.from(uniqueRooms.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+    return Array.from(uniqueRooms.entries()).sort((a, b) =>
+      a[1].localeCompare(b[1]),
+    );
   }, [tasks]);
 
   const load = useCallback(async (showRefreshing = false) => {
@@ -258,11 +281,14 @@ export function Schedules() {
       const response = await listSchedules();
       setTasks(response.tasks);
       setTimezone(response.timezone);
-      setSelectedTaskId(current =>
-        current && response.tasks.some(task => task.task_id === current) ? current : null
+      setSelectedTaskId((current) =>
+        current && response.tasks.some((task) => task.task_id === current)
+          ? current
+          : null,
       );
     } catch (e) {
-      const message = e instanceof Error ? e.message : 'Failed to load schedules';
+      const message =
+        e instanceof Error ? e.message : "Failed to load schedules";
       setError(message);
     } finally {
       setIsLoading(false);
@@ -281,8 +307,8 @@ export function Schedules() {
 
   useEffect(() => {
     if (!selectedTaskId) return;
-    if (roomFilter === 'all') return;
-    if (!visibleTasks.some(task => task.task_id === selectedTaskId)) {
+    if (roomFilter === "all") return;
+    if (!visibleTasks.some((task) => task.task_id === selectedTaskId)) {
       setSelectedTaskId(null);
     }
   }, [roomFilter, selectedTaskId, visibleTasks]);
@@ -294,15 +320,18 @@ export function Schedules() {
 
   const scheduleItems: ScheduleListItem[] = useMemo(
     () =>
-      visibleTasks.map(task => ({
+      visibleTasks.map((task) => ({
         ...task,
         id: task.task_id,
         display_name: task.description || task.message,
       })),
-    [visibleTasks]
+    [visibleTasks],
   );
 
-  const handleDraftChange = <K extends keyof ScheduleDraft>(field: K, value: ScheduleDraft[K]) => {
+  const handleDraftChange = <K extends keyof ScheduleDraft>(
+    field: K,
+    value: ScheduleDraft[K],
+  ) => {
     if (!draft) return;
     setDraft({ ...draft, [field]: value });
     setIsDirty(true);
@@ -316,9 +345,9 @@ export function Schedules() {
 
     if (!message) {
       toast({
-        title: 'Message required',
-        description: 'The prompt message cannot be empty.',
-        variant: 'destructive',
+        title: "Message required",
+        description: "The prompt message cannot be empty.",
+        variant: "destructive",
       });
       return;
     }
@@ -330,13 +359,13 @@ export function Schedules() {
       schedule_type: draft.schedule_type,
     };
 
-    if (draft.schedule_type === 'once') {
+    if (draft.schedule_type === "once") {
       const executeAtIso = toUtcIso(draft.execute_at_input, timezone);
       if (!executeAtIso) {
         toast({
-          title: 'Time required',
-          description: 'Set a valid date and time for one-time schedules.',
-          variant: 'destructive',
+          title: "Time required",
+          description: "Set a valid date and time for one-time schedules.",
+          variant: "destructive",
         });
         return;
       }
@@ -345,9 +374,9 @@ export function Schedules() {
       const cronExpression = draft.cron_expression.trim();
       if (!cronExpression) {
         toast({
-          title: 'Cron required',
-          description: 'Cron schedules require a cron expression.',
-          variant: 'destructive',
+          title: "Cron required",
+          description: "Cron schedules require a cron expression.",
+          variant: "destructive",
         });
         return;
       }
@@ -359,15 +388,15 @@ export function Schedules() {
       await updateSchedule(selectedTask.task_id, payload);
       await load(true);
       toast({
-        title: 'Schedule updated',
+        title: "Schedule updated",
         description: `Task ${selectedTask.task_id} has been updated.`,
       });
       setIsDirty(false);
     } catch (e) {
       toast({
-        title: 'Failed to update schedule',
-        description: e instanceof Error ? e.message : 'Unknown error',
-        variant: 'destructive',
+        title: "Failed to update schedule",
+        description: e instanceof Error ? e.message : "Unknown error",
+        variant: "destructive",
       });
     } finally {
       setIsSaving(false);
@@ -387,14 +416,14 @@ export function Schedules() {
       setSelectedTaskId(null);
       await load(true);
       toast({
-        title: 'Schedule cancelled',
+        title: "Schedule cancelled",
         description: `Task ${selectedTask.task_id} was cancelled.`,
       });
     } catch (e) {
       toast({
-        title: 'Failed to cancel schedule',
-        description: e instanceof Error ? e.message : 'Unknown error',
-        variant: 'destructive',
+        title: "Failed to cancel schedule",
+        description: e instanceof Error ? e.message : "Unknown error",
+        variant: "destructive",
       });
     } finally {
       setIsSaving(false);
@@ -404,22 +433,22 @@ export function Schedules() {
   const renderScheduleItem = (item: ScheduleListItem, isSelected: boolean) => {
     const nextRunLabel = item.next_run_at
       ? formatDateTime(item.next_run_at, timezone)
-      : item.cron_description || 'Recurring';
+      : item.cron_description || "Recurring";
 
     const badges: ItemCardBadge[] = [
       {
-        content: item.schedule_type === 'once' ? 'One-time' : 'Cron',
-        variant: item.schedule_type === 'once' ? 'secondary' : 'outline',
-        icon: item.schedule_type === 'once' ? Timer : Repeat,
+        content: item.schedule_type === "once" ? "One-time" : "Cron",
+        variant: item.schedule_type === "once" ? "secondary" : "outline",
+        icon: item.schedule_type === "once" ? Timer : Repeat,
       },
       {
         content: item.room_alias || item.room_id,
-        variant: 'outline',
+        variant: "outline",
         icon: MapPin,
       },
       {
         content: nextRunLabel,
-        variant: 'secondary',
+        variant: "secondary",
         icon: Clock3,
       },
     ];
@@ -433,7 +462,9 @@ export function Schedules() {
         onClick={setSelectedTaskId}
         badges={badges}
       >
-        <p className="mt-2 text-xs text-muted-foreground font-mono">{item.task_id}</p>
+        <p className="mt-2 text-xs text-muted-foreground font-mono">
+          {item.task_id}
+        </p>
       </ItemCard>
     );
   };
@@ -444,11 +475,15 @@ export function Schedules() {
         <CardContent className="py-3 px-4 sm:py-4 sm:px-5">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="secondary">{tasks.length} scheduled task(s)</Badge>
+              <Badge variant="secondary">
+                {tasks.length} scheduled task(s)
+              </Badge>
               <Badge variant="outline">Timezone: {timezone}</Badge>
-              {roomFilter !== 'all' && (
+              {roomFilter !== "all" && (
                 <Badge variant="outline">
-                  Room: {roomOptions.find(([id]) => id === roomFilter)?.[1] || roomFilter}
+                  Room:{" "}
+                  {roomOptions.find(([id]) => id === roomFilter)?.[1] ||
+                    roomFilter}
                 </Badge>
               )}
             </div>
@@ -487,7 +522,7 @@ export function Schedules() {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 flex-1 min-h-0">
         <div
           className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-            selectedTaskId ? 'hidden lg:block' : 'block'
+            selectedTaskId ? "hidden lg:block" : "block"
           }`}
         >
           <ListPanel<ScheduleListItem>
@@ -501,11 +536,13 @@ export function Schedules() {
             searchPlaceholder="Search schedules..."
             showCreateButton={false}
             emptyIcon={CalendarClock}
-            emptyMessage={isLoading ? 'Loading schedules...' : 'No schedules found'}
+            emptyMessage={
+              isLoading ? "Loading schedules..." : "No schedules found"
+            }
             emptySubtitle={
               isLoading
-                ? 'Fetching scheduled tasks from Matrix state'
-                : 'Create one with !schedule in Matrix'
+                ? "Fetching scheduled tasks from Matrix state"
+                : "Create one with !schedule in Matrix"
             }
             searchFilter={(item, searchTerm) => {
               const term = searchTerm.toLowerCase();
@@ -514,7 +551,7 @@ export function Schedules() {
                 item.description.toLowerCase().includes(term) ||
                 item.message.toLowerCase().includes(term) ||
                 item.room_id.toLowerCase().includes(term) ||
-                (item.room_alias || '').toLowerCase().includes(term)
+                (item.room_alias || "").toLowerCase().includes(term)
               );
             }}
           />
@@ -522,13 +559,16 @@ export function Schedules() {
 
         <div
           className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-            selectedTaskId ? 'block' : 'hidden lg:block'
+            selectedTaskId ? "block" : "hidden lg:block"
           }`}
         >
           {error ? (
             <EditorPanelEmptyState icon={CalendarClock} message={error} />
           ) : !selectedTask || !draft ? (
-            <EditorPanelEmptyState icon={CalendarClock} message="Select a scheduled task to edit" />
+            <EditorPanelEmptyState
+              icon={CalendarClock}
+              message="Select a scheduled task to edit"
+            />
           ) : (
             <EditorPanel
               icon={CalendarClock}
@@ -540,11 +580,21 @@ export function Schedules() {
               disableSave={isSaving}
               disableDelete={isSaving}
             >
-              <FieldGroup label="Task ID" helperText="Immutable schedule identifier">
-                <Input value={draft.task_id} readOnly className="font-mono text-xs" />
+              <FieldGroup
+                label="Task ID"
+                helperText="Immutable schedule identifier"
+              >
+                <Input
+                  value={draft.task_id}
+                  readOnly
+                  className="font-mono text-xs"
+                />
               </FieldGroup>
 
-              <FieldGroup label="Room" helperText="Where this scheduled task will execute">
+              <FieldGroup
+                label="Room"
+                helperText="Where this scheduled task will execute"
+              >
                 <Input
                   value={`${selectedTask.room_alias || selectedTask.room_id} (${
                     selectedTask.room_id
@@ -561,7 +611,7 @@ export function Schedules() {
                 <Textarea
                   id="schedule-message"
                   value={draft.message}
-                  onChange={e => handleDraftChange('message', e.target.value)}
+                  onChange={(e) => handleDraftChange("message", e.target.value)}
                   rows={5}
                   placeholder="@mindroom_agent your scheduled prompt..."
                 />
@@ -575,7 +625,9 @@ export function Schedules() {
                 <Input
                   id="schedule-description"
                   value={draft.description}
-                  onChange={e => handleDraftChange('description', e.target.value)}
+                  onChange={(e) =>
+                    handleDraftChange("description", e.target.value)
+                  }
                 />
               </FieldGroup>
 
@@ -583,10 +635,13 @@ export function Schedules() {
                 label="Schedule Type"
                 helperText="Schedule type is immutable. Cancel and recreate to change it."
               >
-                <Input value={draft.schedule_type === 'once' ? 'One-time' : 'Cron'} readOnly />
+                <Input
+                  value={draft.schedule_type === "once" ? "One-time" : "Cron"}
+                  readOnly
+                />
               </FieldGroup>
 
-              {draft.schedule_type === 'once' ? (
+              {draft.schedule_type === "once" ? (
                 <FieldGroup
                   label="Run At"
                   helperText={`One-time execution timestamp (${timezone})`}
@@ -596,7 +651,9 @@ export function Schedules() {
                     id="schedule-once-time"
                     type="datetime-local"
                     value={draft.execute_at_input}
-                    onChange={e => handleDraftChange('execute_at_input', e.target.value)}
+                    onChange={(e) =>
+                      handleDraftChange("execute_at_input", e.target.value)
+                    }
                   />
                 </FieldGroup>
               ) : (
@@ -608,16 +665,23 @@ export function Schedules() {
                   <Input
                     id="schedule-cron"
                     value={draft.cron_expression}
-                    onChange={e => handleDraftChange('cron_expression', e.target.value)}
+                    onChange={(e) =>
+                      handleDraftChange("cron_expression", e.target.value)
+                    }
                     placeholder="0 9 * * *"
                   />
                 </FieldGroup>
               )}
 
-              <FieldGroup label="Next Run" helperText="Computed next execution time">
+              <FieldGroup
+                label="Next Run"
+                helperText="Computed next execution time"
+              >
                 <div className="rounded-md border px-3 py-2 text-sm text-muted-foreground flex items-center gap-2">
                   <Clock3 className="h-4 w-4" />
-                  <span>{formatDateTime(selectedTask.next_run_at, timezone)}</span>
+                  <span>
+                    {formatDateTime(selectedTask.next_run_at, timezone)}
+                  </span>
                 </div>
               </FieldGroup>
 
@@ -626,12 +690,14 @@ export function Schedules() {
                   <p>
                     {selectedTask.created_at
                       ? formatDateTime(selectedTask.created_at, timezone)
-                      : 'Unknown'}
+                      : "Unknown"}
                   </p>
                   <p className="font-mono text-xs">
-                    {selectedTask.created_by || 'Unknown creator'}
+                    {selectedTask.created_by || "Unknown creator"}
                   </p>
-                  <p className="font-mono text-xs">{selectedTask.thread_id || 'No thread ID'}</p>
+                  <p className="font-mono text-xs">
+                    {selectedTask.thread_id || "No thread ID"}
+                  </p>
                 </div>
               </FieldGroup>
 
@@ -639,24 +705,33 @@ export function Schedules() {
                 <div className="flex items-start gap-2">
                   <MessageSquare className="h-4 w-4 mt-0.5 shrink-0" />
                   <p>
-                    Editing or cancelling here updates running schedules automatically (usually
-                    within 30 seconds). You can also manage schedules in Matrix with
+                    Editing or cancelling here updates running schedules
+                    automatically (usually within 30 seconds). You can also
+                    manage schedules in Matrix with
                     <span className="font-mono"> !list_schedules</span> and
-                    <span className="font-mono"> !cancel_schedule {'<id>'}</span>.
+                    <span className="font-mono">
+                      {" "}
+                      !cancel_schedule {"<id>"}
+                    </span>
+                    .
                   </p>
                 </div>
                 <div className="flex items-start gap-2">
                   <Repeat className="h-4 w-4 mt-0.5 shrink-0" />
                   <p>
-                    Changing schedule type is not supported in-place. Cancel this task and create a
-                    new one with the desired type.
+                    Changing schedule type is not supported in-place. Cancel
+                    this task and create a new one with the desired type.
                   </p>
                 </div>
                 <div className="flex items-start gap-2">
                   <CalendarClock className="h-4 w-4 mt-0.5 shrink-0" />
                   <p>
                     To create new schedules, use Matrix commands like
-                    <span className="font-mono"> !schedule daily at 9am ...</span>.
+                    <span className="font-mono">
+                      {" "}
+                      !schedule daily at 9am ...
+                    </span>
+                    .
                   </p>
                 </div>
               </div>

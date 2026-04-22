@@ -1,9 +1,9 @@
-import { useMemo } from 'react';
-import { useConfigStore } from '@/store/configStore';
-import { Sparkles, Bot, Settings2 } from 'lucide-react';
-import { pluralize } from '@/lib/utils';
-import { ListPanel, ListItem } from '@/components/shared/ListPanel';
-import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
+import { useMemo } from "react";
+import { useConfigStore } from "@/store/configStore";
+import { Sparkles, Bot, Settings2 } from "lucide-react";
+import { pluralize } from "@/lib/utils";
+import { ListPanel, ListItem } from "@/components/shared/ListPanel";
+import { ItemCard, ItemCardBadge } from "@/components/shared/ItemCard";
 
 interface CultureListItem extends ListItem {
   description: string;
@@ -13,34 +13,35 @@ interface CultureListItem extends ListItem {
 }
 
 export function CultureList() {
-  const { cultures, selectedCultureId, selectCulture, createCulture } = useConfigStore();
+  const { cultures, selectedCultureId, selectCulture, createCulture } =
+    useConfigStore();
   const cultureItems: CultureListItem[] = useMemo(
     () =>
-      cultures.map(culture => ({
+      cultures.map((culture) => ({
         ...culture,
         display_name: culture.id,
       })),
-    [cultures]
+    [cultures],
   );
 
   const handleCreateCulture = (cultureName?: string) => {
     createCulture({
-      description: cultureName || 'New culture',
+      description: cultureName || "New culture",
       agents: [],
-      mode: 'automatic',
+      mode: "automatic",
     });
   };
 
   const renderCulture = (culture: CultureListItem, isSelected: boolean) => {
     const badges: ItemCardBadge[] = [
       {
-        content: pluralize(culture.agents.length, 'agent'),
-        variant: 'secondary' as const,
+        content: pluralize(culture.agents.length, "agent"),
+        variant: "secondary" as const,
         icon: Bot,
       },
       {
         content: `Mode: ${culture.mode}`,
-        variant: 'outline' as const,
+        variant: "outline" as const,
         icon: Settings2,
       },
     ];
@@ -49,7 +50,7 @@ export function CultureList() {
       <ItemCard
         id={culture.id}
         title={culture.id}
-        description={culture.description || 'No description'}
+        description={culture.description || "No description"}
         isSelected={isSelected}
         onClick={selectCulture}
         badges={badges}

@@ -1,8 +1,8 @@
-import { useConfigStore } from '@/store/configStore';
-import { Home, Bot, Brain } from 'lucide-react';
-import { pluralize } from '@/lib/utils';
-import { ListPanel, ListItem } from '@/components/shared/ListPanel';
-import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
+import { useConfigStore } from "@/store/configStore";
+import { Home, Bot, Brain } from "lucide-react";
+import { pluralize } from "@/lib/utils";
+import { ListPanel, ListItem } from "@/components/shared/ListPanel";
+import { ItemCard, ItemCardBadge } from "@/components/shared/ItemCard";
 
 // Extend Room type to be compatible with ListItem
 interface RoomListItem extends ListItem {
@@ -18,8 +18,8 @@ export function RoomList() {
 
   const handleCreateRoom = (roomName?: string) => {
     createRoom({
-      display_name: roomName || 'New Room',
-      description: 'New room',
+      display_name: roomName || "New Room",
+      description: "New room",
       agents: [],
     });
   };
@@ -27,8 +27,8 @@ export function RoomList() {
   const renderRoom = (room: RoomListItem, isSelected: boolean) => {
     const badges: ItemCardBadge[] = [
       {
-        content: pluralize(room.agents.length, 'agent'),
-        variant: 'secondary' as const,
+        content: pluralize(room.agents.length, "agent"),
+        variant: "secondary" as const,
         icon: Bot,
       },
     ];
@@ -36,7 +36,7 @@ export function RoomList() {
     if (room.model) {
       badges.push({
         content: `Model: ${room.model}`,
-        variant: 'outline' as const,
+        variant: "outline" as const,
         icon: Brain,
       });
     }

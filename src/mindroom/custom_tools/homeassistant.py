@@ -182,7 +182,7 @@ class HomeAssistantTools(Toolkit):
             JSON string with result
 
         """
-        domain = entity_id.split(".")[0]
+        domain = entity_id.split(".", maxsplit=1)[0]
         result = await self._api_request(
             "POST",
             f"/api/services/{domain}/turn_on",
@@ -200,7 +200,7 @@ class HomeAssistantTools(Toolkit):
             JSON string with result
 
         """
-        domain = entity_id.split(".")[0]
+        domain = entity_id.split(".", maxsplit=1)[0]
         result = await self._api_request(
             "POST",
             f"/api/services/{domain}/turn_off",
@@ -218,7 +218,7 @@ class HomeAssistantTools(Toolkit):
             JSON string with result
 
         """
-        domain = entity_id.split(".")[0]
+        domain = entity_id.split(".", maxsplit=1)[0]
         result = await self._api_request(
             "POST",
             f"/api/services/{domain}/toggle",

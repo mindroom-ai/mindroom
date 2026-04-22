@@ -1,14 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { CultureList } from './CultureList';
-import { useConfigStore } from '@/store/configStore';
-import type { Culture } from '@/types/config';
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { CultureList } from "./CultureList";
+import { useConfigStore } from "@/store/configStore";
+import type { Culture } from "@/types/config";
 
-vi.mock('@/store/configStore', () => ({
+vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
 }));
 
-describe('CultureList', () => {
+describe("CultureList", () => {
   const mockSelectCulture = vi.fn();
   const mockCreateCulture = vi.fn();
 
@@ -22,19 +22,19 @@ describe('CultureList', () => {
     });
   });
 
-  it('renders and filters cultures that do not have display_name', () => {
+  it("renders and filters cultures that do not have display_name", () => {
     const cultures: Culture[] = [
       {
-        id: 'engineering',
-        description: 'Shared engineering best practices',
-        agents: ['code', 'shell'],
-        mode: 'automatic',
+        id: "engineering",
+        description: "Shared engineering best practices",
+        agents: ["code", "shell"],
+        mode: "automatic",
       },
       {
-        id: 'support',
-        description: 'Support standards',
-        agents: ['general'],
-        mode: 'manual',
+        id: "support",
+        description: "Support standards",
+        agents: ["general"],
+        mode: "manual",
       },
     ];
 
@@ -47,22 +47,22 @@ describe('CultureList', () => {
 
     render(<CultureList />);
 
-    expect(screen.getByText('engineering')).toBeInTheDocument();
-    expect(screen.getByText('support')).toBeInTheDocument();
+    expect(screen.getByText("engineering")).toBeInTheDocument();
+    expect(screen.getByText("support")).toBeInTheDocument();
 
-    const searchInput = screen.getByPlaceholderText('Search cultures...');
-    fireEvent.change(searchInput, { target: { value: 'engineer' } });
+    const searchInput = screen.getByPlaceholderText("Search cultures...");
+    fireEvent.change(searchInput, { target: { value: "engineer" } });
 
-    expect(screen.getByText('engineering')).toBeInTheDocument();
-    expect(screen.queryByText('support')).not.toBeInTheDocument();
+    expect(screen.getByText("engineering")).toBeInTheDocument();
+    expect(screen.queryByText("support")).not.toBeInTheDocument();
   });
 
-  it('creates a culture with Enter and re-renders without crashing', async () => {
+  it("creates a culture with Enter and re-renders without crashing", async () => {
     let cultures: Culture[] = [];
-    const createCulture = vi.fn((cultureData: Omit<Culture, 'id'>) => {
+    const createCulture = vi.fn((cultureData: Omit<Culture, "id">) => {
       cultures = [
         {
-          id: 'engineering',
+          id: "engineering",
           ...cultureData,
         },
       ];
@@ -77,30 +77,30 @@ describe('CultureList', () => {
 
     const { rerender } = render(<CultureList />);
 
-    fireEvent.click(screen.getByTestId('create-button'));
-    const input = screen.getByPlaceholderText('Culture name...');
-    fireEvent.change(input, { target: { value: 'Engineering' } });
-    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.click(screen.getByTestId("create-button"));
+    const input = screen.getByPlaceholderText("Culture name...");
+    fireEvent.change(input, { target: { value: "Engineering" } });
+    fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => {
       expect(createCulture).toHaveBeenCalledWith({
-        description: 'Engineering',
+        description: "Engineering",
         agents: [],
-        mode: 'automatic',
+        mode: "automatic",
       });
     });
 
     rerender(<CultureList />);
-    expect(screen.getByText('engineering')).toBeInTheDocument();
+    expect(screen.getByText("engineering")).toBeInTheDocument();
   });
 
-  it('selects a culture when clicked', () => {
+  it("selects a culture when clicked", () => {
     const cultures: Culture[] = [
       {
-        id: 'engineering',
-        description: 'Shared engineering best practices',
-        agents: ['code', 'shell'],
-        mode: 'automatic',
+        id: "engineering",
+        description: "Shared engineering best practices",
+        agents: ["code", "shell"],
+        mode: "automatic",
       },
     ];
 
@@ -112,9 +112,9 @@ describe('CultureList', () => {
     });
 
     render(<CultureList />);
-    const cultureCard = screen.getByText('engineering').closest('.rounded-xl');
+    const cultureCard = screen.getByText("engineering").closest(".rounded-xl");
     fireEvent.click(cultureCard!);
 
-    expect(mockSelectCulture).toHaveBeenCalledWith('engineering');
+    expect(mockSelectCulture).toHaveBeenCalledWith("engineering");
   });
 });

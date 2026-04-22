@@ -1,5 +1,5 @@
-import { LucideIcon } from 'lucide-react';
-import { sharedStyles } from './styles';
+import { LucideIcon } from "lucide-react";
+import { sharedStyles } from "./styles";
 
 export interface EmptyStateProps {
   /**
@@ -23,7 +23,12 @@ export interface EmptyStateProps {
 /**
  * Consistent empty state display component for when lists or sections have no content
  */
-export function EmptyState({ icon: Icon, title, subtitle, className = '' }: EmptyStateProps) {
+export function EmptyState({
+  icon: Icon,
+  title,
+  subtitle,
+  className = "",
+}: EmptyStateProps) {
   return (
     <div className={`${sharedStyles.empty.container} ${className}`}>
       <Icon className={sharedStyles.empty.icon} />

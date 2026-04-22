@@ -1,22 +1,30 @@
-import { FaSpotify } from 'react-icons/fa';
-import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope } from '../types';
-import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
-import type { WorkerScope } from '@/types/config';
+import { FaSpotify } from "react-icons/fa";
+import {
+  Integration,
+  IntegrationProvider,
+  IntegrationConfig,
+  IntegrationScope,
+} from "../types";
+import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import type { WorkerScope } from "@/types/config";
 
 class SpotifyIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
-    id: 'spotify',
-    name: 'Spotify',
-    description: 'Music streaming service integration',
-    category: 'entertainment',
+    id: "spotify",
+    name: "Spotify",
+    description: "Music streaming service integration",
+    category: "entertainment",
     icon: <FaSpotify className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'oauth',
+    status: "available",
+    setup_type: "oauth",
     connected: false,
   };
 
-  private localStorageKey(agentName?: string | null, executionScope?: WorkerScope | null): string {
-    const scopeKey = executionScope ?? 'unscoped';
+  private localStorageKey(
+    agentName?: string | null,
+    executionScope?: WorkerScope | null,
+  ): string {
+    const scopeKey = executionScope ?? "unscoped";
     return agentName
       ? `spotify_configured:${agentName}:${scopeKey}`
       : `spotify_configured:${scopeKey}`;
@@ -33,54 +41,64 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
   }
 
   async loadStatus(scope?: IntegrationScope): Promise<Partial<Integration>> {
-    const connected = await this.checkConnection(scope?.agentName ?? null, scope?.executionScope);
+    const connected = await this.checkConnection(
+      scope?.agentName ?? null,
+      scope?.executionScope,
+    );
     return {
-      status: connected ? 'connected' : 'available',
+      status: connected ? "connected" : "available",
       connected,
     };
   }
 
   private async connect(
     agentName?: string | null,
-    executionScope?: WorkerScope | null
+    executionScope?: WorkerScope | null,
   ): Promise<void> {
     try {
       const response = await fetch(
         withAgentExecutionScope(
           `${API_BASE_URL}/api/integrations/spotify/connect`,
           agentName,
-          executionScope
+          executionScope,
         ),
         {
-          method: 'POST',
-        }
+          method: "POST",
+        },
       );
 
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.detail || 'Failed to connect Spotify');
+        throw new Error(error.detail || "Failed to connect Spotify");
       }
 
       const data = await response.json();
-      const authWindow = window.open(data.auth_url, '_blank', 'width=500,height=600');
+      const authWindow = window.open(
+        data.auth_url,
+        "_blank",
+        "width=500,height=600",
+      );
 
       // Poll for window closure
       const pollInterval = setInterval(async () => {
         if (authWindow?.closed) {
           clearInterval(pollInterval);
-          localStorage.setItem(this.localStorageKey(agentName, executionScope), 'true');
+          localStorage.setItem(
+            this.localStorageKey(agentName, executionScope),
+            "true",
+          );
           // The parent component should reload status after this
         }
       }, 2000);
     } catch (error) {
-      console.error('Failed to connect Spotify:', error);
+      console.error("Failed to connect Spotify:", error);
       throw error;
     }
   }
 
   private async disconnect(
     agentName?: string | null,
-    executionScope?: WorkerScope | null
+    executionScope?: WorkerScope | null,
   ): Promise<void> {
     localStorage.removeItem(this.localStorageKey(agentName, executionScope));
     // Optionally call backend to revoke tokens
@@ -89,23 +107,25 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
         withAgentExecutionScope(
           `${API_BASE_URL}/api/integrations/spotify/disconnect`,
           agentName,
-          executionScope
+          executionScope,
         ),
         {
-          method: 'POST',
-        }
+          method: "POST",
+        },
       );
     } catch (error) {
-      console.error('Failed to disconnect Spotify:', error);
+      console.error("Failed to disconnect Spotify:", error);
     }
   }
 
   private async checkConnection(
     agentName?: string | null,
-    executionScope?: WorkerScope | null
+    executionScope?: WorkerScope | null,
   ): Promise<boolean> {
     // Check localStorage first for quick response
-    const localConfig = localStorage.getItem(this.localStorageKey(agentName, executionScope));
+    const localConfig = localStorage.getItem(
+      this.localStorageKey(agentName, executionScope),
+    );
     if (localConfig) return true;
 
     // Then check backend for authoritative status
@@ -114,15 +134,15 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
         withAgentExecutionScope(
           `${API_BASE_URL}/api/integrations/spotify/status`,
           agentName,
-          executionScope
-        )
+          executionScope,
+        ),
       );
       if (response.ok) {
         const data = await response.json();
         return data.connected === true;
       }
     } catch (error) {
-      console.error('Failed to check Spotify connection:', error);
+      console.error("Failed to check Spotify connection:", error);
     }
     return false;
   }

@@ -1762,7 +1762,7 @@ class TestDoctor:
         monkeypatch.setattr("mindroom.cli.doctor._http_check", _mock_check)
         monkeypatch.setattr(
             "mindroom.cli.doctor._validate_provider_key",
-            lambda _prov, _key, base_url=None: (called_urls.append(base_url or "NO_BASE_URL") or (True, "")),
+            lambda _prov, _key, base_url=None: called_urls.append(base_url or "NO_BASE_URL") or (True, ""),
         )
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)

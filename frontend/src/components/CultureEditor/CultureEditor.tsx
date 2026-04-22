@@ -1,21 +1,25 @@
-import { useEffect, useCallback } from 'react';
-import { useConfigStore } from '@/store/configStore';
-import { useSwipeBack } from '@/hooks/useSwipeBack';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
+import { useEffect, useCallback } from "react";
+import { useConfigStore } from "@/store/configStore";
+import { useSwipeBack } from "@/hooks/useSwipeBack";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { Sparkles } from 'lucide-react';
-import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
-import { useForm, Controller } from 'react-hook-form';
-import { Culture } from '@/types/config';
-import { useToast } from '@/components/ui/use-toast';
+} from "@/components/ui/select";
+import { Sparkles } from "lucide-react";
+import {
+  EditorPanel,
+  EditorPanelEmptyState,
+  FieldGroup,
+} from "@/components/shared";
+import { useForm, Controller } from "react-hook-form";
+import { Culture } from "@/types/config";
+import { useToast } from "@/components/ui/use-toast";
 
 export function CultureEditor() {
   const { toast } = useToast();
@@ -31,7 +35,9 @@ export function CultureEditor() {
     selectCulture,
   } = useConfigStore();
 
-  const selectedCulture = cultures.find(culture => culture.id === selectedCultureId);
+  const selectedCulture = cultures.find(
+    (culture) => culture.id === selectedCultureId,
+  );
 
   useSwipeBack({
     onSwipeBack: () => selectCulture(null),
@@ -40,9 +46,9 @@ export function CultureEditor() {
 
   const { control, reset } = useForm<Culture>({
     defaultValues: selectedCulture || {
-      id: '',
-      description: '',
-      mode: 'automatic',
+      id: "",
+      description: "",
+      mode: "automatic",
       agents: [],
     },
   });
@@ -59,11 +65,14 @@ export function CultureEditor() {
         updateCulture(selectedCultureId, { [fieldName]: value });
       }
     },
-    [selectedCultureId, updateCulture]
+    [selectedCultureId, updateCulture],
   );
 
   const handleDelete = () => {
-    if (selectedCultureId && confirm('Are you sure you want to delete this culture?')) {
+    if (
+      selectedCultureId &&
+      confirm("Are you sure you want to delete this culture?")
+    ) {
       deleteCulture(selectedCultureId);
     }
   };
@@ -73,7 +82,12 @@ export function CultureEditor() {
   };
 
   if (!selectedCulture) {
-    return <EditorPanelEmptyState icon={Sparkles} message="Select a culture to edit" />;
+    return (
+      <EditorPanelEmptyState
+        icon={Sparkles}
+        message="Select a culture to edit"
+      />
+    );
   }
 
   return (
@@ -91,7 +105,13 @@ export function CultureEditor() {
         helperText="Unique identifier for this culture"
         htmlFor="culture_id"
       >
-        <Input id="culture_id" value={selectedCulture.id} disabled readOnly className="bg-muted" />
+        <Input
+          id="culture_id"
+          value={selectedCulture.id}
+          disabled
+          readOnly
+          className="bg-muted"
+        />
       </FieldGroup>
 
       <FieldGroup
@@ -108,9 +128,9 @@ export function CultureEditor() {
               id="description"
               placeholder="Shared engineering principles, standards, and best practices..."
               rows={3}
-              onChange={e => {
+              onChange={(e) => {
                 field.onChange(e);
-                handleFieldChange('description', e.target.value);
+                handleFieldChange("description", e.target.value);
               }}
             />
           )}
@@ -128,18 +148,24 @@ export function CultureEditor() {
           render={({ field }) => (
             <Select
               value={field.value}
-              onValueChange={value => {
+              onValueChange={(value) => {
                 field.onChange(value);
-                handleFieldChange('mode', value as Culture['mode']);
+                handleFieldChange("mode", value as Culture["mode"]);
               }}
             >
               <SelectTrigger id="mode">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="automatic">Automatic (capture after every run)</SelectItem>
-                <SelectItem value="agentic">Agentic (explicit tool-driven updates)</SelectItem>
-                <SelectItem value="manual">Manual (read-only culture context)</SelectItem>
+                <SelectItem value="automatic">
+                  Automatic (capture after every run)
+                </SelectItem>
+                <SelectItem value="agentic">
+                  Agentic (explicit tool-driven updates)
+                </SelectItem>
+                <SelectItem value="manual">
+                  Manual (read-only culture context)
+                </SelectItem>
               </SelectContent>
             </Select>
           )}
@@ -160,15 +186,15 @@ export function CultureEditor() {
                   No agents available. Create agents in the Agents tab.
                 </p>
               ) : (
-                agents.map(agent => {
+                agents.map((agent) => {
                   const isChecked = field.value.includes(agent.id);
-                  const assignedCulture = cultures.find(culture =>
-                    culture.agents.includes(agent.id)
+                  const assignedCulture = cultures.find((culture) =>
+                    culture.agents.includes(agent.id),
                   );
                   const assignedCultureLabel = !assignedCulture
-                    ? 'Currently in: none'
+                    ? "Currently in: none"
                     : assignedCulture.id === selectedCulture.id
-                      ? 'Currently in: this culture'
+                      ? "Currently in: this culture"
                       : `Currently in: ${assignedCulture.id}`;
                   return (
                     <div
@@ -178,25 +204,26 @@ export function CultureEditor() {
                       <Checkbox
                         id={`culture-agent-${agent.id}`}
                         checked={isChecked}
-                        onCheckedChange={checked => {
+                        onCheckedChange={(checked) => {
                           const shouldAssign = checked === true;
                           const previousCulture = cultures.find(
-                            culture =>
-                              culture.id !== selectedCulture.id && culture.agents.includes(agent.id)
+                            (culture) =>
+                              culture.id !== selectedCulture.id &&
+                              culture.agents.includes(agent.id),
                           );
                           const newAgents = shouldAssign
                             ? [...field.value, agent.id]
-                            : field.value.filter(id => id !== agent.id);
+                            : field.value.filter((id) => id !== agent.id);
 
                           if (shouldAssign && !isChecked && previousCulture) {
                             toast({
-                              title: 'Agent moved to culture',
+                              title: "Agent moved to culture",
                               description: `${agent.display_name} moved from ${previousCulture.id} to ${selectedCulture.id}.`,
                             });
                           }
 
                           field.onChange(newAgents);
-                          handleFieldChange('agents', newAgents);
+                          handleFieldChange("agents", newAgents);
                         }}
                         className="h-5 w-5 sm:h-4 sm:w-4"
                       />
@@ -204,8 +231,12 @@ export function CultureEditor() {
                         htmlFor={`culture-agent-${agent.id}`}
                         className="flex-1 cursor-pointer select-none"
                       >
-                        <div className="font-medium text-sm">{agent.display_name}</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">{agent.role}</div>
+                        <div className="font-medium text-sm">
+                          {agent.display_name}
+                        </div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          {agent.role}
+                        </div>
                         <div className="text-xs text-gray-500 dark:text-gray-400">
                           {assignedCultureLabel}
                         </div>

@@ -185,6 +185,8 @@ def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
         duration_ms=round((time.monotonic() - start) * 1000, 1),
         **event_data,
     )
+
+
 def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator that logs elapsed time for sync/async functions.
 

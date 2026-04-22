@@ -1,12 +1,19 @@
-import { useMemo } from 'react';
-import { API_ENDPOINTS, fetchJSON, withAgentExecutionScope } from '@/lib/api';
-import type { WorkerScope } from '@/types/config';
-import { useFetchData } from './useFetchData';
+import { useMemo } from "react";
+import { API_ENDPOINTS, fetchJSON, withAgentExecutionScope } from "@/lib/api";
+import type { WorkerScope } from "@/types/config";
+import { useFetchData } from "./useFetchData";
 
 export interface ToolFieldSchema {
   name: string;
   label: string;
-  type: 'boolean' | 'number' | 'password' | 'select' | 'string[]' | 'text' | 'url';
+  type:
+    | "boolean"
+    | "number"
+    | "password"
+    | "select"
+    | "string[]"
+    | "text"
+    | "url";
   required?: boolean;
   default?: unknown;
   placeholder?: string | null;
@@ -44,14 +51,17 @@ const DEFAULT_RESPONSE: ToolsResponse = {
   status_authoritative: true,
 };
 
-export function useTools(agentName?: string | null, executionScope?: WorkerScope | null) {
+export function useTools(
+  agentName?: string | null,
+  executionScope?: WorkerScope | null,
+) {
   const fetcher = useMemo(
     () => async () => {
       return (await fetchJSON<ToolsResponse>(
-        withAgentExecutionScope(API_ENDPOINTS.tools, agentName, executionScope)
+        withAgentExecutionScope(API_ENDPOINTS.tools, agentName, executionScope),
       )) as ToolsResponse;
     },
-    [agentName, executionScope]
+    [agentName, executionScope],
   );
   const { data: response, ...rest } = useFetchData(fetcher, DEFAULT_RESPONSE);
   return {
@@ -64,42 +74,42 @@ export function useTools(agentName?: string | null, executionScope?: WorkerScope
 // Helper function to map backend tool to frontend integration format
 export function mapToolToIntegration(tool: ToolInfo) {
   // Map backend status to frontend status
-  let status: 'connected' | 'not_connected' | 'available';
+  let status: "connected" | "not_connected" | "available";
   switch (tool.status) {
-    case 'available':
+    case "available":
       // For tools that require configuration, 'available' means they are configured
       if (
-        tool.setup_type === 'api_key' ||
-        tool.setup_type === 'oauth' ||
-        tool.setup_type === 'special'
+        tool.setup_type === "api_key" ||
+        tool.setup_type === "oauth" ||
+        tool.setup_type === "special"
       ) {
-        status = 'connected';
+        status = "connected";
       } else {
-        status = 'available';
+        status = "available";
       }
       break;
-    case 'requires_config':
-      status = 'not_connected';
+    case "requires_config":
+      status = "not_connected";
       break;
     default:
-      status = 'available';
+      status = "available";
   }
 
   // Map setup_type
-  let setup_type: 'oauth' | 'api_key' | 'special' | 'none';
+  let setup_type: "oauth" | "api_key" | "special" | "none";
   switch (tool.setup_type) {
-    case 'oauth':
-      setup_type = 'oauth';
+    case "oauth":
+      setup_type = "oauth";
       break;
-    case 'api_key':
-      setup_type = 'api_key';
+    case "api_key":
+      setup_type = "api_key";
       break;
-    case 'special':
-      setup_type = 'special';
+    case "special":
+      setup_type = "special";
       break;
-    case 'none':
+    case "none":
     default:
-      setup_type = 'none';
+      setup_type = "none";
       break;
   }
 

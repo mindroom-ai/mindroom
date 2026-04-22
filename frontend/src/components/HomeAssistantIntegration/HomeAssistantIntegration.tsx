@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect } from "react";
 import {
   Home,
   Loader2,
@@ -11,17 +11,23 @@ import {
   Activity,
   Info,
   RefreshCw,
-} from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useToast } from '@/components/ui/use-toast';
-import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
-import type { WorkerScope } from '@/types/config';
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useToast } from "@/components/ui/use-toast";
+import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import type { WorkerScope } from "@/types/config";
 
 interface HomeAssistantStatus {
   connected: boolean;
@@ -43,10 +49,10 @@ function getHomeAssistantCallbackUrl(): string {
   const baseUrl =
     API_BASE_URL && /^https?:\/\//.test(API_BASE_URL)
       ? API_BASE_URL
-      : typeof window !== 'undefined'
+      : typeof window !== "undefined"
         ? window.location.origin
-        : 'http://localhost:5173';
-  return new URL('/api/homeassistant/callback', baseUrl).toString();
+        : "http://localhost:5173";
+  return new URL("/api/homeassistant/callback", baseUrl).toString();
 }
 
 export function HomeAssistantIntegration({
@@ -57,10 +63,10 @@ export function HomeAssistantIntegration({
   const [status, setStatus] = useState<HomeAssistantStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
-  const [instanceUrl, setInstanceUrl] = useState('');
-  const [clientId, setClientId] = useState('');
-  const [longLivedToken, setLongLivedToken] = useState('');
-  const [activeTab, setActiveTab] = useState('oauth');
+  const [instanceUrl, setInstanceUrl] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [longLivedToken, setLongLivedToken] = useState("");
+  const [activeTab, setActiveTab] = useState("oauth");
   const { toast } = useToast();
   const callbackUrl = getHomeAssistantCallbackUrl();
 
@@ -75,15 +81,15 @@ export function HomeAssistantIntegration({
         withAgentExecutionScope(
           `${API_BASE_URL}/api/homeassistant/status`,
           agentName,
-          executionScope
-        )
+          executionScope,
+        ),
       );
       if (response.ok) {
         const data = await response.json();
         setStatus(data);
       }
     } catch (error) {
-      console.error('Failed to check Home Assistant status:', error);
+      console.error("Failed to check Home Assistant status:", error);
     } finally {
       setLoading(false);
     }
@@ -92,18 +98,18 @@ export function HomeAssistantIntegration({
   const connectOAuth = async () => {
     if (!instanceUrl) {
       toast({
-        title: 'Missing Information',
-        description: 'Please enter your Home Assistant instance URL',
-        variant: 'destructive',
+        title: "Missing Information",
+        description: "Please enter your Home Assistant instance URL",
+        variant: "destructive",
       });
       return;
     }
 
     if (!clientId) {
       toast({
-        title: 'Missing Information',
-        description: 'Please enter your OAuth Client ID',
-        variant: 'destructive',
+        title: "Missing Information",
+        description: "Please enter your OAuth Client ID",
+        variant: "destructive",
       });
       return;
     }
@@ -114,27 +120,31 @@ export function HomeAssistantIntegration({
         withAgentExecutionScope(
           `${API_BASE_URL}/api/homeassistant/connect/oauth`,
           agentName,
-          executionScope
+          executionScope,
         ),
         {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             instance_url: instanceUrl,
             client_id: clientId,
           }),
-        }
+        },
       );
 
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.detail || 'Failed to start OAuth flow');
+        throw new Error(error.detail || "Failed to start OAuth flow");
       }
 
       const data = await response.json();
 
       // Open OAuth window
-      const authWindow = window.open(data.auth_url, '_blank', 'width=600,height=700');
+      const authWindow = window.open(
+        data.auth_url,
+        "_blank",
+        "width=600,height=700",
+      );
 
       // Poll for completion
       const pollInterval = setInterval(async () => {
@@ -151,16 +161,16 @@ export function HomeAssistantIntegration({
             withAgentExecutionScope(
               `${API_BASE_URL}/api/homeassistant/status`,
               agentName,
-              executionScope
-            )
+              executionScope,
+            ),
           );
           if (statusResponse.ok) {
             const newStatus = await statusResponse.json();
             if (newStatus.connected && !previousStatus) {
               // Connection was successful
               toast({
-                title: 'Success!',
-                description: 'Successfully connected to Home Assistant',
+                title: "Success!",
+                description: "Successfully connected to Home Assistant",
               });
 
               if (onSuccess) {
@@ -171,11 +181,14 @@ export function HomeAssistantIntegration({
         }
       }, 2000);
     } catch (error) {
-      console.error('Failed to connect via OAuth:', error);
+      console.error("Failed to connect via OAuth:", error);
       toast({
-        title: 'Connection Failed',
-        description: error instanceof Error ? error.message : 'Failed to connect to Home Assistant',
-        variant: 'destructive',
+        title: "Connection Failed",
+        description:
+          error instanceof Error
+            ? error.message
+            : "Failed to connect to Home Assistant",
+        variant: "destructive",
       });
       setConnecting(false);
     }
@@ -184,18 +197,18 @@ export function HomeAssistantIntegration({
   const connectToken = async () => {
     if (!instanceUrl) {
       toast({
-        title: 'Missing Information',
-        description: 'Please enter your Home Assistant instance URL',
-        variant: 'destructive',
+        title: "Missing Information",
+        description: "Please enter your Home Assistant instance URL",
+        variant: "destructive",
       });
       return;
     }
 
     if (!longLivedToken) {
       toast({
-        title: 'Missing Information',
-        description: 'Please enter your long-lived access token',
-        variant: 'destructive',
+        title: "Missing Information",
+        description: "Please enter your long-lived access token",
+        variant: "destructive",
       });
       return;
     }
@@ -206,44 +219,47 @@ export function HomeAssistantIntegration({
         withAgentExecutionScope(
           `${API_BASE_URL}/api/homeassistant/connect/token`,
           agentName,
-          executionScope
+          executionScope,
         ),
         {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             instance_url: instanceUrl,
             long_lived_token: longLivedToken,
           }),
-        }
+        },
       );
 
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.detail || 'Failed to connect');
+        throw new Error(error.detail || "Failed to connect");
       }
 
       toast({
-        title: 'Success!',
-        description: 'Successfully connected to Home Assistant',
+        title: "Success!",
+        description: "Successfully connected to Home Assistant",
       });
 
       await checkStatus();
 
       // Clear form
-      setInstanceUrl('');
-      setLongLivedToken('');
+      setInstanceUrl("");
+      setLongLivedToken("");
 
       // Notify parent component of success
       if (onSuccess) {
         onSuccess();
       }
     } catch (error) {
-      console.error('Failed to connect with token:', error);
+      console.error("Failed to connect with token:", error);
       toast({
-        title: 'Connection Failed',
-        description: error instanceof Error ? error.message : 'Failed to connect to Home Assistant',
-        variant: 'destructive',
+        title: "Connection Failed",
+        description:
+          error instanceof Error
+            ? error.message
+            : "Failed to connect to Home Assistant",
+        variant: "destructive",
       });
     } finally {
       setConnecting(false);
@@ -257,29 +273,29 @@ export function HomeAssistantIntegration({
         withAgentExecutionScope(
           `${API_BASE_URL}/api/homeassistant/disconnect`,
           agentName,
-          executionScope
+          executionScope,
         ),
         {
-          method: 'POST',
-        }
+          method: "POST",
+        },
       );
 
       if (!response.ok) {
-        throw new Error('Failed to disconnect');
+        throw new Error("Failed to disconnect");
       }
 
       toast({
-        title: 'Disconnected',
-        description: 'Home Assistant has been disconnected',
+        title: "Disconnected",
+        description: "Home Assistant has been disconnected",
       });
 
       await checkStatus();
     } catch (error) {
-      console.error('Failed to disconnect:', error);
+      console.error("Failed to disconnect:", error);
       toast({
-        title: 'Error',
-        description: 'Failed to disconnect from Home Assistant',
-        variant: 'destructive',
+        title: "Error",
+        description: "Failed to disconnect from Home Assistant",
+        variant: "destructive",
       });
     } finally {
       setConnecting(false);
@@ -319,11 +335,13 @@ export function HomeAssistantIntegration({
               </div>
               <div>
                 <Label className="text-sm text-gray-500">Location</Label>
-                <p className="font-medium">{status.location_name || 'Unknown'}</p>
+                <p className="font-medium">
+                  {status.location_name || "Unknown"}
+                </p>
               </div>
               <div>
                 <Label className="text-sm text-gray-500">Version</Label>
-                <p className="font-medium">{status.version || 'Unknown'}</p>
+                <p className="font-medium">{status.version || "Unknown"}</p>
               </div>
               <div>
                 <Label className="text-sm text-gray-500">Total Entities</Label>
@@ -336,8 +354,17 @@ export function HomeAssistantIntegration({
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Refresh
               </Button>
-              <Button onClick={disconnect} variant="destructive" size="sm" disabled={connecting}>
-                {connecting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Disconnect'}
+              <Button
+                onClick={disconnect}
+                variant="destructive"
+                size="sm"
+                disabled={connecting}
+              >
+                {connecting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  "Disconnect"
+                )}
               </Button>
             </div>
           </CardContent>
@@ -348,7 +375,8 @@ export function HomeAssistantIntegration({
           <CardHeader>
             <CardTitle>Available Capabilities</CardTitle>
             <CardDescription>
-              Your agents can now control and monitor your Home Assistant devices
+              Your agents can now control and monitor your Home Assistant
+              devices
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -387,8 +415,9 @@ export function HomeAssistantIntegration({
         <Info className="h-4 w-4" />
         <AlertTitle>Setup Home Assistant Integration</AlertTitle>
         <AlertDescription>
-          Choose your preferred authentication method below. OAuth is recommended for better
-          security, but you can also use a long-lived access token for simpler setup.
+          Choose your preferred authentication method below. OAuth is
+          recommended for better security, but you can also use a long-lived
+          access token for simpler setup.
         </AlertDescription>
       </Alert>
 
@@ -416,10 +445,12 @@ export function HomeAssistantIntegration({
                     <li>
                       Create an OAuth application in Home Assistant:
                       <br />
-                      Go to Profile → Security → Long-Lived Access Tokens → Add OAuth Application
+                      Go to Profile → Security → Long-Lived Access Tokens → Add
+                      OAuth Application
                     </li>
                     <li>
-                      Set the redirect URI to: <code className="text-xs">{callbackUrl}</code>
+                      Set the redirect URI to:{" "}
+                      <code className="text-xs">{callbackUrl}</code>
                     </li>
                     <li>Copy the Client ID from the created application</li>
                   </ol>
@@ -433,10 +464,11 @@ export function HomeAssistantIntegration({
                   type="url"
                   placeholder="http://homeassistant.local:8123"
                   value={instanceUrl}
-                  onChange={e => setInstanceUrl(e.target.value)}
+                  onChange={(e) => setInstanceUrl(e.target.value)}
                 />
                 <p className="text-xs text-gray-500">
-                  The URL of your Home Assistant instance (including port if needed)
+                  The URL of your Home Assistant instance (including port if
+                  needed)
                 </p>
               </div>
 
@@ -447,7 +479,7 @@ export function HomeAssistantIntegration({
                   type="text"
                   placeholder="Enter your OAuth Client ID"
                   value={clientId}
-                  onChange={e => setClientId(e.target.value)}
+                  onChange={(e) => setClientId(e.target.value)}
                 />
                 <p className="text-xs text-gray-500">
                   The Client ID from your Home Assistant OAuth application
@@ -485,7 +517,8 @@ export function HomeAssistantIntegration({
                   <strong>How to get a token:</strong>
                   <ol className="mt-2 ml-4 list-decimal space-y-1 text-sm">
                     <li>
-                      Go to your Home Assistant profile (click your username at the bottom left)
+                      Go to your Home Assistant profile (click your username at
+                      the bottom left)
                     </li>
                     <li>Scroll down to "Long-Lived Access Tokens"</li>
                     <li>Click "Create Token"</li>
@@ -502,10 +535,11 @@ export function HomeAssistantIntegration({
                   type="url"
                   placeholder="http://homeassistant.local:8123"
                   value={instanceUrl}
-                  onChange={e => setInstanceUrl(e.target.value)}
+                  onChange={(e) => setInstanceUrl(e.target.value)}
                 />
                 <p className="text-xs text-gray-500">
-                  The URL of your Home Assistant instance (including port if needed)
+                  The URL of your Home Assistant instance (including port if
+                  needed)
                 </p>
               </div>
 
@@ -516,7 +550,7 @@ export function HomeAssistantIntegration({
                   type="password"
                   placeholder="Enter your long-lived access token"
                   value={longLivedToken}
-                  onChange={e => setLongLivedToken(e.target.value)}
+                  onChange={(e) => setLongLivedToken(e.target.value)}
                 />
                 <p className="text-xs text-gray-500">
                   The long-lived access token from Home Assistant
@@ -545,7 +579,8 @@ export function HomeAssistantIntegration({
         <CardHeader>
           <CardTitle>What Your Agents Can Do</CardTitle>
           <CardDescription>
-            Once connected, your AI agents will be able to interact with your smart home
+            Once connected, your AI agents will be able to interact with your
+            smart home
           </CardDescription>
         </CardHeader>
         <CardContent>

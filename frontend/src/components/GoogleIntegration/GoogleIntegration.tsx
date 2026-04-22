@@ -1,12 +1,26 @@
-import { useState, useEffect } from 'react';
-import { Mail, Calendar, HardDrive, CheckCircle2, XCircle, Loader2, LogIn } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { useToast } from '@/components/ui/use-toast';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { API_ENDPOINTS, withAgentExecutionScope } from '@/lib/api';
-import type { WorkerScope } from '@/types/config';
+import { useState, useEffect } from "react";
+import {
+  Mail,
+  Calendar,
+  HardDrive,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  LogIn,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/components/ui/use-toast";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { API_ENDPOINTS, withAgentExecutionScope } from "@/lib/api";
+import type { WorkerScope } from "@/types/config";
 
 interface GoogleStatus {
   connected: boolean;
@@ -18,8 +32,8 @@ interface GoogleStatus {
 
 const serviceIcons = {
   Gmail: Mail,
-  'Google Calendar': Calendar,
-  'Google Drive': HardDrive,
+  "Google Calendar": Calendar,
+  "Google Drive": HardDrive,
 };
 
 interface GoogleIntegrationProps {
@@ -28,9 +42,10 @@ interface GoogleIntegrationProps {
   executionScope?: WorkerScope | null;
 }
 
-const GOOGLE_ADMIN_SETUP_DOCS_URL = 'https://docs.mindroom.chat/deployment/google-services-oauth/';
+const GOOGLE_ADMIN_SETUP_DOCS_URL =
+  "https://docs.mindroom.chat/deployment/google-services-oauth/";
 const GOOGLE_USER_SETUP_DOCS_URL =
-  'https://docs.mindroom.chat/deployment/google-services-user-oauth/';
+  "https://docs.mindroom.chat/deployment/google-services-user-oauth/";
 
 export function GoogleIntegration({
   onSuccess,
@@ -51,14 +66,15 @@ export function GoogleIntegration({
 
     // Check if we're returning from OAuth callback
     const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.get('google') === 'connected') {
+    if (urlParams.get("google") === "connected") {
       // Remove the query parameter
       window.history.replaceState({}, document.title, window.location.pathname);
       // Refresh status
       checkGoogleStatus();
       toast({
-        title: 'Google Account Connected',
-        description: 'Your Google services are now available to MindRoom agents.',
+        title: "Google Account Connected",
+        description:
+          "Your Google services are now available to MindRoom agents.",
       });
 
       // Notify parent component of success
@@ -71,7 +87,11 @@ export function GoogleIntegration({
   const checkGoogleStatus = async () => {
     try {
       const response = await fetch(
-        withAgentExecutionScope(API_ENDPOINTS.google.status, agentName, executionScope)
+        withAgentExecutionScope(
+          API_ENDPOINTS.google.status,
+          agentName,
+          executionScope,
+        ),
       );
       const data = await response.json();
       setStatus({
@@ -83,7 +103,7 @@ export function GoogleIntegration({
       });
       return data.connected;
     } catch (error) {
-      console.error('Failed to check Google status:', error);
+      console.error("Failed to check Google status:", error);
       return false;
     }
   };
@@ -92,10 +112,14 @@ export function GoogleIntegration({
     setLoading(true);
     try {
       const response = await fetch(
-        withAgentExecutionScope(API_ENDPOINTS.google.connect, agentName, executionScope),
+        withAgentExecutionScope(
+          API_ENDPOINTS.google.connect,
+          agentName,
+          executionScope,
+        ),
         {
-          method: 'POST',
-        }
+          method: "POST",
+        },
       );
 
       if (!response.ok) {
@@ -104,15 +128,17 @@ export function GoogleIntegration({
         // Check if it's a configuration issue
         if (response.status === 503) {
           toast({
-            title: 'One-Time Admin Setup Required',
+            title: "One-Time Admin Setup Required",
             description: `An administrator must configure Google OAuth once. Setup guide: ${GOOGLE_ADMIN_SETUP_DOCS_URL}`,
-            variant: 'destructive',
+            variant: "destructive",
           });
           setLoading(false);
           return;
         }
 
-        throw new Error(error.detail || 'Failed to start Google authentication');
+        throw new Error(
+          error.detail || "Failed to start Google authentication",
+        );
       }
 
       const data = await response.json();
@@ -120,16 +146,21 @@ export function GoogleIntegration({
       // Check if credentials need to be configured first
       if (data.needs_credentials) {
         toast({
-          title: 'Setup Required',
-          description: data.message || 'Please configure Google OAuth credentials first.',
-          variant: 'destructive',
+          title: "Setup Required",
+          description:
+            data.message || "Please configure Google OAuth credentials first.",
+          variant: "destructive",
         });
         setLoading(false);
         return;
       }
 
       // Open OAuth URL in new window
-      const authWindow = window.open(data.auth_url, '_blank', 'width=500,height=600');
+      const authWindow = window.open(
+        data.auth_url,
+        "_blank",
+        "width=500,height=600",
+      );
 
       // Poll for connection status
       const wasConnected = status.connected;
@@ -145,11 +176,14 @@ export function GoogleIntegration({
         }
       }, 2000);
     } catch (error) {
-      console.error('Failed to connect Google:', error);
+      console.error("Failed to connect Google:", error);
       toast({
-        title: 'Connection Failed',
-        description: error instanceof Error ? error.message : 'Failed to connect to Google',
-        variant: 'destructive',
+        title: "Connection Failed",
+        description:
+          error instanceof Error
+            ? error.message
+            : "Failed to connect to Google",
+        variant: "destructive",
       });
       setLoading(false);
     }
@@ -159,22 +193,26 @@ export function GoogleIntegration({
     setLoading(true);
     try {
       const response = await fetch(
-        withAgentExecutionScope(API_ENDPOINTS.google.disconnect, agentName, executionScope),
+        withAgentExecutionScope(
+          API_ENDPOINTS.google.disconnect,
+          agentName,
+          executionScope,
+        ),
         {
-          method: 'POST',
-        }
+          method: "POST",
+        },
       );
 
       if (response.ok) {
-        setStatus(prev => ({
+        setStatus((prev) => ({
           ...prev,
           connected: false,
           email: undefined,
           services: [],
         }));
         toast({
-          title: 'Disconnected',
-          description: 'Your Google account has been disconnected.',
+          title: "Disconnected",
+          description: "Your Google account has been disconnected.",
         });
         // Notify parent component to refresh
         if (onSuccess) {
@@ -182,11 +220,11 @@ export function GoogleIntegration({
         }
       }
     } catch (error) {
-      console.error('Failed to disconnect:', error);
+      console.error("Failed to disconnect:", error);
       toast({
-        title: 'Error',
-        description: 'Failed to disconnect Google account.',
-        variant: 'destructive',
+        title: "Error",
+        description: "Failed to disconnect Google account.",
+        variant: "destructive",
       });
     } finally {
       setLoading(false);
@@ -197,12 +235,16 @@ export function GoogleIntegration({
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <img src="https://www.google.com/favicon.ico" alt="Google" className="w-5 h-5" />
+          <img
+            src="https://www.google.com/favicon.ico"
+            alt="Google"
+            className="w-5 h-5"
+          />
           Google Services Integration
         </CardTitle>
         <CardDescription>
-          One-time admin setup, then users connect in one click. If setup is missing, follow the
-          step-by-step guide below.
+          One-time admin setup, then users connect in one click. If setup is
+          missing, follow the step-by-step guide below.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -213,7 +255,8 @@ export function GoogleIntegration({
                 <LogIn className="h-4 w-4" />
                 <AlertTitle>Ready to Connect</AlertTitle>
                 <AlertDescription>
-                  Admin setup is complete. Click Login with Google to connect your account.
+                  Admin setup is complete. Click Login with Google to connect
+                  your account.
                 </AlertDescription>
               </Alert>
             ) : (
@@ -222,26 +265,33 @@ export function GoogleIntegration({
                 <AlertTitle>Admin Setup Required</AlertTitle>
                 <AlertDescription className="space-y-2">
                   <p>
-                    An administrator must configure Google OAuth once for this MindRoom deployment
-                    before users can connect.
+                    An administrator must configure Google OAuth once for this
+                    MindRoom deployment before users can connect.
                   </p>
                   <ol className="list-decimal ml-5 space-y-1">
                     <li>Open the Admin Setup guide.</li>
-                    <li>Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` on the backend.</li>
+                    <li>
+                      Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` on the
+                      backend.
+                    </li>
                     <li>Restart the backend, then refresh this page.</li>
                   </ol>
                   <div className="flex flex-wrap gap-2">
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => window.open(GOOGLE_ADMIN_SETUP_DOCS_URL, '_blank')}
+                      onClick={() =>
+                        window.open(GOOGLE_ADMIN_SETUP_DOCS_URL, "_blank")
+                      }
                     >
                       Admin Setup Steps
                     </Button>
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => window.open(GOOGLE_USER_SETUP_DOCS_URL, '_blank')}
+                      onClick={() =>
+                        window.open(GOOGLE_USER_SETUP_DOCS_URL, "_blank")
+                      }
                     >
                       Individual Setup Steps
                     </Button>
@@ -251,16 +301,21 @@ export function GoogleIntegration({
             )}
 
             <div className="space-y-2">
-              <p className="text-sm text-muted-foreground">This will grant MindRoom access to:</p>
+              <p className="text-sm text-muted-foreground">
+                This will grant MindRoom access to:
+              </p>
               <ul className="text-sm space-y-1 ml-4">
                 <li className="flex items-center gap-2">
-                  <Mail className="h-3 w-3" /> Gmail - Read, compose, and send emails
+                  <Mail className="h-3 w-3" /> Gmail - Read, compose, and send
+                  emails
                 </li>
                 <li className="flex items-center gap-2">
-                  <Calendar className="h-3 w-3" /> Calendar - Manage events and schedules
+                  <Calendar className="h-3 w-3" /> Calendar - Manage events and
+                  schedules
                 </li>
                 <li className="flex items-center gap-2">
-                  <HardDrive className="h-3 w-3" /> Drive - Access and manage files
+                  <HardDrive className="h-3 w-3" /> Drive - Access and manage
+                  files
                 </li>
               </ul>
             </div>
@@ -283,13 +338,16 @@ export function GoogleIntegration({
                     alt="Google"
                     className="mr-2 h-4 w-4"
                   />
-                  {status.has_credentials ? 'Login with Google' : 'Admin Setup Needed'}
+                  {status.has_credentials
+                    ? "Login with Google"
+                    : "Admin Setup Needed"}
                 </>
               )}
             </Button>
             {!status.has_credentials && (
               <p className="text-xs text-muted-foreground">
-                Login is disabled until backend Google OAuth credentials are configured.
+                Login is disabled until backend Google OAuth credentials are
+                configured.
               </p>
             )}
           </>
@@ -300,7 +358,11 @@ export function GoogleIntegration({
                 <CheckCircle2 className="h-5 w-5 text-green-600" />
                 <div>
                   <p className="font-medium">Connected</p>
-                  {status.email && <p className="text-sm text-muted-foreground">{status.email}</p>}
+                  {status.email && (
+                    <p className="text-sm text-muted-foreground">
+                      {status.email}
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -308,10 +370,15 @@ export function GoogleIntegration({
             <div className="space-y-2">
               <p className="text-sm font-medium">Active Services:</p>
               <div className="flex flex-wrap gap-2">
-                {status.services.map(service => {
-                  const Icon = serviceIcons[service as keyof typeof serviceIcons] || Mail;
+                {status.services.map((service) => {
+                  const Icon =
+                    serviceIcons[service as keyof typeof serviceIcons] || Mail;
                   return (
-                    <Badge key={service} variant="secondary" className="flex items-center gap-1">
+                    <Badge
+                      key={service}
+                      variant="secondary"
+                      className="flex items-center gap-1"
+                    >
                       <Icon className="h-3 w-3" />
                       {service}
                     </Badge>
@@ -321,7 +388,9 @@ export function GoogleIntegration({
             </div>
 
             <div className="space-y-2">
-              <p className="text-sm text-muted-foreground">Your agents can now:</p>
+              <p className="text-sm text-muted-foreground">
+                Your agents can now:
+              </p>
               <ul className="text-sm space-y-1 ml-4 text-muted-foreground">
                 <li>• Read and search your emails</li>
                 <li>• Send emails on your behalf</li>
@@ -342,7 +411,7 @@ export function GoogleIntegration({
                   Disconnecting...
                 </>
               ) : (
-                'Disconnect Google Account'
+                "Disconnect Google Account"
               )}
             </Button>
           </>

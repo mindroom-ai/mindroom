@@ -155,10 +155,8 @@ async def test_resolve_event_thread_impact_for_client_returns_threaded_impact() 
     """Client-side message classification should expose the canonical threaded impact, not only a bool."""
     client = AsyncMock()
     conversation_cache = AsyncMock()
-    conversation_cache.get_thread_id_for_event.side_effect = (
-        lambda room_id, event_id: "$thread-root:localhost"
-        if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost")
-        else None
+    conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
+        "$thread-root:localhost" if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost") else None
     )
 
     impact = await resolve_event_thread_impact_for_client(

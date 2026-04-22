@@ -184,7 +184,7 @@ def _clean_str(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     cleaned = value.strip()
-    return cleaned if cleaned else None
+    return cleaned or None
 
 
 def profile_dir(runtime_paths: RuntimePaths, profile_name: str) -> Path:

@@ -1,9 +1,9 @@
-import { toast as toastFn } from './toaster';
+import { toast as toastFn } from "./toaster";
 
 interface ToastProps {
   title?: string;
   description?: string;
-  variant?: 'default' | 'destructive';
+  variant?: "default" | "destructive";
 }
 
 export function useToast() {

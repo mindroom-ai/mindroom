@@ -1,27 +1,35 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import Editor from '@monaco-editor/react';
-import { ArrowLeft, FileCode, FolderOpen, Lock, Pencil, Save, Trash2 } from 'lucide-react';
-import { ListPanel, ListItem } from '@/components/shared/ListPanel';
-import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
-import { EditorPanelEmptyState } from '@/components/shared';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { useToast } from '@/components/ui/use-toast';
-import { useTheme } from '@/contexts/ThemeContext';
-import { useSwipeBack } from '@/hooks/useSwipeBack';
+import { useCallback, useEffect, useRef, useState } from "react";
+import Editor from "@monaco-editor/react";
+import {
+  ArrowLeft,
+  FileCode,
+  FolderOpen,
+  Lock,
+  Pencil,
+  Save,
+  Trash2,
+} from "lucide-react";
+import { ListPanel, ListItem } from "@/components/shared/ListPanel";
+import { ItemCard, ItemCardBadge } from "@/components/shared/ItemCard";
+import { EditorPanelEmptyState } from "@/components/shared";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useToast } from "@/components/ui/use-toast";
+import { useTheme } from "@/contexts/ThemeContext";
+import { useSwipeBack } from "@/hooks/useSwipeBack";
 import {
   createSkill,
   deleteSkill,
   getSkill,
   listSkills,
   updateSkill,
-} from '@/services/skillsService';
-import { SkillSummary } from '@/types/skills';
+} from "@/services/skillsService";
+import { SkillSummary } from "@/types/skills";
 
 interface SkillListItem extends ListItem {
   description: string;
-  origin: SkillSummary['origin'];
+  origin: SkillSummary["origin"];
   can_edit: boolean;
 }
 
@@ -33,13 +41,15 @@ export function Skills() {
   const { resolvedTheme } = useTheme();
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
-  const [draftContent, setDraftContent] = useState('');
-  const [originalContent, setOriginalContent] = useState('');
+  const [draftContent, setDraftContent] = useState("");
+  const [originalContent, setOriginalContent] = useState("");
   const [loadingList, setLoadingList] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const selectedSkill = selectedName ? skills.find(s => s.name === selectedName) ?? null : null;
+  const selectedSkill = selectedName
+    ? (skills.find((s) => s.name === selectedName) ?? null)
+    : null;
   const isDirty = draftContent !== originalContent;
 
   useSwipeBack({
@@ -52,12 +62,14 @@ export function Skills() {
     try {
       const data = await listSkills();
       setSkills(data);
-      setSelectedName(current => (current && data.some(s => s.name === current) ? current : null));
+      setSelectedName((current) =>
+        current && data.some((s) => s.name === current) ? current : null,
+      );
     } catch (error) {
       toastRef.current({
-        title: 'Failed to load skills',
-        description: error instanceof Error ? error.message : 'Unknown error',
-        variant: 'destructive',
+        title: "Failed to load skills",
+        description: error instanceof Error ? error.message : "Unknown error",
+        variant: "destructive",
       });
     } finally {
       setLoadingList(false);
@@ -72,24 +84,24 @@ export function Skills() {
     let isActive = true;
 
     if (!selectedName) {
-      setDraftContent('');
-      setOriginalContent('');
+      setDraftContent("");
+      setOriginalContent("");
       return;
     }
 
     setLoadingDetail(true);
     getSkill(selectedName)
-      .then(detail => {
+      .then((detail) => {
         if (!isActive) return;
         setDraftContent(detail.content);
         setOriginalContent(detail.content);
       })
-      .catch(error => {
+      .catch((error) => {
         if (!isActive) return;
         toastRef.current({
-          title: 'Failed to load skill',
-          description: error instanceof Error ? error.message : 'Unknown error',
-          variant: 'destructive',
+          title: "Failed to load skill",
+          description: error instanceof Error ? error.message : "Unknown error",
+          variant: "destructive",
         });
       })
       .finally(() => {
@@ -103,7 +115,7 @@ export function Skills() {
 
   const handleSelect = (name: string) => {
     if (isDirty && selectedName !== name) {
-      if (!window.confirm('Discard unsaved changes?')) return;
+      if (!window.confirm("Discard unsaved changes?")) return;
     }
     setSelectedName(name);
   };
@@ -114,13 +126,16 @@ export function Skills() {
     try {
       await updateSkill(selectedSkill.name, draftContent);
       setOriginalContent(draftContent);
-      toast({ title: 'Skill saved', description: `${selectedSkill.name} updated.` });
+      toast({
+        title: "Skill saved",
+        description: `${selectedSkill.name} updated.`,
+      });
       await refreshSkills();
     } catch (error) {
       toast({
-        title: 'Failed to save skill',
-        description: error instanceof Error ? error.message : 'Unknown error',
-        variant: 'destructive',
+        title: "Failed to save skill",
+        description: error instanceof Error ? error.message : "Unknown error",
+        variant: "destructive",
       });
     } finally {
       setSaving(false);
@@ -132,24 +147,27 @@ export function Skills() {
     const trimmed = name.trim().toLowerCase();
     if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(trimmed)) {
       toast({
-        title: 'Invalid skill name',
+        title: "Invalid skill name",
         description:
-          'Name must be alphanumeric with optional hyphens, starting and ending with a letter or digit.',
-        variant: 'destructive',
+          "Name must be alphanumeric with optional hyphens, starting and ending with a letter or digit.",
+        variant: "destructive",
       });
       return false;
     }
     try {
       await createSkill(trimmed, trimmed);
-      toast({ title: 'Skill created', description: `${trimmed} is ready to edit.` });
+      toast({
+        title: "Skill created",
+        description: `${trimmed} is ready to edit.`,
+      });
       await refreshSkills();
       setSelectedName(trimmed);
       return true;
     } catch (error) {
       toast({
-        title: 'Failed to create skill',
-        description: error instanceof Error ? error.message : 'Unknown error',
-        variant: 'destructive',
+        title: "Failed to create skill",
+        description: error instanceof Error ? error.message : "Unknown error",
+        variant: "destructive",
       });
       return false;
     }
@@ -157,22 +175,30 @@ export function Skills() {
 
   const handleDelete = async () => {
     if (!selectedSkill) return;
-    if (!window.confirm(`Delete skill "${selectedSkill.name}"? This cannot be undone.`)) return;
+    if (
+      !window.confirm(
+        `Delete skill "${selectedSkill.name}"? This cannot be undone.`,
+      )
+    )
+      return;
     try {
       await deleteSkill(selectedSkill.name);
-      toast({ title: 'Skill deleted', description: `${selectedSkill.name} removed.` });
+      toast({
+        title: "Skill deleted",
+        description: `${selectedSkill.name} removed.`,
+      });
       setSelectedName(null);
       await refreshSkills();
     } catch (error) {
       toast({
-        title: 'Failed to delete skill',
-        description: error instanceof Error ? error.message : 'Unknown error',
-        variant: 'destructive',
+        title: "Failed to delete skill",
+        description: error instanceof Error ? error.message : "Unknown error",
+        variant: "destructive",
       });
     }
   };
 
-  const listItems: SkillListItem[] = skills.map(s => ({
+  const listItems: SkillListItem[] = skills.map((s) => ({
     id: s.name,
     display_name: s.name,
     description: s.description,
@@ -182,10 +208,14 @@ export function Skills() {
 
   const renderSkill = (skill: SkillListItem, isSelected: boolean) => {
     const badges: ItemCardBadge[] = [
-      { content: skill.origin, variant: 'secondary' as const, icon: FolderOpen },
       {
-        content: skill.can_edit ? 'Editable' : 'Read-only',
-        variant: skill.can_edit ? ('default' as const) : ('outline' as const),
+        content: skill.origin,
+        variant: "secondary" as const,
+        icon: FolderOpen,
+      },
+      {
+        content: skill.can_edit ? "Editable" : "Read-only",
+        variant: skill.can_edit ? ("default" as const) : ("outline" as const),
         icon: skill.can_edit ? Pencil : Lock,
       },
     ];
@@ -206,7 +236,7 @@ export function Skills() {
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
       <div
         className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-          selectedSkill ? 'hidden lg:block' : 'block'
+          selectedSkill ? "hidden lg:block" : "block"
         }`}
       >
         <ListPanel<SkillListItem>
@@ -224,21 +254,24 @@ export function Skills() {
           createButtonText="New"
           onCreateItem={handleCreate}
           emptyIcon={FileCode}
-          emptyMessage={loadingList ? 'Loading skills...' : 'No skills found'}
+          emptyMessage={loadingList ? "Loading skills..." : "No skills found"}
           emptySubtitle={
             loadingList
-              ? 'Fetching skill list from the server'
-              : 'Add skills under ~/.mindroom/skills to get started'
+              ? "Fetching skill list from the server"
+              : "Add skills under ~/.mindroom/skills to get started"
           }
         />
       </div>
       <div
         className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-          selectedSkill ? 'block' : 'hidden lg:block'
+          selectedSkill ? "block" : "hidden lg:block"
         }`}
       >
         {!selectedSkill ? (
-          <EditorPanelEmptyState icon={FileCode} message="Select a skill to view" />
+          <EditorPanelEmptyState
+            icon={FileCode}
+            message="Select a skill to view"
+          />
         ) : (
           <Card className="h-full flex flex-col overflow-hidden">
             <CardHeader className="pb-3 flex-shrink-0">
@@ -271,7 +304,9 @@ export function Skills() {
                       disabled={!isDirty || saving}
                     >
                       <Save className="h-4 w-4 sm:mr-1" />
-                      <span className="hidden sm:inline">{saving ? 'Saving...' : 'Save'}</span>
+                      <span className="hidden sm:inline">
+                        {saving ? "Saving..." : "Save"}
+                      </span>
                     </Button>
                     <Button variant="ghost" size="sm" onClick={handleDelete}>
                       <Trash2 className="h-4 w-4 text-destructive" />
@@ -281,7 +316,9 @@ export function Skills() {
               </div>
               <div className="flex flex-wrap items-center gap-2 mt-3">
                 <Badge variant="secondary">{selectedSkill.origin}</Badge>
-                {!selectedSkill.can_edit && <Badge variant="outline">Read-only</Badge>}
+                {!selectedSkill.can_edit && (
+                  <Badge variant="outline">Read-only</Badge>
+                )}
               </div>
             </CardHeader>
             <CardContent className="flex-1 min-h-0 p-0">
@@ -293,9 +330,9 @@ export function Skills() {
                 <Editor
                   height="100%"
                   language="markdown"
-                  theme={resolvedTheme === 'dark' ? 'vs-dark' : 'vs'}
+                  theme={resolvedTheme === "dark" ? "vs-dark" : "vs"}
                   value={draftContent}
-                  onChange={value => setDraftContent(value ?? '')}
+                  onChange={(value) => setDraftContent(value ?? "")}
                   loading={
                     <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
                       Loading editor...
@@ -306,7 +343,7 @@ export function Skills() {
                     minimap: { enabled: false },
                     fontSize: 13,
                     scrollBeyondLastLine: false,
-                    wordWrap: 'on',
+                    wordWrap: "on",
                     padding: { top: 12, bottom: 12 },
                   }}
                 />

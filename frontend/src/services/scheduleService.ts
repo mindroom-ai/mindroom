@@ -3,18 +3,20 @@ import type {
   ScheduleListResponse,
   ScheduleTask,
   UpdateScheduleRequest,
-} from '@/types/schedule';
+} from "@/types/schedule";
 
-const API_BASE = '/api/schedules';
+const API_BASE = "/api/schedules";
 
-export async function listSchedules(roomId?: string): Promise<ScheduleListResponse> {
+export async function listSchedules(
+  roomId?: string,
+): Promise<ScheduleListResponse> {
   const url = new URL(API_BASE, window.location.origin);
   if (roomId) {
-    url.searchParams.set('room_id', roomId);
+    url.searchParams.set("room_id", roomId);
   }
 
   const response = await fetch(url.pathname + url.search, {
-    method: 'GET',
+    method: "GET",
   });
 
   if (!response.ok) {
@@ -26,12 +28,12 @@ export async function listSchedules(roomId?: string): Promise<ScheduleListRespon
 
 export async function updateSchedule(
   taskId: string,
-  payload: UpdateScheduleRequest
+  payload: UpdateScheduleRequest,
 ): Promise<ScheduleTask> {
   const response = await fetch(`${API_BASE}/${encodeURIComponent(taskId)}`, {
-    method: 'PUT',
+    method: "PUT",
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
   });
@@ -46,13 +48,16 @@ export async function updateSchedule(
 
 export async function cancelSchedule(
   taskId: string,
-  roomId: string
+  roomId: string,
 ): Promise<CancelScheduleResponse> {
-  const url = new URL(`${API_BASE}/${encodeURIComponent(taskId)}`, window.location.origin);
-  url.searchParams.set('room_id', roomId);
+  const url = new URL(
+    `${API_BASE}/${encodeURIComponent(taskId)}`,
+    window.location.origin,
+  );
+  url.searchParams.set("room_id", roomId);
 
   const response = await fetch(url.pathname + url.search, {
-    method: 'DELETE',
+    method: "DELETE",
   });
 
   if (!response.ok) {
@@ -66,7 +71,7 @@ export async function cancelSchedule(
 async function extractErrorMessage(response: Response): Promise<string> {
   try {
     const data = await response.json();
-    if (typeof data?.detail === 'string') {
+    if (typeof data?.detail === "string") {
       return data.detail;
     }
   } catch {
