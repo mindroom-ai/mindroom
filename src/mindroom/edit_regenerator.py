@@ -9,7 +9,7 @@ from mindroom.coalescing import coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks.ingress import hook_ingress_policy
-from mindroom.matrix.identity import extract_agent_name, historical_internal_sender_ids
+from mindroom.matrix.identity import active_internal_sender_ids, extract_agent_name
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
@@ -188,7 +188,7 @@ class EditRegenerator:
         edited_content, _ = await extract_edit_body(
             event.source,
             self._client(),
-            trusted_sender_ids=historical_internal_sender_ids(
+            trusted_sender_ids=active_internal_sender_ids(
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
             ),

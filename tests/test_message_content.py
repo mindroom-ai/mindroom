@@ -12,7 +12,7 @@ import mindroom.matrix.message_content as message_content_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY
-from mindroom.matrix.identity import historical_internal_sender_ids
+from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.message_content import (
     _clear_mxc_cache,
     _download_mxc_text,
@@ -399,8 +399,8 @@ class TestResolvedMessageExtraction:
             trusted_sender_ids={"@mindroom_general:localhost"},
         ) == ("Diagnosis follows\n\n⚠️ Worker startup failed for shell.run: intentional example.")
 
-    def test_visible_body_from_event_source_trusts_persisted_removed_agent_sender_ids(self, tmp_path: Path) -> None:
-        """Historical messages from removed managed senders should keep canonical-body metadata."""
+    def test_visible_body_from_event_source_ignores_removed_agent_sender_ids(self, tmp_path: Path) -> None:
+        """Removed managed senders must not keep overriding canonical-body metadata."""
         config = bind_runtime_paths(
             Config(agents={"general": AgentConfig(display_name="General Agent")}),
             test_runtime_paths(tmp_path),
@@ -423,13 +423,13 @@ class TestResolvedMessageExtraction:
             visible_body_from_event_source(
                 event_source,
                 "hello",
-                trusted_sender_ids=historical_internal_sender_ids(config, runtime_paths),
+                trusted_sender_ids=active_internal_sender_ids(config, runtime_paths),
             )
-            == "hello"
+            == "hello\n\n⏳ Preparing isolated worker..."
         )
 
     def test_visible_body_from_event_source_trusts_persisted_runtime_usernames(self, tmp_path: Path) -> None:
-        """Persisted managed usernames should stay trusted even when they drift from current config-derived IDs."""
+        """Persisted current usernames should stay trusted on the current runtime domain."""
         config = bind_runtime_paths(
             Config(agents={"general": AgentConfig(display_name="General Agent")}),
             test_runtime_paths(tmp_path),
@@ -438,9 +438,10 @@ class TestResolvedMessageExtraction:
         state = MatrixState()
         state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="legacy.example.com")
         state.save(runtime_paths=runtime_paths)
+        current_domain = config.get_domain(runtime_paths)
 
         event_source = {
-            "sender": "@mindroom_general_oldns:legacy.example.com",
+            "sender": f"@mindroom_general_oldns:{current_domain}",
             "content": {
                 "msgtype": "m.text",
                 "body": "hello\n\n⏳ Preparing isolated worker...",
@@ -452,13 +453,13 @@ class TestResolvedMessageExtraction:
             visible_body_from_event_source(
                 event_source,
                 "hello",
-                trusted_sender_ids=historical_internal_sender_ids(config, runtime_paths),
+                trusted_sender_ids=active_internal_sender_ids(config, runtime_paths),
             )
             == "hello"
         )
 
-    def test_visible_body_from_event_source_trusts_previous_persisted_sender_ids(self, tmp_path: Path) -> None:
-        """Historical reads should keep trusting earlier persisted sender IDs after a rename."""
+    def test_visible_body_from_event_source_ignores_previous_persisted_sender_ids(self, tmp_path: Path) -> None:
+        """Earlier persisted usernames must not stay trusted after a rename."""
         config = bind_runtime_paths(
             Config(agents={"general": AgentConfig(display_name="General Agent")}),
             test_runtime_paths(tmp_path),
@@ -470,7 +471,7 @@ class TestResolvedMessageExtraction:
         state.save(runtime_paths=runtime_paths)
 
         event_source = {
-            "sender": "@mindroom_general_v1:legacy.example.com",
+            "sender": f"@mindroom_general_v1:{config.get_domain(runtime_paths)}",
             "content": {
                 "msgtype": "m.text",
                 "body": "hello\n\n⏳ Preparing isolated worker...",
@@ -482,9 +483,9 @@ class TestResolvedMessageExtraction:
             visible_body_from_event_source(
                 event_source,
                 "hello",
-                trusted_sender_ids=historical_internal_sender_ids(config, runtime_paths),
+                trusted_sender_ids=active_internal_sender_ids(config, runtime_paths),
             )
-            == "hello"
+            == "hello\n\n⏳ Preparing isolated worker..."
         )
 
 

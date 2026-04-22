@@ -1239,8 +1239,8 @@ def test_sender_authorization_trusts_persisted_current_internal_accounts(tmp_pat
     assert is_authorized_sender("@mindroom_assistant_oldns:example.com", config, "!room:example.com") is True
 
 
-def test_effective_sender_trusts_persisted_current_internal_accounts_with_domain_drift(tmp_path: Path) -> None:
-    """Current managed accounts should stay trusted by exact persisted sender ID across domain changes."""
+def test_effective_sender_ignores_persisted_current_internal_accounts_with_domain_drift(tmp_path: Path) -> None:
+    """Old-domain sender IDs must not stay trusted for live relay authorization."""
     config = _isolated_config(
         tmp_path,
         agents={
@@ -1270,7 +1270,7 @@ def test_effective_sender_trusts_persisted_current_internal_accounts_with_domain
             event_source,
             config,
         )
-        == "@alice:example.com"
+        == "@mindroom_assistant_oldns:legacy.example.com"
     )
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
 
 from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig
@@ -212,8 +213,8 @@ class TestHelperFunctions:
         drifted_id = MatrixID.parse(f"@mindroom_general_oldns:{domain}")
         assert drifted_id.agent_name(self.config, runtime_paths) == "general"
 
-    def test_matrix_id_agent_name_trusts_current_persisted_sender_id_with_domain_drift(self, tmp_path: Path) -> None:
-        """MatrixID.agent_name should trust exact current persisted sender IDs across domain changes."""
+    def test_matrix_id_agent_name_ignores_old_domain_sender_ids(self, tmp_path: Path) -> None:
+        """MatrixID.agent_name should only trust the current runtime domain."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
         state = MatrixState()
@@ -221,7 +222,35 @@ class TestHelperFunctions:
         state.save(runtime_paths=runtime_paths)
 
         drifted_id = MatrixID.parse("@mindroom_general_oldns:legacy.example.com")
-        assert drifted_id.agent_name(self.config, runtime_paths) == "general"
+        assert drifted_id.agent_name(self.config, runtime_paths) is None
+
+    def test_matrix_state_load_migrates_legacy_accounts_to_current_schema(self, tmp_path: Path) -> None:
+        """Loading legacy state should backfill the current domain and drop old compatibility fields."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(
+            yaml.safe_dump(
+                {
+                    "accounts": {
+                        "agent_general": {
+                            "username": "mindroom_general_oldns",
+                            "password": "pw",
+                            "known_user_ids": ["@mindroom_general_oldns:legacy.example.com"],
+                        },
+                    },
+                },
+                sort_keys=False,
+            ),
+        )
+
+        state = MatrixState.load(runtime_paths=runtime_paths)
+
+        assert state.accounts["agent_general"].domain == self.config.get_domain(runtime_paths)
+        migrated_data = yaml.safe_load(state_file.read_text())
+        assert migrated_data["accounts"]["agent_general"]["domain"] == self.config.get_domain(runtime_paths)
+        assert "known_user_ids" not in migrated_data["accounts"]["agent_general"]
 
     def test_extract_agent_name_ignores_removed_persisted_username(self, tmp_path: Path) -> None:
         """Persisted usernames for removed agents must not stay live-managed."""

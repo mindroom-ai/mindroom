@@ -19,7 +19,7 @@ from mindroom.custom_tools.matrix_helpers import (
     thread_root_body_preview,
 )
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
-from mindroom.matrix.identity import historical_internal_sender_ids
+from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -342,7 +342,7 @@ class MatrixRoomTools(Toolkit):
             )
 
         threads_list: list[dict[str, Any]] = []
-        trusted_sender_ids = historical_internal_sender_ids(context.config, context.runtime_paths)
+        trusted_sender_ids = active_internal_sender_ids(context.config, context.runtime_paths)
         for event in thread_roots:
             thread_info: dict[str, Any] = {
                 "thread_id": event.event_id,
