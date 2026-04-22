@@ -49,7 +49,6 @@ The router exclusively handles all commands:
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
 - `!config <operation>` - Manage configuration
-- `!skill <name> [args]` - Run a skill by name
 
 Even in single-agent rooms, commands are always processed by the router.
 

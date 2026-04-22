@@ -694,8 +694,8 @@ class TestCommandHandling:
             bot._turn_controller._execute_command.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_router_skill_command_respects_target_reply_permissions(self) -> None:
-        """Skill command should not dispatch to an agent disallowed for the sender."""
+    async def test_router_removed_skill_command_returns_unknown_response(self) -> None:
+        """Removed skill commands should fall through to the standard unknown-command reply."""
         agent_user = AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
@@ -770,13 +770,12 @@ class TestCommandHandling:
                     return_value=None,
                 ),
                 patch("mindroom.turn_controller.is_dm_room", return_value=False),
-                patch("mindroom.commands.handler.resolve_skill_command_spec") as mock_resolve_spec,
             ):
                 await bot._on_message(room, event)
 
-            mock_resolve_spec.assert_not_called()
             bot._send_skill_command_response.assert_not_called()
             bot._send_response.assert_called_once()
+            assert bot._send_response.await_args.args[2] == "❌ Unknown command. Try !help for available commands."
 
     @pytest.mark.asyncio
     async def test_non_router_agent_responds_to_non_commands(self) -> None:

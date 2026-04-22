@@ -251,11 +251,11 @@ Expected outcome: The router posts a confirmation artifact, only the intended co
 - [ ] `CMD-006` Restart the runtime while a config confirmation is still pending.
 Expected outcome: Pending confirmation state survives restart and continues to work in the correct room and thread.
 
-- [ ] `CMD-007` Use `!skill` when exactly one agent in the room can handle the skill.
-Expected outcome: The skill resolves automatically without requiring an explicit agent mention.
+- [ ] `CMD-007` Send the removed `!skill` command in a room with a single matching skill-enabled agent.
+Expected outcome: The router treats it as an unknown command and does not dispatch any skill-specific path.
 
-- [ ] `CMD-008` Use `!skill` when multiple agents in the room have the same skill.
-Expected outcome: The runtime refuses ambiguous execution and asks for disambiguation instead of guessing.
+- [ ] `CMD-008` Repeat the removed `!skill` command with agent mentions or in rooms where multiple agents share the old skill name.
+Expected outcome: Mentions do not revive the removed command and the runtime still returns the standard unknown-command response.
 
 - [ ] `CMD-009` Exercise reaction-based interactive prompts that are scoped to one conversation.
 Expected outcome: Reactions outside the intended room, message, or thread do not mutate the interactive workflow.
@@ -322,8 +322,8 @@ Expected outcome: The runtime returns the documented or implemented fallback beh
 - [ ] `MEDIA-009` Repeat the voice flow with `voice.visible_router_echo` enabled and disabled.
 Expected outcome: Visible router echo behavior matches the configuration without changing the underlying responder selection logic.
 
-- [ ] `MEDIA-010` Exercise voice command intelligence with an explicit spoken help or skill request and with a similar non-command question.
-Expected outcome: Explicit command intent can normalize to `!help` or `!skill`, but speculative command rewrites are rejected and natural-language queries stay natural language.
+- [ ] `MEDIA-010` Exercise voice command intelligence with an explicit spoken help request, an explicit spoken removed-`!skill` request, and a similar non-command question.
+Expected outcome: Explicit help intent can normalize to `!help`, removed `!skill` intent stays an unknown command, and speculative command rewrites are rejected so natural-language queries stay natural language.
 
 - [ ] `MEDIA-011` Speak or inject unavailable agent mentions while voice normalization runs in a room with limited available entities.
 Expected outcome: Unavailable configured entities lose their `@` mention marker while available room-scoped entities keep valid mentions and dispatch correctly.
@@ -399,8 +399,8 @@ Expected outcome: Skill precedence, allowlisting, and eligibility gating all mat
 - [ ] `TOOL-002` Edit a `SKILL.md` file while the runtime is active.
 Expected outcome: Skill caches invalidate automatically and the next skill use reflects the updated instructions.
 
-- [ ] `TOOL-003` Exercise `!skill` for a direct-dispatch skill and for a model-invoked skill.
-Expected outcome: Command dispatch rules, allowlist enforcement, and ambiguity handling behave consistently for both patterns.
+- [ ] `TOOL-003` Exercise an enabled skill through normal chat without any explicit `!skill` command.
+Expected outcome: The agent can still load and use allowed skills implicitly through the model path, while explicit `!skill` invocations remain unsupported.
 
 - [ ] `TOOL-004` Add or remove a plugin path in config during a live run.
 Expected outcome: Plugin-provided tools and skills appear or disappear cleanly without stale registrations remaining.

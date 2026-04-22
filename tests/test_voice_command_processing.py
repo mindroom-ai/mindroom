@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,7 +32,6 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_cache_support,
     install_send_response_mock,
-    install_send_skill_command_response_mock,
     orchestrator_runtime_paths,
     replace_turn_controller_deps,
     runtime_paths_for,
@@ -428,8 +426,8 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(tmp_path) -> None:  # noqa: ANN001
-    """Router should target the agent mentioned only in hydrated sidecar command content."""
+async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) -> None:  # noqa: ANN001
+    """Router should not special-case removed skill commands after sidecar hydration."""
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_router:example.com"
     agent_user.agent_name = ROUTER_AGENT_NAME
@@ -468,10 +466,8 @@ async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(
             ).encode("utf-8"),
         ),
     )
-    bot._send_skill_command_response = AsyncMock(return_value="$skill-reply")
     bot._send_response = AsyncMock(return_value="$fallback")
     install_send_response_mock(bot, bot._send_response)
-    install_send_skill_command_response_mock(bot, bot._send_skill_command_response)
     unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
         return_value=(False, None, []),
     )
@@ -501,29 +497,17 @@ async def test_router_parses_sidecar_skill_command_mentions_from_canonical_body(
         },
     )
 
-    with (
-        patch(
-            "mindroom.turn_controller.interactive.handle_text_response",
-            new_callable=AsyncMock,
-            return_value=None,
-        ) as mock_interactive,
-        patch(
-            "mindroom.commands.handler.resolve_skill_command_spec",
-            return_value=SimpleNamespace(
-                name="demo",
-                user_invocable=True,
-                dispatch=None,
-                disable_model_invocation=False,
-            ),
-        ),
-    ):
+    with patch(
+        "mindroom.turn_controller.interactive.handle_text_response",
+        new_callable=AsyncMock,
+        return_value=None,
+    ) as mock_interactive:
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
 
     mock_interactive.assert_awaited_once()
-    assert bot._send_response.await_count == 0
-    assert bot._send_skill_command_response.await_args.kwargs["agent_name"] == "home"
-    assert "summarize the release notes" in bot._send_skill_command_response.await_args.kwargs["prompt"]
+    bot._send_response.assert_awaited_once()
+    assert bot._send_response.await_args.args[2] == "❌ Unknown command. Try !help for available commands."
 
 
 @pytest.mark.asyncio

@@ -31,7 +31,6 @@ from mindroom.tool_system.runtime_context import (
     runtime_context_from_dispatch_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.skills import resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     tool_execution_identity,
@@ -211,17 +210,6 @@ def _generate_welcome_message(room_id: str, config: Config, runtime_paths: Runti
     )
 
     return welcome_msg
-
-
-def _build_skill_command_prompt(skill_name: str, args_text: str) -> str:
-    args = args_text.strip()
-    args_section = args or "(no arguments provided)"
-    return (
-        "You were invoked via the !skill command.\n"
-        f"Skill: {skill_name}\n"
-        f"User input:\n{args_section}\n\n"
-        "Load the skill instructions with get_skill_instructions and follow them."
-    )
 
 
 def _normalized_response_event_id(raw_response_event_id: str | None) -> str | None:
@@ -622,7 +610,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     context.logger.info("Handling command", command_type=command.type.value)
 
     event_info = EventInfo.from_event(event.source)
-    _, thread_id, thread_history = await context.derive_conversation_context(
+    _, thread_id, _thread_history = await context.derive_conversation_context(
         room.room_id,
         event_info,
         event_id=event.event_id,
@@ -772,70 +760,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             if response_event_id is None:
                 context.record_handled_turn(handled_turn)
             return  # Exit early since we've handled the response
-
-    elif command.type == CommandType.SKILL:
-        skill_name = command.args.get("skill_name")
-        args_text = command.args.get("args_text", "")
-        if not skill_name:
-            response_text = "Usage: !skill <name> [args]"
-        else:
-            mentioned_agents, _, _ = check_agent_mentioned(
-                event.source,
-                None,
-                context.config,
-                context.runtime_paths,
-            )
-            target_agent, error = await _resolve_skill_command_agent(
-                skill_name,
-                client=context.client,
-                config=context.config,
-                room=room,
-                mentioned_agents=mentioned_agents,
-                requester_user_id=requester_user_id,
-                runtime_paths=context.runtime_paths,
-            )
-            if error:
-                response_text = error
-            else:
-                assert target_agent is not None
-                spec = resolve_skill_command_spec(skill_name, context.config, context.runtime_paths, target_agent)
-                if spec is None:
-                    response_text = f"❌ Skill '{skill_name}' not found or not enabled for agent '{target_agent}'."
-                elif not spec.user_invocable:
-                    response_text = f"❌ Skill '{spec.name}' is not user-invocable."
-                elif spec.dispatch and spec.dispatch.kind == "tool":
-                    response_text = await context.run_skill_command_tool(
-                        agent_name=target_agent,
-                        command_tool=spec.dispatch.tool_name,
-                        skill_name=spec.name,
-                        args_text=args_text,
-                        requester_user_id=requester_user_id,
-                        room_id=room.room_id,
-                        thread_id=effective_thread_id,
-                    )
-                elif spec.disable_model_invocation:
-                    response_text = (
-                        f"❌ Skill '{spec.name}' is configured to skip model invocation and has no tool dispatch."
-                    )
-                else:
-                    prompt = _build_skill_command_prompt(spec.name, args_text)
-                    raw_event_id = await context.send_skill_command_response(
-                        room_id=room.room_id,
-                        reply_to_event_id=event.event_id,
-                        thread_id=effective_thread_id,
-                        thread_history=thread_history,
-                        prompt=prompt,
-                        agent_name=target_agent,
-                        user_id=requester_user_id,
-                        reply_to_event=event,
-                    )
-                    handled_turn = HandledTurnState.from_source_event_id(
-                        event.event_id,
-                        response_event_id=_normalized_response_event_id(raw_event_id),
-                    )
-                    if handled_turn.response_event_id is not None:
-                        context.record_handled_turn(handled_turn)
-                    return
 
     elif command.type == CommandType.UNKNOWN:
         # Handle unknown commands

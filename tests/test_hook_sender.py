@@ -13,7 +13,6 @@ from mindroom import interactive
 from mindroom.authorization import is_authorized_sender as real_is_authorized_sender
 from mindroom.bot import AgentBot
 from mindroom.coalescing import PreparedTextEvent
-from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -44,7 +43,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import MultiAgentOrchestrator
-from mindroom.tool_system.skills import _SkillCommandDispatch, _SkillCommandSpec
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from tests.conftest import (
@@ -1780,72 +1778,6 @@ async def test_hook_dispatch_skill_command_preserves_source_envelope_in_runtime(
     source_envelope = bot._send_skill_command_response.await_args.kwargs["source_envelope"]
     assert source_envelope.hook_source == "origin-plugin:message:received"
     assert source_envelope.message_received_depth == 1
-
-
-@pytest.mark.asyncio
-async def test_hook_dispatch_skill_tool_command_builds_full_tool_runtime_context(tmp_path: Path) -> None:
-    """Hook-dispatched !skill tool runs should inherit the full tool runtime context."""
-    bot = _hook_bot(tmp_path)
-    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
-    event = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$hook-skill-tool",
-            "sender": "@mindroom_router:localhost",
-            "origin_server_ts": 1234567890,
-            "content": {
-                "msgtype": "m.text",
-                "body": "!skill demo summarize",
-                "com.mindroom.source_kind": "hook_dispatch",
-                "com.mindroom.hook_source": "origin-plugin:message:received",
-                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
-            },
-        },
-    )
-    command = Command(
-        type=CommandType.SKILL,
-        args={"skill_name": "demo", "args_text": "summarize"},
-        raw_text="!skill demo summarize",
-    )
-    bot.client.rooms = {}
-    bot._send_response = AsyncMock(return_value="$response")
-    captured_runtime_context = None
-
-    async def fake_run_skill_command_tool(**kwargs: object) -> str:
-        nonlocal captured_runtime_context
-        dispatch_context = kwargs["dispatch_context"]
-        captured_runtime_context = dispatch_context.runtime_context
-        return "tool-result"
-
-    spec = _SkillCommandSpec(
-        name="demo",
-        description="demo",
-        source_path=tmp_path / "demo" / "SKILL.md",
-        user_invocable=True,
-        disable_model_invocation=False,
-        dispatch=_SkillCommandDispatch(tool_name="shell.demo"),
-    )
-
-    with (
-        patch("mindroom.commands.handler._resolve_skill_command_agent", new=AsyncMock(return_value=("code", None))),
-        patch("mindroom.commands.handler.resolve_skill_command_spec", return_value=spec),
-        patch(
-            "mindroom.turn_controller._run_skill_command_tool",
-            new=AsyncMock(side_effect=fake_run_skill_command_tool),
-        ),
-    ):
-        await bot._turn_controller._execute_command(
-            room=room,
-            event=event,
-            requester_user_id="@mindroom_router:localhost",
-            command=command,
-            source_envelope=_synthetic_envelope(agent_name="router"),
-        )
-
-    assert captured_runtime_context is not None
-    assert captured_runtime_context.message_received_depth == 1
-    assert captured_runtime_context.hook_message_sender is not None
-    assert captured_runtime_context.room_state_querier is not None
-    assert captured_runtime_context.room_state_putter is not None
 
 
 @pytest.mark.asyncio

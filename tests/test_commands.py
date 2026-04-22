@@ -121,24 +121,22 @@ def test_list_schedules_command() -> None:
         assert command.args == {}
 
 
-def test_skill_command() -> None:
-    """Test skill command parsing."""
+def test_removed_skill_command_is_unknown() -> None:
+    """Test that the removed skill command is parsed as unknown."""
     command = command_parser.parse("!skill repo-quick-audit")
     assert command is not None
-    assert command.type == CommandType.SKILL
-    assert command.args["skill_name"] == "repo-quick-audit"
-    assert command.args["args_text"] == ""
+    assert command.type == CommandType.UNKNOWN
+    assert command.args["raw_command"] == "!skill repo-quick-audit"
 
     command = command_parser.parse("!skill summarize Release notes")
     assert command is not None
-    assert command.type == CommandType.SKILL
-    assert command.args["skill_name"] == "summarize"
-    assert command.args["args_text"] == "Release notes"
+    assert command.type == CommandType.UNKNOWN
+    assert command.args["raw_command"] == "!skill summarize Release notes"
 
     command = command_parser.parse("!skill   ")
     assert command is not None
-    assert command.type == CommandType.SKILL
-    assert command.args["skill_name"] is None
+    assert command.type == CommandType.UNKNOWN
+    assert command.args["raw_command"] == "!skill"
 
 
 def test_all_commands_have_documentation() -> None:
@@ -226,6 +224,7 @@ def test_get_command_help() -> None:
     assert "!list_schedules" in help_text
     assert "!cancel_schedule" in help_text
     assert "!edit_schedule" in help_text
+    assert "!skill" not in help_text
 
     # Specific command help
     schedule_help = get_command_help("schedule")
@@ -258,3 +257,7 @@ def test_get_command_help() -> None:
 
     reload_help_alias = get_command_help("reload_plugins")
     assert reload_help_alias == reload_help
+
+    skill_help = get_command_help("skill")
+    assert "Available Commands" in skill_help
+    assert "!skill" not in skill_help

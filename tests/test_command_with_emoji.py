@@ -21,9 +21,8 @@ def test_command_parser_with_voice_emoji() -> None:
 
     command = command_parser.parse("🎤 !skill demo arg")
     assert command is not None
-    assert command.type == CommandType.SKILL
-    assert command.args["skill_name"] == "demo"
-    assert command.args["args_text"] == "arg"
+    assert command.type == CommandType.UNKNOWN
+    assert command.args["raw_command"] == "!skill demo arg"
 
 
 def test_command_parser_without_emoji() -> None:

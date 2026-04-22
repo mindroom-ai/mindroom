@@ -28,11 +28,6 @@ Agents access skills via `get_skill_instructions()`, scripts via `get_skill_scri
 name: repo-quick-audit
 description: Quick repository audit checklist
 metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
-user-invocable: true
-disable-model-invocation: false
-command-dispatch: tool
-command-tool: repo_audit.run
-command-arg-mode: raw
 ---
 
 # Repo Quick Audit
@@ -44,10 +39,9 @@ command-arg-mode: raw
 Notes:
 
 - `metadata` can be a JSON5 string (shown above) or a YAML mapping.
-- `user-invocable`, `disable-model-invocation`, and `command-*` also accept snake_case names.
 - If `name` is omitted, MindRoom falls back to the skill directory name.
 - If `description` is omitted or blank, MindRoom falls back to the resolved skill name.
-- If YAML frontmatter is omitted entirely, the skill still loads with those same name/description fallbacks. Frontmatter is still recommended for clearer listings and for command metadata such as `user-invocable` or `command-dispatch`.
+- If YAML frontmatter is omitted entirely, the skill still loads with those same name/description fallbacks. Frontmatter is still recommended for clearer listings and metadata.
 
 ## Frontmatter fields
 
@@ -56,11 +50,6 @@ Notes:
 | `name` | string | Unique skill identifier |
 | `description` | string | Brief summary shown to users/models; defaults to the skill name when omitted or blank |
 | `metadata` | mapping or JSON5 string | OpenClaw metadata and custom fields |
-| `user-invocable` | bool | Allow `!skill` (default: true) |
-| `disable-model-invocation` | bool | Prevent model invocation (default: false) |
-| `command-dispatch` | `"tool"` | Set to `tool` to run a tool directly |
-| `command-tool` | string | Function to call: `function_name`, `toolkit.function_name`, or `toolkit` (if the toolkit exposes exactly one function) |
-| `command-arg-mode` | `"raw"` | Argument passing mode; only `raw` is currently supported |
 | `license` | string | Informational only; accepted but not used by the runtime |
 | `compatibility` | string | Informational only; accepted but not used by the runtime |
 | `allowed-tools` | list | Reserved; accepted in frontmatter but not enforced by the runtime |
@@ -116,26 +105,6 @@ Agents see available skills in the system prompt and can load details using thes
 - `get_skill_reference(skill_name, reference_path)` - Access reference documentation
 - `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` - Read or execute scripts
 
-## Skill command dispatch (`!skill`)
-
-Users can run a skill by name:
-
-```
-!skill repo-quick-audit --recent
-```
-
-Agent resolution:
-
-- If the message includes a Matrix mention of an agent, that agent handles the skill. The message must still start with `!skill`.
-- If only one agent in the room has the skill enabled, it handles the request.
-- If multiple agents have the skill, you must mention one to disambiguate.
-
-Rules:
-
-- The skill must be in the agent allowlist and `user-invocable` must be `true`.
-- If `command-dispatch: tool` is set, MindRoom runs the tool directly.
-- If `disable-model-invocation: true` and no tool dispatch is configured, the command fails.
-
 ## Skill vs tool
 
 | Aspect | Skills | Tools |
@@ -144,7 +113,7 @@ Rules:
 | Location | File system | Code/plugins |
 | Filtering | Automatic by requirements | Always available |
 | Instructions | Rich markdown | Docstrings |
-| Invocation | User or model | Model only |
+| Invocation | Model via skill tools | Model only |
 
 ## Hot reloading
 

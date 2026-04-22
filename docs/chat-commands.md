@@ -18,7 +18,6 @@ Commands start with `!` and are handled by the router agent.
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
 | `!config <operation>` | View and modify configuration |
-| `!skill <name> [args]` | Run a skill by name |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
 ## Who Handles Commands
@@ -48,12 +47,11 @@ Display available commands or get detailed help on a specific topic.
 !help
 !help schedule
 !help config
-!help skill
 !help cancel_schedule
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `skill`, `config`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
+**Topics:** `schedule`, `config`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
 
 ### `!hi`
 
@@ -182,35 +180,6 @@ Pending changes are persisted in Matrix room state and survive restarts.
 Unconfirmed changes expire after 24 hours.
 
 Changes are saved to `config.yaml` immediately on confirmation and take effect for new agent interactions.
-
-### `!skill`
-
-Run a user-invocable skill by name.
-
-```
-!skill <name> [args]
-```
-
-**Examples:**
-
-```
-!skill repo-quick-audit
-!skill summarize Release notes for v2.3
-```
-
-**Agent resolution:**
-
-- If the message includes a Matrix mention of an agent, that agent handles the skill. The message must still start with `!skill`.
-- If only one agent in the room has the skill enabled, it handles the request.
-- If multiple agents have the skill, you must mention one to disambiguate.
-
-**Rules:**
-
-- The skill must be in the agent's `skills` allowlist and `user-invocable` must be `true`.
-- If `command-dispatch: tool` is set in the skill's frontmatter, the tool runs directly.
-- If `disable-model-invocation: true` and no tool dispatch is configured, the command fails.
-
-See [Skills](skills.md) for skill configuration details.
 
 ### `!reload-plugins`
 
