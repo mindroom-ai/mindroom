@@ -35,6 +35,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import DeliveryResult
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -260,13 +261,7 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
 
     await apply_post_response_effects(
         ResponseOutcome(
-            resolved_event_id="$response",
-            delivery_result=DeliveryResult(
-                event_id="$response",
-                response_text="hidden",
-                delivery_kind="sent",
-                suppressed=True,
-            ),
+            final_delivery_outcome=FinalDeliveryOutcome.suppressed_without_visible_response(),
             interactive_target=MessageTarget.resolve(
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -345,12 +340,9 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     ):
         await apply_post_response_effects(
             ResponseOutcome(
-                resolved_event_id="$response",
-                delivery_result=DeliveryResult(
-                    event_id="$response",
-                    response_text="visible",
-                    delivery_kind="sent",
-                    suppressed=False,
+                final_delivery_outcome=FinalDeliveryOutcome.final_visible_delivery(
+                    final_visible_event_id="$response",
+                    final_visible_body="visible",
                 ),
                 thread_summary_room_id="!room:localhost",
                 thread_summary_thread_id="$thread",
@@ -568,7 +560,10 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
 
             lifecycle_lock.release()
             await asyncio.wait_for(lifecycle_started.wait(), timeout=0.2)
-            assert await task == "$response"
+            resolution = await task
+            assert resolution.response_identity_event_id == "$response"
+            assert resolution.turn_completion_event_id == "$response"
+            assert resolution.should_mark_handled is True
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()

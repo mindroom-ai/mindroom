@@ -23,6 +23,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
 )
+from mindroom.final_delivery import StreamTerminalOperation, StreamTransportOutcome
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -71,23 +72,13 @@ _StreamInputChunk = (
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 
 
-@dataclass(frozen=True, slots=True)
-class StreamFinalizationOutcome:
-    """Report whether terminal stream state is already visible or needs outer repair."""
-
-    terminal_landed: bool
-    terminal_event_id: str | None
-    terminal_status: _TerminalStreamStatus
-    reason: str
-
-
 @dataclass(slots=True)
 class StreamDeliveryState:
     """Capture one streaming delivery's latest visible event and terminal outcome."""
 
     event_id: str | None = None
     accumulated_text: str = ""
-    finalization_outcome: StreamFinalizationOutcome | None = None
+    finalization_outcome: StreamTransportOutcome | None = None
     suppressed_and_cleaned: bool = False
     repair_text: str | None = None
     repair_tool_trace: list[ToolTraceEntry] | None = None
@@ -106,14 +97,34 @@ class StreamingDeliveryError(Exception):
         event_id: str | None,
         accumulated_text: str,
         tool_trace: list[ToolTraceEntry],
-        finalization_outcome: StreamFinalizationOutcome | None = None,
+        transport_outcome: StreamTransportOutcome | None = None,
     ) -> None:
         super().__init__(str(error))
         self.error = error
         self.event_id = event_id
         self.accumulated_text = accumulated_text
         self.tool_trace = tool_trace.copy()
-        self.finalization_outcome = finalization_outcome
+        self.transport_outcome = transport_outcome
+
+
+class StreamingDeliveryCancelled(asyncio.CancelledError):
+    """Preserve finalized stream state when delivery is cancelled mid-response."""
+
+    def __init__(
+        self,
+        error: asyncio.CancelledError,
+        *,
+        event_id: str | None,
+        accumulated_text: str,
+        tool_trace: list[ToolTraceEntry],
+        transport_outcome: StreamTransportOutcome | None = None,
+    ) -> None:
+        super().__init__(*error.args)
+        self.error = error
+        self.event_id = event_id
+        self.accumulated_text = accumulated_text
+        self.tool_trace = tool_trace.copy()
+        self.transport_outcome = transport_outcome
 
 
 def _build_streaming_delivery_error(
@@ -350,14 +361,15 @@ class StreamingResponse:
     ) -> _TerminalStreamStatus:
         """Apply terminal text adjustments and return the terminal stream status."""
         ai_run_payload = self.extra_content.get(AI_RUN_METADATA_KEY) if self.extra_content is not None else None
-        has_visible_tool_output = self.show_tool_calls and self.observed_tool_calls > 0
+        observed_nonvisible_activity = (
+            self.observed_reasoning_content or self.observed_tool_calls > 0 or self.placeholder_progress_sent
+        )
         no_visible_text_error = (
             error is None
             and not restart_interrupted
             and not cancelled
             and not self.accumulated_text.strip()
-            and self.observed_reasoning_content
-            and not has_visible_tool_output
+            and observed_nonvisible_activity
         )
         if no_visible_text_error:
             self.accumulated_text = _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
@@ -389,8 +401,8 @@ class StreamingResponse:
         cancelled: bool = False,
         restart_interrupted: bool = False,
         error: Exception | None = None,
-    ) -> StreamFinalizationOutcome:
-        """Send the terminal update and report whether it became visible."""
+    ) -> StreamTransportOutcome:
+        """Send the terminal update and return immutable transport facts."""
         final_stream_status = self._prepare_terminal_text_and_status(
             cancelled=cancelled,
             restart_interrupted=restart_interrupted,
@@ -401,6 +413,26 @@ class StreamingResponse:
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
+        terminal_operation: StreamTerminalOperation = "edit" if self.event_id is not None else "send"
+        text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
+        response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
+        rendered_body = response.formatted_text if (self.accumulated_text.strip() or has_placeholder) else None
+        visible_body_state: Literal["none", "placeholder_only", "visible_body"]
+        if rendered_body is None:
+            terminal_operation = "none"
+            visible_body_state = "none"
+            return StreamTransportOutcome(
+                last_physical_stream_event_id=self.event_id,
+                terminal_operation=terminal_operation,
+                terminal_result="not_attempted",
+                terminal_status=final_stream_status,
+                rendered_body=None,
+                visible_body_state=visible_body_state,
+                option_map=None,
+                options_list=None,
+            )
+        visible_body_state = "placeholder_only" if rendered_body == _PROGRESS_PLACEHOLDER else "visible_body"
+        options_list = tuple(response.options_list) if response.options_list is not None else None
         try:
             send_succeeded = await self._send_or_edit_message(
                 client,
@@ -416,11 +448,16 @@ class StreamingResponse:
                 stream_status=final_stream_status,
                 exc_info=True,
             )
-            return StreamFinalizationOutcome(
-                terminal_landed=False,
-                terminal_event_id=self.event_id,
+            return StreamTransportOutcome(
+                last_physical_stream_event_id=self.event_id,
+                terminal_operation=terminal_operation,
+                terminal_result="cancelled",
                 terminal_status=final_stream_status,
-                reason="terminal_update_cancelled",
+                rendered_body=rendered_body,
+                visible_body_state=visible_body_state,
+                failure_reason="terminal_update_cancelled",
+                option_map=response.option_map,
+                options_list=options_list,
             )
         except Exception as exc:
             logger.warning(
@@ -431,11 +468,16 @@ class StreamingResponse:
                 reason=str(exc),
                 exc_info=True,
             )
-            return StreamFinalizationOutcome(
-                terminal_landed=False,
-                terminal_event_id=self.event_id,
+            return StreamTransportOutcome(
+                last_physical_stream_event_id=self.event_id,
+                terminal_operation=terminal_operation,
+                terminal_result="failed",
                 terminal_status=final_stream_status,
-                reason=f"terminal_update_exception:{exc.__class__.__name__}",
+                rendered_body=rendered_body,
+                visible_body_state=visible_body_state,
+                failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
+                option_map=response.option_map,
+                options_list=options_list,
             )
         if not send_succeeded:
             logger.warning(
@@ -444,17 +486,27 @@ class StreamingResponse:
                 room_id=self.room_id,
                 stream_status=final_stream_status,
             )
-            return StreamFinalizationOutcome(
-                terminal_landed=False,
-                terminal_event_id=self.event_id,
+            return StreamTransportOutcome(
+                last_physical_stream_event_id=self.event_id,
+                terminal_operation=terminal_operation,
+                terminal_result="failed",
                 terminal_status=final_stream_status,
-                reason="terminal_update_failed",
+                rendered_body=rendered_body,
+                visible_body_state=visible_body_state,
+                failure_reason="terminal_update_failed",
+                option_map=response.option_map,
+                options_list=options_list,
             )
-        return StreamFinalizationOutcome(
-            terminal_landed=True,
-            terminal_event_id=self.event_id,
+        return StreamTransportOutcome(
+            last_physical_stream_event_id=self.event_id,
+            terminal_operation=terminal_operation,
+            terminal_result="succeeded",
             terminal_status=final_stream_status,
-            reason="terminal_update_applied",
+            rendered_body=rendered_body,
+            visible_body_state=visible_body_state,
+            failure_reason=None,
+            option_map=response.option_map,
+            options_list=options_list,
         )
 
     async def _send_or_edit_message(
@@ -515,7 +567,7 @@ class StreamingResponse:
         text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
 
         # Format the text (handles interactive questions if present)
-        response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=False)
+        response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=is_final)
         display_text = response.formatted_text
 
         # Only use latest_thread_event_id for the initial message (not edits)
@@ -548,12 +600,7 @@ class StreamingResponse:
         return _PreparedStreamingDelivery(
             content=content,
             display_text=display_text,
-            committed_state=_CommittedDeliveryState(
-                accumulated_text=self.accumulated_text if self.accumulated_text.strip() else "",
-                tool_trace=deepcopy(self.tool_trace),
-                placeholder_progress_sent=not self.accumulated_text.strip(),
-            ),
-            had_warmup_suffix=bool(warmup_suffix_lines),
+            retry_on_failure=is_final and self.event_id is not None,
         )
 
     def _mark_delivery_committed(self, committed_state: _CommittedDeliveryState) -> None:
@@ -815,8 +862,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912
     visible_event_id_callback: Callable[[str], None] | None = None,
     latest_thread_event_id: str | None = None,
     conversation_cache: ConversationCacheProtocol | None = None,
-) -> tuple[str | None, str]:
-    """Stream chunks to a Matrix room, returning (event_id, accumulated_text)."""
+) -> StreamTransportOutcome:
+    """Stream chunks to a Matrix room and return the canonical transport outcome."""
     resolved_target = target or MessageTarget.resolve(
         room_id=room_id,
         thread_id=thread_id,
@@ -858,7 +905,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912
     stream_error: Exception | None = None
     cancellation_error: asyncio.CancelledError | None = None
     cancellation_traceback = None
-    finalization_outcome: StreamFinalizationOutcome | None = None
+    transport_outcome: StreamTransportOutcome | None = None
     try:
         if header:
             await streaming.update_content(header, client)
@@ -868,37 +915,44 @@ async def send_streaming_response(  # noqa: C901, PLR0912
         cancellation_traceback = exc.__traceback__
         if is_sync_restart_cancel(exc):
             logger.info("Streaming response interrupted by sync restart", message_id=streaming.event_id)
-            finalization_outcome = await streaming.finalize(client, restart_interrupted=True)
+            transport_outcome = await streaming.finalize(client, restart_interrupted=True)
         else:
             logger.warning(
                 "Streaming response cancelled — traceback for diagnosis",
                 message_id=streaming.event_id,
                 exc_info=True,
             )
-            finalization_outcome = await streaming.finalize(client, cancelled=True)
+            transport_outcome = await streaming.finalize(client, cancelled=True)
     except Exception as e:
         stream_error = e
         logger.exception("Streaming response failed", error=str(e))
-        finalization_outcome = await streaming.finalize(client, error=e)
+        transport_outcome = await streaming.finalize(client, error=e)
     else:
-        finalization_outcome = await streaming.finalize(client)
+        transport_outcome = await streaming.finalize(client)
     finally:
         if tool_trace_collector is not None:
             tool_trace_collector[:] = streaming.tool_trace
         if stream_state is not None:
             stream_state.event_id = streaming.event_id
             stream_state.accumulated_text = streaming.accumulated_text
-            stream_state.finalization_outcome = finalization_outcome
+            stream_state.finalization_outcome = transport_outcome
 
     if cancellation_error is not None:
-        raise cancellation_error.with_traceback(cancellation_traceback)
+        raise StreamingDeliveryCancelled(
+            cancellation_error,
+            event_id=streaming.event_id,
+            accumulated_text=streaming.accumulated_text,
+            tool_trace=streaming.tool_trace,
+            transport_outcome=transport_outcome,
+        ).with_traceback(cancellation_traceback)
     if stream_error is not None:
         raise StreamingDeliveryError(
             stream_error,
             event_id=streaming.event_id,
             accumulated_text=streaming.accumulated_text,
             tool_trace=streaming.tool_trace,
-            finalization_outcome=finalization_outcome,
+            transport_outcome=transport_outcome,
         ) from stream_error
 
-    return streaming.event_id, streaming.accumulated_text
+    assert transport_outcome is not None
+    return transport_outcome

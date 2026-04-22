@@ -13,6 +13,7 @@ from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wai
 
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
 from mindroom.hooks import (
     AgentLifecycleContext,
     EnrichmentItem,
@@ -1397,7 +1398,7 @@ class AgentBot:
         reason_prefix: str = "Team request",
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> str | None:
+    ) -> TurnDeliveryResolution:
         """Generate a team response (shared between preformed teams and TeamBot)."""
         return await self._response_runner.generate_team_response_helper(
             ResponseRequest(
@@ -1443,7 +1444,7 @@ class AgentBot:
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> str | None:
+    ) -> TurnDeliveryResolution:
         """Generate and send/edit a response using AI.
 
         Args:
@@ -1471,7 +1472,7 @@ class AgentBot:
                 lifecycle lock is acquired and before response generation starts.
 
         Returns:
-            Event ID of the response message, or None if failed
+            Typed terminal delivery resolution for the completed response lifecycle.
 
         """
         return await self._response_runner.generate_response(
@@ -1668,10 +1669,14 @@ class TeamBot(AgentBot):
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> str | None:
+    ) -> TurnDeliveryResolution:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
-            return None
+            return TurnDeliveryResolution.from_outcome(
+                FinalDeliveryOutcome.error_without_visible_response(
+                    failure_reason="empty_team_prompt",
+                ),
+            )
 
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
@@ -1698,12 +1703,31 @@ class TeamBot(AgentBot):
             assert team_resolution.reason is not None
             if existing_event_id:
                 await self._edit_message(room_id, existing_event_id, team_resolution.reason, thread_id)
-                return existing_event_id
-            return await self._send_response(
+                return TurnDeliveryResolution.from_outcome(
+                    FinalDeliveryOutcome.final_visible_delivery(
+                        final_visible_event_id=existing_event_id,
+                        final_visible_body=team_resolution.reason,
+                        delivery_kind="edited",
+                    ),
+                )
+            event_id = await self._send_response(
                 room_id,
                 reply_to_event_id,
                 team_resolution.reason,
                 thread_id,
+            )
+            if event_id is None:
+                return TurnDeliveryResolution.from_outcome(
+                    FinalDeliveryOutcome.error_without_visible_response(
+                        failure_reason="team_resolution_delivery_failed",
+                    ),
+                )
+            return TurnDeliveryResolution.from_outcome(
+                FinalDeliveryOutcome.final_visible_delivery(
+                    final_visible_event_id=event_id,
+                    final_visible_body=team_resolution.reason,
+                    delivery_kind="sent",
+                ),
             )
         assert team_resolution.mode is not None
 

@@ -9,7 +9,7 @@ from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import HandledTurnState, apply_delivery_resolution
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.scheduling import (
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.config.main import Config
+    from mindroom.final_delivery import TurnDeliveryResolution
     from mindroom.hooks.types import HookMatrixAdmin
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache

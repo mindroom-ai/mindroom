@@ -19,6 +19,7 @@ from mindroom.delivery_gateway import (
     FinalizeStreamedResponseRequest,
     ResponseHookService,
 )
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -364,15 +365,20 @@ async def test_suppressed_delivery_emits_cancelled_hook(
         result = await gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
-                streamed_event_id="$stream",
-                streamed_text="suppressed",
-                delivery_kind="sent",
+                stream_transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$stream",
+                    terminal_operation="send",
+                    terminal_result="succeeded",
+                    terminal_status="completed",
+                    rendered_body="suppressed",
+                    visible_body_state="visible_body",
+                ),
+                initial_delivery_kind="sent",
                 response_kind="ai",
                 response_envelope=_envelope(),
                 correlation_id="corr-suppressed-streamed",
                 tool_trace=None,
                 extra_content=None,
-                cleanup_suppressed_streamed_event=False,
             ),
         )
 
@@ -456,15 +462,20 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
         delivery_result = await gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
-                streamed_event_id="$stream",
-                streamed_text="visible response",
-                delivery_kind="sent",
+                stream_transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$stream",
+                    terminal_operation="send",
+                    terminal_result="succeeded",
+                    terminal_status="completed",
+                    rendered_body="visible response",
+                    visible_body_state="visible_body",
+                ),
+                initial_delivery_kind="sent",
                 response_kind="ai",
                 response_envelope=_envelope(),
                 correlation_id="corr-late-streamed",
                 tool_trace=None,
                 extra_content=None,
-                cleanup_suppressed_streamed_event=False,
             ),
         )
 

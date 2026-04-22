@@ -95,7 +95,12 @@ from mindroom.orchestrator import (
     _SignalAwareUvicornServer,
     main,
 )
-from mindroom.response_runner import ResponseRequest, ResponseRunner, _merge_response_extra_content
+from mindroom.response_runner import (
+    ResponseRequest,
+    ResponseRunner,
+    _coerce_final_delivery_outcome,
+    _merge_response_extra_content,
+)
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.streaming import StreamingDeliveryError
@@ -2044,8 +2049,9 @@ class TestAgentBot:
                 ),
             )
 
-        assert delivery.event_id == "$terminal"
-        assert delivery.delivery_kind == "sent"
+        assert delivery.visible_response_event_id == "$terminal"
+        assert delivery.response_identity_event_id == "$terminal"
+        assert delivery.delivery_kind is None
         assert "Response interrupted by an error" in delivery.response_text
 
     @pytest.mark.asyncio
@@ -2337,7 +2343,7 @@ class TestAgentBot:
                 team_response=AsyncMock(return_value="Team reply"),
             ),
         ):
-            event_id = await bot._generate_team_response_helper(
+            resolution = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
                 reply_to_event_id="$team-root",
                 thread_id=None,
@@ -2350,7 +2356,7 @@ class TestAgentBot:
                 correlation_id="corr-team",
             )
 
-        assert event_id == "$team"
+        assert resolution.response_identity_event_id == "$team"
         assert mock_edit_message.await_args.args[4] == "Team reply [hooked]"
         assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
 
@@ -2386,7 +2392,7 @@ class TestAgentBot:
                 team_response=AsyncMock(return_value="Team reply"),
             ),
         ):
-            event_id = await bot._generate_team_response_helper(
+            resolution = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
                 reply_to_event_id="$team-root",
                 thread_id=None,
@@ -2399,7 +2405,7 @@ class TestAgentBot:
                 correlation_id="corr-team",
             )
 
-        assert event_id == "$team"
+        assert resolution.response_identity_event_id == "$team"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_merges_raw_prompt_with_model_prompt(
@@ -2434,7 +2440,7 @@ class TestAgentBot:
                 team_response=mock_team_response,
             ),
         ):
-            event_id = await bot._generate_team_response_helper(
+            resolution = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
                 reply_to_event_id="$team-root",
                 thread_id=None,
@@ -2453,7 +2459,7 @@ class TestAgentBot:
                 correlation_id="corr-team",
             )
 
-        assert event_id == "$team"
+        assert resolution.response_identity_event_id == "$team"
         prepared_message = mock_team_response.await_args.kwargs["message"]
         assert "Summarize the latest invoice." in prepared_message
         assert "Available attachment IDs: att_invoice." in prepared_message
@@ -2495,7 +2501,7 @@ class TestAgentBot:
                 team_response=mock_team_response,
             ),
         ):
-            event_id = await bot._generate_team_response_helper(
+            resolution = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
                 reply_to_event_id="$team-root",
                 thread_id=None,
@@ -2514,7 +2520,7 @@ class TestAgentBot:
                 correlation_id="corr-team",
             )
 
-        assert event_id == "$team"
+        assert resolution.response_identity_event_id == "$team"
         prepared_message = mock_team_response.await_args.kwargs["message"]
         assert prepared_message == timestamped_prompt
 
@@ -2578,7 +2584,7 @@ class TestAgentBot:
                 team_response=AsyncMock(return_value="Team reply"),
             ),
         ):
-            event_id = await bot._generate_team_response_helper(
+            resolution = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
                 reply_to_event_id="$reply_plain:localhost",
                 thread_id="$raw_thread:localhost",
@@ -2591,7 +2597,7 @@ class TestAgentBot:
                 correlation_id="corr-team",
             )
 
-        assert event_id == "$team"
+        assert resolution.response_identity_event_id == "$team"
         assert len(sent_contents) == 1
         content = sent_contents[0]
         assert content["m.relates_to"]["rel_type"] == "m.thread"
@@ -2656,15 +2662,7 @@ class TestAgentBot:
             event_id="$placeholder",
             reason="Suppressed placeholder response",
         )
-        assert (
-            unwrap_extracted_collaborator(bot._response_runner).resolve_response_event_id(
-                delivery_result=delivery,
-                tracked_event_id="$placeholder",
-                existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
-            )
-            is None
-        )
+        assert delivery.response_identity_event_id is None
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_suppressed_existing_event_returns_no_final_event(
@@ -2719,15 +2717,7 @@ class TestAgentBot:
         assert delivery.suppressed is True
         assert delivery.event_id is None
         redact_message_event.assert_not_awaited()
-        assert (
-            unwrap_extracted_collaborator(bot._response_runner).resolve_response_event_id(
-                delivery_result=delivery,
-                tracked_event_id="$existing",
-                existing_event_id="$existing",
-                existing_event_is_placeholder=False,
-            )
-            is None
-        )
+        assert delivery.response_identity_event_id is None
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_raises_when_suppressed_placeholder_redaction_fails(
@@ -2859,35 +2849,24 @@ class TestAgentBot:
             event_id="$streaming",
             reason="Suppressed streamed response",
         )
-        assert (
-            unwrap_extracted_collaborator(bot._response_runner).resolve_response_event_id(
-                delivery_result=delivery,
-                tracked_event_id="$streaming",
-                existing_event_id=None,
-            )
-            is None
-        )
+        assert delivery.response_identity_event_id is None
 
-    def test_resolve_response_event_id_does_not_preserve_placeholder_after_failed_edit(self) -> None:
-        """A failed edit must not report the placeholder as the final delivered event."""
+    def test_failed_placeholder_edit_does_not_preserve_response_identity(self) -> None:
+        """A failed placeholder edit must not preserve a response identity."""
         delivery = DeliveryResult(
             event_id=None,
             response_text="Handled",
             delivery_kind=None,
             suppressed=False,
         )
-        coordinator = MagicMock(spec=ResponseRunner)
-
-        assert (
-            ResponseRunner.resolve_response_event_id(
-                coordinator,
-                delivery_result=delivery,
-                tracked_event_id="$placeholder",
-                existing_event_id="$placeholder",
-                existing_event_is_placeholder=True,
-            )
-            is None
+        outcome = _coerce_final_delivery_outcome(
+            delivery,
+            tracked_event_id="$placeholder",
+            existing_event_id="$placeholder",
+            existing_event_is_placeholder=True,
         )
+
+        assert outcome.response_identity_event_id is None
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_registers_interactive_questions_with_bot_agent_name(
@@ -2925,7 +2904,7 @@ class TestAgentBot:
             patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
             patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_buttons,
         ):
-            event_id = await bot._generate_team_response_helper(
+            resolution = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
                 reply_to_event_id="$team-root",
                 thread_id=None,
@@ -2936,7 +2915,7 @@ class TestAgentBot:
                 payload=DispatchPayload(prompt="team prompt"),
             )
 
-        assert event_id == "$team"
+        assert resolution.response_identity_event_id == "$team"
         mock_register.assert_called_once()
         assert mock_register.call_args.args[0] == "$team"
         assert mock_register.call_args.args[1] == "!test:localhost"
@@ -3650,7 +3629,7 @@ class TestAgentBot:
             ),
         ):
             async with bot._conversation_resolver.turn_thread_cache_scope():
-                event_id = await bot._generate_response(
+                resolution = await bot._generate_response(
                     room_id="!test:localhost",
                     prompt="Continue",
                     reply_to_event_id="$event",
@@ -3659,7 +3638,7 @@ class TestAgentBot:
                     user_id="@alice:localhost",
                 )
 
-        assert event_id == "$response"
+        assert resolution.response_identity_event_id == "$response"
         mock_get_thread_history.assert_awaited_once_with("!test:localhost", "$thread")
         request = mock_process.await_args.args[0]
         assert list(request.thread_history) == fresh_history
@@ -4305,7 +4284,7 @@ class TestAgentBot:
                 new_callable=AsyncMock,
             ) as mock_thread_summary,
         ):
-            event_id = await bot._generate_response(
+            resolution = await bot._generate_response(
                 room_id="!test:localhost",
                 prompt="Team, summarize this thread",
                 reply_to_event_id="$event",
@@ -4317,7 +4296,9 @@ class TestAgentBot:
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert event_id is None
+        assert resolution.state == "suppressed_redacted"
+        assert resolution.should_mark_handled is True
+        assert resolution.visible_response_event_id is None
         mock_thread_summary.assert_not_awaited()
         assert "thread_summary_!test:localhost_$thread" not in scheduled_names
 
@@ -4400,7 +4381,7 @@ class TestAgentBot:
                 new=AsyncMock(return_value=("$placeholder", "stream chunk")),
             ) as mock_send_streaming_response,
         ):
-            event_id = await bot._generate_team_response_helper(
+            resolution = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
                 reply_to_event_id="$event",
                 thread_id="$thread_root",
@@ -4415,7 +4396,8 @@ class TestAgentBot:
                 correlation_id="corr-team-stream",
             )
 
-        assert event_id == "$placeholder"
+        assert resolution.response_identity_event_id == "$placeholder"
+        assert resolution.visible_response_event_id == "$placeholder"
         mock_team_response.assert_not_awaited()
         send_kwargs = mock_send_streaming_response.await_args.kwargs
         assert send_kwargs["existing_event_id"] == "$placeholder"
@@ -4473,7 +4455,7 @@ class TestAgentBot:
                 team_response_stream=fake_team_response_stream,
             ),
         ):
-            event_id = await bot._generate_team_response_helper(
+            resolution = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
                 reply_to_event_id="$event",
                 thread_id="$thread_root",
@@ -4488,7 +4470,9 @@ class TestAgentBot:
                 correlation_id="corr-team-stream-suppress",
             )
 
-        assert event_id is None
+        assert resolution.state == "suppressed_redacted"
+        assert resolution.should_mark_handled is True
+        assert resolution.visible_response_event_id is None
         bot._redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$placeholder",
@@ -4525,7 +4509,7 @@ class TestAgentBot:
             ),
             patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
         ):
-            event_id = await bot._generate_team_response_helper(
+            resolution = await bot._generate_team_response_helper(
                 room_id="!test:localhost",
                 reply_to_event_id="$event",
                 thread_id="$thread_root",
@@ -4540,7 +4524,8 @@ class TestAgentBot:
                 correlation_id="corr-team-suppress",
             )
 
-        assert event_id is None
+        assert resolution.state == "suppressed_redacted"
+        assert resolution.visible_response_event_id is None
         bot._redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$placeholder",

@@ -42,7 +42,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import SendTextRequest, SuppressedPlaceholderCleanupError
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import HandledTurnState, apply_delivery_resolution
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.hooks.ingress import (
     hook_ingress_policy,
@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.final_delivery import TurnDeliveryResolution
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -737,7 +738,7 @@ class TurnController:
         )
 
         try:
-            response_event_id = await self.deps.response_runner.generate_response(
+            response_resolution = await self.deps.response_runner.generate_response(
                 ResponseRequest(
                     room_id=room.room_id,
                     prompt=f"The user selected: {selection.selected_value}",
@@ -758,18 +759,18 @@ class TurnController:
                 acknowledgment_event_id=ack_event_id,
             )
             return
-        if response_event_id is not None:
+        if response_resolution.should_mark_handled:
             self._mark_source_events_responded(
-                HandledTurnState.from_source_event_id(
-                    selection.question_event_id,
-                    response_event_id=response_event_id,
+                apply_delivery_resolution(
+                    HandledTurnState.from_source_event_id(selection.question_event_id),
+                    response_resolution,
                 ),
             )
             if source_event_id is not None and source_event_id != selection.question_event_id:
                 self._mark_source_events_responded(
-                    HandledTurnState.from_source_event_id(
-                        source_event_id,
-                        response_event_id=response_event_id,
+                    apply_delivery_resolution(
+                        HandledTurnState.from_source_event_id(source_event_id),
+                        response_resolution,
                     ),
                 )
 
@@ -1103,7 +1104,7 @@ class TurnController:
             if action.kind == "team":
                 assert action.form_team is not None
                 assert action.form_team.mode is not None
-                response_event_id = await self.deps.response_runner.generate_team_response_helper(
+                response_resolution = await self.deps.response_runner.generate_team_response_helper(
                     ResponseRequest(
                         room_id=room.room_id,
                         reply_to_event_id=event.event_id,
@@ -1123,7 +1124,7 @@ class TurnController:
                     team_mode=action.form_team.mode.value,
                 )
             else:
-                response_event_id = await self.deps.response_runner.generate_response(
+                response_resolution = await self.deps.response_runner.generate_response(
                     ResponseRequest(
                         room_id=room.room_id,
                         reply_to_event_id=event.event_id,
@@ -1148,8 +1149,8 @@ class TurnController:
                 thread_id=dispatch.context.thread_id,
                 error=failure,
             )
-            if response_event_id is not None:
-                self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+            if response_resolution.should_mark_handled:
+                self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))
             return
         except SuppressedPlaceholderCleanupError:
             with bound_log_context(**dispatch.target.log_context):
@@ -1159,8 +1160,8 @@ class TurnController:
                     correlation_id=dispatch.correlation_id,
                 )
             raise
-        if response_event_id is not None:
-            self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+        if response_resolution.should_mark_handled:
+            self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""

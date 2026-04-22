@@ -178,7 +178,6 @@ LEGAL_FINAL_DELIVERY_STATES: Mapping[FinalDeliveryState, _StateValidationRule] =
         "error_with_visible_response": _StateValidationRule(
             terminal_status="error",
             requires_final_visible_event=True,
-            requires_final_visible_body=True,
         ),
         "error_without_visible_response": _StateValidationRule(
             terminal_status="error",
