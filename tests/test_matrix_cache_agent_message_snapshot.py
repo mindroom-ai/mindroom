@@ -371,6 +371,58 @@ async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
     )
 
 
+@pytest.mark.asyncio
+async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_is_stale(
+    tmp_path: Path,
+) -> None:
+    """Room-scope reads should fail closed when the latest sender message is stale."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                (
+                    "$newer-message",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$newer-message",
+                        sender="@agent:localhost",
+                        body="Newest stale message",
+                        origin_server_ts=2000,
+                    ),
+                ),
+            ],
+        )
+        runtime_started_at = time.time()
+        await cache.store_events_batch(
+            [
+                (
+                    "$older-message",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$older-message",
+                        sender="@agent:localhost",
+                        body="Older fresh message",
+                        origin_server_ts=1000,
+                    ),
+                ),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    snapshot = get_latest_agent_message_snapshot(
+        db_path=db_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=runtime_started_at,
+    )
+
+    assert snapshot is None
+
+
 def test_real_sqlite_reader_handles_missing_db_returns_none(tmp_path: Path) -> None:
     """Missing cache files should return None instead of raising."""
     snapshot = get_latest_agent_message_snapshot(

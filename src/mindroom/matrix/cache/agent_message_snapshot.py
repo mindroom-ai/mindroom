@@ -44,6 +44,14 @@ class _CachedEventRow:
     cached_at: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class _SnapshotLookupResult:
+    """Outcome for one matching scope event during latest-message lookup."""
+
+    snapshot: AgentMessageSnapshot | None
+    stop_scanning: bool = False
+
+
 def _relation_type(event: dict[str, Any]) -> str | None:
     content = _content_dict(event.get("content"))
     relates_to = content.get("m.relates_to")
@@ -195,10 +203,10 @@ def _snapshot_from_event(
     event: dict[str, Any],
     cached_at: float | None,
     runtime_started_at: float | None,
-) -> AgentMessageSnapshot | None:
+) -> _SnapshotLookupResult:
     event_id = event.get("event_id")
     if not isinstance(event_id, str) or not event_id:
-        return None
+        return _SnapshotLookupResult(snapshot=None)
     latest_edit = _load_latest_edit(
         conn,
         room_id=room_id,
@@ -211,13 +219,15 @@ def _snapshot_from_event(
         and runtime_started_at is not None
         and (visible_cached_at is None or visible_cached_at < runtime_started_at)
     ):
-        return None
+        return _SnapshotLookupResult(snapshot=None, stop_scanning=True)
     timestamp = latest_event.get("origin_server_ts")
     if not isinstance(timestamp, int) or isinstance(timestamp, bool):
-        return None
-    return AgentMessageSnapshot(
-        content=_visible_content(latest_event),
-        origin_server_ts=timestamp,
+        return _SnapshotLookupResult(snapshot=None)
+    return _SnapshotLookupResult(
+        snapshot=AgentMessageSnapshot(
+            content=_visible_content(latest_event),
+            origin_server_ts=timestamp,
+        ),
     )
 
 
@@ -276,7 +286,7 @@ def _load_scope_snapshot(
             sender=sender,
         ):
             continue
-        snapshot = _snapshot_from_event(
+        result = _snapshot_from_event(
             conn,
             room_id=room_id,
             thread_id=thread_id,
@@ -284,8 +294,10 @@ def _load_scope_snapshot(
             cached_at=None if cached_at is None else float(cached_at),
             runtime_started_at=runtime_started_at,
         )
-        if snapshot is not None:
-            return snapshot
+        if result.stop_scanning:
+            return None
+        if result.snapshot is not None:
+            return result.snapshot
     return None
 
 
