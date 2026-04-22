@@ -513,15 +513,15 @@ Deeper synthetic hook hops still arrive as messages, but they do not re-enter `m
 Queries Matrix room state events.
 When `state_key` is provided, returns the content `dict` for that single state event, or `None` on Matrix error response/not-found.
 When `state_key` is `None`, returns a `{state_key: content}` dict of all state events matching `event_type`, or `None` on Matrix error response.
+Returns `None` when no room state querier is available (e.g. no Matrix client bound).
+When both the current bot and the router can query room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
+Transport exceptions from the underlying Matrix client propagate to the hook.
 
 **`await ctx.get_latest_agent_message_snapshot(room_id, sender, *, thread_id=None)`**
 Returns the latest visible cached `m.room.message` from `sender` in the given room or thread scope.
 The helper automatically applies `ctx.runtime_started_at` so room-level reads ignore visible cache rows from before the current bot runtime.
 It returns `None` when no reader is bound, when the advisory cache is disabled or missing usable rows, or when the sender has no cached message in that scope.
 It raises `CacheUnavailable` when a thread snapshot exists but fails the cache freshness contract, such as a stale or invalidated thread cache row.
-Returns `None` when no room state querier is available (e.g. no Matrix client bound).
-When both the current bot and the router can query room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
-Transport exceptions from the underlying Matrix client propagate to the hook.
 
 **`await ctx.put_room_state(room_id, event_type, state_key, content)`**
 Writes a single Matrix room state event and returns `True` on success, `False` on Matrix error response.
