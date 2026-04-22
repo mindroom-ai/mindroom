@@ -78,10 +78,15 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 def _load_test_config(
     tmp_path: Path,
     *,
-    defaults_compress_tool_results: bool,
+    defaults_compress_tool_results: bool | None,
     agent_compress_tool_results: bool | None = None,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = _runtime_paths(tmp_path)
+    defaults_override = (
+        f"  compress_tool_results: {str(defaults_compress_tool_results).lower()}\n"
+        if defaults_compress_tool_results is not None
+        else ""
+    )
     agent_override = (
         f"    compress_tool_results: {str(agent_compress_tool_results).lower()}\n"
         if agent_compress_tool_results is not None
@@ -92,7 +97,7 @@ def _load_test_config(
             f"""\
             defaults:
               tools: []
-              compress_tool_results: {str(defaults_compress_tool_results).lower()}
+            {defaults_override}
 
             models:
               default:
@@ -114,7 +119,7 @@ def _load_test_config(
 def _create_test_agent(
     tmp_path: Path,
     *,
-    defaults_compress_tool_results: bool,
+    defaults_compress_tool_results: bool | None,
     agent_compress_tool_results: bool | None = None,
 ) -> Agent:
     config, runtime_paths = _load_test_config(
@@ -143,6 +148,15 @@ def test_defaults_compress_tool_results_false_propagates_to_agent(tmp_path: Path
     """defaults.compress_tool_results=false should reach the created agent."""
     agent = _create_test_agent(tmp_path, defaults_compress_tool_results=False)
 
+    assert agent.compress_tool_results is False
+
+
+def test_omitted_defaults_compress_tool_results_uses_shipped_false_default(tmp_path: Path) -> None:
+    """Omitting defaults.compress_tool_results should keep the shipped safe default."""
+    config, _runtime_paths = _load_test_config(tmp_path, defaults_compress_tool_results=None)
+    agent = _create_test_agent(tmp_path, defaults_compress_tool_results=None)
+
+    assert config.defaults.compress_tool_results is False
     assert agent.compress_tool_results is False
 
 
