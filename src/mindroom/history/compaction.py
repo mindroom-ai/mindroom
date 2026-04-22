@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -26,7 +27,8 @@ from agno.tools.function import Function
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.constants import MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS
+from mindroom.background_tasks import create_background_task
+from mindroom.constants import MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS, request_task_cancel
 from mindroom.history.storage import clear_force_compaction_state, update_scope_seen_event_ids, write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.hooks import CompactionHookContext, emit
@@ -91,6 +93,26 @@ class _CompactionProviderTimeoutError(Exception):
     def __init__(self, original: TimeoutError) -> None:
         super().__init__(str(original))
         self.original = original
+
+
+async def _drain_timed_out_compaction_request(response_task: asyncio.Task[ModelResponse]) -> None:
+    """Observe one timed-out provider task until it eventually finishes."""
+    try:
+        response = await response_task
+    except _CompactionProviderTimeoutError as exc:
+        logger.warning(
+            "Timed-out compaction request later failed with provider timeout",
+            error=str(exc.original),
+        )
+    except asyncio.CancelledError:
+        logger.debug("Timed-out compaction request finished as cancelled")
+    except Exception:
+        logger.warning("Timed-out compaction request later failed", exc_info=True)
+    else:
+        logger.warning(
+            "Timed-out compaction request later returned a discarded result",
+            has_text=isinstance(response.content, str) and bool(response.content.strip()),
+        )
 
 
 @dataclass(frozen=True)
@@ -731,16 +753,35 @@ async def _generate_compaction_summary(
         except TimeoutError as exc:
             raise _CompactionProviderTimeoutError(exc) from exc
 
+    response_task = asyncio.create_task(
+        _request_summary(),
+        name="compaction_summary_request",
+    )
     try:
-        response = await asyncio.wait_for(
-            _request_summary(),
+        done, _pending = await asyncio.wait(
+            {response_task},
             timeout=MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS,
         )
+    except asyncio.CancelledError:
+        request_task_cancel(response_task)
+        with suppress(asyncio.CancelledError):
+            await response_task
+        raise
+
+    if response_task not in done:
+        request_task_cancel(response_task)
+        create_background_task(
+            _drain_timed_out_compaction_request(response_task),
+            name="compaction_summary_timeout_cleanup",
+            log_exceptions=False,
+        )
+        msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS}s"
+        raise RuntimeError(msg)
+
+    try:
+        response = response_task.result()
     except _CompactionProviderTimeoutError as exc:
         raise exc.original from exc
-    except TimeoutError as exc:
-        msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS}s"
-        raise RuntimeError(msg) from exc
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
     if not normalized_text:
