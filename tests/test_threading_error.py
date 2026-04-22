@@ -4237,6 +4237,89 @@ class TestThreadingBehavior:
         assert timing_call.kwargs["pending_task_count"] == 2
 
     @pytest.mark.asyncio
+    async def test_wait_for_room_idle_counts_full_backlog_when_queue_grows_mid_wait(  # noqa: PLR0915
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Room-idle waits should count both the initial backlog and tasks queued later."""
+        monkeypatch.setenv("MINDROOM_TIMING", "1")
+        timing_logger = MagicMock()
+        monkeypatch.setattr(timing_module, "logger", timing_logger)
+        coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=object(),
+        )
+        first_started = asyncio.Event()
+        allow_first_finish = asyncio.Event()
+        second_started = asyncio.Event()
+        allow_second_finish = asyncio.Event()
+        third_started = asyncio.Event()
+        allow_third_finish = asyncio.Event()
+        fourth_started = asyncio.Event()
+        allow_fourth_finish = asyncio.Event()
+
+        async def first_update() -> None:
+            first_started.set()
+            await allow_first_finish.wait()
+
+        async def second_update() -> None:
+            second_started.set()
+            await allow_second_finish.wait()
+
+        async def third_update() -> None:
+            third_started.set()
+            await allow_third_finish.wait()
+
+        async def fourth_update() -> None:
+            fourth_started.set()
+            await allow_fourth_finish.wait()
+
+        try:
+            first_task = coordinator.queue_room_update(
+                "!room:localhost",
+                first_update,
+                name="matrix_cache_first_update",
+            )
+            await asyncio.wait_for(first_started.wait(), timeout=1.0)
+            second_task = coordinator.queue_room_update(
+                "!room:localhost",
+                second_update,
+                name="matrix_cache_second_update",
+            )
+            third_task = coordinator.queue_room_update(
+                "!room:localhost",
+                third_update,
+                name="matrix_cache_third_update",
+            )
+            waiter = asyncio.create_task(coordinator.wait_for_room_idle("!room:localhost"))
+            await asyncio.sleep(0)
+            fourth_task = coordinator.queue_room_update(
+                "!room:localhost",
+                fourth_update,
+                name="matrix_cache_fourth_update",
+            )
+            await asyncio.sleep(0)
+            allow_first_finish.set()
+            await asyncio.wait_for(second_started.wait(), timeout=1.0)
+            allow_second_finish.set()
+            await asyncio.wait_for(third_started.wait(), timeout=1.0)
+            allow_third_finish.set()
+            await asyncio.wait_for(fourth_started.wait(), timeout=1.0)
+            allow_fourth_finish.set()
+            await first_task
+            await second_task
+            await third_task
+            await fourth_task
+            await waiter
+        finally:
+            await coordinator.close()
+
+        timing_call = next(
+            call for call in timing_logger.info.call_args_list if call.args == ("Event cache idle wait timing",)
+        )
+        assert timing_call.kwargs["pending_task_count"] == 4
+
+    @pytest.mark.asyncio
     async def test_queue_room_update_skips_timing_overhead_when_disabled(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -4318,6 +4401,52 @@ class TestThreadingBehavior:
             and call.kwargs["outcome"] == "ok"
             for call in append_calls
         )
+
+    @pytest.mark.asyncio
+    async def test_append_live_event_logs_append_failure_outcome_when_enabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Live ingress timing should classify append misses as append failures."""
+        monkeypatch.setenv("MINDROOM_TIMING", "1")
+        timing_logger = MagicMock()
+        monkeypatch.setattr(timing_module, "logger", timing_logger)
+        event_cache = _runtime_event_cache()
+        event_cache.append_event = AsyncMock(return_value=False)
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+        access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(
+            return_value=MutationThreadImpact.threaded("$thread:localhost"),
+        )
+        event = nio.RoomMessageText.from_dict(
+            {
+                "type": "m.room.message",
+                "room_id": "!room:localhost",
+                "event_id": "$reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234,
+                "content": {
+                    "body": "hello",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread:localhost"},
+                },
+            },
+        )
+
+        await access.append_live_event(
+            "!room:localhost",
+            event,
+            event_info=EventInfo.from_event(event.source),
+        )
+
+        timing_call = next(
+            call for call in timing_logger.info.call_args_list if call.args == ("Live event cache append timing",)
+        )
+        assert timing_call.kwargs["thread_id"] == "$thread:localhost"
+        assert timing_call.kwargs["appended"] is False
+        assert timing_call.kwargs["outcome"] == "append_failed"
 
     @pytest.mark.asyncio
     async def test_append_live_event_skips_timing_overhead_when_disabled(

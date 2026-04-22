@@ -585,11 +585,13 @@ class ThreadLiveWritePolicy:
 
         outcome = "ok"
         try:
-            await self._cache_ops.queue_room_cache_update(
+            appended = await self._cache_ops.queue_room_cache_update(
                 room_id,
                 append_and_invalidate,
                 name="matrix_cache_append_live_event",
             )
+            if appended is False:
+                outcome = "append_failed"
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise

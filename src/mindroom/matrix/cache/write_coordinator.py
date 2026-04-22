@@ -58,15 +58,18 @@ class _EventCacheWriteCoordinator:
     ] = field(default_factory=weakref.WeakKeyDictionary, init=False)
 
     def _pending_chain_length(self, task: asyncio.Task[Any] | None) -> int:
-        count = 0
+        return len(self._pending_chain_tasks(task))
+
+    def _pending_chain_tasks(self, task: asyncio.Task[Any] | None) -> set[asyncio.Task[Any]]:
+        pending_tasks: set[asyncio.Task[Any]] = set()
         seen: set[asyncio.Task[Any]] = set()
         current = task
         while current is not None and current not in seen:
             seen.add(current)
             if not current.done():
-                count += 1
+                pending_tasks.add(current)
             current = self._pending_predecessor(current)
-        return count
+        return pending_tasks
 
     def _emit_idle_wait_timing(
         self,
@@ -240,7 +243,7 @@ class _EventCacheWriteCoordinator:
     async def _wait_for_room_idle_with_timing(self, room_id: str) -> None:
         wait_started: float | None = None
         wait_iterations = 0
-        pending_task_count = 0
+        pending_tasks: set[asyncio.Task[Any]] = set()
         while True:
             tail_task = self._room_update_tasks.get(room_id)
             if tail_task is None:
@@ -248,15 +251,12 @@ class _EventCacheWriteCoordinator:
                     room_id=room_id,
                     wait_started=wait_started,
                     wait_iterations=wait_iterations,
-                    pending_task_count=pending_task_count,
+                    pending_task_count=len(pending_tasks),
                 )
                 return
             if wait_started is None:
                 wait_started = time.perf_counter()
-            pending_task_count = max(
-                pending_task_count,
-                wait_iterations + self._pending_chain_length(tail_task),
-            )
+            pending_tasks.update(self._pending_chain_tasks(tail_task))
             await self._await_room_tail(room_id, tail_task)
             wait_iterations += 1
 
