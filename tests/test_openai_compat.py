@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
-from agno.run.agent import RunOutput
+from agno.run.agent import RunCompletedEvent, RunOutput
 from agno.run.team import TeamRunOutput
 from agno.team import Team as AgnoTeam
 from fastapi import Request
@@ -33,6 +33,7 @@ from mindroom.api.openai_compat import (
     _convert_messages,
     _derive_session_id,
     _extract_content_text,
+    _extract_stream_text,
     _is_error_response,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
@@ -1347,6 +1348,16 @@ class TestStreamingCompletion:
         lines = response.text.strip().split("\n\n")
         content_chunk = json.loads(lines[1].removeprefix("data: "))
         assert content_chunk["choices"][0]["delta"]["content"] == "This is a cached response"
+
+    def test_extract_stream_text_reads_run_completed_event_content(self) -> None:
+        """OpenAI-compatible streaming must forward terminal-only completion content."""
+        tool_state = openai_compat._ToolStreamState()
+        text = _extract_stream_text(
+            RunCompletedEvent(content="final answer"),
+            tool_state,
+        )
+
+        assert text == "final answer"
 
     def test_streaming_first_event_error_returns_500(self, app_client: TestClient) -> None:
         """If first stream event is an error string, return HTTP 500 instead of SSE."""

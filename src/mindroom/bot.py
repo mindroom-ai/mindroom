@@ -90,6 +90,7 @@ from .delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
     EditTextRequest,
+    FinalDeliveryRequest,
     ResponseHookService,
     SendTextRequest,
 )
@@ -1701,33 +1702,38 @@ class TeamBot(AgentBot):
         )
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None
-            if existing_event_id:
-                await self._edit_message(room_id, existing_event_id, team_resolution.reason, thread_id)
-                return TurnDeliveryResolution.from_outcome(
-                    FinalDeliveryOutcome.final_visible_delivery(
-                        final_visible_event_id=existing_event_id,
-                        final_visible_body=team_resolution.reason,
-                        delivery_kind="edited",
-                    ),
-                )
-            event_id = await self._send_response(
-                room_id,
-                reply_to_event_id,
-                team_resolution.reason,
-                thread_id,
+            resolved_target = target or self._conversation_resolver.build_message_target(
+                room_id=room_id,
+                thread_id=thread_id,
+                reply_to_event_id=reply_to_event_id,
             )
-            if event_id is None:
-                return TurnDeliveryResolution.from_outcome(
-                    FinalDeliveryOutcome.error_without_visible_response(
-                        failure_reason="team_resolution_delivery_failed",
-                    ),
-                )
-            return TurnDeliveryResolution.from_outcome(
-                FinalDeliveryOutcome.final_visible_delivery(
-                    final_visible_event_id=event_id,
-                    final_visible_body=team_resolution.reason,
-                    delivery_kind="sent",
+            fallback_envelope = response_envelope or MessageEnvelope(
+                source_event_id=reply_to_event_id or "",
+                room_id=room_id,
+                target=resolved_target,
+                requester_id=user_id or "",
+                sender_id=user_id or "",
+                body=prompt,
+                attachment_ids=tuple(attachment_ids or ()),
+                mentioned_agents=(),
+                agent_name=self.agent_name,
+                source_kind="message",
+            )
+            final_outcome = await self._delivery_gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=resolved_target,
+                    existing_event_id=existing_event_id,
+                    existing_event_is_placeholder=existing_event_is_placeholder,
+                    response_text=team_resolution.reason,
+                    response_kind="team",
+                    response_envelope=fallback_envelope,
+                    correlation_id=correlation_id or reply_to_event_id or room_id,
+                    tool_trace=None,
+                    extra_content=None,
                 ),
+            )
+            return TurnDeliveryResolution.from_outcome(
+                final_outcome,
             )
         assert team_resolution.mode is not None
 

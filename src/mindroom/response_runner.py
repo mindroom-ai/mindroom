@@ -88,7 +88,6 @@ from .delivery_gateway import (
     FinalizeStreamedResponseRequest,
     SendTextRequest,
     StreamingDeliveryRequest,
-    SuppressedPlaceholderCleanupError,
 )
 from .media_inputs import MediaInputs
 from .response_lifecycle import DeliveryOutcome, ResponseLifecycle
@@ -239,7 +238,7 @@ def _late_stream_finalize_cancelled_outcome(
         or transport_outcome.visible_body_state != "visible_body"
     ):
         return None
-    return FinalDeliveryOutcome.keep_prior_visible_stream_after_completed_terminal_failure(
+    return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
         last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
         final_visible_body=transport_outcome.rendered_body,
         failure_reason=failure_reason,
@@ -248,12 +247,20 @@ def _late_stream_finalize_cancelled_outcome(
     )
 
 
+def _is_cancelled_failure_reason(failure_reason: str | None) -> bool:
+    """Return whether one fallback failure reason represents cancellation."""
+    if failure_reason is None:
+        return False
+    return "cancel" in failure_reason.lower()
+
+
 def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911, PLR0912
     delivery: FinalDeliveryOutcome | DeliveryResult | None,
     *,
     tracked_event_id: str | None = None,
     existing_event_id: str | None = None,
     existing_event_is_placeholder: bool = False,
+    placeholder_event_id: str | None = None,
     failure_reason: str | None = None,
 ) -> FinalDeliveryOutcome:
     """Normalize legacy delivery facts into the canonical terminal outcome."""
@@ -265,7 +272,52 @@ def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911, PLR0912
     )
 
     if delivery is None:
+        if tracked_event_id is not None and tracked_event_id == placeholder_event_id:
+            if _is_cancelled_failure_reason(resolved_failure_reason):
+                return FinalDeliveryOutcome.cancelled_with_visible_response(
+                    final_visible_event_id=tracked_event_id,
+                    failure_reason=resolved_failure_reason or "delivery_result_missing_after_placeholder_cancel",
+                )
+            return FinalDeliveryOutcome.error_with_visible_response(
+                final_visible_event_id=tracked_event_id,
+                final_visible_body="",
+                failure_reason=resolved_failure_reason or "delivery_result_missing_after_placeholder",
+            )
+        if (
+            tracked_event_id is not None
+            and existing_event_id is not None
+            and existing_event_is_placeholder
+            and tracked_event_id == existing_event_id
+        ):
+            if _is_cancelled_failure_reason(resolved_failure_reason):
+                return FinalDeliveryOutcome.cancelled_with_visible_response(
+                    final_visible_event_id=tracked_event_id,
+                    failure_reason=resolved_failure_reason
+                    or "delivery_result_missing_after_visible_placeholder_cancel",
+                )
+            return FinalDeliveryOutcome.error_with_visible_response(
+                final_visible_event_id=tracked_event_id,
+                final_visible_body="",
+                failure_reason=resolved_failure_reason or "delivery_result_missing_after_visible_placeholder",
+            )
+        if tracked_event_id is not None and (existing_event_id is None or tracked_event_id != existing_event_id):
+            if _is_cancelled_failure_reason(resolved_failure_reason):
+                return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
+                    last_physical_stream_event_id=tracked_event_id,
+                    final_visible_body=None,
+                    failure_reason=resolved_failure_reason or "delivery_result_missing_after_visible_stream_cancel",
+                )
+            return FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
+                last_physical_stream_event_id=tracked_event_id,
+                final_visible_body=None,
+                failure_reason=resolved_failure_reason or "delivery_result_missing_after_visible_stream",
+            )
         if existing_event_id is not None and not existing_event_is_placeholder:
+            if _is_cancelled_failure_reason(resolved_failure_reason):
+                return FinalDeliveryOutcome.cancelled_with_visible_response(
+                    final_visible_event_id=existing_event_id,
+                    failure_reason=resolved_failure_reason or "delivery_result_missing_after_visible_response_cancel",
+                )
             return FinalDeliveryOutcome.error_with_visible_response(
                 final_visible_event_id=existing_event_id,
                 final_visible_body="",
@@ -294,6 +346,11 @@ def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911, PLR0912
                 and delivery.event_id == existing_event_id
                 and not existing_event_is_placeholder
             ):
+                if _is_cancelled_failure_reason(resolved_failure_reason):
+                    return FinalDeliveryOutcome.cancelled_with_visible_response(
+                        final_visible_event_id=delivery.event_id,
+                        failure_reason=resolved_failure_reason,
+                    )
                 return FinalDeliveryOutcome.error_with_visible_response(
                     final_visible_event_id=delivery.event_id,
                     final_visible_body=rendered_body or "",
@@ -302,8 +359,31 @@ def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911, PLR0912
                     options_list=delivery.options_list,
                 )
             if visible_body_state != "visible_body":
+                if (
+                    existing_event_id is not None
+                    and existing_event_is_placeholder
+                    and delivery.event_id == existing_event_id
+                ):
+                    if _is_cancelled_failure_reason(resolved_failure_reason):
+                        return FinalDeliveryOutcome.cancelled_with_visible_response(
+                            final_visible_event_id=delivery.event_id,
+                            failure_reason=resolved_failure_reason,
+                        )
+                    return FinalDeliveryOutcome.error_with_visible_response(
+                        final_visible_event_id=delivery.event_id,
+                        final_visible_body="",
+                        failure_reason=resolved_failure_reason,
+                    )
                 return FinalDeliveryOutcome.error_without_visible_response(
                     failure_reason=resolved_failure_reason,
+                )
+            if _is_cancelled_failure_reason(resolved_failure_reason):
+                return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
+                    last_physical_stream_event_id=delivery.event_id,
+                    final_visible_body=rendered_body,
+                    failure_reason=resolved_failure_reason,
+                    option_map=delivery.option_map,
+                    options_list=delivery.options_list,
                 )
             return FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
                 last_physical_stream_event_id=delivery.event_id,
@@ -313,6 +393,11 @@ def _coerce_final_delivery_outcome(  # noqa: C901, PLR0911, PLR0912
                 options_list=delivery.options_list,
             )
         if existing_event_id is not None and not existing_event_is_placeholder:
+            if _is_cancelled_failure_reason(resolved_failure_reason):
+                return FinalDeliveryOutcome.cancelled_with_visible_response(
+                    final_visible_event_id=existing_event_id,
+                    failure_reason=resolved_failure_reason,
+                )
             return FinalDeliveryOutcome.error_with_visible_response(
                 final_visible_event_id=existing_event_id,
                 final_visible_body="",
@@ -1650,6 +1735,12 @@ class ResponseRunner:
         if not request.existing_event_id:
             thinking_msg = "🤝 Team Response: Thinking..."
 
+        run_message_id: str | None = None
+
+        def note_task_cancelled(failure_reason: str) -> None:
+            nonlocal delivery_failure_reason
+            delivery_failure_reason = failure_reason
+
         try:
             run_message_id = await self.run_cancellable_response(
                 room_id=request.room_id,
@@ -1662,6 +1753,7 @@ class ResponseRunner:
                 user_id=requester_user_id,
                 run_id=response_run_id,
                 pipeline_timing=request.pipeline_timing,
+                on_cancelled=note_task_cancelled,
             )
             if tracked_event_id is None:
                 tracked_event_id = run_message_id
@@ -1713,17 +1805,22 @@ class ResponseRunner:
                 ),
             )
         except Exception as error:
-            if isinstance(error, SuppressedPlaceholderCleanupError):
-                raise
             if not delivery_stage_started:
                 raise
-            delivery_failure_reason = str(error)
+            delivery_failure_reason = (
+                "sync_restart_cancelled"
+                if isinstance(error, asyncio.CancelledError) and is_sync_restart_cancel(error)
+                else "cancelled_by_user"
+                if isinstance(error, asyncio.CancelledError)
+                else str(error)
+            )
             self._log_delivery_failure(response_kind="team", error=error)
         canonical_final_outcome = _coerce_final_delivery_outcome(
             final_delivery_outcome,
             tracked_event_id=tracked_event_id,
             existing_event_id=request.existing_event_id,
             existing_event_is_placeholder=request.existing_event_is_placeholder,
+            placeholder_event_id=run_message_id if request.existing_event_id is None else None,
             failure_reason=delivery_failure_reason,
         )
         if not isinstance(final_delivery_outcome, FinalDeliveryOutcome):
@@ -1772,6 +1869,7 @@ class ResponseRunner:
         run_id: str | None = None,
         target: MessageTarget | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
+        on_cancelled: Callable[[str], None] | None = None,
     ) -> str | None:
         """Run one response generation function with cancellation support."""
         resolved_target = target or self.deps.resolver.build_message_target(
@@ -1843,6 +1941,9 @@ class ResponseRunner:
                 try:
                     await task
                 except asyncio.CancelledError as exc:
+                    failure_reason = "sync_restart_cancelled" if is_sync_restart_cancel(exc) else "cancelled_by_user"
+                    if on_cancelled is not None:
+                        on_cancelled(failure_reason)
                     if is_sync_restart_cancel(exc):
                         self.deps.logger.info(
                             "Response interrupted by sync restart",
@@ -2416,8 +2517,6 @@ class ResponseRunner:
                 )
             raise
         except Exception as error:
-            if isinstance(error, SuppressedPlaceholderCleanupError):
-                raise
             self.deps.logger.exception("Error in streaming response", error=str(error))
             late_outcome = (
                 _late_stream_finalize_cancelled_outcome(
@@ -2619,6 +2718,10 @@ class ResponseRunner:
             if event_id is not None:
                 tracked_event_id = event_id
 
+        def note_task_cancelled(failure_reason: str) -> None:
+            nonlocal delivery_failure_reason
+            delivery_failure_reason = failure_reason
+
         async def generate(message_id: str | None) -> None:
             nonlocal delivery_result, tracked_event_id
             if message_id is not None:
@@ -2646,6 +2749,7 @@ class ResponseRunner:
         if not request.existing_event_id:
             thinking_msg = "Thinking..."
 
+        run_message_id: str | None = None
         try:
             run_message_id = await self.run_cancellable_response(
                 room_id=request.room_id,
@@ -2658,6 +2762,7 @@ class ResponseRunner:
                 user_id=request.user_id,
                 run_id=response_run_id,
                 pipeline_timing=request.pipeline_timing,
+                on_cancelled=note_task_cancelled,
             )
             tracked_event_id = self._latest_stream_event_id(
                 tracked_event_id=tracked_event_id,
@@ -2667,13 +2772,20 @@ class ResponseRunner:
         except Exception as error:
             if not delivery_stage_started:
                 raise
-            delivery_failure_reason = str(error)
+            delivery_failure_reason = (
+                "sync_restart_cancelled"
+                if isinstance(error, asyncio.CancelledError) and is_sync_restart_cancel(error)
+                else "cancelled_by_user"
+                if isinstance(error, asyncio.CancelledError)
+                else str(error)
+            )
             self._log_delivery_failure(response_kind="ai", error=error)
         final_delivery_outcome = _coerce_final_delivery_outcome(
             delivery_result,
             tracked_event_id=tracked_event_id,
             existing_event_id=request.existing_event_id,
             existing_event_is_placeholder=request.existing_event_is_placeholder,
+            placeholder_event_id=run_message_id if request.existing_event_id is None else None,
             failure_reason=delivery_failure_reason,
         )
         return await lifecycle.finalize(

@@ -769,7 +769,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
         elif isinstance(chunk, RunCompletedEvent):
             if chunk.reasoning_content:
                 streaming.observed_reasoning_content = True
-            if chunk.content:
+            if chunk.content is not None:
                 streaming.accumulated_text = _merge_final_completion_content(
                     streaming.accumulated_text,
                     str(chunk.content),

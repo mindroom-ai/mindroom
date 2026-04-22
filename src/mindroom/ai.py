@@ -95,7 +95,7 @@ __all__ = [
     "build_matrix_run_metadata",
     "stream_agent_response",
 ]
-AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _AI_RUN_METADATA_VERSION = 1
 
 
@@ -1317,7 +1317,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                 state.completed_run_event = event
                 if event.reasoning_content:
                     state.observed_reasoning_content = True
-                if event.content:
+                if event.content is not None:
                     final_text = str(event.content)
                     state.assistant_text = final_text
                     state.full_response = final_text

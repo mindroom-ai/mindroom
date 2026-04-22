@@ -1607,7 +1607,7 @@ async def test_generate_response_locked_persists_interrupted_history_when_final_
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
 
-    assert resolution.state == "error_without_visible_response"
+    assert resolution.state == "cancelled_with_visible_response"
     assert resolution.response_identity_event_id is None
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
@@ -1678,7 +1678,7 @@ async def test_generate_response_locked_delivery_cancel_with_visible_tools_repla
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-    assert resolution.state == "error_without_visible_response"
+    assert resolution.state == "cancelled_with_visible_response"
     assert resolution.response_identity_event_id is None
     persisted_session = cast("AgentSession", history_storage.session)
     assert persisted_session is not None
@@ -1759,8 +1759,8 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
 
-    assert resolution.state == "kept_prior_visible_stream_after_completed_terminal_failure"
-    assert resolution.response_identity_event_id == "$stream-msg"
+    assert resolution.state == "kept_prior_visible_stream_after_cancel"
+    assert resolution.response_identity_event_id is None
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1931,7 +1931,7 @@ async def test_process_and_respond_streaming_passes_current_and_model_prompt_to_
 async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_exception(
     tmp_path: Path,
 ) -> None:
-    """Plain streaming exceptions should propagate their text to message:cancelled."""
+    """Plain streaming exceptions should propagate their text to the typed error outcome."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -2342,7 +2342,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             team_mode="coordinate",
         )
 
-    assert resolution.state == "error_without_visible_response"
+    assert resolution.state == "cancelled_with_visible_response"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2406,8 +2406,8 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             team_mode="coordinate",
         )
 
-    assert resolution.state == "kept_prior_visible_stream_after_completed_terminal_failure"
-    assert resolution.response_identity_event_id == "$team-msg"
+    assert resolution.state == "kept_prior_visible_stream_after_cancel"
+    assert resolution.response_identity_event_id is None
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2725,7 +2725,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             team_mode="coordinate",
         )
 
-    assert resolution.state == "error_without_visible_response"
+    assert resolution.state == "error_with_visible_response"
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -4918,6 +4918,84 @@ class TestUserIdPassthrough:
 
         assert recorder.outcome == "completed"
         assert recorder.assistant_text == "hello from final event"
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_final_event_overwrites_partial_text_in_turn_recorder(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Canonical final completion content should overwrite earlier streamed partial text."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="hel")
+            yield RunCompletedEvent(
+                content="hello",
+                run_id="run-corrected",
+                session_id="session1",
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+        recorder = TurnRecorder(user_message="test")
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                turn_recorder=recorder,
+            ):
+                pass
+
+        assert recorder.outcome == "completed"
+        assert recorder.assistant_text == "hello"
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_empty_final_event_overwrites_partial_text_in_turn_recorder(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Empty canonical final content should clear earlier partial recorder text."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="temporary")
+            yield RunCompletedEvent(
+                content="",
+                run_id="run-empty-final",
+                session_id="session1",
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+        recorder = TurnRecorder(user_message="test")
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                turn_recorder=recorder,
+            ):
+                pass
+
+        assert recorder.outcome == "completed"
+        assert recorder.assistant_text == ""
 
     @pytest.mark.asyncio
     async def test_ai_response_metadata_uses_room_resolved_runtime_model(self, tmp_path: Path) -> None:

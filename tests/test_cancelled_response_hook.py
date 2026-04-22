@@ -307,7 +307,7 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "expected_visible_event_id"),
-    [("final", None), ("streamed", "$stream")],
+    [("final", None), ("streamed", None)],
 )
 async def test_suppressed_delivery_emits_cancelled_hook(
     tmp_path: Path,
@@ -507,3 +507,127 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
     assert delivery_result.delivery_kind == expected_delivery_kind
     assert delivery_result.response_text == "visible response"
     assert cancelled_seen == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("existing_event_id", "expected_state", "expected_visible_event_id"),
+    [
+        (None, "error_without_visible_response", None),
+        ("$existing", "error_with_visible_response", "$existing"),
+    ],
+)
+async def test_deliver_final_delivery_failure_emits_cancelled_hook(
+    tmp_path: Path,
+    existing_event_id: str | None,
+    expected_state: str,
+    expected_visible_event_id: str | None,
+) -> None:
+    """Ordinary final send/edit failures must still emit exactly one cancelled hook."""
+    cancelled_seen: list[CancelledResponseInfo] = []
+
+    @hook(EVENT_MESSAGE_CANCELLED)
+    async def on_cancelled(ctx: CancelledResponseContext) -> None:
+        cancelled_seen.append(ctx.info)
+
+    registry = HookRegistry.from_plugins([_plugin("test-delivery-failure", [on_cancelled])])
+    config, response_hooks = _response_hook_service(tmp_path, registry)
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    parsed = MagicMock()
+    parsed.formatted_text = "visible response"
+    parsed.option_map = None
+    parsed.options_list = None
+
+    with (
+        patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=False)),
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value=None)),
+    ):
+        outcome = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$event"),
+                existing_event_id=existing_event_id,
+                existing_event_is_placeholder=False,
+                response_text="visible response",
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-delivery-failure",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+    assert outcome.state == expected_state
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].visible_response_event_id == expected_visible_event_id
+    assert cancelled_seen[0].failure_reason == "delivery_failed"
+
+
+@pytest.mark.asyncio
+async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_after_cleanup_attempt(
+    tmp_path: Path,
+) -> None:
+    """Suppressed placeholder cleanup failure must not emit hooks before cleanup succeeds."""
+    cancelled_seen: list[CancelledResponseInfo] = []
+
+    @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+    async def suppress_response(ctx: BeforeResponseContext) -> None:
+        ctx.draft.suppress = True
+
+    @hook(EVENT_MESSAGE_CANCELLED)
+    async def on_cancelled(ctx: CancelledResponseContext) -> None:
+        cancelled_seen.append(ctx.info)
+
+    registry = HookRegistry.from_plugins(
+        [_plugin("test-suppression-cleanup-failure", [suppress_response, on_cancelled])],
+    )
+    config, response_hooks = _response_hook_service(tmp_path, registry)
+
+    async def redact_message_event(*, room_id: str, event_id: str, reason: str) -> bool:
+        del room_id, event_id, reason
+        assert cancelled_seen == []
+        return False
+
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(side_effect=redact_message_event),
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    outcome = await gateway.deliver_final(
+        FinalDeliveryRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            existing_event_id="$placeholder",
+            existing_event_is_placeholder=True,
+            response_text="suppressed",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-suppressed-cleanup-fail",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert outcome.state == "suppression_cleanup_failed"
+    assert outcome.visible_response_event_id == "$placeholder"
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].visible_response_event_id == "$placeholder"

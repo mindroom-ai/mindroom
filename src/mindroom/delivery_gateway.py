@@ -53,10 +53,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
 
 
-class SuppressedPlaceholderCleanupError(RuntimeError):
-    """Raised when one provisional suppressed response cannot be removed safely."""
-
-
 @dataclass
 class ResponseHookService:
     """Own response hook execution around final delivery."""
@@ -462,9 +458,7 @@ class DeliveryGateway:
                 extra_content=extra_content,
             )
             if cleanup_outcome.state == "suppression_cleanup_failed":
-                raise SuppressedPlaceholderCleanupError(
-                    cleanup_outcome.failure_reason or "completed placeholder-only cleanup failed",
-                )
+                return cleanup_outcome
         return FinalDeliveryOutcome.error_without_visible_response(
             failure_reason=failure_reason,
             tool_trace=tool_trace or (),
@@ -519,7 +513,7 @@ class DeliveryGateway:
             extra_content=extra_content,
         )
 
-    async def _cleanup_visible_placeholder_or_raise(
+    async def _cleanup_visible_placeholder(
         self,
         *,
         room_id: str,
@@ -531,9 +525,9 @@ class DeliveryGateway:
         failure_reason: str,
         tool_trace: list[ToolTraceEntry] | None = None,
         extra_content: dict[str, Any] | None = None,
-    ) -> None:
-        """Redact a visible placeholder and raise if cleanup fails."""
-        cleanup_outcome = await self._redact_visible_response_event(
+    ) -> FinalDeliveryOutcome:
+        """Redact a visible placeholder and return the canonical cleanup outcome."""
+        return await self._redact_visible_response_event(
             room_id=room_id,
             event_id=event_id,
             response_kind=response_kind,
@@ -544,10 +538,6 @@ class DeliveryGateway:
             tool_trace=tool_trace,
             extra_content=extra_content,
         )
-        if cleanup_outcome.state == "suppression_cleanup_failed":
-            raise SuppressedPlaceholderCleanupError(
-                cleanup_outcome.failure_reason or "visible placeholder cleanup failed",
-            )
 
     async def _deliver_visible_response(
         self,
@@ -599,7 +589,7 @@ class DeliveryGateway:
                 return outcome
 
             if existing_event_is_placeholder:
-                await self._cleanup_visible_placeholder_or_raise(
+                cleanup_outcome = await self._cleanup_visible_placeholder(
                     room_id=target.room_id,
                     event_id=existing_event_id,
                     response_kind=response_kind,
@@ -610,6 +600,8 @@ class DeliveryGateway:
                     tool_trace=tool_trace,
                     extra_content=extra_content,
                 )
+                if cleanup_outcome.state == "suppression_cleanup_failed":
+                    return cleanup_outcome
                 return FinalDeliveryOutcome.error_without_visible_response(
                     failure_reason="delivery_failed",
                     tool_trace=tool_trace or (),
@@ -797,13 +789,6 @@ class DeliveryGateway:
         )
         if draft.suppress:
             visible_response_event_id = request.existing_event_id if request.existing_event_is_placeholder else None
-            await self._emit_cancelled_response_best_effort(
-                correlation_id=request.correlation_id,
-                envelope=request.response_envelope,
-                visible_response_event_id=visible_response_event_id,
-                response_kind=request.response_kind,
-                failure_reason="suppressed_by_hook",
-            )
             self.deps.logger.info(
                 "Response suppressed by hook",
                 response_kind=request.response_kind,
@@ -811,7 +796,7 @@ class DeliveryGateway:
                 correlation_id=request.correlation_id,
             )
             if visible_response_event_id is not None:
-                cleanup_outcome = await self._redact_visible_response_event(
+                outcome = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
                     event_id=visible_response_event_id,
                     response_kind=request.response_kind,
@@ -822,16 +807,20 @@ class DeliveryGateway:
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
                 )
-                if cleanup_outcome.state == "suppression_cleanup_failed":
-                    raise SuppressedPlaceholderCleanupError(
-                        cleanup_outcome.failure_reason or "suppressed placeholder cleanup failed",
-                    )
-                return cleanup_outcome
-            return FinalDeliveryOutcome.suppressed_without_visible_response(
-                failure_reason="suppressed_by_hook",
-                tool_trace=draft.tool_trace or (),
-                extra_content=draft.extra_content,
-            )
+            else:
+                outcome = FinalDeliveryOutcome.suppressed_without_visible_response(
+                    failure_reason="suppressed_by_hook",
+                    tool_trace=draft.tool_trace or (),
+                    extra_content=draft.extra_content,
+                )
+            if request.emit_terminal_hooks:
+                return await self.emit_terminal_outcome_hooks(
+                    outcome=outcome,
+                    correlation_id=request.correlation_id,
+                    envelope=request.response_envelope,
+                    response_kind=request.response_kind,
+                )
+            return outcome
 
         outcome = await self._deliver_visible_response(
             target=request.target,
@@ -845,7 +834,7 @@ class DeliveryGateway:
             tool_trace=draft.tool_trace,
             extra_content=draft.extra_content,
         )
-        if request.emit_terminal_hooks and outcome.state != "final_visible_delivery":
+        if request.emit_terminal_hooks and not outcome.emits_after_response:
             return await self.emit_terminal_outcome_hooks(
                 outcome=outcome,
                 correlation_id=request.correlation_id,
@@ -878,7 +867,7 @@ class DeliveryGateway:
                 extra_content=extra_content,
             )
         elif request.existing_event_is_placeholder:
-            await self._cleanup_visible_placeholder_or_raise(
+            cleanup_outcome = await self._cleanup_visible_placeholder(
                 room_id=request.target.room_id,
                 event_id=request.event_id,
                 response_kind=request.response_kind,
@@ -888,9 +877,13 @@ class DeliveryGateway:
                 failure_reason=failure_reason,
                 extra_content=extra_content,
             )
-            outcome = FinalDeliveryOutcome.cancelled_without_visible_response(
-                failure_reason=failure_reason,
-                extra_content=extra_content,
+            outcome = (
+                cleanup_outcome
+                if cleanup_outcome.state == "suppression_cleanup_failed"
+                else FinalDeliveryOutcome.cancelled_without_visible_response(
+                    failure_reason=failure_reason,
+                    extra_content=extra_content,
+                )
             )
         else:
             outcome = FinalDeliveryOutcome.cancelled_with_visible_response(
@@ -1106,15 +1099,8 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
         if draft.suppress:
-            await self._emit_cancelled_response_best_effort(
-                correlation_id=request.correlation_id,
-                envelope=request.response_envelope,
-                visible_response_event_id=visible_stream_event_id,
-                response_kind=request.response_kind,
-                failure_reason="suppressed_by_hook",
-            )
             if streamed_event_id is not None:
-                cleanup_outcome = await self._redact_visible_response_event(
+                outcome = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
                     event_id=streamed_event_id,
                     response_kind=request.response_kind,
@@ -1125,15 +1111,17 @@ class DeliveryGateway:
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
                 )
-                if cleanup_outcome.state == "suppression_cleanup_failed":
-                    raise SuppressedPlaceholderCleanupError(
-                        cleanup_outcome.failure_reason or "suppressed streamed cleanup failed",
-                    )
-                return cleanup_outcome
-            return FinalDeliveryOutcome.suppressed_without_visible_response(
-                failure_reason="suppressed_by_hook",
-                tool_trace=draft.tool_trace or (),
-                extra_content=draft.extra_content,
+            else:
+                outcome = FinalDeliveryOutcome.suppressed_without_visible_response(
+                    failure_reason="suppressed_by_hook",
+                    tool_trace=draft.tool_trace or (),
+                    extra_content=draft.extra_content,
+                )
+            return await self.emit_terminal_outcome_hooks(
+                outcome=outcome,
+                correlation_id=request.correlation_id,
+                envelope=request.response_envelope,
+                response_kind=request.response_kind,
             )
 
         needs_final_edit = (

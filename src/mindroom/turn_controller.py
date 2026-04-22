@@ -40,7 +40,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
 )
-from mindroom.delivery_gateway import SendTextRequest, SuppressedPlaceholderCleanupError
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState, apply_delivery_resolution
 from mindroom.hooks import build_hook_matrix_admin
@@ -737,28 +737,20 @@ class TurnController:
             ),
         )
 
-        try:
-            response_resolution = await self.deps.response_runner.generate_response(
-                ResponseRequest(
-                    room_id=room.room_id,
-                    prompt=f"The user selected: {selection.selected_value}",
-                    reply_to_event_id=selection.question_event_id,
-                    thread_id=selection.thread_id,
-                    thread_history=thread_history,
-                    existing_event_id=ack_event_id,
-                    existing_event_is_placeholder=True,
-                    user_id=user_id,
-                    target=response_target,
-                    matrix_run_metadata=selection_matrix_run_metadata,
-                ),
-            )
-        except SuppressedPlaceholderCleanupError:
-            self.deps.logger.warning(
-                "Suppressed interactive acknowledgment cleanup failed",
-                source_event_id=selection.question_event_id,
-                acknowledgment_event_id=ack_event_id,
-            )
-            return
+        response_resolution = await self.deps.response_runner.generate_response(
+            ResponseRequest(
+                room_id=room.room_id,
+                prompt=f"The user selected: {selection.selected_value}",
+                reply_to_event_id=selection.question_event_id,
+                thread_id=selection.thread_id,
+                thread_history=thread_history,
+                existing_event_id=ack_event_id,
+                existing_event_is_placeholder=True,
+                user_id=user_id,
+                target=response_target,
+                matrix_run_metadata=selection_matrix_run_metadata,
+            ),
+        )
         if response_resolution.should_mark_handled:
             self._mark_source_events_responded(
                 apply_delivery_resolution(
@@ -1149,17 +1141,9 @@ class TurnController:
                 thread_id=dispatch.context.thread_id,
                 error=failure,
             )
-            if response_resolution.should_mark_handled:
-                self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))
+            if response_event_id is not None:
+                self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
             return
-        except SuppressedPlaceholderCleanupError:
-            with bound_log_context(**dispatch.target.log_context):
-                self.deps.logger.warning(
-                    "Suppressed response cleanup failed",
-                    source_event_id=event.event_id,
-                    correlation_id=dispatch.correlation_id,
-                )
-            raise
         if response_resolution.should_mark_handled:
             self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))
 

@@ -16,7 +16,14 @@ from html import escape
 from typing import TYPE_CHECKING, Annotated, Literal, NoReturn, cast
 from uuid import uuid4
 
-from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import (
+    RunCompletedEvent,
+    RunContentEvent,
+    RunErrorEvent,
+    RunOutput,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
@@ -1042,6 +1049,8 @@ def _format_stream_tool_event(
 def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> str | None:
     """Extract text content from a stream event."""
     if isinstance(event, RunContentEvent) and event.content:
+        return str(event.content)
+    if isinstance(event, RunCompletedEvent) and event.content is not None:
         return str(event.content)
     if isinstance(event, str):
         return event
