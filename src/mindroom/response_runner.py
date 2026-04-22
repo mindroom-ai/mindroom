@@ -216,18 +216,27 @@ def _stream_transport_outcome_from_delivery_exception(
     )
 
 
-def _late_stream_finalize_cancelled_outcome(
+def _late_stream_finalize_preserved_outcome(
     *,
     transport_outcome: StreamTransportOutcome,
     failure_reason: str,
+    cancelled: bool,
 ) -> FinalDeliveryOutcome | None:
-    """Preserve one already-visible streamed reply when finalization is cancelled late."""
+    """Preserve one already-visible streamed reply when finalization fails late."""
     if (
         transport_outcome.last_physical_stream_event_id is None
         or transport_outcome.visible_body_state != "visible_body"
     ):
         return None
-    return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
+    if cancelled:
+        return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
+            last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
+            final_visible_body=transport_outcome.rendered_body,
+            failure_reason=failure_reason,
+            option_map=transport_outcome.option_map,
+            options_list=transport_outcome.options_list,
+        )
+    return FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
         last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
         final_visible_body=transport_outcome.rendered_body,
         failure_reason=failure_reason,
@@ -1011,10 +1020,12 @@ class ResponseRunner:
         """Return one pipeline outcome label for the canonical final delivery outcome."""
         if final_delivery_outcome is not None and final_delivery_outcome.suppressed:
             return "suppressed"
-        if final_delivery_outcome is not None and final_delivery_outcome.delivery_kind is not None:
-            return final_delivery_outcome.delivery_kind
         if final_delivery_outcome is not None and final_delivery_outcome.terminal_status == "cancelled":
             return "cancelled"
+        if final_delivery_outcome is not None and final_delivery_outcome.terminal_status == "error":
+            return "error"
+        if final_delivery_outcome is not None and final_delivery_outcome.delivery_kind is not None:
+            return final_delivery_outcome.delivery_kind
         if final_delivery_outcome is not None and final_delivery_outcome.has_any_visible_response:
             return "visible_response_preserved"
         return "no_visible_response"
@@ -1390,9 +1401,10 @@ class ResponseRunner:
                         is_team=True,
                         response_event_id=event_id or tracked_event_id,
                     )
-                    late_outcome = _late_stream_finalize_cancelled_outcome(
+                    late_outcome = _late_stream_finalize_preserved_outcome(
                         transport_outcome=transport_outcome,
                         failure_reason="stream_finalize_cancelled",
+                        cancelled=True,
                     )
                     if late_outcome is not None:
                         final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
@@ -1599,6 +1611,11 @@ class ResponseRunner:
         except Exception as error:
             if not delivery_stage_started:
                 raise
+            tracked_event_id = self._latest_stream_event_id(
+                tracked_event_id=tracked_event_id,
+                stream_state=stream_state,
+                fallback_event_id=run_message_id,
+            )
             delivery_failure_reason = (
                 "sync_restart_cancelled"
                 if isinstance(error, asyncio.CancelledError) and is_sync_restart_cancel(error)
@@ -1610,11 +1627,7 @@ class ResponseRunner:
             final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=_late_delivery_failure_outcome(
                     tracked_event_id=tracked_event_id,
-                    tracked_event_was_visible=(
-                        stream_transport_outcome.has_rendered_visible_body
-                        if stream_transport_outcome is not None
-                        else False
-                    ),
+                    tracked_event_was_visible=_stream_state_has_visible_body(stream_state),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                     placeholder_event_id=run_message_id if request.existing_event_id is None else None,
@@ -1625,14 +1638,15 @@ class ResponseRunner:
                 response_kind="team",
             )
         if final_delivery_outcome is None and delivery_failure_reason is not None:
+            tracked_event_id = self._latest_stream_event_id(
+                tracked_event_id=tracked_event_id,
+                stream_state=stream_state,
+                fallback_event_id=run_message_id,
+            )
             final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=_late_delivery_failure_outcome(
                     tracked_event_id=tracked_event_id,
-                    tracked_event_was_visible=(
-                        stream_transport_outcome.has_rendered_visible_body
-                        if stream_transport_outcome is not None
-                        else False
-                    ),
+                    tracked_event_was_visible=_stream_state_has_visible_body(stream_state),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                     placeholder_event_id=run_message_id if request.existing_event_id is None else None,
@@ -2332,9 +2346,10 @@ class ResponseRunner:
         except Exception as error:
             self.deps.logger.exception("Error in streaming response", error=str(error))
             late_outcome = (
-                _late_stream_finalize_cancelled_outcome(
+                _late_stream_finalize_preserved_outcome(
                     transport_outcome=transport_outcome,
                     failure_reason=str(error),
+                    cancelled=False,
                 )
                 if transport_outcome is not None
                 else None
@@ -2390,9 +2405,10 @@ class ResponseRunner:
                 is_team=False,
                 response_event_id=transport_outcome.last_physical_stream_event_id,
             )
-            late_outcome = _late_stream_finalize_cancelled_outcome(
+            late_outcome = _late_stream_finalize_preserved_outcome(
                 transport_outcome=transport_outcome,
                 failure_reason="stream_finalize_cancelled",
+                cancelled=True,
             )
             if late_outcome is not None:
                 return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(

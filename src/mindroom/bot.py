@@ -1727,11 +1727,12 @@ class TeamBot(AgentBot):
                     existing_event_id=existing_event_id,
                     existing_event_is_placeholder=existing_event_is_placeholder,
                     response_text=team_resolution.reason,
-                    response_kind="team",
+                    response_kind="system",
                     response_envelope=fallback_envelope,
                     correlation_id=correlation_id or reply_to_event_id or room_id,
                     tool_trace=None,
                     extra_content=None,
+                    apply_before_hooks=False,
                 ),
             )
             return TurnDeliveryResolution.from_outcome(

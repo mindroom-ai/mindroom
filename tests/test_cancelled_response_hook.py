@@ -514,7 +514,7 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
     ("existing_event_id", "expected_state", "expected_visible_event_id"),
     [
         (None, "error_without_visible_response", None),
-        ("$existing", "error_with_visible_response", "$existing"),
+        ("$existing", "kept_prior_visible_response_after_error", "$existing"),
     ],
 )
 async def test_deliver_final_delivery_failure_emits_cancelled_hook(

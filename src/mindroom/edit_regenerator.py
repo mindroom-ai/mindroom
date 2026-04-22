@@ -314,8 +314,15 @@ class EditRegenerator:
         else:
             if needs_turn_record_backfill:
                 self._record_turn_record(regeneration_turn_record)
-            self._logger().info(
-                "Suppressed regeneration left existing response unchanged",
-                original_event_id=original_event_id,
-                response_event_id=response_event_id,
-            )
+            if regenerated_resolution.state == "kept_prior_visible_response_after_error":
+                self._logger().warning(
+                    "Regeneration failed; keeping existing visible response",
+                    original_event_id=original_event_id,
+                    response_event_id=response_event_id,
+                )
+            else:
+                self._logger().info(
+                    "Suppressed regeneration left existing response unchanged",
+                    original_event_id=original_event_id,
+                    response_event_id=response_event_id,
+                )

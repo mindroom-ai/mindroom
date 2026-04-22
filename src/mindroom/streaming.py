@@ -79,12 +79,6 @@ class StreamDeliveryState:
     event_id: str | None = None
     accumulated_text: str = ""
     finalization_outcome: StreamTransportOutcome | None = None
-    suppressed_and_cleaned: bool = False
-    repair_text: str | None = None
-    repair_tool_trace: list[ToolTraceEntry] | None = None
-    repair_extra_content: dict[str, Any] | None = None
-    repair_option_map: dict[str, str] | None = None
-    repair_options_list: list[dict[str, str]] | None = None
 
 
 class StreamingDeliveryError(Exception):
@@ -439,6 +433,7 @@ class StreamingResponse:
                 is_final=True,
                 allow_empty_progress=has_placeholder,
                 stream_status=final_stream_status,
+                retry_on_failure=not restart_interrupted,
             )
         except asyncio.CancelledError:
             logger.warning(
@@ -516,6 +511,7 @@ class StreamingResponse:
         *,
         allow_empty_progress: bool = False,
         stream_status: str | None = None,
+        retry_on_failure: bool = True,
     ) -> bool:
         """Send new message or edit existing one."""
         prepared_delivery = self._prepare_delivery(
@@ -600,7 +596,7 @@ class StreamingResponse:
         return _PreparedStreamingDelivery(
             content=content,
             display_text=display_text,
-            retry_on_failure=is_final and self.event_id is not None,
+            retry_on_failure=retry_on_failure and is_final and self.event_id is not None,
         )
 
     def _mark_delivery_committed(self, committed_state: _CommittedDeliveryState) -> None:

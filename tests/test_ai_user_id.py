@@ -1802,6 +1802,84 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
 
 
 @pytest.mark.asyncio
+async def test_generate_response_locked_preserves_visible_stream_on_late_finalize_error(
+    tmp_path: Path,
+) -> None:
+    """Late streamed finalization errors should preserve the visible stream as an error outcome."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    request = replace(
+        _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        response_envelope=MessageEnvelope(
+            source_event_id="$user_msg",
+            room_id="!test:localhost",
+            target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            requester_id="@alice:localhost",
+            sender_id="@alice:localhost",
+            body="Hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="general",
+            source_kind="message",
+        ),
+        correlation_id="corr-stream-error",
+    )
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_generate_streaming(
+            *_args: object,
+            **kwargs: object,
+        ) -> StreamTransportOutcome:
+            turn_recorder = cast("TurnRecorder", kwargs["turn_recorder"])
+            turn_recorder.set_run_id("run-stream-delivery-error")
+            turn_recorder.record_completed(
+                run_metadata={},
+                assistant_text="Hello!",
+                completed_tools=[],
+            )
+            return StreamTransportOutcome(
+                last_physical_stream_event_id="$stream-msg",
+                terminal_operation="send",
+                terminal_result="succeeded",
+                terminal_status="completed",
+                rendered_body="Hello!",
+                visible_body_state="visible_body",
+            )
+
+        coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
+            side_effect=RuntimeError("delivery crash"),
+        )
+
+        with patch.object(
+            ResponseRunner,
+            "generate_streaming_ai_response",
+            new=AsyncMock(side_effect=fake_generate_streaming),
+        ):
+            resolution = await coordinator.generate_response_locked(
+                request,
+                resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            )
+
+    assert resolution.state == "kept_prior_visible_stream_after_error"
+    assert resolution.response_identity_event_id == "$stream-msg"
+
+
+@pytest.mark.asyncio
 async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_context(
     tmp_path: Path,
 ) -> None:
@@ -2447,6 +2525,61 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
         ("user", "Hello"),
         ("assistant", "Team hello\n\n[interrupted]"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_preserves_visible_stream_on_late_finalize_error(
+    tmp_path: Path,
+) -> None:
+    """Late streamed team finalization errors should preserve the visible stream as an error outcome."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
+            side_effect=RuntimeError("delivery crash"),
+        )
+
+        async def consume_stream(request: object) -> StreamTransportOutcome:
+            accumulated = ""
+            async for chunk in request.response_stream:
+                accumulated += str(chunk)
+            return _stream_outcome("$team-msg", accumulated)
+
+        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(side_effect=consume_stream)
+
+        def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Team hello"
+
+            return fake_stream()
+
+        mock_team_stream.side_effect = fake_team_response_stream
+
+        resolution = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert resolution.state == "kept_prior_visible_stream_after_error"
+    assert resolution.response_identity_event_id == "$team-msg"
 
 
 def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_trace_is_empty(

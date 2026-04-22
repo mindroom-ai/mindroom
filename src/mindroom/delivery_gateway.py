@@ -144,19 +144,6 @@ class ResponseHookService:
         await emit(self.hook_context.registry, EVENT_MESSAGE_CANCELLED, context)
 
 
-@dataclass(frozen=True)
-class DeliveryResult:
-    """Final send or edit outcome for one generated response."""
-
-    event_id: str | None
-    response_text: str
-    delivery_kind: Literal["sent", "edited"] | None
-    suppressed: bool = False
-    option_map: dict[str, str] | None = None
-    options_list: list[dict[str, str]] | None = None
-    failure_reason: str | None = None
-
-
 def _is_cancelled_failure_reason(failure_reason: str | None) -> bool:
     """Return whether one fallback failure reason represents cancellation."""
     if failure_reason is None:
@@ -200,9 +187,8 @@ def _late_failure_with_visible_response(
             final_visible_event_id=event_id,
             failure_reason=reason,
         )
-    return FinalDeliveryOutcome.error_with_visible_response(
+    return FinalDeliveryOutcome.kept_prior_visible_response_after_error(
         final_visible_event_id=event_id,
-        final_visible_body="",
         failure_reason=reason,
     )
 
@@ -218,27 +204,14 @@ def _late_delivery_failure_outcome(
 ) -> FinalDeliveryOutcome:
     """Map raw late-failure transport facts into one canonical terminal outcome."""
     cancelled = _is_cancelled_failure_reason(failure_reason)
-
-    if tracked_event_id is not None and tracked_event_id == placeholder_event_id:
-        return _late_failure_without_visible(
-            cancelled=cancelled,
-            reason=(
-                failure_reason
-                or (
-                    "delivery_result_missing_after_placeholder_cancel"
-                    if cancelled
-                    else "delivery_result_missing_after_placeholder"
-                )
-            ),
-        )
-    if (
-        tracked_event_id is not None
-        and existing_event_id is not None
-        and existing_event_is_placeholder
-        and tracked_event_id == existing_event_id
-    ):
+    placeholder_stream_missing = tracked_event_id is not None and (
+        tracked_event_id == placeholder_event_id
+        or (existing_event_id is not None and existing_event_is_placeholder and tracked_event_id == existing_event_id)
+    )
+    if placeholder_stream_missing:
+        assert tracked_event_id is not None
         if tracked_event_was_visible:
-            return _late_failure_with_preserved_stream(
+            outcome = _late_failure_with_preserved_stream(
                 cancelled=cancelled,
                 event_id=tracked_event_id,
                 reason=(
@@ -250,19 +223,20 @@ def _late_delivery_failure_outcome(
                     )
                 ),
             )
-        return _late_failure_without_visible(
-            cancelled=cancelled,
-            reason=(
-                failure_reason
-                or (
-                    "delivery_result_missing_after_visible_placeholder_cancel"
-                    if cancelled
-                    else "delivery_result_missing_after_visible_placeholder"
-                )
-            ),
-        )
-    if tracked_event_id is not None and (existing_event_id is None or tracked_event_id != existing_event_id):
-        return _late_failure_with_preserved_stream(
+        else:
+            outcome = _late_failure_without_visible(
+                cancelled=cancelled,
+                reason=(
+                    failure_reason
+                    or (
+                        "delivery_result_missing_after_placeholder_cancel"
+                        if cancelled
+                        else "delivery_result_missing_after_placeholder"
+                    )
+                ),
+            )
+    elif tracked_event_id is not None and (existing_event_id is None or tracked_event_id != existing_event_id):
+        outcome = _late_failure_with_preserved_stream(
             cancelled=cancelled,
             event_id=tracked_event_id,
             reason=failure_reason
@@ -272,8 +246,8 @@ def _late_delivery_failure_outcome(
                 else "delivery_result_missing_after_visible_stream"
             ),
         )
-    if existing_event_id is not None and not existing_event_is_placeholder:
-        return _late_failure_with_visible_response(
+    elif existing_event_id is not None and not existing_event_is_placeholder:
+        outcome = _late_failure_with_visible_response(
             cancelled=cancelled,
             event_id=existing_event_id,
             reason=failure_reason
@@ -283,10 +257,12 @@ def _late_delivery_failure_outcome(
                 else "delivery_result_missing_after_visible_response"
             ),
         )
-    return _late_failure_without_visible(
-        cancelled=cancelled,
-        reason=failure_reason or ("delivery_result_missing_cancelled" if cancelled else "delivery_result_missing"),
-    )
+    else:
+        outcome = _late_failure_without_visible(
+            cancelled=cancelled,
+            reason=failure_reason or ("delivery_result_missing_cancelled" if cancelled else "delivery_result_missing"),
+        )
+    return outcome
 
 
 @dataclass(frozen=True)
@@ -754,9 +730,8 @@ class DeliveryGateway:
                     tool_trace=tool_trace or (),
                     extra_content=extra_content,
                 )
-            return FinalDeliveryOutcome.error_with_visible_response(
+            return FinalDeliveryOutcome.kept_prior_visible_response_after_error(
                 final_visible_event_id=existing_event_id,
-                final_visible_body="",
                 failure_reason="delivery_failed",
                 tool_trace=tool_trace or (),
                 extra_content=extra_content,
@@ -914,44 +889,119 @@ class DeliveryGateway:
         )
         return False
 
-    async def deliver_final(self, request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
+    async def deliver_final(self, request: FinalDeliveryRequest) -> FinalDeliveryOutcome:  # noqa: C901, PLR0912
         """Apply before/after hooks around one final send or edit."""
-        draft = (
-            await self.deps.response_hooks.apply_before_response(
-                correlation_id=request.correlation_id,
-                envelope=request.response_envelope,
-                response_text=request.response_text,
-                response_kind=request.response_kind,
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
+        try:
+            draft = (
+                await self.deps.response_hooks.apply_before_response(
+                    correlation_id=request.correlation_id,
+                    envelope=request.response_envelope,
+                    response_text=request.response_text,
+                    response_kind=request.response_kind,
+                    tool_trace=request.tool_trace,
+                    extra_content=request.extra_content,
+                )
+                if request.apply_before_hooks
+                else ResponseDraft(
+                    response_text=request.response_text,
+                    response_kind=request.response_kind,
+                    tool_trace=request.tool_trace,
+                    extra_content=request.extra_content,
+                    envelope=request.response_envelope,
+                )
             )
-            if request.apply_before_hooks
-            else ResponseDraft(
-                response_text=request.response_text,
-                response_kind=request.response_kind,
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
-                envelope=request.response_envelope,
-            )
-        )
+        except Exception as error:
+            cancelled = isinstance(error, asyncio.CancelledError)
+            failure_reason = str(error)
+            if request.existing_event_id is not None:
+                if request.existing_event_is_placeholder:
+                    cleanup_outcome = await self._cleanup_visible_placeholder(
+                        room_id=request.target.room_id,
+                        event_id=request.existing_event_id,
+                        response_kind=request.response_kind,
+                        response_envelope=request.response_envelope,
+                        correlation_id=request.correlation_id,
+                        redaction_reason=(
+                            "Cancelled placeholder response"
+                            if cancelled
+                            else "Failed placeholder response before delivery"
+                        ),
+                        failure_reason=failure_reason,
+                        tool_trace=request.tool_trace,
+                        extra_content=request.extra_content,
+                    )
+                    if cleanup_outcome.state == "suppression_cleanup_failed":
+                        outcome = cleanup_outcome
+                    elif cancelled:
+                        outcome = FinalDeliveryOutcome.cancelled_without_visible_response(
+                            failure_reason=failure_reason,
+                            tool_trace=request.tool_trace or (),
+                            extra_content=request.extra_content,
+                        )
+                    else:
+                        outcome = FinalDeliveryOutcome.error_without_visible_response(
+                            failure_reason=failure_reason,
+                            tool_trace=request.tool_trace or (),
+                            extra_content=request.extra_content,
+                        )
+                elif cancelled:
+                    outcome = FinalDeliveryOutcome.cancelled_with_visible_response(
+                        final_visible_event_id=request.existing_event_id,
+                        failure_reason=failure_reason,
+                        tool_trace=request.tool_trace or (),
+                        extra_content=request.extra_content,
+                    )
+                else:
+                    outcome = FinalDeliveryOutcome.kept_prior_visible_response_after_error(
+                        final_visible_event_id=request.existing_event_id,
+                        failure_reason=failure_reason,
+                        tool_trace=request.tool_trace or (),
+                        extra_content=request.extra_content,
+                    )
+            elif cancelled:
+                outcome = FinalDeliveryOutcome.cancelled_without_visible_response(
+                    failure_reason=failure_reason,
+                    tool_trace=request.tool_trace or (),
+                    extra_content=request.extra_content,
+                )
+            else:
+                outcome = FinalDeliveryOutcome.error_without_visible_response(
+                    failure_reason=failure_reason,
+                    tool_trace=request.tool_trace or (),
+                    extra_content=request.extra_content,
+                )
+            if request.emit_terminal_hooks:
+                return await self.emit_terminal_outcome_hooks(
+                    outcome=outcome,
+                    correlation_id=request.correlation_id,
+                    envelope=request.response_envelope,
+                    response_kind=request.response_kind,
+                )
+            return outcome
         if draft.suppress:
-            visible_response_event_id = request.existing_event_id if request.existing_event_is_placeholder else None
             self.deps.logger.info(
                 "Response suppressed by hook",
                 response_kind=request.response_kind,
                 source_event_id=request.response_envelope.source_event_id,
                 correlation_id=request.correlation_id,
             )
-            if visible_response_event_id is not None:
+            if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 outcome = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
-                    event_id=visible_response_event_id,
+                    event_id=request.existing_event_id,
                     response_kind=request.response_kind,
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id,
                     redaction_reason="Suppressed placeholder response",
                     failure_reason="suppressed_by_hook",
                     tool_trace=draft.tool_trace,
+                    extra_content=draft.extra_content,
+                )
+            elif request.existing_event_id is not None:
+                outcome = FinalDeliveryOutcome.kept_prior_visible_response_after_suppression(
+                    final_visible_event_id=request.existing_event_id,
+                    failure_reason="suppressed_by_hook",
+                    tool_trace=draft.tool_trace or (),
                     extra_content=draft.extra_content,
                 )
             else:

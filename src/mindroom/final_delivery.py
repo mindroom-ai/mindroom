@@ -21,6 +21,8 @@ FinalDeliveryState = Literal[
     "kept_prior_visible_stream_after_completed_terminal_failure",
     "kept_prior_visible_stream_after_cancel",
     "kept_prior_visible_stream_after_error",
+    "kept_prior_visible_response_after_suppression",
+    "kept_prior_visible_response_after_error",
     "cancelled_with_visible_response",
     "cancelled_with_visible_note",
     "cancelled_without_visible_response",
@@ -142,6 +144,14 @@ LEGAL_FINAL_DELIVERY_STATES: Mapping[FinalDeliveryState, _StateValidationRule] =
             allows_final_visible_event=False,
             requires_prior_visible_stream=True,
         ),
+        "kept_prior_visible_response_after_suppression": _StateValidationRule(
+            terminal_status="completed",
+            requires_final_visible_event=True,
+        ),
+        "kept_prior_visible_response_after_error": _StateValidationRule(
+            terminal_status="error",
+            requires_final_visible_event=True,
+        ),
         "cancelled_with_visible_response": _StateValidationRule(
             terminal_status="cancelled",
             requires_final_visible_event=True,
@@ -259,6 +269,32 @@ FINAL_DELIVERY_POLICY: Mapping[FinalDeliveryState, FinalDeliveryPolicy] = Mappin
             should_queue_thread_summary=False,
             should_register_interactive_follow_up=True,
             should_shield_late_failures=True,
+        ),
+        "kept_prior_visible_response_after_suppression": FinalDeliveryPolicy(
+            emits_after_response=False,
+            emits_cancelled_response=True,
+            visible_response_event_source="final_visible_event",
+            response_identity_event_source="none",
+            turn_completion_event_source="none",
+            should_mark_handled=False,
+            retryable=True,
+            should_persist_response_identity=False,
+            should_queue_thread_summary=False,
+            should_register_interactive_follow_up=False,
+            should_shield_late_failures=False,
+        ),
+        "kept_prior_visible_response_after_error": FinalDeliveryPolicy(
+            emits_after_response=False,
+            emits_cancelled_response=True,
+            visible_response_event_source="final_visible_event",
+            response_identity_event_source="none",
+            turn_completion_event_source="none",
+            should_mark_handled=False,
+            retryable=True,
+            should_persist_response_identity=False,
+            should_queue_thread_summary=False,
+            should_register_interactive_follow_up=False,
+            should_shield_late_failures=False,
         ),
         "cancelled_with_visible_response": FinalDeliveryPolicy(
             emits_after_response=False,
@@ -547,6 +583,7 @@ class FinalDeliveryOutcome:
     def suppressed(self) -> bool:
         """Return whether this outcome ended in one suppression state."""
         return self.state in {
+            "kept_prior_visible_response_after_suppression",
             "suppressed_without_visible_response",
             "suppressed_redacted",
             "suppression_cleanup_failed",
@@ -657,6 +694,50 @@ class FinalDeliveryOutcome:
             extra_content=extra_content or EMPTY_MAPPING,
             option_map=option_map,
             options_list=tuple(options_list) if options_list is not None else None,
+        )
+
+    @classmethod
+    def kept_prior_visible_response_after_suppression(
+        cls,
+        *,
+        final_visible_event_id: str,
+        final_visible_body: str | None = None,
+        failure_reason: str | None = None,
+        tool_trace: Sequence[ToolTraceEntry] = (),
+        extra_content: Mapping[str, Any] | None = None,
+    ) -> FinalDeliveryOutcome:
+        """Build the suppressed state where a prior visible response remains unchanged."""
+        return cls(
+            state="kept_prior_visible_response_after_suppression",
+            terminal_status="completed",
+            final_visible_event_id=final_visible_event_id,
+            last_physical_stream_event_id=None,
+            final_visible_body=final_visible_body,
+            failure_reason=failure_reason,
+            tool_trace=tuple(tool_trace),
+            extra_content=extra_content or EMPTY_MAPPING,
+        )
+
+    @classmethod
+    def kept_prior_visible_response_after_error(
+        cls,
+        *,
+        final_visible_event_id: str,
+        final_visible_body: str | None = None,
+        failure_reason: str | None = None,
+        tool_trace: Sequence[ToolTraceEntry] = (),
+        extra_content: Mapping[str, Any] | None = None,
+    ) -> FinalDeliveryOutcome:
+        """Build the error state where a prior visible response remains unchanged."""
+        return cls(
+            state="kept_prior_visible_response_after_error",
+            terminal_status="error",
+            final_visible_event_id=final_visible_event_id,
+            last_physical_stream_event_id=None,
+            final_visible_body=final_visible_body,
+            failure_reason=failure_reason,
+            tool_trace=tuple(tool_trace),
+            extra_content=extra_content or EMPTY_MAPPING,
         )
 
     @classmethod

@@ -78,6 +78,13 @@ def _suppressed_without_visible_response() -> FinalDeliveryOutcome:
     return FinalDeliveryOutcome.suppressed_without_visible_response()
 
 
+def _kept_prior_visible_response_after_suppression() -> FinalDeliveryOutcome:
+    return FinalDeliveryOutcome.kept_prior_visible_response_after_suppression(
+        final_visible_event_id="$existing",
+        final_visible_body="existing reply",
+    )
+
+
 def _suppressed_redacted() -> FinalDeliveryOutcome:
     return FinalDeliveryOutcome.suppressed_redacted(
         last_physical_stream_event_id="$suppressed",
@@ -94,6 +101,13 @@ def _error_with_visible_response() -> FinalDeliveryOutcome:
     return FinalDeliveryOutcome.error_with_visible_response(
         final_visible_event_id="$error",
         final_visible_body="Something went wrong.",
+    )
+
+
+def _kept_prior_visible_response_after_error() -> FinalDeliveryOutcome:
+    return FinalDeliveryOutcome.kept_prior_visible_response_after_error(
+        final_visible_event_id="$existing",
+        final_visible_body="existing reply",
     )
 
 
@@ -224,6 +238,23 @@ def _error_without_visible_response() -> FinalDeliveryOutcome:
             id="cancelled_without_visible_response",
         ),
         pytest.param(
+            _kept_prior_visible_response_after_suppression,
+            _PolicyExpectation(
+                visible_response_event_id="$existing",
+                response_identity_event_id=None,
+                turn_completion_event_id=None,
+                emits_after_response=False,
+                emits_cancelled_response=True,
+                should_mark_handled=False,
+                retryable=True,
+                should_persist_response_identity=False,
+                should_queue_thread_summary=False,
+                should_register_interactive_follow_up=False,
+                should_shield_late_failures=False,
+            ),
+            id="kept_prior_visible_response_after_suppression",
+        ),
+        pytest.param(
             _suppressed_without_visible_response,
             _PolicyExpectation(
                 visible_response_event_id=None,
@@ -290,6 +321,23 @@ def _error_without_visible_response() -> FinalDeliveryOutcome:
                 should_shield_late_failures=True,
             ),
             id="error_with_visible_response",
+        ),
+        pytest.param(
+            _kept_prior_visible_response_after_error,
+            _PolicyExpectation(
+                visible_response_event_id="$existing",
+                response_identity_event_id=None,
+                turn_completion_event_id=None,
+                emits_after_response=False,
+                emits_cancelled_response=True,
+                should_mark_handled=False,
+                retryable=True,
+                should_persist_response_identity=False,
+                should_queue_thread_summary=False,
+                should_register_interactive_follow_up=False,
+                should_shield_late_failures=False,
+            ),
+            id="kept_prior_visible_response_after_error",
         ),
         pytest.param(
             _error_without_visible_response,

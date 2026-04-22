@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -634,6 +635,54 @@ async def test_reload_plugins_records_handled_turn_when_reply_delivery_fails(tmp
     )
 
     reload_plugins.assert_awaited_once()
+    context.record_handled_turn.assert_called_once_with(HandledTurnState.from_source_event_id("$event"))
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_dispatch_records_handled_turn_when_reply_delivery_fails(tmp_path: Path) -> None:
+    """Tool-dispatched skill commands must not replay if their confirmation reply never lands."""
+    context = _command_handler_context(
+        tmp_path,
+        send_response=AsyncMock(return_value=_error_resolution()),
+    )
+    context = replace(context, run_skill_command_tool=AsyncMock(return_value="✅ Tool completed."))
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@alice:example.org",
+        event_id="$event",
+        source={"content": {"body": "!skill demo do thing"}},
+    )
+    command = Command(
+        type=CommandType.SKILL,
+        args={"skill_name": "demo", "args_text": "do thing"},
+        raw_text="!skill demo do thing",
+    )
+
+    with (
+        patch("mindroom.commands.handler.check_agent_mentioned", return_value=([], None, None)),
+        patch(
+            "mindroom.commands.handler._resolve_skill_command_agent",
+            new=AsyncMock(return_value=("demo_agent", None)),
+        ),
+        patch(
+            "mindroom.commands.handler.resolve_skill_command_spec",
+            return_value=SimpleNamespace(
+                name="demo",
+                user_invocable=True,
+                dispatch=SimpleNamespace(kind="tool", tool_name="demo_tool"),
+                disable_model_invocation=False,
+            ),
+        ),
+    ):
+        await handle_command(
+            context=context,
+            room=room,
+            event=event,
+            command=command,
+            requester_user_id="@alice:example.org",
+        )
+
+    context.run_skill_command_tool.assert_awaited_once()
     context.record_handled_turn.assert_called_once_with(HandledTurnState.from_source_event_id("$event"))
 
 

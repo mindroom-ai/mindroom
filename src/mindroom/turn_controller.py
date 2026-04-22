@@ -1021,6 +1021,7 @@ class TurnController:
                     correlation_id=dispatch.correlation_id,
                     tool_trace=None,
                     extra_content=None,
+                    apply_before_hooks=False,
                 ),
             )
             response_resolution = TurnDeliveryResolution.from_outcome(final_outcome)

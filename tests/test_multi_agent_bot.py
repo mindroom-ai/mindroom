@@ -106,7 +106,7 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
-    _late_stream_finalize_cancelled_outcome,
+    _late_stream_finalize_preserved_outcome,
     _merge_response_extra_content,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
@@ -2728,6 +2728,8 @@ class TestAgentBot:
         bot._delivery_gateway.deliver_final.assert_awaited_once()
         delivered_request = bot._delivery_gateway.deliver_final.await_args.args[0]
         assert delivered_request.existing_event_is_placeholder is True
+        assert delivered_request.response_kind == "system"
+        assert delivered_request.apply_before_hooks is False
         assert delivery_resolution.state == "error_with_visible_response"
 
     @pytest.mark.asyncio
@@ -2795,7 +2797,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Suppressing a non-placeholder edit should not preserve the stale event id."""
+        """Suppressing a non-placeholder edit should keep the prior visible event retryable."""
 
         @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
         async def before_hook(ctx: BeforeResponseContext) -> None:
@@ -2840,7 +2842,7 @@ class TestAgentBot:
         )
 
         assert delivery.suppressed is True
-        assert delivery.event_id is None
+        assert delivery.event_id == "$existing"
         redact_message_event.assert_not_awaited()
         assert delivery.response_identity_event_id is None
 
@@ -3225,9 +3227,9 @@ class TestAgentBot:
         assert outcome.response_identity_event_id is None
         assert outcome.should_mark_handled is False
 
-    def test_late_stream_finalize_cancelled_outcome_uses_cancel_state(self) -> None:
+    def test_late_stream_finalize_preserved_outcome_uses_cancel_state(self) -> None:
         """Late streamed-finalization cancellation must preserve the cancel-specific policy row."""
-        outcome = _late_stream_finalize_cancelled_outcome(
+        outcome = _late_stream_finalize_preserved_outcome(
             transport_outcome=StreamTransportOutcome(
                 last_physical_stream_event_id="$stream",
                 terminal_operation="edit",
@@ -3238,12 +3240,71 @@ class TestAgentBot:
                 failure_reason="cancelled_by_user",
             ),
             failure_reason="cancelled_by_user",
+            cancelled=True,
         )
 
         assert outcome is not None
         assert outcome.state == "kept_prior_visible_stream_after_cancel"
         assert outcome.response_identity_event_id is None
         assert outcome.should_queue_thread_summary is False
+
+    def test_late_stream_finalize_preserved_outcome_uses_error_state(self) -> None:
+        """Late streamed-finalization errors must preserve the error-specific policy row."""
+        outcome = _late_stream_finalize_preserved_outcome(
+            transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$stream",
+                terminal_operation="edit",
+                terminal_result="succeeded",
+                terminal_status="completed",
+                rendered_body="partial",
+                visible_body_state="visible_body",
+                failure_reason=None,
+            ),
+            failure_reason="hook crashed",
+            cancelled=False,
+        )
+
+        assert outcome is not None
+        assert outcome.state == "kept_prior_visible_stream_after_error"
+        assert outcome.response_identity_event_id == "$stream"
+        assert outcome.should_mark_handled is True
+
+    def test_missing_delivery_after_visible_placeholder_send_preserves_visible_stream(self) -> None:
+        """A late failure must preserve visible streamed content even when the event id is still the original send."""
+        outcome = _late_delivery_failure_outcome(
+            tracked_event_id="$thinking",
+            existing_event_id=None,
+            existing_event_is_placeholder=False,
+            placeholder_event_id="$thinking",
+            failure_reason="late_finalize_exception",
+            tracked_event_was_visible=True,
+        )
+
+        assert outcome.state == "kept_prior_visible_stream_after_error"
+        assert outcome.visible_response_event_id == "$thinking"
+
+    def test_response_outcome_prefers_terminal_status_over_delivery_kind(self) -> None:
+        """Pipeline outcome summaries must not report cancelled or error states as plain send/edit success."""
+        assert (
+            ResponseRunner._response_outcome(
+                FinalDeliveryOutcome.cancelled_with_visible_note(
+                    final_visible_event_id="$cancelled",
+                    final_visible_body="Cancelled.",
+                    delivery_kind="edited",
+                ),
+            )
+            == "cancelled"
+        )
+        assert (
+            ResponseRunner._response_outcome(
+                FinalDeliveryOutcome.error_with_visible_response(
+                    final_visible_event_id="$error",
+                    final_visible_body="boom",
+                    delivery_kind="edited",
+                ),
+            )
+            == "error"
+        )
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_registers_interactive_questions_with_bot_agent_name(
@@ -7597,6 +7658,7 @@ class TestAgentBot:
             "private agents cannot participate in teams yet",
         )
         assert delivered_request.response_kind == "system"
+        assert delivered_request.apply_before_hooks is False
         tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
@@ -9146,6 +9208,147 @@ class TestAgentBot:
                 visible_echo_event_id="$thinking",
             ),
         )
+
+    @pytest.mark.asyncio
+    async def test_deliver_final_suppression_preserves_existing_visible_response_linkage(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Suppressing a reused visible response must keep that prior event visible without remarking success."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
+        gateway = replace_delivery_gateway_deps(
+            bot,
+            response_hooks=SimpleNamespace(
+                apply_before_response=AsyncMock(
+                    return_value=SimpleNamespace(
+                        response_text="ignored",
+                        response_kind="ai",
+                        tool_trace=None,
+                        extra_content=None,
+                        envelope=response_envelope,
+                        suppress=True,
+                    ),
+                ),
+                emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
+            ),
+        )
+
+        outcome = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                existing_event_id="$existing",
+                existing_event_is_placeholder=False,
+                response_text="Updated answer",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-deliver-suppress-existing",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome.state == "kept_prior_visible_response_after_suppression"
+        assert outcome.visible_response_event_id == "$existing"
+        assert outcome.response_identity_event_id is None
+        assert outcome.should_mark_handled is False
+        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_deliver_final_failed_existing_visible_edit_preserves_prior_response(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Failed edits of an existing visible response must keep the prior event visible but retryable."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
+        gateway = replace_delivery_gateway_deps(
+            bot,
+            response_hooks=SimpleNamespace(
+                apply_before_response=AsyncMock(
+                    return_value=SimpleNamespace(
+                        response_text="Updated answer",
+                        response_kind="ai",
+                        tool_trace=None,
+                        extra_content=None,
+                        envelope=response_envelope,
+                        suppress=False,
+                    ),
+                ),
+                emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
+            ),
+        )
+        with patch("mindroom.delivery_gateway.edit_message_result", new=AsyncMock(return_value=None)):
+            outcome = await gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                    existing_event_id="$existing",
+                    existing_event_is_placeholder=False,
+                    response_text="Updated answer",
+                    response_kind="ai",
+                    response_envelope=response_envelope,
+                    correlation_id="corr-deliver-existing-failure",
+                    tool_trace=None,
+                    extra_content=None,
+                ),
+            )
+
+        assert outcome.state == "kept_prior_visible_response_after_error"
+        assert outcome.visible_response_event_id == "$existing"
+        assert outcome.response_identity_event_id is None
+        assert outcome.should_mark_handled is False
+        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_deliver_final_before_response_exception_cleans_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A before-response crash must clean up a visible placeholder instead of leaving it behind."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
+        gateway = replace_delivery_gateway_deps(
+            bot,
+            redact_message_event=AsyncMock(return_value=True),
+            response_hooks=SimpleNamespace(
+                apply_before_response=AsyncMock(side_effect=RuntimeError("hook boom")),
+                emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
+            ),
+        )
+
+        outcome = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                existing_event_id="$thinking",
+                existing_event_is_placeholder=True,
+                response_text="Updated answer",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-deliver-before-hook-crash",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome.state == "error_without_visible_response"
+        gateway.deps.redact_message_event.assert_awaited_once_with(
+            room_id="!test:localhost",
+            event_id="$thinking",
+            reason="Failed placeholder response before delivery",
+        )
+        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_generation_returns_no_final_event(
