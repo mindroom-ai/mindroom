@@ -2660,19 +2660,28 @@ async def test_bot_custom_approval_response_event_refuses_truncated_approval(tmp
 
     assert pending is not None
     room = _approval_room()
-    event = _custom_response_event(
-        approval_event_id="$approval",
-        status="approved",
-    )
 
     with (
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch.object(type(bot._turn_policy), "can_reply_to_sender", return_value=True),
     ):
-        await bot._on_unknown_event(room, event)
+        handled = await bot._handle_tool_approval_action(
+            room=room,
+            sender_id="@user:localhost",
+            approval_event_id="$approval",
+            action=lambda approval_manager: approval_manager.handle_custom_response(
+                approval_event_id="$approval",
+                room_id=room.room_id,
+                status="approved",
+                reason=None,
+                resolved_by="@user:localhost",
+            ),
+        )
 
+    assert handled is False
     assert task.done() is False
     assert store.list_pending() == [pending]
+    editor.assert_not_awaited()
     bot.client.room_send.assert_awaited_once_with(
         room_id="!room:localhost",
         message_type="m.room.message",
