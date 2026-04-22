@@ -259,6 +259,26 @@ def test_timing_enabled_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert timing_enabled() is True
 
 
+def test_timed_routes_elapsed_logging_through_shared_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """timed() should delegate timing_elapsed event shaping to emit_elapsed_timing()."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+    emit_elapsed_timing = Mock()
+    monkeypatch.setattr(timing_module, "emit_elapsed_timing", emit_elapsed_timing)
+
+    @timed("delegated_label")
+    def run(*, timing_scope: str | None = None) -> None:
+        del timing_scope
+
+    run(timing_scope="scope-123")
+
+    emit_elapsed_timing.assert_called_once()
+    assert emit_elapsed_timing.call_args.args[0] == "delegated_label"
+    assert isinstance(emit_elapsed_timing.call_args.args[1], float)
+    assert emit_elapsed_timing.call_args.kwargs["timing_scope"] == "scope-123"
+    logger.info.assert_not_called()
+
+
 def _timing_probe_labels(
     *,
     module_name: str,

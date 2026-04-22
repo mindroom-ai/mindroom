@@ -180,29 +180,19 @@ def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
         duration_ms=round((time.monotonic() - start) * 1000, 1),
         **event_data,
     )
-def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:  # noqa: C901
+def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator that logs elapsed time for sync/async functions.
 
     When MINDROOM_TIMING != "1", returns the original function unchanged (zero overhead).
     Log format: TIMING [<scope>] <label>: <elapsed>s  (scope omitted if not set)
     """
 
-    def decorator(fn: Callable[P, R]) -> Callable[P, R]:  # noqa: C901
+    def decorator(fn: Callable[P, R]) -> Callable[P, R]:
         if not _is_enabled():
             return fn
 
         def emit_timing(start: float, kwargs: P.kwargs) -> None:
-            scope = kwargs.get("timing_scope")
-            if not isinstance(scope, str) or not scope:
-                scope = timing_scope.get()
-            duration_ms = round((time.monotonic() - start) * 1000, 1)
-            event_data: dict[str, object] = {
-                "label": label,
-                "duration_ms": duration_ms,
-            }
-            if scope:
-                event_data["timing_scope"] = scope
-            logger.info("timing_elapsed", **event_data)
+            emit_elapsed_timing(label, start, timing_scope=kwargs.get("timing_scope"))
 
         if inspect.isasyncgenfunction(fn):
 
