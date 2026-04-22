@@ -15,7 +15,7 @@ from .commands.parsing import command_parser
 from .constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from .hooks.ingress import is_voice_event
 from .matrix.media import extract_media_caption
-from .timing import emit_elapsed_timing
+from .timing import emit_elapsed_timing, event_timing_scope
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -418,6 +418,7 @@ class CoalescingGate:
                 enqueue_start,
                 path="bypass",
                 source_kind=pending_event.source_kind,
+                timing_scope=event_timing_scope(pending_event.event.event_id),
             )
             return
 
@@ -433,6 +434,7 @@ class CoalescingGate:
                 enqueue_start,
                 path="command_interrupt",
                 source_kind=pending_event.source_kind,
+                timing_scope=event_timing_scope(pending_event.event.event_id),
             )
             return
 
@@ -452,6 +454,7 @@ class CoalescingGate:
                     path="grace_media_extend",
                     source_kind=pending_event.source_kind,
                     pending_count=len(gate.pending),
+                    timing_scope=event_timing_scope(pending_event.event.event_id),
                 )
                 return
             # Text during grace → flush existing batch, start new turn
@@ -471,17 +474,20 @@ class CoalescingGate:
                 path="in_flight_buffer",
                 source_kind=pending_event.source_kind,
                 pending_count=len(gate.pending),
+                timing_scope=event_timing_scope(pending_event.event.event_id),
             )
             return
         if self._debounce_seconds() <= 0:
             pending_count = len(gate.pending)
-            await self._flush(key)
+            flush_outcome = await self._flush(key)
             emit_elapsed_timing(
                 "coalescing_gate.enqueue",
                 enqueue_start,
-                path="immediate_flush",
+                path="zero_debounce",
                 source_kind=pending_event.source_kind,
                 pending_count=pending_count,
+                flush_outcome=flush_outcome,
+                timing_scope=event_timing_scope(pending_event.event.event_id),
             )
             return
         self._reset_timer(key, delay=self._debounce_seconds(), phase=GatePhase.DEBOUNCE)
@@ -491,6 +497,7 @@ class CoalescingGate:
             path="debounce_schedule",
             source_kind=pending_event.source_kind,
             pending_count=len(gate.pending),
+            timing_scope=event_timing_scope(pending_event.event.event_id),
         )
 
     async def drain_all(self) -> None:
@@ -580,12 +587,12 @@ class CoalescingGate:
         self._reset_timer(key, delay=min(grace_seconds, remaining_seconds), phase=GatePhase.GRACE)
         self._gates[key].grace_deadline = saved_deadline
 
-    async def _flush(self, key: CoalescingKey, *, bypass_grace: bool = False) -> None:
+    async def _flush(self, key: CoalescingKey, *, bypass_grace: bool = False) -> str | None:
         """Execute one gate flush cycle."""
         flush_start = time.monotonic()
         gate = self._gates.get(key)
         if gate is None or not gate.pending or gate.phase is GatePhase.IN_FLIGHT:
-            return
+            return None
         if (
             not bypass_grace
             and gate.phase is not GatePhase.GRACE
@@ -599,8 +606,9 @@ class CoalescingGate:
                 flush_start,
                 outcome="scheduled_grace",
                 pending_count=len(gate.pending),
+                timing_scope=event_timing_scope(build_coalesced_batch(key, gate.pending).primary_event.event_id),
             )
-            return
+            return "scheduled_grace"
         # Set IN_FLIGHT before _cancel_timer so the running timer task
         # (which may be the current task) is not self-cancelled.
         gate.phase = GatePhase.IN_FLIGHT
@@ -608,17 +616,21 @@ class CoalescingGate:
         pending_events = list(gate.pending)
         pending_count = len(pending_events)
         gate.pending.clear()
+        batch = build_coalesced_batch(key, pending_events)
+        timing_scope = event_timing_scope(batch.primary_event.event_id)
         dispatched = False
         try:
             dispatch_batch_start = time.monotonic()
-            await self._dispatch_batch(build_coalesced_batch(key, pending_events))
+            await self._dispatch_batch(batch)
             dispatched = True
             emit_elapsed_timing(
                 "coalescing_gate.flush.dispatch_batch",
                 dispatch_batch_start,
                 pending_count=pending_count,
                 bypass_grace=bypass_grace,
+                timing_scope=timing_scope,
             )
+            return "dispatched"
         finally:
             emit_elapsed_timing(
                 "coalescing_gate.flush",
@@ -626,6 +638,7 @@ class CoalescingGate:
                 outcome="dispatched" if dispatched else "failed",
                 pending_count=pending_count,
                 bypass_grace=bypass_grace,
+                timing_scope=timing_scope,
             )
             current_key, gate = self._resolve_gate_entry(key, gate)
             if gate is not None and current_key is not None:

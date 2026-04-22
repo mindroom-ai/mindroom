@@ -78,6 +78,7 @@ from mindroom.timing import (
     attach_dispatch_pipeline_timing,
     create_dispatch_pipeline_timing,
     emit_elapsed_timing,
+    event_timing_scope,
     get_dispatch_pipeline_timing,
 )
 from mindroom.timing import timing_scope as timing_scope_context
@@ -460,6 +461,7 @@ class TurnController:
         if dispatch_timing is not None:
             dispatch_timing.mark("gate_enter")
         enqueue_start = time.monotonic()
+        timing_scope = event_timing_scope(event.event_id)
         effective_requester_user_id = requester_user_id or self._requester_user_id(
             sender=event.sender,
             source=event.source,
@@ -478,6 +480,7 @@ class TurnController:
                 "ingress_handoff.enqueue_for_dispatch",
                 enqueue_start,
                 path="trusted_internal_relay",
+                timing_scope=timing_scope,
             )
             return
         coalescing_key_start = time.monotonic()
@@ -486,6 +489,7 @@ class TurnController:
             "ingress_handoff.enqueue_for_dispatch.coalescing_key",
             coalescing_key_start,
             thread_id=resolved_key[1],
+            timing_scope=timing_scope,
         )
         gate_enqueue_start = time.monotonic()
         await self.deps.coalescing_gate.enqueue(
@@ -500,11 +504,13 @@ class TurnController:
             "ingress_handoff.enqueue_for_dispatch.coalescing_gate",
             gate_enqueue_start,
             source_kind=source_kind,
+            timing_scope=timing_scope,
         )
         emit_elapsed_timing(
             "ingress_handoff.enqueue_for_dispatch",
             enqueue_start,
             source_kind=source_kind,
+            timing_scope=timing_scope,
         )
 
     async def _maybe_send_visible_voice_echo(
@@ -1229,6 +1235,7 @@ class TurnController:
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
         dispatch_event = build_batch_dispatch_event(batch)
+        timing_scope = event_timing_scope(dispatch_event.event_id)
         dispatch_timing = get_dispatch_pipeline_timing(dispatch_event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("gate_exit")
@@ -1254,6 +1261,7 @@ class TurnController:
             retarget_start,
             original_thread_id=batch_coalescing_key[1],
             resolved_thread_id=canonical_key[1],
+            timing_scope=timing_scope,
         )
         async with self.deps.resolver.turn_thread_cache_scope():
             dispatch_start = time.monotonic()
@@ -1271,6 +1279,7 @@ class TurnController:
                 "coalescing.handle_batch.dispatch_text_message",
                 dispatch_start,
                 source_event_count=len(batch.source_event_ids),
+                timing_scope=timing_scope,
             )
 
     async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
@@ -1428,7 +1437,7 @@ class TurnController:
         )
         dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
-        timing_scope_token = timing_scope_context.set(event.event_id[:20] if event.event_id else "unknown")
+        timing_scope_token = timing_scope_context.set(event_timing_scope(event.event_id))
         try:
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_start")

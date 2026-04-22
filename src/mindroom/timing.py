@@ -157,6 +157,11 @@ def get_dispatch_pipeline_timing(source: object) -> DispatchPipelineTiming | Non
     return None
 
 
+def event_timing_scope(event_id: str | None) -> str:
+    """Return the stable timing scope identifier for one event."""
+    return event_id[:20] if event_id else "unknown"
+
+
 def emit_timing_event(event_name: str, **event_data: object) -> None:
     """Emit one structured timing event when timing instrumentation is enabled."""
     if not _is_enabled():
