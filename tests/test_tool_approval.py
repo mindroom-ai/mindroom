@@ -261,6 +261,10 @@ class _LockCheckingCache(dict[tuple[str, int], object]):
         self._require_lock()
         return super().get(key, default)
 
+    def __setitem__(self, key: tuple[str, int], value: object) -> None:
+        self._require_lock()
+        super().__setitem__(key, value)
+
     def __iter__(self) -> Iterator[tuple[str, int]]:
         self._require_lock()
         return super().__iter__()
@@ -269,9 +273,9 @@ class _LockCheckingCache(dict[tuple[str, int], object]):
         self._require_lock()
         return super().pop(key, default)
 
-    def __setitem__(self, key: tuple[str, int], value: object) -> None:
+    def clear(self) -> None:
         self._require_lock()
-        super().__setitem__(key, value)
+        super().clear()
 
 
 def _write_approval_script(script_path: Path, *, requires_approval: bool, wave: int) -> None:
@@ -658,6 +662,30 @@ def test_script_cache_is_thread_safe_under_concurrent_reloads(tmp_path: Path, mo
         )
 
     assert len(tool_approval_module._SCRIPT_CACHE) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initialize_manager", [False, True])
+async def test_shutdown_approval_store_clears_script_cache_under_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initialize_manager: bool,
+) -> None:
+    """Shutdown should clear the shared script cache with the same lock discipline as reloads."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    tracking_lock = _TrackingLock()
+    cache = _LockCheckingCache(tracking_lock)
+    monkeypatch.setattr(tool_approval_module, "_SCRIPT_CACHE_LOCK", tracking_lock)
+    monkeypatch.setattr(tool_approval_module, "_SCRIPT_CACHE", cache)
+    with tracking_lock:
+        cache[("approval_scripts/shell_review.py", 123)] = object()
+
+    if initialize_manager:
+        initialize_approval_store(runtime_paths)
+
+    await shutdown_approval_store()
+
+    assert cache == {}
 
 
 @pytest.mark.asyncio

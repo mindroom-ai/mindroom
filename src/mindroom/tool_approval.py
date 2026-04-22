@@ -1230,6 +1230,12 @@ def _load_script_module(
     return module, resolved_path
 
 
+def _clear_script_cache() -> None:
+    """Clear the shared approval-script cache under the cache lock."""
+    with _SCRIPT_CACHE_LOCK:
+        _SCRIPT_CACHE.clear()
+
+
 def tool_requires_approval_for_openai_compat(
     config: Config,
     tool_name: str,
@@ -1356,9 +1362,9 @@ async def shutdown_approval_store(
 
     manager = _MANAGER
     if manager is None:
-        _SCRIPT_CACHE.clear()
+        _clear_script_cache()
         return
 
     await manager.shutdown(reason=reason)
     _MANAGER = None
-    _SCRIPT_CACHE.clear()
+    _clear_script_cache()
