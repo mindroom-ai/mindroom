@@ -4182,6 +4182,61 @@ class TestThreadingBehavior:
         assert timing_call.kwargs["pending_task_count"] == 2
 
     @pytest.mark.asyncio
+    async def test_wait_for_room_idle_counts_tasks_queued_after_wait_starts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Room-idle waits should include same-room tasks queued after the wait begins."""
+        monkeypatch.setenv("MINDROOM_TIMING", "1")
+        timing_logger = MagicMock()
+        monkeypatch.setattr(timing_module, "logger", timing_logger)
+        coordinator = _EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=object(),
+        )
+        first_started = asyncio.Event()
+        allow_first_finish = asyncio.Event()
+        second_started = asyncio.Event()
+        allow_second_finish = asyncio.Event()
+
+        async def first_update() -> None:
+            first_started.set()
+            await allow_first_finish.wait()
+
+        async def second_update() -> None:
+            second_started.set()
+            await allow_second_finish.wait()
+
+        try:
+            first_task = coordinator.queue_room_update(
+                "!room:localhost",
+                first_update,
+                name="matrix_cache_first_update",
+            )
+            await asyncio.wait_for(first_started.wait(), timeout=1.0)
+            waiter = asyncio.create_task(coordinator.wait_for_room_idle("!room:localhost"))
+            await asyncio.sleep(0)
+            second_task = coordinator.queue_room_update(
+                "!room:localhost",
+                second_update,
+                name="matrix_cache_second_update",
+            )
+            await asyncio.sleep(0)
+            allow_first_finish.set()
+            await asyncio.wait_for(second_started.wait(), timeout=1.0)
+            allow_second_finish.set()
+            await first_task
+            await second_task
+            await waiter
+        finally:
+            await coordinator.close()
+
+        timing_call = next(
+            call for call in timing_logger.info.call_args_list if call.args == ("Event cache idle wait timing",)
+        )
+        assert timing_call.kwargs["pending_task_count"] == 2
+
+    @pytest.mark.asyncio
     async def test_queue_room_update_skips_timing_overhead_when_disabled(
         self,
         monkeypatch: pytest.MonkeyPatch,

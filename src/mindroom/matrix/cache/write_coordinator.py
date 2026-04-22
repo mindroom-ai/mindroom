@@ -253,9 +253,12 @@ class _EventCacheWriteCoordinator:
                 return
             if wait_started is None:
                 wait_started = time.perf_counter()
-                pending_task_count = self._pending_chain_length(tail_task)
-            wait_iterations += 1
+            pending_task_count = max(
+                pending_task_count,
+                wait_iterations + self._pending_chain_length(tail_task),
+            )
             await self._await_room_tail(room_id, tail_task)
+            wait_iterations += 1
 
     async def wait_for_room_idle(self, room_id: str) -> None:
         """Wait for the currently queued same-room update chain to drain."""
