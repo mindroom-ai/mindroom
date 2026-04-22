@@ -1657,6 +1657,35 @@ class MultiAgentOrchestrator:
             return None
         return router_bot
 
+    async def ensure_router_manages_invited_room(
+        self,
+        room_id: str,
+        *,
+        inviter_client: nio.AsyncClient,
+    ) -> bool:
+        """Invite and persist the router for one ad-hoc room so approval transport works there."""
+        router_bot = self._router_bot()
+        if router_bot is None:
+            return False
+
+        router_user_id = router_bot.agent_user.user_id
+        if not isinstance(router_user_id, str) or not router_user_id:
+            logger.warning("Router user id unavailable for invited-room transport", room_id=room_id)
+            return False
+
+        if self._bot_has_approval_room(router_bot, room_id):
+            router_bot.remember_invited_room(room_id)
+            return True
+
+        invited = await invite_to_room(inviter_client, room_id, router_user_id)
+        if not invited:
+            logger.warning("Failed to invite router to ad-hoc room", room_id=room_id)
+            return False
+
+        router_bot.remember_invited_room(room_id)
+        await router_bot.join_configured_rooms()
+        return self._bot_has_approval_room(router_bot, room_id)
+
     async def _setup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
         """Setup rooms and ensure all bots have correct memberships.
 

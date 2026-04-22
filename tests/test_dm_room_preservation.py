@@ -344,6 +344,41 @@ class TestDMPreservationDuringCleanup:
         assert result == {}
         client.room_kick.assert_not_called()
 
+    async def test_cleanup_all_orphaned_bots_preserves_router_persisted_invited_room(self, tmp_path: Path) -> None:
+        """Router-owned invited rooms should not be treated as orphaned during cleanup."""
+        client = AsyncMock()
+        config = _config_with_runtime_paths(
+            tmp_path,
+            agents={
+                "agent": AgentConfig(
+                    display_name="Agent",
+                    role="Test agent",
+                ),
+            },
+        )
+        rp = runtime_paths_for(config)
+        invited_rooms_path = agent_state_root_path(rp.storage_root, "router") / "invited_rooms.json"
+        invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
+        invited_rooms_path.write_text('[\n  "!ad-hoc:server"\n]\n', encoding="utf-8")
+
+        with (
+            patch("mindroom.matrix.room_cleanup.get_joined_rooms", return_value=["!ad-hoc:server"]),
+            patch(
+                "mindroom.matrix.room_cleanup.get_room_members",
+                return_value=["@mindroom_router:server"],
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup._get_all_known_bot_usernames",
+                return_value={"mindroom_router"},
+            ),
+            patch("mindroom.matrix.room_cleanup.is_dm_room", new=AsyncMock(return_value=False)),
+        ):
+            client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
+            result = await cleanup_all_orphaned_bots(client, config, rp)
+
+        assert result == {}
+        client.room_kick.assert_not_called()
+
     async def test_orphaned_bot_cleanup_skips_root_space(self, tmp_path: Path) -> None:
         """Test that orphaned bot cleanup skips the root space room.
 
