@@ -16,6 +16,8 @@ is out of scope.
 
 ## 1. Validation honesty
 
+Validation status: validation REPLACED by `tests/test_issue_176_real_thread_parallelism.py`.
+
 REV-C's reading of the *committed* test is technically correct and the
 numbers are real: 202.2 ms vs 201.8 ms on this branch vs `origin/main`. But
 the test is measuring SQLite-bound serialization, not the production
@@ -203,6 +205,8 @@ Reasoning:
 > network fetch, wall-clock latency drops from ~400 ms (serialized) to
 > ~200 ms (parallel). See `tests/test_issue_176_real_thread_parallelism.py`
 > for the reproducer.
+>
+> Validation status: validation REPLACED by `tests/test_issue_176_real_thread_parallelism.py`.
 >
 > **Known limitation:** the underlying `_EventCache` still serializes
 > every SQLite operation through a single process-wide `_db_lock`. This
