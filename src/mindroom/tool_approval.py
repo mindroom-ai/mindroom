@@ -1390,6 +1390,34 @@ class ApprovalManager:
             self._discard(pending.id)
         return recovered_requests
 
+    async def recover_unconfirmed_deliveries_in_rooms(self, room_ids: set[str]) -> list[PendingApproval]:
+        """Recover missing event ids for resolved approvals anchored in the given rooms."""
+        recover_event_id = self._recover_event_id
+        if recover_event_id is None:
+            return []
+
+        recovered_requests: list[PendingApproval] = []
+        for pending in self.list_unconfirmed_deliveries():
+            if pending.room_id not in room_ids:
+                continue
+            try:
+                recovered_event_id = await recover_event_id(pending)
+            except Exception:
+                logger.warning(
+                    "Failed to recover approval Matrix event id",
+                    approval_id=pending.id,
+                    room_id=pending.room_id,
+                    exc_info=True,
+                )
+                continue
+            if isinstance(recovered_event_id, str) and recovered_event_id:
+                self._set_event_delivery(pending.id, recovered_event_id)
+                self._persist_request(pending)
+                recovered_requests.append(pending)
+                continue
+            self._discard(pending.id)
+        return recovered_requests
+
     @staticmethod
     def _truncated_approval_reason(
         pending: PendingApproval,

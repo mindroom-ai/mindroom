@@ -58,6 +58,7 @@ from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_approval import (
     _DEFAULT_ROUTER_MANAGED_ROOM_REASON,
+    ApprovalManager,
     PendingApproval,
     SentApprovalEvent,
     ToolApprovalTransportError,
@@ -639,14 +640,41 @@ class MultiAgentOrchestrator:
     async def _force_finalize_pending_approvals_for_rooms(
         self,
         room_ids: set[str],
-    ) -> None:
+    ) -> set[str]:
         """Finalize approvals before the router leaves their anchor rooms."""
         if not room_ids:
-            return
+            return set()
         approval_store = get_approval_store()
         if approval_store is None:
-            return
+            return set(room_ids)
 
+        return await self._drain_approval_state_for_rooms(room_ids, approval_store=approval_store)
+
+    @staticmethod
+    def _rooms_with_unsynced_approval_state(
+        room_ids: set[str],
+        *,
+        approval_store: ApprovalManager,
+    ) -> set[str]:
+        blocked_room_ids = {
+            pending.room_id
+            for pending in approval_store.list_unsynced_resolved_in_rooms(room_ids)
+            if pending.room_id is not None
+        }
+        blocked_room_ids.update(
+            pending.room_id
+            for pending in approval_store.list_unconfirmed_deliveries()
+            if pending.room_id in room_ids
+        )
+        return blocked_room_ids
+
+    async def _drain_approval_state_for_rooms(
+        self,
+        room_ids: set[str],
+        *,
+        approval_store: ApprovalManager,
+    ) -> set[str]:
+        """Wait until approvals in the given rooms are either synced or deferred to a later pass."""
         await approval_store.wait_for_pending_sends_in_rooms(room_ids, timeout=None)
 
         for pending in approval_store.list_pending():
@@ -658,7 +686,18 @@ class MultiAgentOrchestrator:
                     reason=_REMOVED_APPROVAL_ROOM_REASON,
                 )
 
-        await approval_store.sync_unsynced_resolved(room_ids=room_ids)
+        await approval_store.recover_unconfirmed_deliveries_in_rooms(room_ids)
+
+        for attempt in range(3):
+            await approval_store.sync_unsynced_resolved(room_ids=room_ids)
+            blocked_room_ids = self._rooms_with_unsynced_approval_state(room_ids, approval_store=approval_store)
+            if not blocked_room_ids:
+                return set(room_ids)
+            if attempt < 2:
+                await asyncio.sleep(2**attempt)
+
+        blocked_room_ids = self._rooms_with_unsynced_approval_state(room_ids, approval_store=approval_store)
+        return set(room_ids) - blocked_room_ids
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""

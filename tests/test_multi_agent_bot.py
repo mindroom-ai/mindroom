@@ -115,6 +115,7 @@ from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_approval import (
+    SentApprovalEvent,
     initialize_approval_store,
     shutdown_approval_store,
 )
@@ -12849,6 +12850,195 @@ class TestMultiAgentOrchestrator:
                 "rel_type": "m.replace",
                 "event_id": "$approval",
             }
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_router_recovers_event_id_before_leaving_room(self, tmp_path: Path) -> None:
+        """Router leave should recover missing approval event ids before replaying the resolved edit."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        request_path = runtime_paths.storage_root / "approvals" / "persisted-pending.json"
+        request_path.parent.mkdir(parents=True, exist_ok=True)
+        request_path.write_text(
+            json.dumps(
+                {
+                    "id": "persisted-pending",
+                    "tool_name": "run_shell_command",
+                    "arguments_preview": {"command": "echo hi"},
+                    "arguments_preview_truncated": False,
+                    "event_arguments_payload": {"command": "echo hi"},
+                    "event_arguments_truncated": False,
+                    "agent_name": "code",
+                    "room_id": "!R:server",
+                    "thread_id": "$thread",
+                    "requester_id": "@user:localhost",
+                    "approver_user_id": "@user:localhost",
+                    "matched_rule": "run_shell_*",
+                    "script_path": None,
+                    "requested_at": "2026-04-09T12:00:00+00:00",
+                    "expires_at": "2026-04-10T12:00:00+00:00",
+                    "status": "pending",
+                    "resolution_reason": None,
+                    "resolved_at": None,
+                    "resolved_by": None,
+                    "event_id": None,
+                    "resolution_synced_at": None,
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+        config = _runtime_bound_config(
+            Config(models={"default": {"provider": "test", "id": "test-model"}}),
+            tmp_path,
+        )
+        router_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password=TEST_PASSWORD,
+        )
+        router_bot = AgentBot(
+            router_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!R:server"],
+        )
+        router_bot.orchestrator = orchestrator
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
+        router_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!R:server"])
+        router_bot.client.rooms["!R:server"].add_member(router_user.user_id, router_user.display_name, None)
+        router_bot.running = True
+        orchestrator.agent_bots = {"router": router_bot}
+
+        event_order: list[str] = []
+
+        async def _recover_event_id(_pending: object) -> str:
+            event_order.append("recover")
+            return "$approval"
+
+        async def _edit_event(room_id: str, event_id: str, content: dict[str, object]) -> bool:
+            event_order.append("edit")
+            assert room_id == "!R:server"
+            assert event_id == "$approval"
+            assert content["status"] == "expired"
+            return True
+
+        initialize_approval_store(
+            runtime_paths,
+            editor=AsyncMock(side_effect=_edit_event),
+            recoverer=AsyncMock(side_effect=_recover_event_id),
+            runtime_loop=asyncio.get_running_loop(),
+        )
+        router_bot.rooms = []
+
+        async def _leave_rooms(_client: object, room_ids: list[str]) -> None:
+            event_order.append("leave")
+            assert room_ids == ["!R:server"]
+            del router_bot.client.rooms["!R:server"]
+
+        leave_non_dm_rooms = AsyncMock(side_effect=_leave_rooms)
+
+        try:
+            with (
+                patch("mindroom.bot_room_lifecycle.is_dm_room", new=AsyncMock(return_value=False)),
+                patch("mindroom.bot_room_lifecycle.leave_non_dm_rooms", new=leave_non_dm_rooms),
+            ):
+                await router_bot.leave_unconfigured_rooms()
+
+            assert event_order == ["recover", "edit", "leave"]
+            leave_non_dm_rooms.assert_awaited_once()
+            assert request_path.exists() is False
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_router_does_not_leave_room_when_unsynced_approvals_remain(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Router leave should skip rooms whose approval cards still cannot sync after draining."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        monkeypatch.setattr("mindroom.tool_approval._UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS", 60.0)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+
+        config = _runtime_bound_config(
+            Config(models={"default": {"provider": "test", "id": "test-model"}}),
+            tmp_path,
+        )
+        router_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password=TEST_PASSWORD,
+        )
+        router_bot = AgentBot(
+            router_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!R:server"],
+        )
+        router_bot.orchestrator = orchestrator
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
+        router_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!R:server"])
+        router_bot.client.rooms["!R:server"].add_member(router_user.user_id, router_user.display_name, None)
+        router_bot.running = True
+        orchestrator.agent_bots = {"router": router_bot}
+
+        sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+        editor = AsyncMock(return_value=False)
+        store = initialize_approval_store(
+            runtime_paths,
+            sender=sender,
+            editor=editor,
+            runtime_loop=asyncio.get_running_loop(),
+        )
+        task = asyncio.create_task(
+            store.request_approval(
+                tool_name="run_shell_command",
+                arguments={"command": "echo hi"},
+                agent_name="code",
+                room_id="!R:server",
+                thread_id="$thread",
+                requester_id="@user:localhost",
+                approver_user_id="@user:localhost",
+                matched_rule="run_shell_*",
+                script_path=None,
+                timeout_seconds=60,
+            ),
+        )
+
+        async with asyncio.timeout(1):
+            while True:
+                pending = store.list_pending()
+                if pending and pending[0].event_id is not None:
+                    break
+                await asyncio.sleep(0)
+
+        router_bot.rooms = []
+        leave_non_dm_rooms = AsyncMock()
+
+        try:
+            with (
+                patch("mindroom.bot_room_lifecycle.is_dm_room", new=AsyncMock(return_value=False)),
+                patch("mindroom.bot_room_lifecycle.leave_non_dm_rooms", new=leave_non_dm_rooms),
+                patch("mindroom.orchestrator.asyncio.sleep", new=AsyncMock()),
+            ):
+                await router_bot.leave_unconfigured_rooms()
+
+            decision = await task
+
+            assert decision.status == "expired"
+            assert leave_non_dm_rooms.await_count == 0
+            assert editor.await_count == 4
+            assert "!R:server" in tuple(router_bot.client.rooms)
+            assert store.list_unsynced_resolved_in_rooms({"!R:server"}) != []
         finally:
             await shutdown_approval_store()
 
