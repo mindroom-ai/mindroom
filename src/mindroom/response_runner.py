@@ -1554,12 +1554,6 @@ class ResponseRunner:
                         )
                     else:
                         failure_reason = cancel_failure_reason(classify_cancel_source(exc))
-                        await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                            correlation_id=resolved_correlation_id,
-                            envelope=resolved_response_envelope,
-                            response_kind="team",
-                            failure_reason=failure_reason,
-                        )
                         final_delivery_outcome = FinalDeliveryOutcome(
                             terminal_status="cancelled",
                             event_id=None,
@@ -2215,12 +2209,6 @@ class ResponseRunner:
                     raise
                 return outcome
             failure_reason = cancel_failure_reason(cancel_source)
-            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                correlation_id=correlation_id,
-                envelope=response_envelope,
-                response_kind=response_kind,
-                failure_reason=failure_reason,
-            )
             if self._should_reraise_user_stop(exc):
                 raise
             return FinalDeliveryOutcome(
