@@ -35,16 +35,6 @@ class StreamTransportOutcome:  # noqa: D101
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
 
-    def __post_init__(self) -> None:  # noqa: D105
-        if self.terminal_result == "not_attempted" and self.terminal_operation != "none":
-            raise ValueError("terminal_operation must be 'none' when terminal_result is 'not_attempted'")  # noqa: EM101, TRY003
-        if self.terminal_result != "not_attempted" and self.terminal_operation == "none":
-            raise ValueError("terminal_operation cannot be 'none' when a terminal result exists")  # noqa: EM101, TRY003
-        if self.visible_body_state == "none" and self.rendered_body is not None:
-            raise ValueError("visible_body_state 'none' cannot carry a rendered_body")  # noqa: EM101, TRY003
-        if self.visible_body_state != "none" and self.rendered_body is None:
-            raise ValueError("visible_body_state requires a rendered_body")  # noqa: EM101, TRY003
-
     @property
     def has_any_physical_stream_event(self) -> bool:  # noqa: D102
         return self.last_physical_stream_event_id is not None
@@ -76,33 +66,10 @@ class FinalDeliveryOutcome:  # noqa: D101
         object.__setattr__(self, "extra_content", dict(self.extra_content or {}))
         object.__setattr__(self, "option_map", _copy_dict(self.option_map))
         object.__setattr__(self, "options_list", _copy_options(self.options_list))
-        if self.terminal_status == "completed":
-            if not self.is_visible_response or self.event_id is None:
-                raise ValueError("completed outcomes require a visible response event")  # noqa: EM101, TRY003
-            if self.final_visible_body is None:
-                raise ValueError("completed outcomes require final_visible_body")  # noqa: EM101, TRY003
-            if self.failure_reason is not None:
-                raise ValueError("completed outcomes cannot carry failure_reason")  # noqa: EM101, TRY003
-            if self.suppressed:
-                raise ValueError("completed outcomes cannot be suppressed")  # noqa: EM101, TRY003
-        if self.is_visible_response and self.event_id is None:
-            raise ValueError("is_visible_response requires event_id")  # noqa: EM101, TRY003
-        if self.delivery_kind is not None and not self.is_visible_response:
-            raise ValueError("delivery_kind requires a visible response event")  # noqa: EM101, TRY003
 
     @property
     def final_visible_event_id(self) -> str | None:  # noqa: D102
         return self.event_id if self.is_visible_response else None
-
-    @property
-    def visible_response_event_id(self) -> str | None:  # noqa: D102
-        return self.final_visible_event_id
-
-    @property
-    def response_identity_event_id(self) -> str | None:  # noqa: D102
-        if self.mark_handled and self.is_visible_response and not self.suppressed:
-            return self.event_id
-        return None
 
     @property
     def response_text(self) -> str:  # noqa: D102
@@ -115,5 +82,4 @@ class FinalDeliveryOutcome:  # noqa: D101
             terminal_status="cancelled",
             event_id=None,
             failure_reason="empty_prompt",
-            retryable=True,
         )

@@ -113,8 +113,6 @@ type _MediaDispatchEvent = (
 type _InboundMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
 type _TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
-type MatrixEventId = str
-type RequesterUserId = str
 
 
 class _EditRegenerator(Protocol):
@@ -234,7 +232,7 @@ class TurnController:
         event: _DispatchEvent | _InboundMediaEvent,
         *,
         is_edit: bool = False,
-    ) -> RequesterUserId | None:
+    ) -> str | None:
         """Run shared early-exit checks for inbound text and media events."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
         source_kind = content.get("com.mindroom.source_kind") if isinstance(content, dict) else None
@@ -513,7 +511,7 @@ class TurnController:
         *,
         text: str,
         thread_id: str | None,
-    ) -> MatrixEventId | None:
+    ) -> str | None:
         """Optionally post a display-only router echo for normalized audio."""
         if self.deps.agent_name != ROUTER_AGENT_NAME or not self.deps.runtime.config.voice.visible_router_echo:
             return None

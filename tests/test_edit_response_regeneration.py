@@ -230,16 +230,17 @@ def _outcome(
     visible_event_id = final_visible_event_id or last_physical_stream_event_id
     return FinalDeliveryOutcome(
         terminal_status=terminal_status,
-        final_visible_event_id=final_visible_event_id,
-        visible_response_event_id=visible_event_id,
-        response_identity_event_id=visible_event_id if terminal_status == "completed" else None,
-        turn_completion_event_id=visible_event_id,
-        last_physical_stream_event_id=last_physical_stream_event_id,
+        event_id=visible_event_id,
+        is_visible_response=visible_event_id is not None,
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
         failure_reason=failure_reason,
         mark_handled=state != "error_without_visible_response" and visible_event_id is not None,
     )
+
+
+def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
 def _generate_response_with_locked_callback(
@@ -3088,7 +3089,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             },
         )
 
-    assert resolution.response_identity_event_id == "$response:example.com"
+    assert _handled_response_event_id(resolution) == "$response:example.com"
     assert storage.upserted_session is not None
     persisted_metadata = storage.upserted_session.runs[0].metadata
     assert persisted_metadata is not None
@@ -3501,7 +3502,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             },
         )
 
-    assert resolution.response_identity_event_id == "$response-new:example.com"
+    assert _handled_response_event_id(resolution) == "$response-new:example.com"
     storage = bot._conversation_state_writer.create_storage(None)
     try:
         persisted_session = get_agent_session(storage, session_id)

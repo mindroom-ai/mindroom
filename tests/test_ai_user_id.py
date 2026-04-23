@@ -137,6 +137,14 @@ def _stream_outcome(
     )
 
 
+def _visible_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+    return outcome.final_visible_event_id
+
+
+def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
+
+
 def _set_gateway_method(gateway: DeliveryGateway, name: str, value: T) -> T:
     object.__setattr__(gateway, name, value)
     return value
@@ -1418,7 +1426,7 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
         )
 
     assert delivery.terminal_status == "cancelled"
-    assert delivery.visible_response_event_id == "$thinking"
+    assert _visible_response_event_id(delivery) == "$thinking"
     assert sequence == [
         "ai",
         "started:!test:localhost:$thread-root:$thread-root",
@@ -1568,8 +1576,8 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
         )
 
     assert resolution.terminal_status == "cancelled"
-    assert resolution.visible_response_event_id == "$thinking"
-    assert resolution.response_identity_event_id is None
+    assert _visible_response_event_id(resolution) == "$thinking"
+    assert _handled_response_event_id(resolution) is None
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1642,8 +1650,8 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
         )
 
     assert resolution.terminal_status == "cancelled"
-    assert resolution.visible_response_event_id == "$thinking"
-    assert resolution.response_identity_event_id is None
+    assert _visible_response_event_id(resolution) == "$thinking"
+    assert _handled_response_event_id(resolution) is None
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1707,7 +1715,7 @@ async def test_generate_response_locked_persists_interrupted_history_when_final_
             )
 
     assert resolution.terminal_status == "cancelled"
-    assert resolution.response_identity_event_id is None
+    assert _handled_response_event_id(resolution) is None
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1780,7 +1788,7 @@ async def test_generate_response_locked_delivery_cancel_with_visible_tools_repla
         )
 
     assert resolution.terminal_status == "cancelled"
-    assert resolution.response_identity_event_id is None
+    assert _handled_response_event_id(resolution) is None
     persisted_session = cast("AgentSession", history_storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1870,7 +1878,7 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
             )
 
     assert resolution.terminal_status == "cancelled"
-    assert resolution.response_identity_event_id is None
+    assert _handled_response_event_id(resolution) is None
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1960,7 +1968,7 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             )
 
     assert resolution.terminal_status == "error"
-    assert resolution.response_identity_event_id == "$stream-msg"
+    assert _handled_response_event_id(resolution) == "$stream-msg"
 
 
 @pytest.mark.asyncio
@@ -2256,7 +2264,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         )
 
     assert resolution.terminal_status == "error"
-    assert resolution.response_identity_event_id == "$team-terminal"
+    assert _handled_response_event_id(resolution) == "$team-terminal"
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -2326,7 +2334,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
         )
 
     assert resolution.terminal_status == "error"
-    assert resolution.response_identity_event_id == "$team-terminal"
+    assert _handled_response_event_id(resolution) == "$team-terminal"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2413,7 +2421,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
         )
 
     assert resolution.terminal_status == "error"
-    assert resolution.response_identity_event_id == "$team-terminal"
+    assert _handled_response_event_id(resolution) == "$team-terminal"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2497,7 +2505,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
         )
 
     assert resolution.terminal_status == "cancelled"
-    assert resolution.visible_response_event_id == "$thinking"
+    assert _visible_response_event_id(resolution) == "$thinking"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2630,7 +2638,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
         )
 
     assert resolution.terminal_status == "cancelled"
-    assert resolution.response_identity_event_id is None
+    assert _handled_response_event_id(resolution) is None
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2697,7 +2705,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
         )
 
     assert resolution.terminal_status == "cancelled"
-    assert resolution.visible_response_event_id == "$team-msg"
+    assert _visible_response_event_id(resolution) == "$team-msg"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2767,7 +2775,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
         )
 
     assert resolution.terminal_status == "error"
-    assert resolution.response_identity_event_id == "$team-msg"
+    assert _handled_response_event_id(resolution) == "$team-msg"
 
 
 @pytest.mark.asyncio
@@ -2938,7 +2946,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
         )
 
     assert resolution.terminal_status == "cancelled"
-    assert resolution.visible_response_event_id == "$thinking"
+    assert _visible_response_event_id(resolution) == "$thinking"
     assert model_prompts
     assert model_prompts[0] != "Hello"
     assert 'Current message:\n<msg from="@alice:localhost">' in model_prompts[0]
@@ -3036,7 +3044,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
         )
 
     assert resolution.terminal_status == "cancelled"
-    assert resolution.visible_response_event_id == "$thinking"
+    assert _visible_response_event_id(resolution) == "$thinking"
     assert sequence == [
         "team",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
@@ -3236,7 +3244,7 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
             team_mode="coordinate",
         )
 
-    assert resolution.response_identity_event_id == "$thinking"
+    assert _handled_response_event_id(resolution) == "$thinking"
     assert mock_team_response.await_args is not None
     message = mock_team_response.await_args.kwargs["message"]
     assert "What is in the image?" in message
@@ -3321,7 +3329,7 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
 
     assert resolution.terminal_status == "error"
     assert resolution.retryable is True
-    assert resolution.visible_response_event_id is None
+    assert _visible_response_event_id(resolution) is None
 
 
 class TestUserIdPassthrough:

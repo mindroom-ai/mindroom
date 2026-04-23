@@ -219,6 +219,14 @@ def _outcome(
     )
 
 
+def _visible_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+    return outcome.final_visible_event_id
+
+
+def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
+
+
 def _make_matrix_client_mock() -> AsyncMock:
     """Return one Matrix client mock with safe thread-history defaults."""
     return make_matrix_client_mock()
@@ -2146,8 +2154,8 @@ class TestAgentBot:
                 ),
             )
 
-        assert delivery.visible_response_event_id == "$terminal"
-        assert delivery.response_identity_event_id == "$terminal"
+        assert _visible_response_event_id(delivery) == "$terminal"
+        assert _handled_response_event_id(delivery) == "$terminal"
         assert delivery.delivery_kind is None
         assert "Response interrupted by an error" in delivery.response_text
 
@@ -2456,7 +2464,7 @@ class TestAgentBot:
                 correlation_id="corr-team",
             )
 
-        assert resolution.response_identity_event_id == "$team"
+        assert _handled_response_event_id(resolution) == "$team"
         assert mock_send_message.await_args.args[2]["body"] == "🤝 Team Response: Thinking..."
         assert mock_edit_message.await_args.args[4] == "Team reply [hooked]"
         assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
@@ -2508,7 +2516,7 @@ class TestAgentBot:
                 correlation_id="corr-team",
             )
 
-        assert resolution.response_identity_event_id == "$team"
+        assert _handled_response_event_id(resolution) == "$team"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_merges_raw_prompt_with_model_prompt(
@@ -2564,7 +2572,7 @@ class TestAgentBot:
                 correlation_id="corr-team",
             )
 
-        assert resolution.response_identity_event_id == "$team"
+        assert _handled_response_event_id(resolution) == "$team"
         prepared_message = mock_team_response.await_args.kwargs["message"]
         assert "Summarize the latest invoice." in prepared_message
         assert "Available attachment IDs: att_invoice." in prepared_message
@@ -2627,7 +2635,7 @@ class TestAgentBot:
                 correlation_id="corr-team",
             )
 
-        assert resolution.response_identity_event_id == "$team"
+        assert _handled_response_event_id(resolution) == "$team"
         prepared_message = mock_team_response.await_args.kwargs["message"]
         assert prepared_message == timestamped_prompt
 
@@ -2704,7 +2712,7 @@ class TestAgentBot:
                 correlation_id="corr-team",
             )
 
-        assert resolution.response_identity_event_id == "$team"
+        assert _handled_response_event_id(resolution) == "$team"
         assert len(sent_contents) == 1
         content = sent_contents[0]
         assert content["m.relates_to"]["rel_type"] == "m.thread"
@@ -2786,7 +2794,7 @@ class TestAgentBot:
         bot._delivery_gateway.deps.response_hooks.emit_after_response.assert_awaited_once()
         bot._delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
         assert delivery_resolution.terminal_status == "completed"
-        assert delivery_resolution.response_identity_event_id == "$existing"
+        assert _handled_response_event_id(delivery_resolution) == "$existing"
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_redacts_suppressed_placeholder(
@@ -2845,7 +2853,7 @@ class TestAgentBot:
             event_id="$placeholder",
             reason="Suppressed placeholder response",
         )
-        assert delivery.response_identity_event_id is None
+        assert _handled_response_event_id(delivery) is None
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_suppressed_existing_event_returns_no_final_event(
@@ -2900,7 +2908,7 @@ class TestAgentBot:
         assert delivery.suppressed is True
         assert delivery.event_id == "$existing"
         redact_message_event.assert_not_awaited()
-        assert delivery.response_identity_event_id is None
+        assert _handled_response_event_id(delivery) is None
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_raises_when_suppressed_placeholder_redaction_fails(
@@ -2953,8 +2961,8 @@ class TestAgentBot:
         )
 
         assert outcome.terminal_status == "error"
-        assert outcome.visible_response_event_id == "$placeholder"
-        assert outcome.response_identity_event_id is None
+        assert _visible_response_event_id(outcome) == "$placeholder"
+        assert _handled_response_event_id(outcome) is None
         assert outcome.mark_handled is True
         assert outcome.retryable is False
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
@@ -3197,8 +3205,8 @@ class TestAgentBot:
             )
 
         assert delivery.terminal_status == "error"
-        assert delivery.visible_response_event_id == "$existing"
-        assert delivery.response_identity_event_id is None
+        assert _visible_response_event_id(delivery) == "$existing"
+        assert _handled_response_event_id(delivery) is None
         assert delivery.mark_handled is False
         assert delivery.retryable is True
 
@@ -3280,7 +3288,7 @@ class TestAgentBot:
                 payload=DispatchPayload(prompt="team prompt"),
             )
 
-        assert resolution.response_identity_event_id == "$team"
+        assert _handled_response_event_id(resolution) == "$team"
         mock_register.assert_called_once()
         assert mock_register.call_args.args[0] == "$team"
         assert mock_register.call_args.args[1] == "!test:localhost"
@@ -4012,7 +4020,7 @@ class TestAgentBot:
                     user_id="@alice:localhost",
                 )
 
-        assert resolution.response_identity_event_id == "$response"
+        assert _handled_response_event_id(resolution) == "$response"
         mock_get_thread_history.assert_awaited_once_with("!test:localhost", "$thread")
         request = mock_process.await_args.args[0]
         assert list(request.thread_history) == fresh_history
@@ -4380,7 +4388,7 @@ class TestAgentBot:
             release.set()
             resolution = await task
 
-        assert resolution.response_identity_event_id == "$response"
+        assert _handled_response_event_id(resolution) == "$response"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_queues_memory_before_helper_failure(
@@ -4686,7 +4694,7 @@ class TestAgentBot:
 
         assert resolution.terminal_status == "completed"
         assert resolution.mark_handled is True
-        assert resolution.visible_response_event_id == "$team-response"
+        assert _visible_response_event_id(resolution) == "$team-response"
         mock_thread_summary.assert_awaited_once()
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
@@ -4793,8 +4801,8 @@ class TestAgentBot:
                 correlation_id="corr-team-stream",
             )
 
-        assert resolution.response_identity_event_id == "$placeholder"
-        assert resolution.visible_response_event_id == "$placeholder"
+        assert _handled_response_event_id(resolution) == "$placeholder"
+        assert _visible_response_event_id(resolution) == "$placeholder"
         mock_team_response.assert_not_awaited()
         send_kwargs = mock_send_streaming_response.await_args.kwargs
         assert send_kwargs["existing_event_id"] == "$placeholder"
@@ -4878,7 +4886,7 @@ class TestAgentBot:
 
         assert resolution.terminal_status == "completed"
         assert resolution.mark_handled is True
-        assert resolution.visible_response_event_id == "$placeholder"
+        assert _visible_response_event_id(resolution) == "$placeholder"
         bot._redact_message_event.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -4929,7 +4937,7 @@ class TestAgentBot:
         assert resolution.terminal_status == "cancelled"
         assert resolution.suppressed is True
         assert resolution.mark_handled is True
-        assert resolution.visible_response_event_id is None
+        assert _visible_response_event_id(resolution) is None
         bot._redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$placeholder",
@@ -9138,8 +9146,8 @@ class TestAgentBot:
 
         assert outcome.terminal_status == "cancelled"
         assert outcome.suppressed is True
-        assert outcome.visible_response_event_id == "$existing"
-        assert outcome.response_identity_event_id is None
+        assert _visible_response_event_id(outcome) == "$existing"
+        assert _handled_response_event_id(outcome) is None
         assert outcome.mark_handled is False
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
@@ -9187,8 +9195,8 @@ class TestAgentBot:
             )
 
         assert outcome.terminal_status == "error"
-        assert outcome.visible_response_event_id == "$existing"
-        assert outcome.response_identity_event_id is None
+        assert _visible_response_event_id(outcome) == "$existing"
+        assert _handled_response_event_id(outcome) is None
         assert outcome.mark_handled is False
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 

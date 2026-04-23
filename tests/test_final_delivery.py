@@ -13,10 +13,14 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 class _Expectation:
     event_id: str | None
     is_visible_response: bool
-    visible_response_event_id: str | None
-    response_identity_event_id: str | None
+    final_visible_event_id: str | None
+    handled_response_event_id: str | None
     mark_handled: bool
     retryable: bool
+
+
+def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
 @pytest.mark.parametrize(
@@ -76,8 +80,9 @@ class _Expectation:
                 is_visible_response=True,
                 failure_reason="suppressed_by_hook",
                 mark_handled=True,
+                suppressed=True,
             ),
-            _Expectation("$placeholder", True, "$placeholder", "$placeholder", True, False),
+            _Expectation("$placeholder", True, "$placeholder", None, True, False),
             id="suppression-cleanup-failed",
         ),
         pytest.param(
@@ -99,77 +104,18 @@ def test_final_delivery_outcomes_use_canonical_event_fields(
     """Call sites should rely on the canonical event id plus visible-response flag."""
     assert outcome.event_id == expected.event_id
     assert outcome.is_visible_response is expected.is_visible_response
-    assert outcome.visible_response_event_id == expected.visible_response_event_id
-    assert outcome.response_identity_event_id == expected.response_identity_event_id
+    assert outcome.final_visible_event_id == expected.final_visible_event_id
+    assert _handled_response_event_id(outcome) == expected.handled_response_event_id
     assert outcome.mark_handled is expected.mark_handled
     assert outcome.retryable is expected.retryable
 
 
-def test_final_delivery_outcome_requires_event_id_for_visible_response() -> None:
-    """Visible-response outcomes must carry the canonical event id."""
-    with pytest.raises(ValueError, match="is_visible_response requires event_id"):
-        FinalDeliveryOutcome(
-            terminal_status="error",
-            event_id=None,
-            is_visible_response=True,
-        )
+def test_final_delivery_outcome_cancelled_for_empty_prompt_is_not_retryable() -> None:
+    outcome = FinalDeliveryOutcome.cancelled_for_empty_prompt()
 
-
-def test_final_delivery_outcome_completed_requires_visible_response_event() -> None:
-    """Completed outcomes must represent one visible response."""
-    with pytest.raises(ValueError, match="completed outcomes require a visible response event"):
-        FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id=None,
-            final_visible_body="hello",
-        )
-
-
-def test_final_delivery_outcome_completed_requires_visible_body() -> None:
-    """Completed outcomes must carry the final visible body."""
-    with pytest.raises(ValueError, match="completed outcomes require final_visible_body"):
-        FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$final",
-            is_visible_response=True,
-        )
-
-
-def test_final_delivery_outcome_completed_rejects_failure_reason() -> None:
-    """Completed outcomes cannot carry failure metadata."""
-    with pytest.raises(ValueError, match="completed outcomes cannot carry failure_reason"):
-        FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$final",
-            is_visible_response=True,
-            final_visible_body="hello",
-            failure_reason="suppressed_by_hook",
-        )
-
-
-def test_final_delivery_outcome_completed_rejects_suppressed() -> None:
-    """Completed outcomes cannot also be suppressed."""
-    with pytest.raises(ValueError, match="completed outcomes cannot be suppressed"):
-        FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$final",
-            is_visible_response=True,
-            final_visible_body="hello",
-            suppressed=True,
-        )
-
-
-def test_stream_transport_outcome_rejects_rendered_body_without_visible_state() -> None:
-    """Rendered text without a visible-body state is not a valid transport snapshot."""
-    with pytest.raises(ValueError, match="visible_body_state 'none' cannot carry a rendered_body"):
-        StreamTransportOutcome(
-            last_physical_stream_event_id=None,
-            terminal_operation="none",
-            terminal_result="not_attempted",
-            terminal_status="completed",
-            rendered_body="hello",
-            visible_body_state="none",
-        )
+    assert outcome.terminal_status == "cancelled"
+    assert outcome.failure_reason == "empty_prompt"
+    assert outcome.retryable is False
 
 
 def test_stream_transport_outcome_accepts_placeholder_only_visible_state() -> None:

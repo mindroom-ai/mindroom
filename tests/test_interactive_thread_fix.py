@@ -20,7 +20,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     bind_runtime_paths,
@@ -38,6 +38,14 @@ def _room_send_response(event_id: str) -> MagicMock:
     response.event_id = event_id
     response.__class__ = nio.RoomSendResponse
     return response
+
+
+def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+    return (
+        outcome.event_id
+        if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed
+        else None
+    )
 
 
 @pytest.mark.asyncio
@@ -133,7 +141,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert resolution.response_identity_event_id == "$agent_message_id"
+        assert _handled_response_event_id(resolution) == "$agent_message_id"
         mock_register.assert_called_once()
         call_args = mock_register.call_args[0]
         registered_event_id = call_args[0]
@@ -230,7 +238,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert resolution.response_identity_event_id == "$agent_response_id"
+        assert _handled_response_event_id(resolution) == "$agent_response_id"
         mock_register.assert_called_once()
         call_args = mock_register.call_args[0]
         registered_event_id = call_args[0]
@@ -315,7 +323,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
             user_id="@user:localhost",
         )
 
-        assert resolution.response_identity_event_id == "$standalone_message"
+        assert _handled_response_event_id(resolution) == "$standalone_message"
         mock_register.assert_called_once()
         call_args = mock_register.call_args[0]
         registered_event_id = call_args[0]

@@ -683,7 +683,7 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
     assert finalized.terminal_status == "error"
     assert outcome.terminal_status == "error"
     assert outcome.retryable is True
-    assert outcome.visible_response_event_id == expected_visible_event_id
+    assert outcome.final_visible_event_id == expected_visible_event_id
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].failure_reason == "delivery_failed"
     assert cancelled_seen[0].visible_response_event_id == expected_visible_event_id
@@ -836,7 +836,7 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
     )
 
     assert outcome.terminal_status == "error"
-    assert outcome.visible_response_event_id == "$placeholder"
+    assert outcome.final_visible_event_id == "$placeholder"
     assert cancelled_seen == []
 
 
@@ -894,5 +894,5 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
     )
 
     assert outcome.terminal_status == "error"
-    assert outcome.visible_response_event_id == "$placeholder"
+    assert outcome.final_visible_event_id == "$placeholder"
     assert cancelled_seen == []

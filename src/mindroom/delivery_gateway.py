@@ -298,17 +298,9 @@ class DeliveryGateway:
         return outcome.last_physical_stream_event_id
 
     @staticmethod
-    def _cancelled_error_failure_reason(
-        error: asyncio.CancelledError,
-        *,
-        fallback: str | None = None,
-    ) -> str:
+    def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
         """Normalize CancelledError values to the canonical cancellation reason strings."""
-        reason = cancel_failure_reason(classify_cancel_source(error))
-        if reason:
-            return reason
-        normalized_fallback = (fallback or "").strip()
-        return normalized_fallback or "interrupted"
+        return cancel_failure_reason(classify_cancel_source(error))
 
     async def _cleanup_completed_placeholder_only_stream(
         self,
@@ -377,7 +369,7 @@ class DeliveryGateway:
                 reason=redaction_reason,
             )
         except asyncio.CancelledError as error:
-            return self._cancelled_error_failure_reason(error, fallback=failure_reason)
+            return self._cancelled_error_failure_reason(error)
         except Exception as error:
             self.deps.logger.exception(
                 "Failed to redact visible response during cleanup",
