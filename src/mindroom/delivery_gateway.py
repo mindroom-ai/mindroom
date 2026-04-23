@@ -890,197 +890,172 @@ class DeliveryGateway:
             else None,
         )
 
-    def _interactive_response_for_visible_body(
-        self,
-        *,
-        visible_body: str,
-        raw_body_candidate: str | None,
-    ):
-        """Resolve interactive metadata for the exact text that remained visible."""
-        visible_interactive_response = interactive.parse_and_format_interactive(
-            visible_body,
-            extract_mapping=True,
-        )
-        if raw_body_candidate is None or raw_body_candidate == visible_body:
-            return visible_interactive_response
-        raw_interactive_response = interactive.parse_and_format_interactive(
-            raw_body_candidate,
-            extract_mapping=True,
-        )
-        if (
-            raw_interactive_response.option_map
-            and raw_interactive_response.formatted_text == visible_body
-        ):
-            return raw_interactive_response
-        return visible_interactive_response
-
     async def finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
         """Apply hooks and any final edit needed after streamed delivery completes."""
         stream_outcome = request.stream_transport_outcome
-        streamed_event_id = stream_outcome.last_physical_stream_event_id
-        visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
-        streamed_text = self._current_stream_body(stream_outcome)
-        final_body_candidate = stream_outcome.canonical_final_body_candidate or streamed_text
-        if stream_outcome.terminal_status == "cancelled":
-            if (
-                request.initial_delivery_kind == "edited"
-                and stream_outcome.visible_body_state == "none"
-                and not request.existing_event_is_placeholder
-            ):
-                existing_visible_event_id = request.existing_event_id or streamed_event_id
-                if existing_visible_event_id is not None:
-                    return FinalDeliveryOutcome(
-                        terminal_status="cancelled",
-                        event_id=existing_visible_event_id,
-                        is_visible_response=True,
-                        failure_reason=stream_outcome.failure_reason or "stream_finalize_cancelled",
-                        tool_trace=tuple(request.tool_trace or ()),
+        try:
+            streamed_event_id = stream_outcome.last_physical_stream_event_id
+            visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
+            streamed_text = self._current_stream_body(stream_outcome)
+            final_body_candidate = stream_outcome.canonical_final_body_candidate or streamed_text
+            if stream_outcome.terminal_status == "cancelled":
+                if (
+                    request.initial_delivery_kind == "edited"
+                    and stream_outcome.visible_body_state == "none"
+                    and not request.existing_event_is_placeholder
+                ):
+                    existing_visible_event_id = request.existing_event_id or streamed_event_id
+                    if existing_visible_event_id is not None:
+                        return FinalDeliveryOutcome(
+                            terminal_status="cancelled",
+                            event_id=existing_visible_event_id,
+                            is_visible_response=True,
+                            failure_reason=stream_outcome.failure_reason or "stream_finalize_cancelled",
+                            tool_trace=tuple(request.tool_trace or ()),
+                            extra_content=request.extra_content,
+                        )
+                failure_reason = stream_outcome.failure_reason or "stream_finalize_cancelled"
+                if stream_outcome.visible_body_state == "placeholder_only":
+                    cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
+                        room_id=request.target.room_id,
+                        streamed_event_id=stream_outcome.last_physical_stream_event_id,
+                        response_kind=request.response_kind,
+                        response_envelope=request.response_envelope,
+                        correlation_id=request.correlation_id,
+                        failure_reason=failure_reason,
+                        tool_trace=request.tool_trace,
                         extra_content=request.extra_content,
                     )
-            failure_reason = stream_outcome.failure_reason or "stream_finalize_cancelled"
-            if stream_outcome.visible_body_state == "placeholder_only":
-                cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
-                    room_id=request.target.room_id,
-                    streamed_event_id=stream_outcome.last_physical_stream_event_id,
-                    response_kind=request.response_kind,
-                    response_envelope=request.response_envelope,
-                    correlation_id=request.correlation_id,
-                    failure_reason=failure_reason,
-                    tool_trace=request.tool_trace,
-                    extra_content=request.extra_content,
-                )
-                if cleanup_outcome.event_id is None or not cleanup_outcome.is_visible_response:
+                    if cleanup_outcome.event_id is None or not cleanup_outcome.is_visible_response:
+                        return FinalDeliveryOutcome(
+                            terminal_status="cancelled",
+                            event_id=None,
+                            failure_reason=failure_reason,
+                            tool_trace=tuple(request.tool_trace or ()),
+                            extra_content=request.extra_content,
+                        )
+                    return cleanup_outcome
+
+                visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
+                if visible_stream_event_id is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="cancelled",
-                        event_id=None,
+                        event_id=visible_stream_event_id,
+                        is_visible_response=True,
+                        final_visible_body=streamed_text or None,
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-                return cleanup_outcome
-
-            visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
-            if visible_stream_event_id is not None:
-                return FinalDeliveryOutcome(
-                    terminal_status="cancelled",
-                    event_id=visible_stream_event_id,
-                    is_visible_response=True,
-                    final_visible_body=streamed_text or None,
-                    failure_reason=failure_reason,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
-            if request.existing_event_id is not None and not request.existing_event_is_placeholder:
-                return FinalDeliveryOutcome(
-                    terminal_status="cancelled",
-                    event_id=request.existing_event_id,
-                    is_visible_response=True,
-                    failure_reason=failure_reason,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
-            return FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                event_id=None,
-                failure_reason=failure_reason,
-                tool_trace=tuple(request.tool_trace or ()),
-                extra_content=request.extra_content,
-            )
-
-        if stream_outcome.terminal_status == "error":
-            if (
-                request.initial_delivery_kind == "edited"
-                and stream_outcome.visible_body_state == "none"
-                and not request.existing_event_is_placeholder
-            ):
-                existing_visible_event_id = request.existing_event_id or streamed_event_id
-                if existing_visible_event_id is not None:
+                if request.existing_event_id is not None and not request.existing_event_is_placeholder:
                     return FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=existing_visible_event_id,
+                        terminal_status="cancelled",
+                        event_id=request.existing_event_id,
                         is_visible_response=True,
-                        failure_reason=stream_outcome.failure_reason or "stream_finalize_error",
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
-            failure_reason = stream_outcome.failure_reason or "stream_finalize_error"
-            if stream_outcome.visible_body_state == "placeholder_only":
-                cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
-                    room_id=request.target.room_id,
-                    streamed_event_id=stream_outcome.last_physical_stream_event_id,
-                    response_kind=request.response_kind,
-                    response_envelope=request.response_envelope,
-                    correlation_id=request.correlation_id,
-                    failure_reason=failure_reason,
-                    tool_trace=request.tool_trace,
-                    extra_content=request.extra_content,
-                )
-                if cleanup_outcome.event_id is None or not cleanup_outcome.is_visible_response:
-                    return FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=None,
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-                return cleanup_outcome
-
-            visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
-            if visible_stream_event_id is not None:
                 return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=visible_stream_event_id,
-                    is_visible_response=True,
-                    final_visible_body=streamed_text or None,
+                    terminal_status="cancelled",
+                    event_id=None,
                     failure_reason=failure_reason,
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )
-            if request.existing_event_id is not None and not request.existing_event_is_placeholder:
+
+            if stream_outcome.terminal_status == "error":
+                if (
+                    request.initial_delivery_kind == "edited"
+                    and stream_outcome.visible_body_state == "none"
+                    and not request.existing_event_is_placeholder
+                ):
+                    existing_visible_event_id = request.existing_event_id or streamed_event_id
+                    if existing_visible_event_id is not None:
+                        return FinalDeliveryOutcome(
+                            terminal_status="error",
+                            event_id=existing_visible_event_id,
+                            is_visible_response=True,
+                            failure_reason=stream_outcome.failure_reason or "stream_finalize_error",
+                            tool_trace=tuple(request.tool_trace or ()),
+                            extra_content=request.extra_content,
+                        )
+                failure_reason = stream_outcome.failure_reason or "stream_finalize_error"
+                if stream_outcome.visible_body_state == "placeholder_only":
+                    cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
+                        room_id=request.target.room_id,
+                        streamed_event_id=stream_outcome.last_physical_stream_event_id,
+                        response_kind=request.response_kind,
+                        response_envelope=request.response_envelope,
+                        correlation_id=request.correlation_id,
+                        failure_reason=failure_reason,
+                        tool_trace=request.tool_trace,
+                        extra_content=request.extra_content,
+                    )
+                    if cleanup_outcome.event_id is None or not cleanup_outcome.is_visible_response:
+                        return FinalDeliveryOutcome(
+                            terminal_status="error",
+                            event_id=None,
+                            failure_reason=failure_reason,
+                            tool_trace=tuple(request.tool_trace or ()),
+                            extra_content=request.extra_content,
+                        )
+                    return cleanup_outcome
+
+                visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
+                if visible_stream_event_id is not None:
+                    return FinalDeliveryOutcome(
+                        terminal_status="error",
+                        event_id=visible_stream_event_id,
+                        is_visible_response=True,
+                        final_visible_body=streamed_text or None,
+                        failure_reason=failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
+                    )
+                if request.existing_event_id is not None and not request.existing_event_is_placeholder:
+                    return FinalDeliveryOutcome(
+                        terminal_status="error",
+                        event_id=request.existing_event_id,
+                        is_visible_response=True,
+                        failure_reason=failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
+                    )
                 return FinalDeliveryOutcome(
                     terminal_status="error",
-                    event_id=request.existing_event_id,
-                    is_visible_response=True,
+                    event_id=None,
                     failure_reason=failure_reason,
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )
-            return FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id=None,
-                failure_reason=failure_reason,
-                tool_trace=tuple(request.tool_trace or ()),
-                extra_content=request.extra_content,
-            )
 
-        if (
-            stream_outcome.canonical_final_body_candidate is not None
-            and stream_outcome.visible_body_state in {"none", "placeholder_only"}
-        ):
-            existing_event_id = request.existing_event_id
-            existing_event_is_placeholder = request.existing_event_is_placeholder
-            if stream_outcome.visible_body_state == "placeholder_only":
-                existing_event_id = streamed_event_id
-                existing_event_is_placeholder = True
-            return await self.deliver_final(
-                FinalDeliveryRequest(
-                    target=request.target,
-                    existing_event_id=existing_event_id,
-                    existing_event_is_placeholder=existing_event_is_placeholder,
-                    response_text=stream_outcome.canonical_final_body_candidate,
-                    response_kind=request.response_kind,
-                    response_envelope=request.response_envelope,
-                    correlation_id=request.correlation_id,
-                    tool_trace=request.tool_trace,
-                    extra_content=request.extra_content,
-                ),
-            )
+            if (
+                stream_outcome.canonical_final_body_candidate is not None
+                and stream_outcome.visible_body_state in {"none", "placeholder_only"}
+            ):
+                existing_event_id = request.existing_event_id
+                existing_event_is_placeholder = request.existing_event_is_placeholder
+                if stream_outcome.visible_body_state == "placeholder_only":
+                    existing_event_id = streamed_event_id
+                    existing_event_is_placeholder = True
+                return await self.deliver_final(
+                    FinalDeliveryRequest(
+                        target=request.target,
+                        existing_event_id=existing_event_id,
+                        existing_event_is_placeholder=existing_event_is_placeholder,
+                        response_text=stream_outcome.canonical_final_body_candidate,
+                        response_kind=request.response_kind,
+                        response_envelope=request.response_envelope,
+                        correlation_id=request.correlation_id,
+                        tool_trace=request.tool_trace,
+                        extra_content=request.extra_content,
+                    ),
+                )
 
-        if stream_outcome.failure_reason is not None and stream_outcome.visible_body_state != "visible_body":
-            failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
             if stream_outcome.visible_body_state == "placeholder_only":
                 return await self._cleanup_completed_placeholder_only_stream(
                     room_id=request.target.room_id,
@@ -1088,131 +1063,167 @@ class DeliveryGateway:
                     response_kind=request.response_kind,
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id,
-                    failure_reason=failure_reason,
+                    failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,
                 )
-            if (
-                request.initial_delivery_kind == "edited"
-                and streamed_event_id is not None
-                and visible_stream_event_id is None
-            ):
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=streamed_event_id,
-                    is_visible_response=True,
-                    failure_reason=failure_reason,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
-            if visible_stream_event_id is not None:
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=visible_stream_event_id,
-                    is_visible_response=True,
-                    final_visible_body=streamed_text or None,
-                    failure_reason=failure_reason,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
-            return FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id=None,
-                failure_reason=failure_reason,
-                tool_trace=tuple(request.tool_trace or ()),
-                extra_content=request.extra_content,
-            )
 
-        if stream_outcome.visible_body_state == "placeholder_only":
-            return await self._cleanup_completed_placeholder_only_stream(
-                room_id=request.target.room_id,
-                streamed_event_id=streamed_event_id,
-                response_kind=request.response_kind,
-                response_envelope=request.response_envelope,
-                correlation_id=request.correlation_id,
-                failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
-            )
-
-        if stream_outcome.visible_body_state != "visible_body":
-            if (
-                request.initial_delivery_kind == "edited"
-                and not request.existing_event_is_placeholder
-                and stream_outcome.visible_body_state == "none"
-            ):
-                existing_visible_event_id = request.existing_event_id or streamed_event_id
-                if existing_visible_event_id is not None:
+            if stream_outcome.failure_reason is not None and stream_outcome.visible_body_state != "visible_body":
+                failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
+                if (
+                    request.initial_delivery_kind == "edited"
+                    and streamed_event_id is not None
+                    and visible_stream_event_id is None
+                ):
                     return FinalDeliveryOutcome(
                         terminal_status="error",
-                        event_id=existing_visible_event_id,
+                        event_id=streamed_event_id,
                         is_visible_response=True,
-                        failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
+                        failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
+                if visible_stream_event_id is not None:
+                    return FinalDeliveryOutcome(
+                        terminal_status="error",
+                        event_id=visible_stream_event_id,
+                        is_visible_response=True,
+                        final_visible_body=streamed_text or None,
+                        failure_reason=failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
+                    )
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=None,
+                    failure_reason=failure_reason,
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
+                )
+
+            if stream_outcome.visible_body_state != "visible_body":
+                if (
+                    request.initial_delivery_kind == "edited"
+                    and not request.existing_event_is_placeholder
+                    and stream_outcome.visible_body_state == "none"
+                ):
+                    existing_visible_event_id = request.existing_event_id or streamed_event_id
+                    if existing_visible_event_id is not None:
+                        return FinalDeliveryOutcome(
+                            terminal_status="error",
+                            event_id=existing_visible_event_id,
+                            is_visible_response=True,
+                            failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
+                            tool_trace=tuple(request.tool_trace or ()),
+                            extra_content=request.extra_content,
+                        )
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=None,
+                    failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
+                )
+            try:
+                final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
+                    correlation_id=request.correlation_id,
+                    envelope=request.response_envelope,
+                    response_text=final_body_candidate,
+                    response_kind=request.response_kind,
+                )
+                if (
+                    final_transform_draft.response_text != final_body_candidate
+                    and final_transform_draft.response_text.strip()
+                ):
+                    try:
+                        final_outcome = await self._finalize_visible_replacement_edit(
+                            target=request.target,
+                            event_id=streamed_event_id,
+                            response_text=final_transform_draft.response_text,
+                            tool_trace=request.tool_trace,
+                            extra_content=request.extra_content,
+                        )
+                    except asyncio.CancelledError:
+                        self.deps.logger.warning(
+                            "Final streamed-response transform edit cancelled; preserving streamed success",
+                            correlation_id=request.correlation_id,
+                        )
+                    except Exception:
+                        self.deps.logger.exception(
+                            "Final streamed-response transform edit failed; preserving streamed success",
+                            correlation_id=request.correlation_id,
+                        )
+                    else:
+                        if final_outcome is not None:
+                            return final_outcome
+            except asyncio.CancelledError:
+                self.deps.logger.warning(
+                    "Final streamed-response transform cancelled; preserving streamed success",
+                    correlation_id=request.correlation_id,
+                )
+            except Exception:
+                self.deps.logger.exception(
+                    "Final streamed-response transform failed; preserving streamed success",
+                    correlation_id=request.correlation_id,
+                )
+
+            assert streamed_event_id is not None
+            interactive_response = interactive.parse_and_format_interactive(
+                streamed_text,
+                extract_mapping=True,
+            )
             return FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id=None,
-                failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
+                terminal_status="completed",
+                event_id=streamed_event_id,
+                is_visible_response=True,
+                final_visible_body=streamed_text or interactive_response.formatted_text,
+                delivery_kind=request.initial_delivery_kind,
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
+                option_map=interactive_response.option_map,
+                options_list=tuple(interactive_response.options_list)
+                if interactive_response.options_list is not None
+                else None,
+            )
+        except asyncio.CancelledError:
+            visible_event_id = self._visible_stream_event_id(stream_outcome)
+            event_id = visible_event_id
+            if (
+                event_id is None
+                and request.existing_event_id is not None
+                and not request.existing_event_is_placeholder
+            ):
+                event_id = request.existing_event_id
+            final_visible_body = self._current_stream_body(stream_outcome) if visible_event_id is not None else None
+            return FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id=event_id,
+                is_visible_response=event_id is not None,
+                final_visible_body=final_visible_body,
+                failure_reason="stream_finalize_cancelled",
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
             )
-        try:
-            final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
-                correlation_id=request.correlation_id,
-                envelope=request.response_envelope,
-                response_text=final_body_candidate,
-                response_kind=request.response_kind,
-            )
-            if final_transform_draft.response_text != final_body_candidate:
-                try:
-                    final_outcome = await self._finalize_visible_replacement_edit(
-                        target=request.target,
-                        event_id=streamed_event_id,
-                        response_text=final_transform_draft.response_text,
-                        tool_trace=request.tool_trace,
-                        extra_content=request.extra_content,
-                    )
-                except asyncio.CancelledError:
-                    self.deps.logger.warning(
-                        "Final streamed-response transform edit cancelled; preserving streamed success",
-                        correlation_id=request.correlation_id,
-                    )
-                except Exception:
-                    self.deps.logger.exception(
-                        "Final streamed-response transform edit failed; preserving streamed success",
-                        correlation_id=request.correlation_id,
-                    )
-                else:
-                    if final_outcome is not None:
-                        return final_outcome
-        except asyncio.CancelledError:
-            self.deps.logger.warning(
-                "Final streamed-response transform cancelled; preserving streamed success",
-                correlation_id=request.correlation_id,
-            )
         except Exception:
             self.deps.logger.exception(
-                "Final streamed-response transform failed; preserving streamed success",
+                "Unexpected error in finalize_streamed_response",
                 correlation_id=request.correlation_id,
             )
-
-        assert streamed_event_id is not None
-        interactive_response = self._interactive_response_for_visible_body(
-            visible_body=streamed_text,
-            raw_body_candidate=final_body_candidate,
-        )
-        return FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id=streamed_event_id,
-            is_visible_response=True,
-            final_visible_body=streamed_text or interactive_response.formatted_text,
-            delivery_kind=request.initial_delivery_kind,
-            tool_trace=tuple(request.tool_trace or ()),
-            extra_content=request.extra_content,
-            option_map=interactive_response.option_map,
-            options_list=tuple(interactive_response.options_list)
-            if interactive_response.options_list is not None
-            else None,
-        )
+            visible_event_id = self._visible_stream_event_id(stream_outcome)
+            event_id = visible_event_id
+            if (
+                event_id is None
+                and request.existing_event_id is not None
+                and not request.existing_event_is_placeholder
+            ):
+                event_id = request.existing_event_id
+            final_visible_body = self._current_stream_body(stream_outcome) if visible_event_id is not None else None
+            return FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id=event_id,
+                is_visible_response=event_id is not None,
+                final_visible_body=final_visible_body,
+                failure_reason="stream_finalize_failed",
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
+            )
