@@ -227,14 +227,18 @@ def _outcome(
     delivery_kind: str | None = None,
     failure_reason: str | None = None,
 ) -> FinalDeliveryOutcome:
+    visible_event_id = final_visible_event_id or last_physical_stream_event_id
     return FinalDeliveryOutcome(
-        state=state,
         terminal_status=terminal_status,
         final_visible_event_id=final_visible_event_id,
+        visible_response_event_id=visible_event_id,
+        response_identity_event_id=visible_event_id if terminal_status == "completed" else None,
+        turn_completion_event_id=visible_event_id,
         last_physical_stream_event_id=last_physical_stream_event_id,
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
         failure_reason=failure_reason,
+        mark_handled=state != "error_without_visible_response" and visible_event_id is not None,
     )
 
 

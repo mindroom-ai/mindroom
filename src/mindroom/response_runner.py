@@ -1574,7 +1574,7 @@ class ResponseRunner:
                 ),
             )
             if self._should_reraise_user_stop(error.error):
-                raise error.error
+                raise error.error from None
         except Exception as error:
             if not delivery_stage_started:
                 raise
@@ -2010,7 +2010,7 @@ class ResponseRunner:
             )
             raise
 
-    async def process_and_respond(  # noqa: C901
+    async def process_and_respond(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2344,7 +2344,7 @@ class ResponseRunner:
                 ),
             )
             if self._should_reraise_user_stop(error.error):
-                raise error.error
+                raise error.error from None
             return outcome
         except asyncio.CancelledError as exc:
             self._log_cancelled_response(

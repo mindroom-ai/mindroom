@@ -11,12 +11,12 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.runtime import USER_STOP_CANCEL_MSG
 from mindroom.stop import StopManager
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for, test_runtime_paths
 

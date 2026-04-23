@@ -17,7 +17,7 @@ from agno.run.agent import RunCancelledEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 
 from mindroom.bot import AgentBot
-from mindroom.cancellation import request_task_cancel
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
@@ -27,7 +27,6 @@ from mindroom.hooks import HookRegistry
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import CANCELLED_RESPONSE_NOTE, INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from tests.conftest import (

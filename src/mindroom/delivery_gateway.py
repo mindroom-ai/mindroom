@@ -348,8 +348,6 @@ class DeliveryGateway:
                 correlation_id=correlation_id,
                 redaction_reason="Completed placeholder-only streamed response",
                 failure_reason=failure_reason,
-                tool_trace=tool_trace,
-                extra_content=extra_content,
             )
             if cleanup_failure is not None:
                 return FinalDeliveryOutcome(
@@ -381,8 +379,6 @@ class DeliveryGateway:
         correlation_id: str,
         redaction_reason: str,
         failure_reason: str | None = None,
-        tool_trace: list[ToolTraceEntry] | None = None,
-        extra_content: dict[str, Any] | None = None,
     ) -> str | None:
         """Redact one visible response event and return a failure reason when cleanup fails."""
         self.deps.logger.warning(
@@ -553,8 +549,6 @@ class DeliveryGateway:
                     correlation_id=request.correlation_id,
                     redaction_reason="Cancelled placeholder response",
                     failure_reason=failure_reason,
-                    tool_trace=request.tool_trace,
-                    extra_content=request.extra_content,
                 )
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(
@@ -598,8 +592,6 @@ class DeliveryGateway:
                     correlation_id=request.correlation_id,
                     redaction_reason="Failed placeholder response before delivery",
                     failure_reason=failure_reason,
-                    tool_trace=request.tool_trace,
-                    extra_content=request.extra_content,
                 )
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(
@@ -647,8 +639,6 @@ class DeliveryGateway:
                     correlation_id=request.correlation_id,
                     redaction_reason="Suppressed placeholder response",
                     failure_reason="suppressed_by_hook",
-                    tool_trace=draft.tool_trace,
-                    extra_content=draft.extra_content,
                 )
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(
@@ -720,10 +710,14 @@ class DeliveryGateway:
                     canonical_final_body_candidate=draft.response_text,
                     delivery_kind="edited",
                     mark_handled=True,
-                    tool_trace=draft.tool_trace,
+                    tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
                     option_map=interactive_response.option_map,
-                    options_list=interactive_response.options_list,
+                    options_list=(
+                        tuple(interactive_response.options_list)
+                        if interactive_response.options_list is not None
+                        else None
+                    ),
                 )
 
             if request.existing_event_is_placeholder:
@@ -735,8 +729,6 @@ class DeliveryGateway:
                     correlation_id=request.correlation_id,
                     redaction_reason="Failed placeholder response",
                     failure_reason="delivery_failed",
-                    tool_trace=draft.tool_trace,
-                    extra_content=draft.extra_content,
                 )
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(
@@ -798,7 +790,9 @@ class DeliveryGateway:
             tool_trace=tuple(draft.tool_trace or ()),
             extra_content=draft.extra_content,
             option_map=interactive_response.option_map,
-            options_list=interactive_response.options_list,
+            options_list=tuple(interactive_response.options_list)
+            if interactive_response.options_list is not None
+            else None,
         )
 
     async def deliver_final(
@@ -854,7 +848,6 @@ class DeliveryGateway:
             correlation_id=request.correlation_id,
             redaction_reason="Failed cancelled placeholder response",
             failure_reason=failure_reason,
-            extra_content=extra_content,
         )
         if cleanup_failure is not None:
             return FinalDeliveryOutcome(
@@ -993,7 +986,9 @@ class DeliveryGateway:
             tool_trace=tuple(tool_trace or ()),
             extra_content=extra_content,
             option_map=interactive_response.option_map,
-            options_list=interactive_response.options_list,
+            options_list=tuple(interactive_response.options_list)
+            if interactive_response.options_list is not None
+            else None,
         )
 
     async def _finalize_streamed_response_outcome(  # noqa: C901, PLR0911, PLR0912
@@ -1221,7 +1216,13 @@ class DeliveryGateway:
             tool_trace=tuple(request.tool_trace or ()),
             extra_content=request.extra_content,
             option_map=stream_outcome.option_map or interactive_response.option_map,
-            options_list=stream_outcome.options_list or interactive_response.options_list,
+            options_list=(
+                stream_outcome.options_list
+                if stream_outcome.options_list is not None
+                else (
+                    tuple(interactive_response.options_list) if interactive_response.options_list is not None else None
+                )
+            ),
         )
 
     async def finalize_streamed_response(

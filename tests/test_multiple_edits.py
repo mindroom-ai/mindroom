@@ -33,19 +33,21 @@ def _delivery_resolution(response_event_id: str | None) -> FinalDeliveryOutcome:
     """Build one terminal delivery outcome for edit-regeneration tests."""
     if response_event_id is None:
         return FinalDeliveryOutcome(
-            state="error_without_visible_response",
             terminal_status="error",
             final_visible_event_id=None,
             last_physical_stream_event_id=None,
             failure_reason="test_mock_no_visible_response",
         )
     return FinalDeliveryOutcome(
-        state="final_visible_delivery",
         terminal_status="completed",
         final_visible_event_id=response_event_id,
+        visible_response_event_id=response_event_id,
+        response_identity_event_id=response_event_id,
+        turn_completion_event_id=response_event_id,
         last_physical_stream_event_id=None,
         final_visible_body="",
         delivery_kind="sent",
+        mark_handled=True,
     )
 
 

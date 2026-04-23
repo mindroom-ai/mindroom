@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from mindroom import interactive
 from mindroom.constants import (
-    AI_RUN_METADATA_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -25,7 +24,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.runtime import CancelSource, classify_cancel_source
 from mindroom.streaming_delivery import (
     StreamInputChunk,
     _consume_stream_with_progress_supervision,
@@ -63,6 +61,7 @@ _INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
 INTERRUPTED_RESPONSE_NOTE = _INTERRUPTED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
+_CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 
 
@@ -71,7 +70,7 @@ class StreamingDeliveryError(Exception):
 
     def __init__(
         self,
-        error: Exception,
+        error: BaseException,
         *,
         event_id: str | None,
         accumulated_text: str,
@@ -88,7 +87,7 @@ class StreamingDeliveryError(Exception):
 
 def _build_streaming_delivery_error(
     streaming: StreamingResponse,
-    error: Exception,
+    error: BaseException,
     *,
     tool_trace_collector: list[ToolTraceEntry] | None,
 ) -> StreamingDeliveryError:
@@ -180,7 +179,7 @@ class _CommittedDeliveryState:
 def build_cancelled_response_update(
     text: str,
     *,
-    cancel_source: CancelSource,
+    cancel_source: _CancelSource,
 ) -> tuple[str, _TerminalStreamStatus]:
     """Return the final visible body and stream status for one cancellation source."""
     if cancel_source == "sync_restart":
@@ -199,7 +198,7 @@ def build_cancelled_response_update(
 def _log_stream_cancellation(
     *,
     exc: asyncio.CancelledError,
-    cancel_source: CancelSource,
+    cancel_source: _CancelSource,
     message_id: str | None,
 ) -> None:
     """Log one streaming cancellation with its resolved provenance."""
@@ -360,11 +359,10 @@ class StreamingResponse:
         *,
         cancelled: bool,
         restart_interrupted: bool,
-        cancel_source: CancelSource | None,
+        cancel_source: _CancelSource | None,
         error: Exception | None,
     ) -> _TerminalStreamStatus:
         """Apply terminal text adjustments and return the terminal stream status."""
-        ai_run_payload = self.extra_content.get(AI_RUN_METADATA_KEY) if self.extra_content is not None else None
         resolved_cancel_source = cancel_source
         if resolved_cancel_source is None:
             if restart_interrupted:
@@ -390,7 +388,7 @@ class StreamingResponse:
         *,
         cancelled: bool = False,
         restart_interrupted: bool = False,
-        cancel_source: CancelSource | None = None,
+        cancel_source: _CancelSource | None = None,
         error: Exception | None = None,
     ) -> StreamTransportOutcome:
         """Send the terminal update and return immutable transport facts."""
@@ -942,7 +940,12 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                         delivery_cleanup_error,
                         tool_trace_collector=tool_trace_collector,
                     ) from delivery_cleanup_error
-            cancel_source = classify_cancel_source(exc)
+            cancel_source: _CancelSource = "interrupted"
+            if len(exc.args) > 0:
+                if exc.args[0] == "sync_restart":
+                    cancel_source = "sync_restart"
+                elif exc.args[0] == "user_stop":
+                    cancel_source = "user_stop"
             _log_stream_cancellation(exc=exc, cancel_source=cancel_source, message_id=streaming.event_id)
             transport_outcome = await streaming.finalize(client, cancel_source=cancel_source)
             raise StreamingDeliveryError(

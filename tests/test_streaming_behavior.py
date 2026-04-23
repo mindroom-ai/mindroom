@@ -9,13 +9,14 @@ import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
@@ -40,7 +41,6 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
@@ -2252,7 +2252,7 @@ class TestStreamingBehavior:
 
         assert outcome.last_physical_stream_event_id == "$warmup_stream_123"
         assert outcome.rendered_body == "x" * 300
-        assert "Preparing isolated worker" not in cast("str", outcome.rendered_body)
+        assert "Preparing isolated worker" not in outcome.rendered_body
 
     @pytest.mark.asyncio
     async def test_hidden_tool_mode_worker_warmup_uses_generic_copy(self) -> None:

@@ -2934,7 +2934,7 @@ class TestAgentBot:
         assert outcome.response_identity_event_id is None
         assert outcome.mark_handled is True
         assert outcome.retryable is False
-        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
         redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
@@ -3047,7 +3047,7 @@ class TestAgentBot:
             event_id="$thinking",
             reason="Completed placeholder-only streamed response",
         )
-        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_cancelled_visible_note_survives(
@@ -9134,7 +9134,7 @@ class TestAgentBot:
         assert outcome.visible_response_event_id == "$existing"
         assert outcome.response_identity_event_id is None
         assert outcome.mark_handled is False
-        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_deliver_final_failed_existing_visible_edit_preserves_prior_response(
@@ -9183,7 +9183,7 @@ class TestAgentBot:
         assert outcome.visible_response_event_id == "$existing"
         assert outcome.response_identity_event_id is None
         assert outcome.mark_handled is False
-        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_deliver_final_before_response_exception_cleans_placeholder(
@@ -9226,7 +9226,7 @@ class TestAgentBot:
             event_id="$thinking",
             reason="Failed placeholder response before delivery",
         )
-        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_deliver_final_before_response_cancellation_cleans_placeholder(
@@ -9269,7 +9269,7 @@ class TestAgentBot:
             event_id="$thinking",
             reason="Cancelled placeholder response",
         )
-        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_generation_returns_no_final_event(

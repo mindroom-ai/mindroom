@@ -261,10 +261,10 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
     await apply_post_response_effects(
         ResponseOutcome(
             final_delivery_outcome=FinalDeliveryOutcome(
-                state="suppressed_without_visible_response",
                 terminal_status="completed",
                 final_visible_event_id=None,
                 last_physical_stream_event_id=None,
+                suppressed=True,
             ),
             interactive_target=MessageTarget.resolve(
                 room_id="!room:localhost",
@@ -297,13 +297,16 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
     await apply_post_response_effects(
         ResponseOutcome(
             final_delivery_outcome=FinalDeliveryOutcome(
-                state="kept_prior_visible_stream_after_completed_terminal_failure",
                 terminal_status="completed",
                 final_visible_event_id=None,
+                visible_response_event_id="$stream",
+                response_identity_event_id="$stream",
+                turn_completion_event_id="$stream",
                 last_physical_stream_event_id="$stream",
                 final_visible_body="Choose one",
                 option_map={"1": "yes"},
                 options_list=[{"emoji": "1", "label": "Yes", "value": "yes"}],
+                mark_handled=True,
             ),
             interactive_target=target,
         ),
@@ -334,9 +337,10 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
     await apply_post_response_effects(
         ResponseOutcome(
             final_delivery_outcome=FinalDeliveryOutcome(
-                state="kept_prior_visible_stream_after_error",
                 terminal_status="error",
                 final_visible_event_id=None,
+                visible_response_event_id="$stream",
+                turn_completion_event_id="$stream",
                 last_physical_stream_event_id="$stream",
                 final_visible_body="Choose one\n\n**[Response interrupted]**",
                 option_map={"1": "yes"},
@@ -414,12 +418,15 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         await apply_post_response_effects(
             ResponseOutcome(
                 final_delivery_outcome=FinalDeliveryOutcome(
-                    state="final_visible_delivery",
                     terminal_status="completed",
                     final_visible_event_id="$response",
+                    visible_response_event_id="$response",
+                    response_identity_event_id="$response",
+                    turn_completion_event_id="$response",
                     last_physical_stream_event_id=None,
                     final_visible_body="visible",
                     delivery_kind="sent",
+                    mark_handled=True,
                 ),
                 thread_summary_room_id="!room:localhost",
                 thread_summary_thread_id="$thread",
@@ -606,12 +613,15 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                 "process_and_respond",
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
-                        state="final_visible_delivery",
                         terminal_status="completed",
                         final_visible_event_id="$response",
+                        visible_response_event_id="$response",
+                        response_identity_event_id="$response",
+                        turn_completion_event_id="$response",
                         last_physical_stream_event_id=None,
                         final_visible_body="ok",
                         delivery_kind="sent",
+                        mark_handled=True,
                     ),
                 ),
             ),

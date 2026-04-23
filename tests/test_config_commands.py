@@ -40,19 +40,21 @@ def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
 def _final_visible_resolution(event_id: str) -> FinalDeliveryOutcome:
     """Return one successful terminal outcome for command reply tests."""
     return FinalDeliveryOutcome(
-        state="final_visible_delivery",
         terminal_status="completed",
         final_visible_event_id=event_id,
+        visible_response_event_id=event_id,
+        response_identity_event_id=event_id,
+        turn_completion_event_id=event_id,
         last_physical_stream_event_id=None,
         final_visible_body="ok",
         delivery_kind="sent",
+        mark_handled=True,
     )
 
 
 def _error_resolution() -> FinalDeliveryOutcome:
     """Return one retryable no-visible-output outcome for command reply tests."""
     return FinalDeliveryOutcome(
-        state="error_without_visible_response",
         terminal_status="error",
         final_visible_event_id=None,
         last_physical_stream_event_id=None,

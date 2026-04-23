@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,10 +17,9 @@ from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
-    FinalizeStreamedResponseRequest,
     ResponseHookService,
 )
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -36,6 +36,8 @@ from mindroom.hooks.execution import emit
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+from mindroom.response_lifecycle import DeliveryOutcome, ResponseLifecycle
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -375,7 +377,7 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
     expected_delivery_kind: str,
     tracked_event_id: str | None,
 ) -> None:
-    """Late cancellation during after_response must not downgrade a visible delivery to cancelled."""
+    """Late cancellation during lifecycle after_response must not downgrade a visible delivery to cancelled."""
     after_started = asyncio.Event()
     cancelled_seen: list[CancelledResponseInfo] = []
 
@@ -392,58 +394,44 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
     registry = HookRegistry.from_plugins(
         [_plugin("test-late-after-cancel", [slow_after_response, on_cancelled])],
     )
-    config, response_hooks = _response_hook_service(tmp_path, registry)
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=response_hooks.hook_context.runtime,
-            runtime_paths=runtime_paths_for(config),
-            agent_name="code",
-            logger=get_logger("tests.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
-            sender_domain="localhost",
-            resolver=MagicMock(),
-            response_hooks=response_hooks,
+    _, response_hooks = _response_hook_service(tmp_path, registry)
+    runner = SimpleNamespace(
+        deps=SimpleNamespace(
+            delivery_gateway=SimpleNamespace(
+                deps=SimpleNamespace(response_hooks=response_hooks),
+            ),
         ),
+        _log_post_response_effects_failure=MagicMock(),
+        _emit_pipeline_timing_summary=MagicMock(),
+        _response_outcome=MagicMock(return_value=None),
+    )
+    lifecycle = ResponseLifecycle(
+        runner=runner,
+        response_kind="ai",
+        request=MagicMock(),
+        response_envelope=_envelope(),
+        correlation_id=f"corr-late-{mode}",
     )
 
     delivery_result = None
 
     async def deliver_response() -> None:
         nonlocal delivery_result
-        if mode == "final":
-            with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")):
-                delivery_result = await gateway.deliver_final(
-                    FinalDeliveryRequest(
-                        target=MessageTarget.resolve("!room:localhost", None, "$event"),
-                        existing_event_id=None,
-                        response_text="visible response",
-                        response_kind="ai",
-                        response_envelope=_envelope(),
-                        correlation_id="corr-late-final",
-                        tool_trace=None,
-                        extra_content=None,
-                    ),
-                )
-            return
-
-        delivery_result = await gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=MessageTarget.resolve("!room:localhost", None, "$event"),
-                stream_transport_outcome=StreamTransportOutcome(
-                    last_physical_stream_event_id="$stream",
-                    terminal_operation="send",
-                    terminal_result="succeeded",
+        event_id = "$response" if mode == "final" else "$stream"
+        delivery_result = await lifecycle.finalize(
+            DeliveryOutcome(
+                final_delivery_outcome=FinalDeliveryOutcome(
                     terminal_status="completed",
-                    rendered_body="visible response",
-                    visible_body_state="visible_body",
+                    final_visible_event_id=event_id,
+                    visible_response_event_id=tracked_event_id or event_id,
+                    response_identity_event_id=tracked_event_id or event_id,
+                    turn_completion_event_id=event_id,
+                    final_visible_body="visible response",
+                    delivery_kind=expected_delivery_kind,
                 ),
-                initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=_envelope(),
-                correlation_id="corr-late-streamed",
-                tool_trace=None,
-                extra_content=None,
             ),
+            build_post_response_outcome=lambda outcome: ResponseOutcome(final_delivery_outcome=outcome),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
     task = asyncio.create_task(deliver_response())

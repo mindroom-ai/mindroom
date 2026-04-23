@@ -989,7 +989,7 @@ class TurnController:
             if response_event_id is not None:
                 self._mark_source_events_responded(
                     handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
-                        response_event_id
+                        response_event_id,
                     ),
                 )
                 if dispatch_timing is not None:
@@ -1024,7 +1024,7 @@ class TurnController:
             if response_event_id is not None:
                 self._mark_source_events_responded(
                     handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
-                        response_event_id
+                        response_event_id,
                     ),
                 )
             if dispatch_timing is not None and response_event_id is not None:
@@ -1152,7 +1152,7 @@ class TurnController:
             if response_event_id is not None:
                 self._mark_source_events_responded(
                     handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
-                        response_event_id
+                        response_event_id,
                     ),
                 )
             return
