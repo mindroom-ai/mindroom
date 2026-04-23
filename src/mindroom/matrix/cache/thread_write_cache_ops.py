@@ -47,6 +47,17 @@ class ThreadMutationCacheOps:
         coordinator = self.runtime.event_cache_write_coordinator
         return coordinator.queue_room_update(room_id, update_coro_factory, name=name)
 
+    def queue_room_cache_preflight(
+        self,
+        room_id: str,
+        update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
+        *,
+        name: str,
+    ) -> asyncio.Task[object]:
+        """Track one immediate preflight until it queues the ordered cache mutation."""
+        coordinator = self.runtime.event_cache_write_coordinator
+        return coordinator.queue_room_preflight(room_id, update_coro_factory, name=name)
+
     def queue_thread_cache_update(
         self,
         room_id: str,
