@@ -3072,6 +3072,26 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
     assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
 
 
+def test_resolve_history_execution_plan_caps_large_summary_input_budget(tmp_path: Path) -> None:
+    config, _runtime_paths_value = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=200_000,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=200_000,
+        static_prompt_tokens=2_000,
+    )
+
+    assert execution_plan.summary_input_budget_tokens == 48_000
+    assert execution_plan.destructive_compaction_available is True
+
+
 def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_disabled(
     tmp_path: Path,
 ) -> None:
