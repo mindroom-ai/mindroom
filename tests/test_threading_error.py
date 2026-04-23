@@ -3044,6 +3044,94 @@ class TestThreadingBehavior:
         event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$room-message:localhost")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("timing_enabled_for_test", [False, True], ids=["timing_disabled", "timing_enabled"])
+    async def test_live_unknown_event_waits_for_same_room_write_barrier(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        timing_enabled_for_test: bool,
+    ) -> None:
+        """Live unknown thread mutations should invalidate under the room write barrier."""
+        if timing_enabled_for_test:
+            monkeypatch.setenv("MINDROOM_TIMING", "1")
+        else:
+            monkeypatch.delenv("MINDROOM_TIMING", raising=False)
+
+        coordinator = _runtime_write_coordinator()
+        event_cache = _runtime_event_cache()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+        prior_write_started = asyncio.Event()
+        allow_prior_write_finish = asyncio.Event()
+        room_invalidation_started = asyncio.Event()
+        release_room_invalidation = asyncio.Event()
+
+        async def slow_prior_room_update() -> None:
+            prior_write_started.set()
+            await allow_prior_write_finish.wait()
+
+        async def mark_room_threads_stale(room_id: str, *, reason: str) -> None:
+            assert room_id == "!test:localhost"
+            assert reason == "live_thread_lookup_unavailable"
+            room_invalidation_started.set()
+            await release_room_invalidation.wait()
+
+        access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(
+            return_value=MutationThreadImpact.unknown(),
+        )
+        event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
+
+        coordinator.queue_room_update(
+            "!test:localhost",
+            slow_prior_room_update,
+            name="matrix_cache_prior_update",
+        )
+        await asyncio.wait_for(prior_write_started.wait(), timeout=1.0)
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "type": "m.room.message",
+                "room_id": "!test:localhost",
+                "event_id": "$unknown-edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234,
+                "content": {
+                    "body": "updated",
+                    "msgtype": "m.text",
+                },
+            },
+        )
+
+        live_task = asyncio.create_task(
+            access.append_live_event(
+                "!test:localhost",
+                event,
+                event_info=EventInfo.from_event(event.source),
+            ),
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(room_invalidation_started.wait(), timeout=0.1)
+        assert live_task.done() is False
+
+        allow_prior_write_finish.set()
+        await asyncio.wait_for(room_invalidation_started.wait(), timeout=1.0)
+        assert live_task.done() is False
+        release_room_invalidation.set()
+        await live_task
+        await coordinator.wait_for_room_idle("!test:localhost")
+
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="live_thread_lookup_unavailable",
+        )
+        event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_live_plain_reply_to_threaded_event_persists_event_thread_membership(
         self,
         bot: AgentBot,

@@ -575,7 +575,7 @@ class ThreadLiveWritePolicy:
             event_info=event_info,
         )
         room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"
-        if impact.state is not MutationThreadImpactState.THREADED:
+        if impact.state is MutationThreadImpactState.ROOM_LEVEL:
             await _apply_thread_message_mutation(
                 cache_ops=self._cache_ops,
                 room_id=room_id,
@@ -586,6 +586,23 @@ class ThreadLiveWritePolicy:
                 context="live",
                 room_level_skip_message=room_level_skip_message,
                 invalidate_on_append_failure=True,
+            )
+            return
+        if impact.state is MutationThreadImpactState.UNKNOWN:
+            await self._cache_ops.queue_room_cache_update(
+                room_id,
+                lambda: _apply_thread_message_mutation(
+                    cache_ops=self._cache_ops,
+                    room_id=room_id,
+                    event_info=event_info,
+                    impact=impact,
+                    event_source=None,
+                    event_id=event.event_id,
+                    context="live",
+                    room_level_skip_message=room_level_skip_message,
+                    invalidate_on_append_failure=True,
+                ),
+                name="matrix_cache_append_live_event",
             )
             return
 
@@ -702,9 +719,10 @@ class ThreadLiveWritePolicy:
             event_info=event_info,
         )
         impact_resolution_ms = round((time.perf_counter() - impact_started) * 1000, 1)
+        room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"
         if impact.state is MutationThreadImpactState.ROOM_LEVEL:
             self._cache_ops.logger.debug(
-                "Skipping live thread cache bookkeeping for known non-threaded message mutation",
+                room_level_skip_message,
                 room_id=room_id,
                 event_id=event.event_id,
                 original_event_id=event_info.original_event_id,
@@ -720,21 +738,50 @@ class ThreadLiveWritePolicy:
             )
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
-            invalidate_started = time.perf_counter()
-            await self._cache_ops.invalidate_room_threads(
-                room_id,
-                reason="live_thread_lookup_unavailable",
-            )
-            emit_timing_event(
-                "Live event cache append timing",
-                room_id=room_id,
-                event_id=event.event_id,
-                impact_state="unknown",
-                impact_resolution_ms=impact_resolution_ms,
-                invalidate_ms=round((time.perf_counter() - invalidate_started) * 1000, 1),
-                total_ms=round((time.perf_counter() - started) * 1000, 1),
-                outcome="room_invalidated",
-            )
+            queue_started = time.perf_counter()
+            append_metrics: dict[str, str | int | float | bool] = {}
+            outcome = "room_invalidated"
+
+            async def invalidate_room() -> bool:
+                invalidate_started = time.perf_counter()
+                invalidated = await _apply_thread_message_mutation(
+                    cache_ops=self._cache_ops,
+                    room_id=room_id,
+                    event_info=event_info,
+                    impact=impact,
+                    event_source=None,
+                    event_id=event.event_id,
+                    context="live",
+                    room_level_skip_message=room_level_skip_message,
+                    invalidate_on_append_failure=True,
+                )
+                append_metrics["invalidate_ms"] = round((time.perf_counter() - invalidate_started) * 1000, 1)
+                return invalidated
+
+            try:
+                await self._cache_ops.queue_room_cache_update(
+                    room_id,
+                    invalidate_room,
+                    name="matrix_cache_append_live_event",
+                )
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except Exception:
+                outcome = "error"
+                raise
+            finally:
+                emit_timing_event(
+                    "Live event cache append timing",
+                    room_id=room_id,
+                    event_id=event.event_id,
+                    impact_state="unknown",
+                    impact_resolution_ms=impact_resolution_ms,
+                    queue_and_update_ms=round((time.perf_counter() - queue_started) * 1000, 1),
+                    total_ms=round((time.perf_counter() - started) * 1000, 1),
+                    outcome=outcome,
+                    **append_metrics,
+                )
             return
         await self._append_live_threaded_event_with_timing(
             room_id,
