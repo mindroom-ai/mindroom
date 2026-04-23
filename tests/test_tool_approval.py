@@ -2220,6 +2220,72 @@ async def test_runtime_retry_is_room_scoped(
 
 
 @pytest.mark.asyncio
+async def test_room_drained_callback_does_not_block_runtime_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime retries should keep replaying other rooms while one drain callback is blocked."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr(tool_approval_module, "_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS", 0.01)
+    room_a = "!room-a:localhost"
+    room_b = "!room-b:localhost"
+    room_a_callback_started = asyncio.Event()
+    room_a_callback_finished = asyncio.Event()
+    release_room_a_callback = asyncio.Event()
+    room_b_second_edit = asyncio.Event()
+    room_b_edit_attempts = 0
+
+    async def _on_room_drained(room_id: str) -> None:
+        if room_id != room_a:
+            return
+        room_a_callback_started.set()
+        try:
+            await release_room_a_callback.wait()
+        finally:
+            room_a_callback_finished.set()
+
+    async def _edit_event(room_id: str, event_id: str, content: dict[str, object]) -> bool:
+        nonlocal room_b_edit_attempts
+        assert content["status"] == "expired"
+        if room_id == room_a:
+            assert event_id == "$approval-a"
+            return True
+        assert room_id == room_b
+        assert event_id == "$approval-b"
+        room_b_edit_attempts += 1
+        if room_b_edit_attempts == 1:
+            return False
+        await room_a_callback_started.wait()
+        room_b_second_edit.set()
+        return True
+
+    store = initialize_approval_store(
+        runtime_paths,
+        editor=AsyncMock(side_effect=_edit_event),
+        on_room_drained=_on_room_drained,
+        runtime_loop=asyncio.get_running_loop(),
+    )
+    pending_room_a = _store_resolved_unconfirmed_request(store, approval_id="room-a-retry", room_id=room_a)
+    pending_room_b = _store_resolved_unconfirmed_request(store, approval_id="room-b-retry", room_id=room_b)
+    store._set_event_delivery(pending_room_a.id, "$approval-a")
+    store._set_event_delivery(pending_room_b.id, "$approval-b")
+    store._persist_request(pending_room_a)
+    store._persist_request(pending_room_b)
+
+    try:
+        store._ensure_unsynced_resolution_retry_task()
+        await asyncio.wait_for(room_a_callback_started.wait(), timeout=1)
+        await asyncio.wait_for(room_b_second_edit.wait(), timeout=1)
+
+        assert room_b_edit_attempts == 2
+    finally:
+        release_room_a_callback.set()
+        if room_a_callback_started.is_set():
+            await asyncio.wait_for(room_a_callback_finished.wait(), timeout=1)
+        await shutdown_approval_store()
+
+
+@pytest.mark.asyncio
 async def test_sync_unsynced_approval_event_resolutions_replays_persisted_expired_requests(tmp_path: Path) -> None:
     """Startup reconciliation should edit stale approval cards back to expired."""
     runtime_paths = test_runtime_paths(tmp_path)
