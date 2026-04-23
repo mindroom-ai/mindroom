@@ -38,16 +38,6 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
         ),
         pytest.param(
             FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id="$stream",
-                is_visible_response=True,
-                final_visible_body="partial",
-            ),
-            _Expectation("$stream", True, "$stream", "$stream", True),
-            id="completed-preserved-visible-stream",
-        ),
-        pytest.param(
-            FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id="$stream",
                 is_visible_response=True,

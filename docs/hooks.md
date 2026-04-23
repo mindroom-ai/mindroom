@@ -101,7 +101,7 @@ Hooks run serially.
 `message:final_response_transform` receives a mutable `FinalResponseDraft`.
 Both hooks may replace `draft.response_text`.
 Only `message:before_response` may suppress the reply.
-Failures skip that hook's changes; the previous draft continues to the next hook.
+For `message:final_response_transform`, failures skip that hook's changes and keep the previous draft for the next hook.
 
 ```python
 from mindroom.hooks import hook

@@ -184,10 +184,10 @@ async def test_transport_placeholder_only_cancelled_terminal_update_keeps_commit
 
 
 @pytest.mark.asyncio
-async def test_transport_failed_terminal_update_preserves_committed_interactive_metadata(
+async def test_transport_failed_terminal_update_drops_committed_interactive_metadata(
     tmp_path: Path,
 ) -> None:
-    """Late terminal failures must recover interactive metadata from the visible streamed question."""
+    """Late terminal failures must not carry interactive metadata into a failed terminal outcome."""
     config = _config(tmp_path)
     streaming = _streaming_response(config)
     streaming.accumulated_text = """```interactive
@@ -245,8 +245,8 @@ async def test_transport_failed_terminal_update_preserves_committed_interactive_
 
     assert transport_outcome.terminal_result == "failed"
     assert transport_outcome.rendered_body is not None
-    assert outcome.option_map == {"✅": "yes", "1": "yes"}
-    assert outcome.options_list == ({"emoji": "✅", "label": "Yes", "value": "yes"},)
+    assert outcome.option_map is None
+    assert outcome.options_list is None
 
 
 @pytest.mark.asyncio

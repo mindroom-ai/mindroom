@@ -43,7 +43,7 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
-from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin
+from mindroom.hooks import build_hook_matrix_admin
 from mindroom.hooks.ingress import (
     hook_ingress_policy,
     is_automation_source_kind,
@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
@@ -517,7 +518,7 @@ class TurnController:
             return None
 
         existing_visible_echo_event_id = self.deps.turn_store.visible_echo_for_source(event.event_id)
-        if existing_visible_echo_event_id:
+        if existing_visible_echo_event_id is not None:
             return existing_visible_echo_event_id
 
         target = self.deps.resolver.build_message_target(
@@ -533,7 +534,7 @@ class TurnController:
                 skip_mentions=True,
             ),
         )
-        if visible_echo_event_id:
+        if visible_echo_event_id is not None:
             self.deps.turn_store.record_visible_echo(event.event_id, visible_echo_event_id)
         return visible_echo_event_id
 
@@ -729,7 +730,9 @@ class TurnController:
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
             HandledTurnState.from_source_event_id(selection.question_event_id),
             additional_source_event_ids=(
-                (source_event_id,) if source_event_id and source_event_id != selection.question_event_id else ()
+                (source_event_id,)
+                if source_event_id is not None and source_event_id != selection.question_event_id
+                else ()
             ),
         )
 
@@ -754,7 +757,7 @@ class TurnController:
                     response_event_id=response_event_id,
                 ),
             )
-            if source_event_id and source_event_id != selection.question_event_id:
+            if source_event_id is not None and source_event_id != selection.question_event_id:
                 self._mark_source_events_responded(
                     HandledTurnState.from_source_event_id(
                         source_event_id,
