@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
-EVENT_CACHE_SCHEMA_VERSION = 9
+EVENT_CACHE_SCHEMA_VERSION = 10
 _EVENT_CACHE_TABLES = (
     "thread_events",
     "events",
@@ -90,7 +90,7 @@ async def create_event_cache_schema(db: aiosqlite.Connection) -> None:
     await db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_events_room_origin_ts
-        ON events(room_id, origin_server_ts DESC, event_id DESC)
+        ON events(room_id, origin_server_ts DESC)
         """,
     )
     await db.execute(

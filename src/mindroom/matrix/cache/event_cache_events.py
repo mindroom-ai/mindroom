@@ -143,7 +143,7 @@ async def load_latest_edit(
         FROM event_edits
         JOIN events ON events.event_id = event_edits.edit_event_id
         WHERE event_edits.room_id = ? AND event_edits.original_event_id = ?
-        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
+        ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
         LIMIT 1
         """,
         (room_id, original_event_id),
@@ -166,7 +166,7 @@ async def load_latest_edit_row(
         FROM event_edits
         JOIN events ON events.event_id = event_edits.edit_event_id
         WHERE event_edits.room_id = ? AND event_edits.original_event_id = ?
-        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
+        ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
         LIMIT 1
         """,
         (room_id, original_event_id),
@@ -352,8 +352,13 @@ async def write_lookup_index_rows(
         return
     await db.executemany(
         """
-        INSERT OR REPLACE INTO events(event_id, room_id, origin_server_ts, event_json, cached_at)
+        INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at)
         VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(event_id) DO UPDATE SET
+            room_id = excluded.room_id,
+            origin_server_ts = excluded.origin_server_ts,
+            event_json = excluded.event_json,
+            cached_at = excluded.cached_at
         """,
         [
             (

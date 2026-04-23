@@ -633,3 +633,57 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
         content={"body": "Newest room message", "msgtype": "m.text"},
         origin_server_ts=3000,
     )
+
+
+@pytest.mark.asyncio
+async def test_room_scope_preserves_cache_insert_order_for_same_timestamp_messages(
+    tmp_path: Path,
+) -> None:
+    """Room-scope reads should keep the later cached sender message when timestamps tie."""
+    db_path = tmp_path / "event_cache.db"
+    cache = _EventCache(db_path)
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                (
+                    "$zzz-first",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$zzz-first",
+                        sender="@agent:localhost",
+                        body="First cached message",
+                        origin_server_ts=3000,
+                    ),
+                ),
+            ],
+        )
+        await cache.store_events_batch(
+            [
+                (
+                    "$aaa-second",
+                    "!room:localhost",
+                    _message_event(
+                        event_id="$aaa-second",
+                        sender="@agent:localhost",
+                        body="Second cached message",
+                        origin_server_ts=3000,
+                    ),
+                ),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        db_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={"body": "Second cached message", "msgtype": "m.text"},
+        origin_server_ts=3000,
+    )
