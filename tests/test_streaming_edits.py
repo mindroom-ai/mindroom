@@ -12,7 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -41,18 +41,22 @@ def _make_matrix_client_mock() -> AsyncMock:
     return client
 
 
-def _delivery_resolution(response_event_id: str | None) -> TurnDeliveryResolution:
+def _delivery_resolution(response_event_id: str | None) -> FinalDeliveryOutcome:
     if response_event_id is None:
-        return TurnDeliveryResolution.from_outcome(
-            FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason="test_no_visible_response",
-            ),
+        return FinalDeliveryOutcome(
+            state="error_without_visible_response",
+            terminal_status="error",
+            final_visible_event_id=None,
+            last_physical_stream_event_id=None,
+            failure_reason="test_no_visible_response",
         )
-    return TurnDeliveryResolution.from_outcome(
-        FinalDeliveryOutcome.final_visible_delivery(
-            final_visible_event_id=response_event_id,
-            final_visible_body="test response",
-        ),
+    return FinalDeliveryOutcome(
+        state="final_visible_delivery",
+        terminal_status="completed",
+        final_visible_event_id=response_event_id,
+        last_physical_stream_event_id=None,
+        final_visible_body="test response",
+        delivery_kind="sent",
     )
 
 

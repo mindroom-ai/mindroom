@@ -30,7 +30,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.conversation_state_writer import ConversationStateWriter
-from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.history.interrupted_replay import build_interrupted_replay_run, build_interrupted_replay_snapshot
 from mindroom.history.types import HistoryScope
@@ -217,47 +217,68 @@ def _team_test_config(tmp_path: Path) -> Config:
     return _bind_runtime_paths(config, tmp_path)
 
 
+def _outcome(
+    state: str,
+    *,
+    terminal_status: str,
+    final_visible_event_id: str | None = None,
+    last_physical_stream_event_id: str | None = None,
+    final_visible_body: str | None = None,
+    delivery_kind: str | None = None,
+    failure_reason: str | None = None,
+) -> FinalDeliveryOutcome:
+    return FinalDeliveryOutcome(
+        state=state,
+        terminal_status=terminal_status,
+        final_visible_event_id=final_visible_event_id,
+        last_physical_stream_event_id=last_physical_stream_event_id,
+        final_visible_body=final_visible_body,
+        delivery_kind=delivery_kind,
+        failure_reason=failure_reason,
+    )
+
+
 def _generate_response_with_locked_callback(
     response_event_id: str | None,
-) -> Callable[..., Awaitable[TurnDeliveryResolution]]:
+) -> Callable[..., Awaitable[FinalDeliveryOutcome]]:
     """Execute locked edit cleanup in mocked response generation paths."""
 
-    async def _generate_response(*_args: object, **kwargs: object) -> TurnDeliveryResolution:
+    async def _generate_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
         locked_callback = kwargs.get("on_lifecycle_lock_acquired")
         if locked_callback is not None:
             locked_callback()
         if response_event_id is None:
-            return TurnDeliveryResolution.from_outcome(
-                FinalDeliveryOutcome.error_without_visible_response(
-                    failure_reason="test_mock_no_visible_response",
-                ),
+            return _outcome(
+                "error_without_visible_response",
+                terminal_status="error",
+                failure_reason="test_mock_no_visible_response",
             )
         delivery_kind = "edited" if kwargs.get("existing_event_id") is not None else "sent"
-        return TurnDeliveryResolution.from_outcome(
-            FinalDeliveryOutcome.final_visible_delivery(
-                final_visible_event_id=response_event_id,
-                final_visible_body="",
-                delivery_kind=delivery_kind,
-            ),
+        return _outcome(
+            "final_visible_delivery",
+            terminal_status="completed",
+            final_visible_event_id=response_event_id,
+            final_visible_body="",
+            delivery_kind=delivery_kind,
         )
 
     return _generate_response
 
 
-def _delivery_resolution(response_event_id: str | None) -> TurnDeliveryResolution:
-    """Build one typed delivery resolution for test-side response mocks."""
+def _delivery_resolution(response_event_id: str | None) -> FinalDeliveryOutcome:
+    """Build one terminal outcome for test-side response mocks."""
     if response_event_id is None:
-        return TurnDeliveryResolution.from_outcome(
-            FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason="test_mock_no_visible_response",
-            ),
+        return _outcome(
+            "error_without_visible_response",
+            terminal_status="error",
+            failure_reason="test_mock_no_visible_response",
         )
-    return TurnDeliveryResolution.from_outcome(
-        FinalDeliveryOutcome.final_visible_delivery(
-            final_visible_event_id=response_event_id,
-            final_visible_body="",
-            delivery_kind="sent",
-        ),
+    return _outcome(
+        "final_visible_delivery",
+        terminal_status="completed",
+        final_visible_event_id=response_event_id,
+        final_visible_body="",
+        delivery_kind="sent",
     )
 
 
@@ -924,7 +945,9 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         patch(
             "mindroom.response_runner.DeliveryGateway.deliver_final",
             new=AsyncMock(
-                return_value=FinalDeliveryOutcome.final_visible_delivery(
+                return_value=_outcome(
+                    "final_visible_delivery",
+                    terminal_status="completed",
                     final_visible_event_id=response_event_id,
                     final_visible_body="team response",
                     delivery_kind="edited",
@@ -1656,15 +1679,15 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         "sender": "@user:example.com",
     }
 
-    async def fail_visible_update(*_args: object, **kwargs: object) -> TurnDeliveryResolution:
+    async def fail_visible_update(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
         locked_callback = kwargs.get("on_lifecycle_lock_acquired")
         if locked_callback is not None:
             locked_callback()
-        return TurnDeliveryResolution.from_outcome(
-            FinalDeliveryOutcome.kept_prior_visible_response_after_error(
-                final_visible_event_id="$response:example.com",
-                failure_reason="delivery_failed",
-            ),
+        return _outcome(
+            "kept_prior_visible_response_after_error",
+            terminal_status="error",
+            final_visible_event_id="$response:example.com",
+            failure_reason="delivery_failed",
         )
 
     with (
@@ -2609,10 +2632,10 @@ async def test_edit_regenerator_backfill_preserves_interactive_selection_anchor_
         ],
     )
     generate_response = AsyncMock(
-        return_value=TurnDeliveryResolution.from_outcome(
-            FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason="test_mock_no_visible_response",
-            ),
+        return_value=_outcome(
+            "error_without_visible_response",
+            terminal_status="error",
+            failure_reason="test_mock_no_visible_response",
         ),
     )
     replace_edit_regenerator_deps(bot, generate_response=generate_response)
@@ -2885,7 +2908,7 @@ async def test_handle_message_edit_uses_fallback_cleanup_when_turn_context_was_r
     }
     cleanup_called = False
 
-    async def generate_response_with_locked_cleanup(*_args: object, **kwargs: object) -> TurnDeliveryResolution:
+    async def generate_response_with_locked_cleanup(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
         nonlocal cleanup_called
         locked_cleanup = kwargs["on_lifecycle_lock_acquired"]
         assert locked_cleanup is not None
@@ -3024,7 +3047,9 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
                 ),
             ],
         )
-        return FinalDeliveryOutcome.final_visible_delivery(
+        return _outcome(
+            "final_visible_delivery",
+            terminal_status="completed",
             final_visible_event_id="$response:example.com",
             final_visible_body="ok",
             delivery_kind="sent",
@@ -3439,7 +3464,9 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             )
         finally:
             storage.close()
-        return FinalDeliveryOutcome.final_visible_delivery(
+        return _outcome(
+            "final_visible_delivery",
+            terminal_status="completed",
             final_visible_event_id="$response-new:example.com",
             final_visible_body="ok",
             delivery_kind="sent",

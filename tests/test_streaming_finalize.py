@@ -328,8 +328,11 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
         ),
     )
     mock_deliver_final = AsyncMock(
-        return_value=FinalDeliveryOutcome.kept_prior_visible_response_after_error(
+        return_value=FinalDeliveryOutcome(
+            state="kept_prior_visible_response_after_error",
+            terminal_status="error",
             final_visible_event_id="$streaming",
+            last_physical_stream_event_id=None,
             failure_reason="delivery_failed",
         ),
     )

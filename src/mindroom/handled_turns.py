@@ -18,9 +18,6 @@ from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 
-if typing.TYPE_CHECKING:
-    from mindroom.final_delivery import TurnDeliveryResolution
-
 logger = get_logger(__name__)
 
 
@@ -208,22 +205,6 @@ class HandledTurnRecord:
     def is_coalesced(self) -> bool:
         """Return whether the turn combined multiple source events."""
         return len(self.source_event_ids) > 1
-
-
-def apply_delivery_resolution(
-    handled_turn: HandledTurnState,
-    resolution: TurnDeliveryResolution,
-) -> HandledTurnState:
-    """Project one terminal delivery resolution onto handled-turn persistence state."""
-    return HandledTurnState.create(
-        handled_turn.source_event_ids,
-        response_event_id=resolution.response_identity_event_id,
-        visible_echo_event_id=resolution.visible_response_event_id,
-        source_event_prompts=handled_turn.source_event_prompts,
-        response_owner=handled_turn.response_owner,
-        history_scope=handled_turn.history_scope,
-        conversation_target=handled_turn.conversation_target,
-    )
 
 
 @dataclass

@@ -97,26 +97,6 @@ class StreamingDeliveryError(Exception):
         self.transport_outcome = transport_outcome
 
 
-class StreamingDeliveryCancelled(asyncio.CancelledError):
-    """Preserve finalized stream state when delivery is cancelled mid-response."""
-
-    def __init__(
-        self,
-        error: asyncio.CancelledError,
-        *,
-        event_id: str | None,
-        accumulated_text: str,
-        tool_trace: list[ToolTraceEntry],
-        transport_outcome: StreamTransportOutcome | None = None,
-    ) -> None:
-        super().__init__(*error.args)
-        self.error = error
-        self.event_id = event_id
-        self.accumulated_text = accumulated_text
-        self.tool_trace = tool_trace.copy()
-        self.transport_outcome = transport_outcome
-
-
 def _build_streaming_delivery_error(
     streaming: StreamingResponse,
     error: Exception,
@@ -1001,13 +981,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             cancel_source = classify_cancel_source(exc)
             _log_stream_cancellation(exc=exc, cancel_source=cancel_source, message_id=streaming.event_id)
             transport_outcome = await streaming.finalize(client, cancel_source=cancel_source)
-            raise StreamingDeliveryCancelled(
-                exc,
-                event_id=streaming.event_id,
-                accumulated_text=streaming.accumulated_text,
-                tool_trace=streaming.tool_trace,
-                transport_outcome=transport_outcome,
-            ).with_traceback(exc.__traceback__) from exc
+            raise
         except Exception as exc:
             delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
             logger.exception("Streaming response failed", error=str(delivery_error))

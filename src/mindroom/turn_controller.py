@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import nio
@@ -33,17 +33,16 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
-    STREAM_STATUS_ERROR,
+    STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
 )
-from mindroom.delivery_gateway import FinalDeliveryRequest, SendTextRequest
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.final_delivery import TurnDeliveryResolution
-from mindroom.handled_turns import HandledTurnState, apply_delivery_resolution
+from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin
 from mindroom.hooks.ingress import (
     hook_ingress_policy,
@@ -282,6 +281,21 @@ class TurnController:
     def _mark_source_events_responded(self, handled_turn: HandledTurnState) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
         self.deps.turn_store.record_turn(handled_turn)
+
+    def _mark_handled_delivery(
+        self,
+        handled_turn: HandledTurnState,
+        *,
+        response_event_id: str | None = None,
+        visible_echo_event_id: str | None = None,
+    ) -> None:
+        """Persist one handled turn while preserving both identity and visible linkage."""
+        resolved_handled_turn = handled_turn
+        if response_event_id is not None:
+            resolved_handled_turn = resolved_handled_turn.with_response_event_id(response_event_id)
+        if visible_echo_event_id is not None:
+            resolved_handled_turn = resolved_handled_turn.with_visible_echo_event_id(visible_echo_event_id)
+        self._mark_source_events_responded(resolved_handled_turn)
 
     def _has_newer_unresponded_in_thread(
         self,
@@ -631,8 +645,6 @@ class TurnController:
         event: _TextDispatchEvent,
         requester_user_id: str,
         command: Command,
-        *,
-        source_envelope: MessageEnvelope | None = None,
     ) -> None:
         """Run one explicit command executor path from the turn controller."""
         event = await self.deps.normalizer.resolve_text_event(
@@ -646,44 +658,20 @@ class TurnController:
             thread_id: str | None,
             reply_to_event: nio.RoomMessageText | None = None,
             skip_mentions: bool = False,
-        ) -> TurnDeliveryResolution:
+        ) -> str | None:
             target = self.deps.resolver.build_message_target(
                 room_id=room_id,
                 thread_id=thread_id,
                 reply_to_event_id=reply_to_event_id,
                 event_source=reply_to_event.source if reply_to_event is not None else None,
             )
-            response_envelope = (
-                replace(source_envelope, target=target, body=event.body)
-                if source_envelope is not None
-                else MessageEnvelope(
-                    source_event_id=event.event_id,
-                    room_id=room_id,
+            return await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
                     target=target,
-                    requester_id=requester_user_id,
-                    sender_id=requester_user_id,
-                    body=event.body,
-                    attachment_ids=(),
-                    mentioned_agents=(),
-                    agent_name=self.deps.agent_name,
-                    source_kind="command",
-                )
-            )
-            final_outcome = await self.deps.delivery_gateway.deliver_final(
-                FinalDeliveryRequest(
-                    target=target,
-                    existing_event_id=None,
                     response_text=response_text,
-                    response_kind="system",
-                    response_envelope=response_envelope,
-                    correlation_id=event.event_id,
-                    tool_trace=None,
-                    extra_content=None,
-                    apply_before_hooks=False,
                     skip_mentions=skip_mentions,
                 ),
             )
-            return TurnDeliveryResolution.from_outcome(final_outcome)
 
         orchestrator = self.deps.runtime.orchestrator
         matrix_admin = None
@@ -762,7 +750,7 @@ class TurnController:
             ),
         )
 
-        response_resolution = await self.deps.response_runner.generate_response(
+        final_outcome = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 room_id=room.room_id,
                 prompt=f"The user selected: {selection.selected_value}",
@@ -776,18 +764,19 @@ class TurnController:
                 matrix_run_metadata=selection_matrix_run_metadata,
             ),
         )
-        if response_resolution.should_mark_handled:
+        response_event_id = final_outcome.response_identity_event_id
+        if final_outcome.should_mark_handled and response_event_id is not None:
             self._mark_source_events_responded(
-                apply_delivery_resolution(
-                    HandledTurnState.from_source_event_id(selection.question_event_id),
-                    response_resolution,
+                HandledTurnState.from_source_event_id(
+                    selection.question_event_id,
+                    response_event_id=response_event_id,
                 ),
             )
             if source_event_id and source_event_id != selection.question_event_id:
                 self._mark_source_events_responded(
-                    apply_delivery_resolution(
-                        HandledTurnState.from_source_event_id(source_event_id),
-                        response_resolution,
+                    HandledTurnState.from_source_event_id(
+                        source_event_id,
+                        response_event_id=response_event_id,
                     ),
                 )
 
@@ -943,32 +932,22 @@ class TurnController:
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
         error: Exception,
-    ) -> TurnDeliveryResolution:
-        """Convert dispatch setup failures into one typed terminal delivery resolution."""
+    ) -> str | None:
+        """Convert dispatch setup failures into a visible terminal message."""
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
-        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
-        target = self.deps.resolver.build_message_target(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-        )
-        final_outcome = await self.deps.delivery_gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=target,
-                existing_event_id=None,
+        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
+        return await self.deps.delivery_gateway.send_text(
+            SendTextRequest(
+                target=self.deps.resolver.build_message_target(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    reply_to_event_id=reply_to_event_id,
+                ),
                 response_text=error_text,
-                response_kind="system",
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                tool_trace=None,
                 extra_content=terminal_extra_content,
-                apply_before_hooks=False,
             ),
         )
-        return TurnDeliveryResolution.from_outcome(final_outcome)
 
     def _log_dispatch_latency(
         self,
@@ -1016,29 +995,22 @@ class TurnController:
 
         if action.kind == "reject":
             assert action.rejection_message is not None
-            final_outcome = await self.deps.delivery_gateway.deliver_final(
-                FinalDeliveryRequest(
+            response_event_id = await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
                     target=dispatch.target,
-                    existing_event_id=None,
-                    existing_event_is_placeholder=False,
                     response_text=action.rejection_message,
-                    response_kind="system",
-                    response_envelope=dispatch.envelope,
-                    correlation_id=dispatch.correlation_id,
-                    tool_trace=None,
-                    extra_content=None,
-                    apply_before_hooks=False,
                 ),
             )
-            response_resolution = TurnDeliveryResolution.from_outcome(final_outcome)
-            if response_resolution.should_mark_handled:
-                self._mark_source_events_responded(
-                    apply_delivery_resolution(handled_turn, response_resolution),
+            if response_event_id is not None:
+                self._mark_handled_delivery(
+                    handled_turn,
+                    response_event_id=response_event_id,
+                    visible_echo_event_id=response_event_id,
                 )
-            if dispatch_timing is not None and response_resolution.turn_completion_event_id:
-                dispatch_timing.mark_first_visible_reply("final")
-                dispatch_timing.mark("response_complete")
-                dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
+                if dispatch_timing is not None:
+                    dispatch_timing.mark_first_visible_reply("final")
+                    dispatch_timing.mark("response_complete")
+                    dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
             return
 
         if not dispatch.context.am_i_mentioned:
@@ -1058,17 +1030,19 @@ class TurnController:
             context_ready_monotonic = time.monotonic()
             payload_ready_monotonic = context_ready_monotonic
         except Exception as error:
-            response_resolution = await self._finalize_dispatch_failure(
+            response_event_id = await self._finalize_dispatch_failure(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
-                response_envelope=dispatch.envelope,
-                correlation_id=dispatch.correlation_id,
                 error=error,
             )
-            if response_resolution.should_mark_handled:
-                self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))
-            if dispatch_timing is not None and response_resolution.turn_completion_event_id:
+            if response_event_id is not None:
+                self._mark_handled_delivery(
+                    handled_turn,
+                    response_event_id=response_event_id,
+                    visible_echo_event_id=response_event_id,
+                )
+            if dispatch_timing is not None and response_event_id is not None:
                 dispatch_timing.mark_first_visible_reply("final")
                 dispatch_timing.mark("response_complete")
                 dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
@@ -1145,7 +1119,7 @@ class TurnController:
             if action.kind == "team":
                 assert action.form_team is not None
                 assert action.form_team.mode is not None
-                response_resolution = await self.deps.response_runner.generate_team_response_helper(
+                final_outcome = await self.deps.response_runner.generate_team_response_helper(
                     ResponseRequest(
                         room_id=room.room_id,
                         reply_to_event_id=event.event_id,
@@ -1165,7 +1139,7 @@ class TurnController:
                     team_mode=action.form_team.mode.value,
                 )
             else:
-                response_resolution = await self.deps.response_runner.generate_response(
+                final_outcome = await self.deps.response_runner.generate_response(
                     ResponseRequest(
                         room_id=room.room_id,
                         reply_to_event_id=event.event_id,
@@ -1184,19 +1158,25 @@ class TurnController:
                 )
         except PostLockRequestPreparationError as error:
             failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
-            response_resolution = await self._finalize_dispatch_failure(
+            response_event_id = await self._finalize_dispatch_failure(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=dispatch.context.thread_id,
-                response_envelope=dispatch.envelope,
-                correlation_id=dispatch.correlation_id,
                 error=failure,
             )
-            if response_resolution.should_mark_handled:
-                self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))
+            if response_event_id is not None:
+                self._mark_handled_delivery(
+                    handled_turn,
+                    response_event_id=response_event_id,
+                    visible_echo_event_id=response_event_id,
+                )
             return
-        if response_resolution.should_mark_handled:
-            self._mark_source_events_responded(apply_delivery_resolution(handled_turn, response_resolution))
+        if final_outcome.should_mark_handled:
+            self._mark_handled_delivery(
+                handled_turn,
+                response_event_id=final_outcome.response_identity_event_id,
+                visible_echo_event_id=final_outcome.visible_response_event_id,
+            )
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
@@ -1434,7 +1414,6 @@ class TurnController:
                         event=event,
                         requester_user_id=requester_user_id,
                         command=command,
-                        source_envelope=dispatch.envelope,
                     )
                 return
             if self._has_newer_unresponded_in_thread(

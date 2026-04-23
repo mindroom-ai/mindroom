@@ -539,8 +539,11 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
         patch(
             "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
             new=AsyncMock(
-                return_value=FinalDeliveryOutcome.final_visible_delivery(
+                return_value=FinalDeliveryOutcome(
+                    state="final_visible_delivery",
+                    terminal_status="completed",
                     final_visible_event_id="$response",
+                    last_physical_stream_event_id=None,
                     final_visible_body="handled",
                     delivery_kind="sent",
                 ),

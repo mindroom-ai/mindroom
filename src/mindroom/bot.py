@@ -13,7 +13,7 @@ from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wai
 
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import (
     AgentLifecycleContext,
     EnrichmentItem,
@@ -1407,7 +1407,7 @@ class AgentBot:
         reason_prefix: str = "Team request",
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> TurnDeliveryResolution:
+    ) -> FinalDeliveryOutcome:
         """Generate a team response (shared between preformed teams and TeamBot)."""
         return await self._response_runner.generate_team_response_helper(
             ResponseRequest(
@@ -1453,7 +1453,7 @@ class AgentBot:
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> TurnDeliveryResolution:
+    ) -> FinalDeliveryOutcome:
         """Generate and send/edit a response using AI.
 
         Args:
@@ -1703,7 +1703,7 @@ class TeamBot(AgentBot):
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> TurnDeliveryResolution:
+    ) -> FinalDeliveryOutcome:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
             resolved_target = target or self._conversation_resolver.build_message_target(
@@ -1724,14 +1724,18 @@ class TeamBot(AgentBot):
                 source_kind="message",
             )
             final_outcome = await self._delivery_gateway.emit_terminal_outcome_hooks(
-                outcome=FinalDeliveryOutcome.error_without_visible_response(
+                outcome=FinalDeliveryOutcome(
+                    state="error_without_visible_response",
+                    terminal_status="error",
+                    final_visible_event_id=None,
+                    last_physical_stream_event_id=None,
                     failure_reason="empty_team_prompt",
                 ),
                 correlation_id=correlation_id or reply_to_event_id or room_id,
                 envelope=fallback_envelope,
                 response_kind="team",
             )
-            return TurnDeliveryResolution.from_outcome(final_outcome)
+            return final_outcome
 
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
@@ -1787,9 +1791,7 @@ class TeamBot(AgentBot):
                     apply_before_hooks=False,
                 ),
             )
-            return TurnDeliveryResolution.from_outcome(
-                final_outcome,
-            )
+            return final_outcome
         assert team_resolution.mode is not None
 
         resolved_target = target or self._conversation_resolver.build_message_target(

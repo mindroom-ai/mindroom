@@ -57,6 +57,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
@@ -87,7 +88,7 @@ from mindroom.response_runner import (
     ResponseRunnerDeps,
     prepare_memory_and_model_context,
 )
-from mindroom.streaming import StreamingDeliveryCancelled, StreamingDeliveryError
+from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -111,13 +112,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Generator
     from pathlib import Path
 
-    from mindroom.delivery_gateway import (
-        CancelledVisibleNoteRequest,
-        FinalDeliveryRequest,
-        FinalizeStreamedResponseRequest,
-        LateStreamFinalizeFailureRequest,
-    )
-
 
 def _stream_outcome(
     event_id: str | None,
@@ -138,6 +132,11 @@ def _stream_outcome(
         visible_body_state=visible_body_state,
         failure_reason=failure_reason,
     )
+
+
+def _set_gateway_method(gateway: DeliveryGateway, name: str, value: Any) -> Any:
+    object.__setattr__(gateway, name, value)
+    return value
 
 
 def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
@@ -296,7 +295,7 @@ def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNam
     )
 
 
-def _build_response_runner(  # noqa: C901, PLR0915
+def _build_response_runner(
     bot: MagicMock,
     *,
     config: Config,
@@ -310,189 +309,6 @@ def _build_response_runner(  # noqa: C901, PLR0915
     orchestrator: object | None = None,
 ) -> ResponseRunner:
     """Build a real response runner for one bot-shaped test double."""
-
-    async def _default_deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
-        existing_event_id = request.existing_event_id
-        response_text = request.response_text
-        return FinalDeliveryOutcome.final_visible_delivery(
-            final_visible_event_id=existing_event_id or "$response_id",
-            final_visible_body=response_text,
-            delivery_kind="edited" if existing_event_id is not None else "sent",
-        )
-
-    async def _default_emit_terminal_outcome_hooks(
-        *,
-        outcome: FinalDeliveryOutcome,
-        correlation_id: str,
-        envelope: MessageEnvelope,
-        response_kind: str,
-    ) -> FinalDeliveryOutcome:
-        if outcome.emits_cancelled_response:
-            await delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                correlation_id=correlation_id,
-                envelope=envelope,
-                visible_response_event_id=outcome.visible_response_event_id,
-                response_kind=response_kind,
-                failure_reason=outcome.failure_reason,
-            )
-        elif (
-            outcome.emits_after_response
-            and outcome.final_visible_event_id is not None
-            and outcome.final_visible_body is not None
-            and outcome.delivery_kind is not None
-        ):
-            await delivery_gateway.deps.response_hooks.emit_after_response(
-                correlation_id=correlation_id,
-                envelope=envelope,
-                response_text=outcome.final_visible_body,
-                response_event_id=outcome.final_visible_event_id,
-                delivery_kind=outcome.delivery_kind,
-                response_kind=response_kind,
-            )
-        return outcome
-
-    async def _default_deliver_cancelled_visible_note(
-        request: CancelledVisibleNoteRequest,
-    ) -> FinalDeliveryOutcome:
-        event_id = request.event_id
-        if request.existing_event_is_placeholder:
-            return FinalDeliveryOutcome.cancelled_with_visible_note(
-                final_visible_event_id=event_id,
-                final_visible_body="Cancelled.",
-            )
-        return FinalDeliveryOutcome.cancelled_with_visible_response(
-            final_visible_event_id=event_id,
-            final_visible_body="",
-        )
-
-    async def _default_finalize_streamed_response(  # noqa: C901, PLR0911
-        request: FinalizeStreamedResponseRequest,
-    ) -> FinalDeliveryOutcome:
-        transport_outcome = request.stream_transport_outcome
-        event_id = transport_outcome.last_physical_stream_event_id or "$response_id"
-        body = transport_outcome.rendered_body or ""
-        has_visible_body = transport_outcome.visible_body_state == "visible_body"
-        preserved_existing_visible_reply = (
-            request.initial_delivery_kind == "edited"
-            and transport_outcome.visible_body_state == "none"
-            and transport_outcome.last_physical_stream_event_id is not None
-        )
-        if transport_outcome.terminal_status == "cancelled" or transport_outcome.terminal_result == "cancelled":
-            if preserved_existing_visible_reply:
-                return FinalDeliveryOutcome.cancelled_with_visible_response(
-                    final_visible_event_id=transport_outcome.last_physical_stream_event_id,
-                    failure_reason=transport_outcome.failure_reason,
-                )
-            if transport_outcome.last_physical_stream_event_id is not None and has_visible_body:
-                return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
-                    last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
-                    final_visible_body=body,
-                    failure_reason=transport_outcome.failure_reason,
-                    option_map=transport_outcome.option_map,
-                    options_list=transport_outcome.options_list,
-                )
-            return FinalDeliveryOutcome.cancelled_without_visible_response(
-                failure_reason=transport_outcome.failure_reason,
-            )
-        if transport_outcome.terminal_status == "error":
-            if preserved_existing_visible_reply:
-                return FinalDeliveryOutcome.kept_prior_visible_response_after_error(
-                    final_visible_event_id=transport_outcome.last_physical_stream_event_id,
-                    failure_reason=transport_outcome.failure_reason,
-                )
-            if transport_outcome.last_physical_stream_event_id is not None and has_visible_body:
-                return FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
-                    last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
-                    final_visible_body=body,
-                    failure_reason=transport_outcome.failure_reason,
-                    option_map=transport_outcome.option_map,
-                    options_list=transport_outcome.options_list,
-                )
-            return FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason=transport_outcome.failure_reason,
-            )
-        if transport_outcome.terminal_result == "failed":
-            if preserved_existing_visible_reply:
-                return FinalDeliveryOutcome.kept_prior_visible_response_after_error(
-                    final_visible_event_id=transport_outcome.last_physical_stream_event_id,
-                    failure_reason=transport_outcome.failure_reason,
-                )
-            if transport_outcome.last_physical_stream_event_id is not None and has_visible_body:
-                return FinalDeliveryOutcome.keep_prior_visible_stream_after_completed_terminal_failure(
-                    last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
-                    final_visible_body=body,
-                    failure_reason=transport_outcome.failure_reason,
-                    option_map=transport_outcome.option_map,
-                    options_list=transport_outcome.options_list,
-                )
-            return FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason=transport_outcome.failure_reason,
-            )
-        if preserved_existing_visible_reply:
-            return FinalDeliveryOutcome.kept_prior_visible_response_after_error(
-                final_visible_event_id=transport_outcome.last_physical_stream_event_id,
-                failure_reason=transport_outcome.failure_reason or "stream_completed_without_visible_body",
-            )
-        return FinalDeliveryOutcome.final_visible_delivery(
-            final_visible_event_id=event_id,
-            last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
-            final_visible_body=body,
-            delivery_kind=request.initial_delivery_kind,
-            option_map=transport_outcome.option_map,
-            options_list=transport_outcome.options_list,
-        )
-
-    async def _default_resolve_late_stream_finalize_failure(
-        request: LateStreamFinalizeFailureRequest,
-    ) -> FinalDeliveryOutcome:
-        transport_outcome = request.stream_transport_outcome
-        body = transport_outcome.rendered_body or None
-        event_id = transport_outcome.last_physical_stream_event_id
-        has_visible_body = transport_outcome.visible_body_state == "visible_body" and event_id is not None
-        if transport_outcome.visible_body_state == "placeholder_only":
-            outcome = (
-                FinalDeliveryOutcome.cancelled_without_visible_response(
-                    failure_reason=request.failure_reason,
-                )
-                if request.cancelled
-                else FinalDeliveryOutcome.error_without_visible_response(
-                    failure_reason=request.failure_reason,
-                )
-            )
-        elif has_visible_body:
-            outcome = (
-                FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
-                    last_physical_stream_event_id=event_id,
-                    final_visible_body=body,
-                    failure_reason=request.failure_reason,
-                    option_map=transport_outcome.option_map,
-                    options_list=transport_outcome.options_list,
-                )
-                if request.cancelled
-                else FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
-                    last_physical_stream_event_id=event_id,
-                    final_visible_body=body,
-                    failure_reason=request.failure_reason,
-                    option_map=transport_outcome.option_map,
-                    options_list=transport_outcome.options_list,
-                )
-            )
-        else:
-            outcome = (
-                FinalDeliveryOutcome.cancelled_without_visible_response(
-                    failure_reason=request.failure_reason,
-                )
-                if request.cancelled
-                else FinalDeliveryOutcome.error_without_visible_response(
-                    failure_reason=request.failure_reason,
-                )
-            )
-        return await _default_emit_terminal_outcome_hooks(
-            outcome=outcome,
-            correlation_id=request.correlation_id,
-            envelope=request.response_envelope,
-            response_kind=request.response_kind,
-        )
 
     def _open_test_storage(storage: object | None) -> object:
         if isinstance(storage, _SessionStorage):
@@ -510,6 +326,14 @@ def _build_response_runner(  # noqa: C901, PLR0915
     bot._conversation_resolver.fetch_thread_history = AsyncMock(return_value=())
     bot._conversation_resolver.resolve_response_thread_root = MagicMock(
         side_effect=resolve_response_thread_root_for_test,
+    )
+    bot._conversation_resolver.deps = SimpleNamespace(
+        conversation_cache=SimpleNamespace(
+            get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
+            notify_outbound_message=MagicMock(),
+            notify_outbound_event=MagicMock(),
+            notify_outbound_redaction=MagicMock(),
+        ),
     )
     bot._conversation_state_writer = MagicMock()
     bot._conversation_state_writer.create_storage = MagicMock(
@@ -538,40 +362,6 @@ def _build_response_runner(  # noqa: C901, PLR0915
         side_effect=lambda scope: SessionType.TEAM if scope.kind == "team" else SessionType.AGENT,
     )
     bot._edit_message = AsyncMock(return_value=True)
-    delivery_gateway = MagicMock()
-    delivery_gateway.deliver_final = AsyncMock(
-        side_effect=_default_deliver_final,
-    )
-    delivery_gateway.deliver_stream = AsyncMock(
-        return_value=StreamTransportOutcome(
-            last_physical_stream_event_id="$msg_id",
-            terminal_operation="send",
-            terminal_result="succeeded",
-            terminal_status="completed",
-            rendered_body="Hello!",
-            visible_body_state="visible_body",
-        ),
-    )
-    delivery_gateway.edit_text = AsyncMock()
-    delivery_gateway.send_text = AsyncMock(return_value="$thinking")
-    delivery_gateway.deliver_cancelled_visible_note = AsyncMock(
-        side_effect=_default_deliver_cancelled_visible_note,
-    )
-    delivery_gateway.finalize_streamed_response = AsyncMock(
-        side_effect=_default_finalize_streamed_response,
-    )
-    delivery_gateway.resolve_late_stream_finalize_failure = AsyncMock(
-        side_effect=_default_resolve_late_stream_finalize_failure,
-    )
-    delivery_gateway.emit_terminal_outcome_hooks = AsyncMock(
-        side_effect=_default_emit_terminal_outcome_hooks,
-    )
-    delivery_gateway.deps = SimpleNamespace(
-        response_hooks=SimpleNamespace(
-            emit_cancelled_response=AsyncMock(),
-            emit_after_response=AsyncMock(),
-        ),
-    )
     runtime = SimpleNamespace(
         client=bot.client,
         config=config,
@@ -588,6 +378,37 @@ def _build_response_runner(  # noqa: C901, PLR0915
         hook_registry_state=HookRegistryState(hook_registry or HookRegistry.empty()),
         hook_send_message=AsyncMock(),
     )
+    response_hook_service = ResponseHookService(hook_context=hook_context)
+    response_hook_service.emit_cancelled_response = AsyncMock(wraps=response_hook_service.emit_cancelled_response)
+    response_hook_service.emit_after_response = AsyncMock(wraps=response_hook_service.emit_after_response)
+    delivery_gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=runtime,
+            runtime_paths=runtime_paths,
+            agent_name=bot.agent_name,
+            logger=bot.logger,
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=bot._conversation_resolver,
+            response_hooks=response_hook_service,
+        ),
+    )
+    _set_gateway_method(
+        delivery_gateway,
+        "deliver_stream",
+        AsyncMock(
+            return_value=StreamTransportOutcome(
+                last_physical_stream_event_id="$msg_id",
+                terminal_operation="send",
+                terminal_result="succeeded",
+                terminal_status="completed",
+                rendered_body="Hello!",
+                visible_body_state="visible_body",
+            ),
+        ),
+    )
+    _set_gateway_method(delivery_gateway, "edit_text", AsyncMock(return_value=True))
+    _set_gateway_method(delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
         logger=bot.logger,
@@ -1398,7 +1219,7 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
-        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+        _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
         async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
             cancel_message = "cancel"
@@ -1556,7 +1377,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
-        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+        _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
             run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
@@ -1630,7 +1451,7 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
-        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+        _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
             run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
@@ -1854,8 +1675,10 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
                 visible_body_state="visible_body",
             )
 
-        coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
-            side_effect=asyncio.CancelledError("delivery cancel"),
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "finalize_streamed_response",
+            AsyncMock(side_effect=asyncio.CancelledError("delivery cancel")),
         )
 
         with patch.object(
@@ -1942,8 +1765,10 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
                 visible_body_state="visible_body",
             )
 
-        coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
-            side_effect=RuntimeError("delivery crash"),
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "finalize_streamed_response",
+            AsyncMock(side_effect=RuntimeError("delivery crash")),
         )
 
         with patch.object(
@@ -2453,7 +2278,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+        _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
         async def fake_team_response(*_args: object, **_kwargs: object) -> str:
             started.set()
@@ -2567,8 +2392,10 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
-            side_effect=asyncio.CancelledError("delivery cancel"),
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "finalize_streamed_response",
+            AsyncMock(side_effect=asyncio.CancelledError("delivery cancel")),
         )
 
         async def consume_stream(request: object) -> StreamTransportOutcome:
@@ -2577,7 +2404,11 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
                 accumulated += str(chunk)
             return _stream_outcome("$team-msg", accumulated)
 
-        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(side_effect=consume_stream)
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_stream",
+            AsyncMock(side_effect=consume_stream),
+        )
 
         def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
             async def fake_stream() -> AsyncIterator[str]:
@@ -2633,19 +2464,23 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(
-            side_effect=StreamingDeliveryCancelled(
-                asyncio.CancelledError("team stream cancelled"),
-                event_id="$team-msg",
-                accumulated_text="Team hello",
-                tool_trace=[],
-                transport_outcome=_stream_outcome(
-                    "$team-msg",
-                    "Team hello",
-                    terminal_operation="edit",
-                    terminal_result="cancelled",
-                    terminal_status="cancelled",
-                    failure_reason="cancelled_by_user",
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_stream",
+            AsyncMock(
+                side_effect=StreamingDeliveryError(
+                    asyncio.CancelledError("team stream cancelled"),
+                    event_id="$team-msg",
+                    accumulated_text="Team hello",
+                    tool_trace=[],
+                    transport_outcome=_stream_outcome(
+                        "$team-msg",
+                        "Team hello",
+                        terminal_operation="edit",
+                        terminal_result="cancelled",
+                        terminal_status="cancelled",
+                        failure_reason="cancelled_by_user",
+                    ),
                 ),
             ),
         )
@@ -2694,8 +2529,10 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
-            side_effect=RuntimeError("delivery crash"),
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "finalize_streamed_response",
+            AsyncMock(side_effect=RuntimeError("delivery crash")),
         )
 
         async def consume_stream(request: object) -> StreamTransportOutcome:
@@ -2704,7 +2541,11 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
                 accumulated += str(chunk)
             return _stream_outcome("$team-msg", accumulated)
 
-        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(side_effect=consume_stream)
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_stream",
+            AsyncMock(side_effect=consume_stream),
+        )
 
         def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
             async def fake_stream() -> AsyncIterator[str]:
@@ -2747,10 +2588,22 @@ async def test_generate_team_response_helper_routes_placeholder_only_late_failur
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(side_effect=RuntimeError("stream boom"))
-        coordinator.deps.delivery_gateway.resolve_late_stream_finalize_failure = AsyncMock(
-            return_value=FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason="stream boom",
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_stream",
+            AsyncMock(side_effect=RuntimeError("stream boom")),
+        )
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "resolve_late_stream_finalize_failure",
+            AsyncMock(
+                return_value=FinalDeliveryOutcome(
+                    state="error_without_visible_response",
+                    terminal_status="error",
+                    final_visible_event_id=None,
+                    last_physical_stream_event_id=None,
+                    failure_reason="stream boom",
+                ),
             ),
         )
 
@@ -2955,7 +2808,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps.delivery_gateway.edit_text = AsyncMock()
+        _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
         async def fake_team_response(*_args: object, **kwargs: object) -> str:
             cancel_message = "cancel"
@@ -3213,19 +3066,31 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(
-            return_value=StreamTransportOutcome(
-                last_physical_stream_event_id="$team-msg",
-                terminal_operation="send",
-                terminal_result="succeeded",
-                terminal_status="completed",
-                rendered_body="Team hello",
-                visible_body_state="visible_body",
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_stream",
+            AsyncMock(
+                return_value=StreamTransportOutcome(
+                    last_physical_stream_event_id="$team-msg",
+                    terminal_operation="send",
+                    terminal_result="succeeded",
+                    terminal_status="completed",
+                    rendered_body="Team hello",
+                    visible_body_state="visible_body",
+                ),
             ),
         )
-        coordinator.deps.delivery_gateway.finalize_streamed_response = AsyncMock(
-            return_value=FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason="stream failure",
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "finalize_streamed_response",
+            AsyncMock(
+                return_value=FinalDeliveryOutcome(
+                    state="error_without_visible_response",
+                    terminal_status="error",
+                    final_visible_event_id=None,
+                    last_physical_stream_event_id=None,
+                    failure_reason="stream failure",
+                ),
             ),
         )
 

@@ -46,7 +46,6 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
-    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     RuntimePaths,
@@ -57,8 +56,9 @@ from mindroom.delivery_gateway import (
     DeliveryGateway,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
+    SendTextRequest,
 )
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome, TurnDeliveryResolution
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionOutcome
 from mindroom.history.types import HistoryScope
@@ -168,6 +168,29 @@ def _stream_outcome(
         rendered_body=body,
         visible_body_state=visible_body_state,
         failure_reason=failure_reason,
+    )
+
+
+def _outcome(
+    state: str,
+    *,
+    terminal_status: str,
+    final_visible_event_id: str | None = None,
+    last_physical_stream_event_id: str | None = None,
+    final_visible_body: str | None = None,
+    delivery_kind: str | None = None,
+    failure_reason: str | None = None,
+    extra_content: dict[str, object] | None = None,
+) -> FinalDeliveryOutcome:
+    return FinalDeliveryOutcome(
+        state=state,
+        terminal_status=terminal_status,
+        final_visible_event_id=final_visible_event_id,
+        last_physical_stream_event_id=last_physical_stream_event_id,
+        final_visible_body=final_visible_body,
+        delivery_kind=delivery_kind,
+        failure_reason=failure_reason,
+        extra_content=extra_content,
     )
 
 
@@ -2699,7 +2722,9 @@ class TestAgentBot:
             reason="No team available",
         )
 
-        gateway_outcome = FinalDeliveryOutcome.error_with_visible_response(
+        gateway_outcome = _outcome(
+            "kept_prior_visible_response_after_error",
+            terminal_status="error",
             final_visible_event_id="$existing",
             final_visible_body="",
             failure_reason="delivery_failed",
@@ -2729,7 +2754,7 @@ class TestAgentBot:
         assert delivered_request.existing_event_is_placeholder is True
         assert delivered_request.response_kind == "system"
         assert delivered_request.apply_before_hooks is False
-        assert delivery_resolution.state == "error_with_visible_response"
+        assert delivery_resolution.state == "kept_prior_visible_response_after_error"
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_redacts_suppressed_placeholder(
@@ -3055,12 +3080,12 @@ class TestAgentBot:
                 bot._response_runner,
                 "generate_response",
                 new=AsyncMock(
-                    return_value=TurnDeliveryResolution.from_outcome(
-                        FinalDeliveryOutcome.cancelled_with_visible_note(
-                            final_visible_event_id="$cancelled",
-                            final_visible_body="**[Response cancelled by user]**",
-                            failure_reason="cancelled_by_user",
-                        ),
+                    return_value=_outcome(
+                        "cancelled_with_visible_note",
+                        terminal_status="cancelled",
+                        final_visible_event_id="$cancelled",
+                        final_visible_body="**[Response cancelled by user]**",
+                        failure_reason="cancelled_by_user",
                     ),
                 ),
             ),
@@ -3144,7 +3169,9 @@ class TestAgentBot:
         """Pipeline outcome summaries must not report cancelled or error states as plain send/edit success."""
         assert (
             ResponseRunner._response_outcome(
-                FinalDeliveryOutcome.cancelled_with_visible_note(
+                _outcome(
+                    "cancelled_with_visible_note",
+                    terminal_status="cancelled",
                     final_visible_event_id="$cancelled",
                     final_visible_body="Cancelled.",
                     delivery_kind="edited",
@@ -3154,10 +3181,11 @@ class TestAgentBot:
         )
         assert (
             ResponseRunner._response_outcome(
-                FinalDeliveryOutcome.error_with_visible_response(
+                _outcome(
+                    "kept_prior_visible_response_after_error",
+                    terminal_status="error",
                     final_visible_event_id="$error",
                     final_visible_body="boom",
-                    delivery_kind="edited",
                 ),
             )
             == "error"
@@ -7483,17 +7511,7 @@ class TestAgentBot:
         async def unused_payload_builder(_context: MessageContext) -> DispatchPayload:
             return DispatchPayload(prompt="help me")
 
-        with patch.object(
-            DeliveryGateway,
-            "deliver_final",
-            new=AsyncMock(
-                return_value=FinalDeliveryOutcome.final_visible_delivery(
-                    final_visible_event_id="$reply",
-                    final_visible_body=action.rejection_message,
-                    delivery_kind="sent",
-                ),
-            ),
-        ) as deliver_final:
+        with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$reply")) as send_text:
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
@@ -7505,13 +7523,11 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
-        deliver_final.assert_awaited_once()
-        delivered_request = deliver_final.await_args.args[0]
+        send_text.assert_awaited_once()
+        delivered_request = send_text.await_args.args[0]
         assert delivered_request.response_text.endswith(
             "private agents cannot participate in teams yet",
         )
-        assert delivered_request.response_kind == "system"
-        assert delivered_request.apply_before_hooks is False
         tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
@@ -8413,12 +8429,12 @@ class TestAgentBot:
 
         mock_send_response = AsyncMock()
         mock_generate_team_response = AsyncMock(
-            return_value=TurnDeliveryResolution.from_outcome(
-                FinalDeliveryOutcome.final_visible_delivery(
-                    final_visible_event_id="$team-response",
-                    final_visible_body="",
-                    delivery_kind="sent",
-                ),
+            return_value=_outcome(
+                "final_visible_delivery",
+                terminal_status="completed",
+                final_visible_event_id="$team-response",
+                final_visible_body="",
+                delivery_kind="sent",
             ),
         )
         install_send_response_mock(bot, mock_send_response)
@@ -8571,14 +8587,7 @@ class TestAgentBot:
         install_edit_message_mock(bot, bot._edit_message)
         bot._generate_response = AsyncMock()
         install_generate_response_mock(bot, bot._generate_response)
-        bot._delivery_gateway.deliver_final = AsyncMock(
-            return_value=FinalDeliveryOutcome.error_with_visible_response(
-                final_visible_event_id="$error",
-                final_visible_body="[calculator] ⚠️ Error: Failed to download image",
-                failure_reason="Failed to download image",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
-            ),
-        )
+        bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_policy.plan_turn = AsyncMock(
             return_value=DispatchPlan(
@@ -8604,10 +8613,9 @@ class TestAgentBot:
 
         bot._generate_response.assert_not_called()
         bot._edit_message.assert_not_awaited()
-        bot._delivery_gateway.deliver_final.assert_awaited_once()
-        assert (
-            bot._delivery_gateway.deliver_final.await_args.args[0].response_text
-            == "[calculator] ⚠️ Error: Failed to download image"
+        bot._delivery_gateway.send_text.assert_awaited_once()
+        assert bot._delivery_gateway.send_text.await_args.args[0].response_text == (
+            "[calculator] ⚠️ Error: Failed to download image"
         )
         expected_handled_turn = _agent_response_handled_turn(
             agent_name=mock_agent_user.agent_name,
@@ -8642,36 +8650,22 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        gateway_outcome = FinalDeliveryOutcome.error_with_visible_response(
-            final_visible_event_id="$error",
-            final_visible_body="[calculator] ⚠️ Error: boom",
-            failure_reason="boom",
-            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
-        )
-        bot._delivery_gateway.deliver_final = AsyncMock(return_value=gateway_outcome)
+        bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
 
         resolution = await bot._turn_controller._finalize_dispatch_failure(
             room_id="!test:localhost",
             reply_to_event_id="$event",
             thread_id="$thread_root",
-            response_envelope=_hook_envelope(body="hello", source_event_id="$event"),
-            correlation_id="corr-dispatch-failure",
             error=RuntimeError("boom"),
         )
 
-        assert resolution == TurnDeliveryResolution.from_outcome(gateway_outcome)
-        bot._delivery_gateway.deliver_final.assert_awaited_once_with(
-            FinalDeliveryRequest(
+        assert resolution == "$error"
+        bot._delivery_gateway.send_text.assert_awaited_once_with(
+            SendTextRequest(
                 target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
-                existing_event_id=None,
                 response_text="[calculator] ⚠️ Error: boom",
-                response_kind="system",
-                response_envelope=_hook_envelope(body="hello", source_event_id="$event"),
-                correlation_id="corr-dispatch-failure",
-                tool_trace=None,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
-                apply_before_hooks=False,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
             ),
         )
 
@@ -8718,36 +8712,21 @@ class TestAgentBot:
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._delivery_gateway.deliver_final = AsyncMock(
-            return_value=FinalDeliveryOutcome.error_with_visible_response(
-                final_visible_event_id="$team-error",
-                final_visible_body="[team_bot] ⚠️ Error: boom",
-                failure_reason="boom",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
-            ),
-        )
+        bot._delivery_gateway.send_text = AsyncMock(return_value="$team-error")
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
 
         await bot._turn_controller._finalize_dispatch_failure(
             room_id="!test:localhost",
             reply_to_event_id="$event",
             thread_id="$thread_root",
-            response_envelope=_hook_envelope(body="hello", source_event_id="$event"),
-            correlation_id="corr-team-dispatch-failure",
             error=RuntimeError("boom"),
         )
 
-        assert bot._delivery_gateway.deliver_final.await_args.args == (
-            FinalDeliveryRequest(
+        assert bot._delivery_gateway.send_text.await_args.args == (
+            SendTextRequest(
                 target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
-                existing_event_id=None,
                 response_text="[team_bot] ⚠️ Error: boom",
-                response_kind="system",
-                response_envelope=_hook_envelope(body="hello", source_event_id="$event"),
-                correlation_id="corr-team-dispatch-failure",
-                tool_trace=None,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
-                apply_before_hooks=False,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
             ),
         )
 
@@ -8796,14 +8775,7 @@ class TestAgentBot:
 
         mock_edit = AsyncMock(return_value=False)
         install_edit_message_mock(bot, mock_edit)
-        bot._delivery_gateway.deliver_final = AsyncMock(
-            return_value=FinalDeliveryOutcome.error_with_visible_response(
-                final_visible_event_id="$error",
-                final_visible_body="[calculator] ⚠️ Error: setup failed",
-                failure_reason="setup failed",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
-            ),
-        )
+        bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
         _replace_turn_policy_deps(
             bot,
             delivery_gateway=bot._delivery_gateway,
@@ -8822,7 +8794,7 @@ class TestAgentBot:
             )
 
         mock_edit.assert_not_awaited()
-        bot._delivery_gateway.deliver_final.assert_awaited_once()
+        bot._delivery_gateway.send_text.assert_awaited_once()
         tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
@@ -8877,11 +8849,7 @@ class TestAgentBot:
         with patch(
             "mindroom.bot.TurnController._finalize_dispatch_failure",
             new=AsyncMock(
-                return_value=TurnDeliveryResolution.from_outcome(
-                    FinalDeliveryOutcome.error_without_visible_response(
-                        failure_reason="setup failed",
-                    ),
-                ),
+                return_value=None,
             ),
         ):
             await bot._turn_controller._execute_response_action(
@@ -8938,7 +8906,7 @@ class TestAgentBot:
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
             return DispatchPayload(prompt="hello")
 
-        async def fail_generate_response(*_args: object, **_kwargs: object) -> TurnDeliveryResolution:
+        async def fail_generate_response(*_args: object, **_kwargs: object) -> FinalDeliveryOutcome:
             message = "post-lock setup failed"
             error = RuntimeError(message)
             raise PostLockRequestPreparationError(message) from error
@@ -8954,13 +8922,7 @@ class TestAgentBot:
         with patch(
             "mindroom.bot.TurnController._finalize_dispatch_failure",
             new=AsyncMock(
-                return_value=TurnDeliveryResolution.from_outcome(
-                    FinalDeliveryOutcome.error_with_visible_response(
-                        final_visible_event_id="$error",
-                        final_visible_body="[calculator] ⚠️ Error: post-lock setup failed",
-                        failure_reason="post-lock setup failed",
-                    ),
-                ),
+                return_value="$error",
             ),
         ):
             await bot._turn_controller._execute_response_action(
@@ -9033,11 +8995,11 @@ class TestAgentBot:
                 bot._response_runner,
                 "generate_response",
                 new=AsyncMock(
-                    return_value=TurnDeliveryResolution.from_outcome(
-                        FinalDeliveryOutcome.suppression_cleanup_failed(
-                            last_physical_stream_event_id="$thinking",
-                            failure_reason="suppressed_by_hook",
-                        ),
+                    return_value=_outcome(
+                        "suppression_cleanup_failed",
+                        terminal_status="error",
+                        last_physical_stream_event_id="$thinking",
+                        failure_reason="suppressed_by_hook",
                     ),
                 ),
             ),
@@ -9291,10 +9253,10 @@ class TestAgentBot:
                 bot._response_runner,
                 "generate_response",
                 new=AsyncMock(
-                    return_value=TurnDeliveryResolution.from_outcome(
-                        FinalDeliveryOutcome.error_without_visible_response(
-                            failure_reason="delivery_failed",
-                        ),
+                    return_value=_outcome(
+                        "error_without_visible_response",
+                        terminal_status="error",
+                        failure_reason="delivery_failed",
                     ),
                 ),
             ),

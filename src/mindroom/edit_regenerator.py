@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.final_delivery import TurnDeliveryResolution
+    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
@@ -49,7 +49,7 @@ class _GenerateResponse(Protocol):
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> TurnDeliveryResolution:
+    ) -> FinalDeliveryOutcome:
         """Generate or regenerate a response for one handled turn."""
 
 

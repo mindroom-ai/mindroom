@@ -25,8 +25,8 @@ from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
-from mindroom.handled_turns import HandledTurnState, apply_delivery_resolution
+from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugins import PluginReloadResult
@@ -37,22 +37,26 @@ def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
     return resolve_runtime_paths(config_path=config_path)
 
 
-def _final_visible_resolution(event_id: str) -> TurnDeliveryResolution:
-    """Return one successful terminal resolution for command reply tests."""
-    return TurnDeliveryResolution.from_outcome(
-        FinalDeliveryOutcome.final_visible_delivery(
-            final_visible_event_id=event_id,
-            final_visible_body="ok",
-        ),
+def _final_visible_resolution(event_id: str) -> FinalDeliveryOutcome:
+    """Return one successful terminal outcome for command reply tests."""
+    return FinalDeliveryOutcome(
+        state="final_visible_delivery",
+        terminal_status="completed",
+        final_visible_event_id=event_id,
+        last_physical_stream_event_id=None,
+        final_visible_body="ok",
+        delivery_kind="sent",
     )
 
 
-def _error_resolution() -> TurnDeliveryResolution:
-    """Return one retryable no-visible-output resolution for command reply tests."""
-    return TurnDeliveryResolution.from_outcome(
-        FinalDeliveryOutcome.error_without_visible_response(
-            failure_reason="delivery_failed",
-        ),
+def _error_resolution() -> FinalDeliveryOutcome:
+    """Return one retryable no-visible-output outcome for command reply tests."""
+    return FinalDeliveryOutcome(
+        state="error_without_visible_response",
+        terminal_status="error",
+        final_visible_event_id=None,
+        last_physical_stream_event_id=None,
+        failure_reason="delivery_failed",
     )
 
 
@@ -351,9 +355,9 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
     )
 
     context.record_handled_turn.assert_called_once_with(
-        apply_delivery_resolution(
-            HandledTurnState.from_source_event_id("$event"),
-            _final_visible_resolution("$reply"),
+        HandledTurnState.from_source_event_id(
+            "$event",
+            response_event_id="$reply",
         ),
     )
 
@@ -705,9 +709,9 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     mock_store_pending.assert_awaited_once_with(context.client, "$preview", pending_change)
     mock_add_reactions.assert_awaited_once_with(context.client, "!room:example.org", "$preview")
     context.record_handled_turn.assert_called_once_with(
-        apply_delivery_resolution(
-            HandledTurnState.from_source_event_id("$event"),
-            _final_visible_resolution("$preview"),
+        HandledTurnState.from_source_event_id(
+            "$event",
+            response_event_id="$preview",
         ),
     )
 

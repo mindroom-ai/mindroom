@@ -17,7 +17,6 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _SUMMARY_INSTRUCTIONS,
-    _SUMMARY_TEMPERATURE,
     _TRUNCATION_SAMPLE_SIZE,
     THREAD_SUMMARY_MAX_LENGTH,
     ThreadSummaryWriteError,
@@ -332,11 +331,13 @@ def _mock_config(
     *,
     first_threshold: int = 5,
     subsequent_interval: int = 10,
+    summary_temperature: float | None = None,
 ) -> MagicMock:
     config = MagicMock()
     config.defaults.thread_summary_model = model_name
     config.defaults.thread_summary_first_threshold = first_threshold
     config.defaults.thread_summary_subsequent_interval = subsequent_interval
+    config.defaults.thread_summary_temperature = summary_temperature
     return config
 
 
@@ -1384,10 +1385,10 @@ class TestGenerateSummary:
         prompt = mock_run.await_args.kwargs["run_input"]
         assert prompt == f"<thread_messages>\n{conversation}\n</thread_messages>\n\nSummarize the above thread."
 
-    async def test_generate_summary_forces_low_temperature(self) -> None:
-        """Summary generation should override model temperature with the fixed summary value."""
+    async def test_generate_summary_uses_configured_summary_temperature(self) -> None:
+        """Summary generation should use the configured summary temperature override."""
         history = _make_thread_history(3)
-        config = _mock_config()
+        config = _mock_config(summary_temperature=0.1)
         rp = _mock_runtime_paths()
         mock_model = _TemperatureAwareModel(temperature=0.9)
         mock_response = MagicMock()
@@ -1401,7 +1402,26 @@ class TestGenerateSummary:
             result = await _generate_summary(history, config, rp)
 
         assert result == "🧪 ISSUE-148 matrix cache invalidate-and-refetch live test"
-        assert mock_model.temperature == _SUMMARY_TEMPERATURE
+        assert mock_model.temperature == 0.1
+
+    async def test_generate_summary_can_disable_temperature_override(self) -> None:
+        """A null summary temperature should clear any inherited model temperature."""
+        history = _make_thread_history(3)
+        config = _mock_config(summary_temperature=None)
+        rp = _mock_runtime_paths()
+        mock_model = _TemperatureAwareModel(temperature=0.9)
+        mock_response = MagicMock()
+        mock_response.content = _ThreadSummary(summary="🧪 ISSUE-149 provider default summary")
+
+        with (
+            patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
+            patch("mindroom.thread_summary.Agent"),
+            patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
+        ):
+            result = await _generate_summary(history, config, rp)
+
+        assert result == "🧪 ISSUE-149 provider default summary"
+        assert mock_model.temperature is None
 
     async def test_generate_summary_warns_when_model_lacks_temperature(
         self,

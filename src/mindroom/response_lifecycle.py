@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from agno.db.base import SessionType
     from agno.db.sqlite import SqliteDb
 
-    from mindroom.final_delivery import FinalDeliveryOutcome, TurnDeliveryResolution
+    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.history.types import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
@@ -112,16 +112,15 @@ class ResponseLifecycle:
         *,
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
-    ) -> TurnDeliveryResolution:
-        """Run outer lifecycle finalization and return the typed terminal resolution."""
+    ) -> FinalDeliveryOutcome:
+        """Run outer lifecycle finalization and return the canonical terminal outcome."""
         final_delivery_outcome = outcome.final_delivery_outcome
-        turn_completion_event_id = (
-            final_delivery_outcome.turn_completion_event_id
-            if final_delivery_outcome.should_shield_late_failures
-            else None
-        )
         await self.apply_effects_safely(
-            response_event_id=(turn_completion_event_id),
+            response_event_id=(
+                final_delivery_outcome.turn_completion_event_id
+                if final_delivery_outcome.should_shield_late_failures
+                else None
+            ),
             post_response_outcome=lambda: build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
@@ -129,10 +128,7 @@ class ResponseLifecycle:
             self.request,
             outcome=self.runner._response_outcome(final_delivery_outcome),
         )
-        return self.runner._turn_delivery_resolution(
-            final_delivery_outcome=final_delivery_outcome,
-            turn_completion_event_id=turn_completion_event_id,
-        )
+        return final_delivery_outcome
 
     async def apply_effects_safely(
         self,

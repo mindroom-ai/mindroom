@@ -2807,8 +2807,11 @@ class TestStreamingBehavior:
                 response_hooks=response_hooks,
             ),
         )
-        final_outcome = FinalDeliveryOutcome.final_visible_delivery(
+        final_outcome = FinalDeliveryOutcome(
+            state="final_visible_delivery",
+            terminal_status="completed",
             final_visible_event_id="$streaming",
+            last_physical_stream_event_id=None,
             final_visible_body="updated text",
             delivery_kind="edited",
         )
