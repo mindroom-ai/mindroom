@@ -1898,10 +1898,11 @@ class TestStreamingBehavior:
         assert finalize_calls == []
 
     @pytest.mark.asyncio
-    async def test_send_streaming_response_timeout_cleanup_shuts_down_delivery_once(self) -> None:
-        """Timeout cleanup should not retry shutdown again from the final cleanup block."""
+    async def test_send_streaming_response_timeout_cleanup_retries_delivery_shutdown_in_finally(self) -> None:
+        """Timed-out delivery shutdown must keep the live task available for final cleanup retry."""
         mock_client = _make_matrix_client_mock()
         shutdown_call_count = 0
+        observed_delivery_task: asyncio.Task[None] | None = None
 
         async def fail_stream_supervision(
             response_stream: AsyncIterator[object],
@@ -1919,9 +1920,11 @@ class TestStreamingBehavior:
             delivery_task: asyncio.Task[None] | None,
         ) -> Exception | None:
             nonlocal shutdown_call_count
+            nonlocal observed_delivery_task
             shutdown_call_count += 1
             del delivery_queue
-            if delivery_task is not None:
+            observed_delivery_task = delivery_task
+            if delivery_task is not None and shutdown_call_count > 1:
                 delivery_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await delivery_task
@@ -1946,7 +1949,51 @@ class TestStreamingBehavior:
                 response_stream=_aiter(),
             )
 
-        assert shutdown_call_count == 1
+        if observed_delivery_task is not None and not observed_delivery_task.done():
+            observed_delivery_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await observed_delivery_task
+
+        assert shutdown_call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_shutdown_streaming_runtime_keeps_unfinished_delivery_task_on_timeout(self) -> None:
+        """A timed-out delivery shutdown must leave the live task handle available for retry."""
+        progress_task = asyncio.create_task(asyncio.sleep(0))
+        delivery_task = asyncio.create_task(asyncio.sleep(3600))
+        runtime = _StreamingRuntime(
+            delivery_queue=asyncio.Queue(),
+            progress_task=progress_task,
+            delivery_task=delivery_task,
+        )
+
+        async def finish_progress_shutdown(_pump: object, task: asyncio.Task[None] | None) -> Exception | None:
+            if task is not None:
+                await task
+            return None
+
+        async def timeout_delivery_shutdown(
+            _delivery_queue: asyncio.Queue[object | None],
+            task: asyncio.Task[None] | None,
+        ) -> Exception | None:
+            assert task is delivery_task
+            return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
+
+        with (
+            patch("mindroom.streaming._shutdown_worker_progress_drain", new=finish_progress_shutdown),
+            patch("mindroom.streaming._shutdown_stream_delivery", new=timeout_delivery_shutdown),
+        ):
+            cleanup = await _shutdown_streaming_runtime(pump=object(), runtime=runtime)
+
+        assert cleanup.progress_error is None
+        assert isinstance(cleanup.delivery_error, _StreamDeliveryShutdownTimeoutError)
+        assert runtime.progress_task is None
+        assert runtime.delivery_task is delivery_task
+        assert delivery_task.done() is False
+
+        delivery_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await delivery_task
 
     @pytest.mark.asyncio
     async def test_shutdown_streaming_runtime_keeps_unfinished_delivery_task_on_cancellation(self) -> None:

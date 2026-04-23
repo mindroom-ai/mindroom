@@ -622,13 +622,15 @@ async def _shutdown_streaming_runtime(
     if runtime.progress_task is not None:
         progress_task = runtime.progress_task
         progress_error = await _shutdown_worker_progress_drain(pump, progress_task)
-        runtime.progress_task = None
+        if progress_task.done():
+            runtime.progress_task = None
 
     delivery_error = None
     if runtime.delivery_task is not None:
         delivery_task = runtime.delivery_task
         delivery_error = await _shutdown_stream_delivery(runtime.delivery_queue, delivery_task)
-        runtime.delivery_task = None
+        if delivery_task.done():
+            runtime.delivery_task = None
 
     return _StreamingCleanup(
         progress_error=progress_error,
