@@ -205,48 +205,6 @@ async def test_agent_rejoins_persisted_invited_rooms_on_startup(
 
     mock_client = AsyncMock()
     bot.client = mock_client
-    bot._post_join_room_setup = AsyncMock()
-
-    join_room = AsyncMock(return_value=True)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", AsyncMock(return_value=0))
-
-    await bot.join_configured_rooms()
-
-    join_room.assert_awaited_once_with(mock_client, "!invited-room:localhost")
-
-
-@pytest.mark.asyncio
-async def test_router_rejoins_persisted_invited_rooms_on_startup(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Router-owned transport should preserve ad-hoc invited rooms across restart."""
-    agent_user = AgentMatrixUser(
-        agent_name=ROUTER_AGENT_NAME,
-        user_id="@mindroom_router:localhost",
-        display_name="Router",
-        password=TEST_PASSWORD,
-    )
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default")),
-        test_runtime_paths(tmp_path),
-    )
-    invited_path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
-    invited_path.parent.mkdir(parents=True, exist_ok=True)
-    invited_path.write_text('[\n  "!invited-room:localhost"\n]\n', encoding="utf-8")
-
-    bot = AgentBot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-
-    mock_client = AsyncMock()
-    bot.client = mock_client
-    bot._post_join_room_setup = AsyncMock()
 
     join_room = AsyncMock(return_value=True)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
@@ -777,11 +735,11 @@ async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_agent_invite_brings_router_into_ad_hoc_room(
+async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Ad-hoc invited rooms should become router-managed so approvals still work there."""
+    """Ad-hoc invites should stay agent-scoped unless the router already manages the room."""
     config = bind_runtime_paths(
         Config(
             agents={
@@ -841,16 +799,10 @@ async def test_agent_invite_brings_router_into_ad_hoc_room(
     await bot._on_invite(room, event)
 
     join_room.assert_awaited_once_with(bot.client, "!project-room:localhost")
-    invite_router.assert_awaited_once_with(
-        bot.client,
-        "!project-room:localhost",
-        "@mindroom_router:localhost",
-    )
-    router_bot.join_configured_rooms.assert_awaited_once()
-    assert router_bot._invited_rooms == {"!project-room:localhost"}
-    assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (
-        '[\n  "!project-room:localhost"\n]\n'
-    )
+    invite_router.assert_not_awaited()
+    router_bot.join_configured_rooms.assert_not_awaited()
+    assert router_bot._invited_rooms == set()
+    assert _invited_rooms_path(config, ROUTER_AGENT_NAME).exists() is False
 
 
 @pytest.mark.asyncio

@@ -57,7 +57,9 @@ from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_approval import (
+    _DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     SentApprovalEvent,
+    ToolApprovalTransportError,
     initialize_approval_store,
     shutdown_approval_store,
     sync_unsynced_approval_event_resolutions,
@@ -411,9 +413,11 @@ class MultiAgentOrchestrator:
         content: dict[str, Any],
     ) -> SentApprovalEvent | None:
         """Send one custom approval event on the current loop."""
-        bot = self._approval_transport_bot(room_id)
-        if bot is None or bot.client is None:
+        bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if bot is None or not bot.running or bot.client is None:
             return None
+        if not self._bot_has_approval_room(bot, room_id):
+            raise ToolApprovalTransportError(_DEFAULT_ROUTER_MANAGED_ROOM_REASON)
         send_content = dict(content)
         if thread_id is not None:
             send_content["m.relates_to"] = await self._approval_thread_relation(room_id, thread_id, bot.agent_name)
@@ -1656,35 +1660,6 @@ class MultiAgentOrchestrator:
             logger.warning("Router client not available")
             return None
         return router_bot
-
-    async def ensure_router_manages_invited_room(
-        self,
-        room_id: str,
-        *,
-        inviter_client: nio.AsyncClient,
-    ) -> bool:
-        """Invite and persist the router for one ad-hoc room so approval transport works there."""
-        router_bot = self._router_bot()
-        if router_bot is None:
-            return False
-
-        router_user_id = router_bot.agent_user.user_id
-        if not isinstance(router_user_id, str) or not router_user_id:
-            logger.warning("Router user id unavailable for invited-room transport", room_id=room_id)
-            return False
-
-        if self._bot_has_approval_room(router_bot, room_id):
-            router_bot.remember_invited_room(room_id)
-            return True
-
-        invited = await invite_to_room(inviter_client, room_id, router_user_id)
-        if not invited:
-            logger.warning("Failed to invite router to ad-hoc room", room_id=room_id)
-            return False
-
-        router_bot.remember_invited_room(room_id)
-        await router_bot.join_configured_rooms()
-        return self._bot_has_approval_room(router_bot, room_id)
 
     async def _setup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
         """Setup rooms and ensure all bots have correct memberships.

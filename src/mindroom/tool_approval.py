@@ -43,6 +43,9 @@ _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
 _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
 _DEFAULT_RESTART_REASON = "MindRoom restarted before approval completed."
 _DEFAULT_REINITIALIZE_REASON = "MindRoom reinitialized before approval completed."
+_DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
+    "Tool approval requires a router-managed Matrix room. Invite the router to this room or retry from a managed room."
+)
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
@@ -61,6 +64,14 @@ logger = get_logger(__name__)
 
 class ToolApprovalScriptError(RuntimeError):
     """One approval-script load or execution failure."""
+
+
+class ToolApprovalTransportError(RuntimeError):
+    """One actionable approval transport limitation."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _utcnow() -> datetime:
@@ -568,6 +579,7 @@ class ApprovalManager:
         self._persist_request(pending)
 
         sent_event: SentApprovalEvent | None = None
+        send_failure_reason = _DEFAULT_SEND_FAILURE_REASON
         try:
             try:
                 sent_event = await self._send_event(
@@ -586,15 +598,26 @@ class ApprovalManager:
                     self._persist_request(applied_decision[0])
                 self._discard(pending.id)
                 raise
-        except Exception:
-            logger.warning(
-                "Failed to send approval Matrix event",
-                approval_id=pending.id,
-                room_id=room_id,
-                thread_id=thread_id,
-                agent_name=agent_name,
-                exc_info=True,
-            )
+        except Exception as exc:
+            if isinstance(exc, ToolApprovalTransportError):
+                send_failure_reason = exc.reason
+                logger.info(
+                    "Approval Matrix transport unavailable",
+                    approval_id=pending.id,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    agent_name=agent_name,
+                    reason=send_failure_reason,
+                )
+            else:
+                logger.warning(
+                    "Failed to send approval Matrix event",
+                    approval_id=pending.id,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    agent_name=agent_name,
+                    exc_info=True,
+                )
         if sent_event is None:
             logger.warning(
                 "Approval Matrix event was not delivered",
@@ -606,7 +629,7 @@ class ApprovalManager:
             decision = await self._resolve_pending(
                 pending.id,
                 status="expired",
-                reason=_DEFAULT_SEND_FAILURE_REASON,
+                reason=send_failure_reason,
                 resolved_by=None,
             )
             self._discard(pending.id)

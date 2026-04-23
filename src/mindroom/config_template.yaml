@@ -16,7 +16,7 @@ agents:
     model: default
     rooms:
       - lobby
-    accept_invites: true  # Accept direct room invites and auto-join invited rooms
+    accept_invites: true  # Accept direct room invites and auto-join invited rooms; approval-gated tools still need the router already in that room
     tools: []
     # Tools can be plain strings or single-key dicts with per-agent config overrides:
     # tools:

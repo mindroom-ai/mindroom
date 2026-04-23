@@ -839,10 +839,6 @@ class AgentBot:
         """Persist invited room IDs atomically for one eligible named agent."""
         self._room_lifecycle.save_invited_rooms()
 
-    def remember_invited_room(self, room_id: str) -> bool:
-        """Persist one invited room for this bot when its lifecycle requires it."""
-        return self._room_lifecycle.remember_invited_room(room_id)
-
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         await self._room_lifecycle.join_configured_rooms()

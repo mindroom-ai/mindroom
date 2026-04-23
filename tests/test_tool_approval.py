@@ -1209,6 +1209,49 @@ async def test_request_approval_expires_when_matrix_send_fails(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_request_approval_returns_specific_reason_when_router_transport_is_unavailable(tmp_path: Path) -> None:
+    """Requests in rooms without the router should fail with an explicit limitation message."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+    router_client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+    router_client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$approval-event", room_id="!room:localhost"),
+    )
+    router_bot = MagicMock()
+    router_bot.agent_name = "router"
+    router_bot.running = True
+    router_bot.client = router_client
+    orchestrator.agent_bots = {"router": router_bot}
+
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=orchestrator._send_approval_event,
+        editor=AsyncMock(),
+    )
+
+    decision = await store.request_approval(
+        tool_name="run_shell_command",
+        arguments={"command": "echo hi"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        matched_rule="run_shell_*",
+        script_path=None,
+        timeout_seconds=60,
+    )
+
+    assert decision.status == "expired"
+    assert decision.reason == (
+        "Tool approval requires a router-managed Matrix room. "
+        "Invite the router to this room or retry from a managed room."
+    )
+    router_client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_request_approval_discards_pending_request_when_matrix_send_returns_none(tmp_path: Path) -> None:
     """Send failures that return no event ID should not leak approval requests in memory or on disk."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1815,8 +1858,8 @@ async def test_orchestrator_send_approval_event_uses_expected_room_send_payload(
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_send_approval_event_returns_none_when_router_not_joined(tmp_path: Path) -> None:
-    """Approval transport should fail when the router is not joined to the room."""
+async def test_orchestrator_send_approval_event_raises_when_router_not_joined(tmp_path: Path) -> None:
+    """Approval transport should surface the router-managed-room limitation explicitly."""
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator._capture_runtime_loop()
@@ -1830,21 +1873,27 @@ async def test_orchestrator_send_approval_event_returns_none_when_router_not_joi
     router_bot.client = router_client
     orchestrator.agent_bots = {"router": router_bot}
 
-    event_id = await orchestrator._send_approval_event(
-        "!room:localhost",
-        "$thread",
-        {
-            "approval_id": "approval-1",
-            "tool_name": "run_shell_command",
-            "arguments": {"command": "echo hi"},
-            "agent_name": "code",
-            "status": "pending",
-            "msgtype": "io.mindroom.tool_approval",
-            "body": "🔒 Approval required: run_shell_command",
-        },
-    )
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"Tool approval requires a router-managed Matrix room\. "
+            r"Invite the router to this room or retry from a managed room\."
+        ),
+    ):
+        await orchestrator._send_approval_event(
+            "!room:localhost",
+            "$thread",
+            {
+                "approval_id": "approval-1",
+                "tool_name": "run_shell_command",
+                "arguments": {"command": "echo hi"},
+                "agent_name": "code",
+                "status": "pending",
+                "msgtype": "io.mindroom.tool_approval",
+                "body": "🔒 Approval required: run_shell_command",
+            },
+        )
 
-    assert event_id is None
     router_client.room_send.assert_not_awaited()
 
 

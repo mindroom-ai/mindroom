@@ -20,7 +20,7 @@ from mindroom.matrix.invited_rooms_store import (
 )
 from mindroom.matrix.rooms import is_dm_room, leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
-from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
+from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -39,7 +39,7 @@ class BotRoomLifecycleDeps:
 
     agent_name: str
     agent_user: AgentMatrixUser
-    runtime: SupportsClientConfigOrchestrator
+    runtime: SupportsClientConfig
     runtime_paths: RuntimePaths
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
@@ -94,14 +94,6 @@ class BotRoomLifecycle:
         if not self.should_persist_invited_rooms():
             return
         save_invited_rooms(self.invited_rooms_file_path(), self.invited_rooms)
-
-    def remember_invited_room(self, room_id: str) -> bool:
-        """Track one invited room in memory and on disk when this entity persists them."""
-        if not self.should_persist_invited_rooms() or room_id in self.invited_rooms:
-            return False
-        self.invited_rooms.add(room_id)
-        self.save_invited_rooms()
-        return True
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
@@ -221,10 +213,8 @@ class BotRoomLifecycle:
             return
 
         self._logger().info("Joined room", room_id=room.room_id)
-        self.remember_invited_room(room.room_id)
-        if self.deps.agent_name != ROUTER_AGENT_NAME:
-            orchestrator = self.deps.runtime.orchestrator
-            if orchestrator is not None:
-                await orchestrator.ensure_router_manages_invited_room(room.room_id, inviter_client=client)
+        if self.should_persist_invited_rooms() and room.room_id not in self.invited_rooms:
+            self.invited_rooms.add(room.room_id)
+            self.save_invited_rooms()
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             await self.deps.on_router_invite_joined(room.room_id)
