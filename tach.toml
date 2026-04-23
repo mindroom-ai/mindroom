@@ -226,16 +226,13 @@ path = "mindroom.api.integrations"
 depends_on = [
     "mindroom.api.credentials",
     "mindroom.api.main",
-    "mindroom.constants",
     "mindroom.tool_system.dependencies",
-    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
 path = "mindroom.api.knowledge"
 depends_on = [
     "mindroom.api.config_lifecycle",
-    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.knowledge",
 ]
@@ -301,7 +298,6 @@ path = "mindroom.api.credentials"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.api.config_lifecycle",
-    "mindroom.constants",
     "mindroom.credentials",
     "mindroom.tool_system.worker_routing",
 ]
@@ -314,7 +310,6 @@ depends_on = [
     "mindroom.api.credentials",
     "mindroom.api.google_tools_helper",
     "mindroom.config.main",
-    "mindroom.constants",
     "mindroom.credentials",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.worker_routing",
@@ -351,7 +346,6 @@ depends_on = [
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backends.local",
-    "mindroom.workers.models",
 ]
 
 [[modules]]
@@ -362,7 +356,6 @@ depends_on = ["mindroom.api.sandbox_runner"]
 path = "mindroom.api.sandbox_worker_prep"
 depends_on = [
     "mindroom.api.sandbox_exec",
-    "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
@@ -374,7 +367,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.schedules"
 depends_on = [
-    "mindroom",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.logging_config",
@@ -395,8 +387,6 @@ path = "mindroom.api.workers"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.tool_system.sandbox_proxy",
-    "mindroom.workers.manager",
-    "mindroom.workers.models",
     "mindroom.workers.runtime",
 ]
 
@@ -1158,7 +1148,6 @@ path = "mindroom.cli.doctor"
 depends_on = [
     "mindroom.cli.config",
     "mindroom.config.main",
-    "mindroom.config.models",
     "mindroom.constants",
     "mindroom.embeddings",
     "mindroom.matrix.health",
@@ -1168,7 +1157,6 @@ depends_on = [
 path = "mindroom.cli.local_stack"
 depends_on = [
     "mindroom.cli.config",
-    "mindroom.constants",
     "mindroom.matrix.health",
 ]
 
@@ -1198,7 +1186,6 @@ path = "mindroom.commands.config_commands"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.config.main",
-    "mindroom.constants",
     "mindroom.logging_config",
 ]
 
