@@ -33,7 +33,7 @@ from defusedxml.ElementTree import fromstring
 
 from mindroom.agents import create_agent, create_session_storage, get_agent_session
 from mindroom.ai import _prepare_agent_and_prompt
-from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.background_tasks import _get_background_task_count, wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -838,6 +838,47 @@ async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelle
 
 
 @pytest.mark.asyncio
+async def test_compaction_summary_outer_cancellation_returns_without_waiting_for_provider_cleanup() -> None:
+    class _SlowCancelCleanupSummaryModel(FakeModel):
+        def __init__(self, *, model_id: str, provider: str) -> None:
+            super().__init__(id=model_id, provider=provider)
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.finished = asyncio.Event()
+
+        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                await asyncio.sleep(0.05)
+                raise
+            finally:
+                self.finished.set()
+            raise AssertionError
+
+    model = _SlowCancelCleanupSummaryModel(model_id="summary-model", provider="fake")
+    summary_task = asyncio.create_task(
+        _generate_compaction_summary(
+            model=model,
+            summary_input="Current prompt",
+        ),
+    )
+
+    await asyncio.wait_for(model.started.wait(), timeout=0.1)
+    summary_task.cancel()
+    start = asyncio.get_running_loop().time()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(summary_task, timeout=0.02)
+
+    assert asyncio.get_running_loop().time() - start < 0.04
+    await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
+    await asyncio.wait_for(model.finished.wait(), timeout=0.2)
+
+
+@pytest.mark.asyncio
 async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_error() -> None:
     class _CleanupErrorSummaryModel(FakeModel):
         def __init__(self, *, model_id: str, provider: str) -> None:
@@ -876,6 +917,49 @@ async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_
     assert model.response_task.done() is True
     with pytest.raises(RuntimeError, match="provider cleanup failed"):
         model.response_task.result()
+
+
+@pytest.mark.asyncio
+async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
+    class _DetachedTimeoutCleanupSummaryModel(FakeModel):
+        def __init__(self, *, model_id: str, provider: str) -> None:
+            super().__init__(id=model_id, provider=provider)
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.release_cleanup = asyncio.Event()
+            self.finished = asyncio.Event()
+
+        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            self.started.set()
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                await self.release_cleanup.wait()
+                return ModelResponse(content="merged summary")
+            finally:
+                self.finished.set()
+            raise AssertionError
+
+    model = _DetachedTimeoutCleanupSummaryModel(model_id="summary-model", provider="fake")
+
+    with (
+        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.compaction._COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS", 0.01),
+        pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
+    ):
+        await _generate_compaction_summary(
+            model=model,
+            summary_input="Current prompt",
+        )
+
+    await asyncio.wait_for(model.started.wait(), timeout=0.1)
+    await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
+    await asyncio.sleep(0)
+    assert _get_background_task_count() == 0
+    model.release_cleanup.set()
+    await asyncio.wait_for(model.finished.wait(), timeout=0.2)
+    await wait_for_background_tasks(timeout=0.1)
 
 
 @pytest.mark.asyncio
