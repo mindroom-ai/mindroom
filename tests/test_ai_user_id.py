@@ -1165,6 +1165,13 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
                 event_id="$terminal",
                 accumulated_text=accumulated,
                 tool_trace=[],
+                transport_outcome=_stream_outcome(
+                    "$terminal",
+                    accumulated,
+                    terminal_result="failed",
+                    terminal_status="error",
+                    failure_reason="boom",
+                ),
             )
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
@@ -1232,6 +1239,13 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
                 event_id="$terminal",
                 accumulated_text="Partial answer\n\n**[Response interrupted by an error: boom]**",
                 tool_trace=[],
+                transport_outcome=_stream_outcome(
+                    "$terminal",
+                    "Partial answer\n\n**[Response interrupted by an error: boom]**",
+                    terminal_result="failed",
+                    terminal_status="error",
+                    failure_reason="boom",
+                ),
             )
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
@@ -1299,6 +1313,13 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
                         result_preview="/app",
                     ),
                 ],
+                transport_outcome=_stream_outcome(
+                    "$terminal",
+                    "Partial answer\n\n🔧 `run_shell_command` [1]\n\n**[Response interrupted by an error: boom]**",
+                    terminal_result="failed",
+                    terminal_status="error",
+                    failure_reason="boom",
+                ),
             )
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
@@ -2195,6 +2216,13 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
                 event_id="$team-terminal",
                 accumulated_text=accumulated,
                 tool_trace=[],
+                transport_outcome=_stream_outcome(
+                    "$team-terminal",
+                    accumulated,
+                    terminal_result="failed",
+                    terminal_status="error",
+                    failure_reason="boom",
+                ),
             )
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
@@ -2272,6 +2300,13 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
                 event_id="$team-terminal",
                 accumulated_text="Team hello\n\n**[Response interrupted by an error: boom]**",
                 tool_trace=[],
+                transport_outcome=_stream_outcome(
+                    "$team-terminal",
+                    "Team hello\n\n**[Response interrupted by an error: boom]**",
+                    terminal_result="failed",
+                    terminal_status="error",
+                    failure_reason="boom",
+                ),
             )
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
@@ -2348,6 +2383,17 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
                         result_preview="/app",
                     ),
                 ],
+                transport_outcome=_stream_outcome(
+                    "$team-terminal",
+                    (
+                        "🤝 **Team Response** (General):\n\nTeam hello\n\n"
+                        "🔧 `run_shell_command` [1]\n\n"
+                        "**[Response interrupted by an error: boom]**"
+                    ),
+                    terminal_result="failed",
+                    terminal_status="error",
+                    failure_reason="boom",
+                ),
             )
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
@@ -2754,7 +2800,7 @@ async def test_generate_team_response_helper_routes_placeholder_only_late_failur
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
-            "resolve_late_stream_finalize_failure",
+            "finalize_streamed_response",
             AsyncMock(
                 return_value=FinalDeliveryOutcome(
                     terminal_status="error",
@@ -2772,7 +2818,7 @@ async def test_generate_team_response_helper_routes_placeholder_only_late_failur
         )
 
     assert resolution.terminal_status == "error"
-    coordinator.deps.delivery_gateway.resolve_late_stream_finalize_failure.assert_awaited_once()
+    coordinator.deps.delivery_gateway.finalize_streamed_response.assert_awaited_once()
     coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
 

@@ -264,23 +264,6 @@ class FinalizeStreamedResponseRequest:
 
 
 @dataclass(frozen=True)
-class LateStreamFinalizeFailureRequest:
-    """Parameters for resolving a late streamed-finalization interruption."""
-
-    target: MessageTarget
-    stream_transport_outcome: StreamTransportOutcome
-    response_kind: str
-    response_envelope: MessageEnvelope
-    correlation_id: str
-    tool_trace: list[ToolTraceEntry] | None
-    extra_content: dict[str, Any] | None
-    failure_reason: str
-    cancelled: bool
-    existing_event_id: str | None = None
-    existing_event_is_placeholder: bool = False
-
-
-@dataclass(frozen=True)
 class DeliveryGateway:
     """Send, edit, redact, and finalize visible Matrix responses."""
 
@@ -960,20 +943,67 @@ class DeliveryGateway:
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-            return await self.resolve_late_stream_finalize_failure(
-                LateStreamFinalizeFailureRequest(
-                    target=request.target,
-                    stream_transport_outcome=stream_outcome,
+            failure_reason = stream_outcome.failure_reason or "stream_finalize_cancelled"
+            if stream_outcome.visible_body_state == "placeholder_only":
+                cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
+                    room_id=request.target.room_id,
+                    streamed_event_id=stream_outcome.last_physical_stream_event_id,
                     response_kind=request.response_kind,
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id,
+                    failure_reason=failure_reason,
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,
-                    failure_reason=stream_outcome.failure_reason or "stream_finalize_cancelled",
-                    cancelled=True,
-                    existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
-                ),
+                )
+                if cleanup_outcome.event_id is None or not cleanup_outcome.is_visible_response:
+                    return FinalDeliveryOutcome(
+                        terminal_status="cancelled",
+                        event_id=None,
+                        failure_reason=failure_reason,
+                        retryable=True,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
+                    )
+                return cleanup_outcome
+
+            visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
+            if visible_stream_event_id is not None:
+                interactive_response = interactive.parse_and_format_interactive(
+                    final_body_candidate,
+                    extract_mapping=True,
+                )
+                return FinalDeliveryOutcome(
+                    terminal_status="cancelled",
+                    event_id=visible_stream_event_id,
+                    is_visible_response=True,
+                    final_visible_body=streamed_text or None,
+                    canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
+                    failure_reason=failure_reason,
+                    retryable=True,
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
+                    option_map=interactive_response.option_map,
+                    options_list=tuple(interactive_response.options_list)
+                    if interactive_response.options_list is not None
+                    else None,
+                )
+            if request.existing_event_id is not None and not request.existing_event_is_placeholder:
+                return FinalDeliveryOutcome(
+                    terminal_status="cancelled",
+                    event_id=request.existing_event_id,
+                    is_visible_response=True,
+                    failure_reason=failure_reason,
+                    retryable=True,
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
+                )
+            return FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id=None,
+                failure_reason=failure_reason,
+                retryable=True,
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
             )
 
         if stream_outcome.terminal_status == "error":
@@ -993,20 +1023,67 @@ class DeliveryGateway:
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-            return await self.resolve_late_stream_finalize_failure(
-                LateStreamFinalizeFailureRequest(
-                    target=request.target,
-                    stream_transport_outcome=stream_outcome,
+            failure_reason = stream_outcome.failure_reason or "stream_finalize_error"
+            if stream_outcome.visible_body_state == "placeholder_only":
+                cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
+                    room_id=request.target.room_id,
+                    streamed_event_id=stream_outcome.last_physical_stream_event_id,
                     response_kind=request.response_kind,
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id,
+                    failure_reason=failure_reason,
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,
-                    failure_reason=stream_outcome.failure_reason or "stream_finalize_error",
-                    cancelled=False,
-                    existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
-                ),
+                )
+                if cleanup_outcome.event_id is None or not cleanup_outcome.is_visible_response:
+                    return FinalDeliveryOutcome(
+                        terminal_status="error",
+                        event_id=None,
+                        failure_reason=failure_reason,
+                        retryable=True,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
+                    )
+                return cleanup_outcome
+
+            visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
+            if visible_stream_event_id is not None:
+                interactive_response = interactive.parse_and_format_interactive(
+                    final_body_candidate,
+                    extract_mapping=True,
+                )
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=visible_stream_event_id,
+                    is_visible_response=True,
+                    final_visible_body=streamed_text or None,
+                    canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
+                    failure_reason=failure_reason,
+                    mark_handled=True,
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
+                    option_map=interactive_response.option_map,
+                    options_list=tuple(interactive_response.options_list)
+                    if interactive_response.options_list is not None
+                    else None,
+                )
+            if request.existing_event_id is not None and not request.existing_event_is_placeholder:
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=request.existing_event_id,
+                    is_visible_response=True,
+                    failure_reason=failure_reason,
+                    retryable=True,
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
+                )
+            return FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id=None,
+                failure_reason=failure_reason,
+                retryable=True,
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
             )
 
         if (
@@ -1061,6 +1138,10 @@ class DeliveryGateway:
                     extra_content=request.extra_content,
                 )
             if visible_stream_event_id is not None:
+                interactive_response = interactive.parse_and_format_interactive(
+                    final_body_candidate,
+                    extract_mapping=True,
+                )
                 return FinalDeliveryOutcome(
                     terminal_status="error",
                     event_id=visible_stream_event_id,
@@ -1071,8 +1152,10 @@ class DeliveryGateway:
                     mark_handled=True,
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
-                    option_map=stream_outcome.option_map,
-                    options_list=stream_outcome.options_list,
+                    option_map=interactive_response.option_map,
+                    options_list=tuple(interactive_response.options_list)
+                    if interactive_response.options_list is not None
+                    else None,
                 )
             return FinalDeliveryOutcome(
                 terminal_status="error",
@@ -1162,87 +1245,19 @@ class DeliveryGateway:
             )
 
         assert streamed_event_id is not None
-        interactive_response = interactive.parse_and_format_interactive(streamed_text, extract_mapping=True)
+        interactive_response = interactive.parse_and_format_interactive(final_body_candidate, extract_mapping=True)
         return FinalDeliveryOutcome(
             terminal_status="completed",
             event_id=streamed_event_id,
             is_visible_response=True,
-            final_visible_body=interactive_response.formatted_text,
+            final_visible_body=streamed_text or interactive_response.formatted_text,
             canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
             delivery_kind=request.initial_delivery_kind,
             mark_handled=True,
             tool_trace=tuple(request.tool_trace or ()),
             extra_content=request.extra_content,
-            option_map=stream_outcome.option_map or interactive_response.option_map,
-            options_list=(
-                stream_outcome.options_list
-                if stream_outcome.options_list is not None
-                else (
-                    tuple(interactive_response.options_list) if interactive_response.options_list is not None else None
-                )
-            ),
-        )
-
-    async def resolve_late_stream_finalize_failure(
-        self,
-        request: LateStreamFinalizeFailureRequest,
-    ) -> FinalDeliveryOutcome:
-        """Resolve one raw cancellation/error raised after streaming already completed."""
-        stream_outcome = request.stream_transport_outcome
-        if stream_outcome.visible_body_state == "placeholder_only":
-            cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
-                room_id=request.target.room_id,
-                streamed_event_id=stream_outcome.last_physical_stream_event_id,
-                response_kind=request.response_kind,
-                response_envelope=request.response_envelope,
-                correlation_id=request.correlation_id,
-                failure_reason=request.failure_reason,
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
-            )
-            if cleanup_outcome.event_id is None or not cleanup_outcome.is_visible_response:
-                return FinalDeliveryOutcome(
-                    terminal_status="cancelled" if request.cancelled else "error",
-                    event_id=None,
-                    failure_reason=request.failure_reason,
-                    retryable=True,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
-            return cleanup_outcome
-
-        visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
-        streamed_text = self._current_stream_body(stream_outcome)
-        if visible_stream_event_id is not None:
-            return FinalDeliveryOutcome(
-                terminal_status="cancelled" if request.cancelled else "error",
-                event_id=visible_stream_event_id,
-                is_visible_response=True,
-                final_visible_body=streamed_text or None,
-                canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
-                failure_reason=request.failure_reason,
-                mark_handled=not request.cancelled,
-                retryable=request.cancelled,
-                tool_trace=tuple(request.tool_trace or ()),
-                extra_content=request.extra_content,
-                option_map=stream_outcome.option_map,
-                options_list=stream_outcome.options_list,
-            )
-        if request.existing_event_id is not None and not request.existing_event_is_placeholder:
-            return FinalDeliveryOutcome(
-                terminal_status="cancelled" if request.cancelled else "error",
-                event_id=request.existing_event_id,
-                is_visible_response=True,
-                failure_reason=request.failure_reason,
-                retryable=True,
-                tool_trace=tuple(request.tool_trace or ()),
-                extra_content=request.extra_content,
-            )
-        return FinalDeliveryOutcome(
-            terminal_status="cancelled" if request.cancelled else "error",
-            event_id=None,
-            failure_reason=request.failure_reason,
-            retryable=True,
-            tool_trace=tuple(request.tool_trace or ()),
-            extra_content=request.extra_content,
+            option_map=interactive_response.option_map,
+            options_list=tuple(interactive_response.options_list)
+            if interactive_response.options_list is not None
+            else None,
         )

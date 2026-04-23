@@ -1140,6 +1140,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.streaming"
 depends_on = [
+    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.final_delivery",
     "mindroom.interactive",

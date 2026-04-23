@@ -34,12 +34,8 @@ class StreamTransportOutcome:  # noqa: D101
     had_visible_body_before_terminal: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
-    option_map: dict[str, str] | None = None
-    options_list: tuple[dict[str, str], ...] | None = None
 
     def __post_init__(self) -> None:  # noqa: D105
-        object.__setattr__(self, "option_map", _copy_dict(self.option_map))
-        object.__setattr__(self, "options_list", _copy_options(self.options_list))
         if self.terminal_result == "not_attempted" and self.terminal_operation != "none":
             raise ValueError("terminal_operation must be 'none' when terminal_result is 'not_attempted'")  # noqa: EM101, TRY003
         if self.terminal_result != "not_attempted" and self.terminal_operation == "none":

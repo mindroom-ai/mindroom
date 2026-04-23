@@ -2122,6 +2122,13 @@ class TestAgentBot:
                     event_id="$terminal",
                     accumulated_text="partial\n\n**[Response interrupted by an error: boom]**",
                     tool_trace=[],
+                    transport_outcome=_stream_outcome(
+                        "$terminal",
+                        "partial\n\n**[Response interrupted by an error: boom]**",
+                        terminal_result="failed",
+                        terminal_status="error",
+                        failure_reason="boom",
+                    ),
                 ),
             ),
             patch_response_runner_module(

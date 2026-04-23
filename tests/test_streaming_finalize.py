@@ -185,7 +185,7 @@ async def test_transport_placeholder_only_cancelled_terminal_update_keeps_commit
 async def test_transport_failed_terminal_update_preserves_committed_interactive_metadata(
     tmp_path: Path,
 ) -> None:
-    """Late terminal failures must keep the committed interactive mapping for the visible streamed question."""
+    """Late terminal failures must recover interactive metadata from the visible streamed question."""
     config = _config(tmp_path)
     streaming = _streaming_response(config)
     streaming.accumulated_text = """```interactive
@@ -207,10 +207,42 @@ async def test_transport_failed_terminal_update_preserves_committed_interactive_
         "mindroom.streaming.edit_message_result",
         new=AsyncMock(return_value=None),
     ):
-        outcome = await streaming.finalize(_client(), restart_interrupted=True)
+        transport_outcome = await streaming.finalize(_client(), restart_interrupted=True)
 
-    assert outcome.terminal_result == "failed"
-    assert outcome.rendered_body is not None
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=Mock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    outcome = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            stream_transport_outcome=transport_outcome,
+            initial_delivery_kind="sent",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-interactive-preserved",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert transport_outcome.terminal_result == "failed"
+    assert transport_outcome.rendered_body is not None
     assert outcome.option_map == {"✅": "yes", "1": "yes"}
     assert outcome.options_list == ({"emoji": "✅", "label": "Yes", "value": "yes"},)
 
