@@ -234,23 +234,6 @@ class ThreadOutboundWritePolicy:
             event_id=event_id,
             context="outbound",
         )
-        await self._apply_outbound_event_notification_with_impact(
-            room_id,
-            event_id,
-            event_source,
-            event_info,
-            impact=impact,
-        )
-
-    async def _apply_outbound_event_notification_with_impact(
-        self,
-        room_id: str,
-        event_id: str,
-        event_source: dict[str, Any],
-        event_info: EventInfo,
-        *,
-        impact: MutationThreadImpact,
-    ) -> None:
         await _apply_thread_message_mutation(
             cache_ops=self._cache_ops,
             room_id=room_id,
@@ -261,35 +244,6 @@ class ThreadOutboundWritePolicy:
             context="outbound",
             room_level_skip_message="Skipping outbound thread cache bookkeeping for non-threaded event mutation",
             invalidate_on_append_failure=False,
-        )
-
-    async def _resolve_and_route_outbound_event_notification(
-        self,
-        room_id: str,
-        event_id: str,
-        event_source: dict[str, Any],
-        event_info: EventInfo,
-    ) -> None:
-        impact = await self._resolver.resolve_thread_impact_for_mutation(
-            room_id,
-            event_info=event_info,
-            event_id=event_id,
-            context="outbound",
-        )
-        self._schedule_fail_open_impact_update(
-            room_id,
-            impact,
-            lambda: self._apply_outbound_event_notification_with_impact(
-                room_id,
-                event_id,
-                event_source,
-                event_info,
-                impact=impact,
-            ),
-            name="matrix_cache_notify_outbound_event",
-            cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
-            failure_message="Ignoring outbound cache bookkeeping failure after successful send",
-            log_context={"event_id": event_id},
         )
 
     def notify_outbound_event(
@@ -329,15 +283,33 @@ class ThreadOutboundWritePolicy:
                 return
             if not is_thread_affecting_relation(event_info):
                 return
-            self._schedule_fail_open_room_preflight(
+            thread_id = event_info.thread_id or event_info.thread_id_from_edit
+            if thread_id is not None:
+                self._schedule_fail_open_thread_update(
+                    room_id,
+                    thread_id,
+                    lambda: self._apply_outbound_event_notification(
+                        room_id,
+                        event_id,
+                        normalized_event_source,
+                        event_info,
+                    ),
+                    name="matrix_cache_notify_outbound_event",
+                    cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
+                    failure_message="Ignoring outbound cache bookkeeping failure after successful send",
+                    log_context={"event_id": event_id},
+                )
+                return
+            # Lookup-dependent outbound mutations stay on the room barrier because earlier outbound writes can create the lookup rows needed to resolve thread impact. Safe parallelization would require reservation-based routing (see ISSUE-189).
+            self._schedule_fail_open_room_update(
                 room_id,
-                lambda: self._resolve_and_route_outbound_event_notification(
+                lambda: self._apply_outbound_event_notification(
                     room_id,
                     event_id,
                     normalized_event_source,
                     event_info,
                 ),
-                name="matrix_cache_notify_outbound_event_preflight",
+                name="matrix_cache_notify_outbound_event",
                 cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
                 failure_message="Ignoring outbound cache bookkeeping failure after successful send",
                 log_context={"event_id": event_id},
@@ -416,19 +388,6 @@ class ThreadOutboundWritePolicy:
             redacted_event_id=redacted_event_id,
             context="outbound",
         )
-        await self._apply_outbound_redaction_notification_with_impact(
-            room_id,
-            redacted_event_id,
-            impact=impact,
-        )
-
-    async def _apply_outbound_redaction_notification_with_impact(
-        self,
-        room_id: str,
-        redacted_event_id: str,
-        *,
-        impact: MutationThreadImpact,
-    ) -> None:
         await _apply_thread_redaction_mutation(
             cache_ops=self._cache_ops,
             room_id=room_id,
@@ -436,31 +395,6 @@ class ThreadOutboundWritePolicy:
             impact=impact,
             context="outbound",
             redact_room_level_event=False,
-        )
-
-    async def _resolve_and_route_outbound_redaction_notification(
-        self,
-        room_id: str,
-        redacted_event_id: str,
-    ) -> None:
-        impact = await _resolve_thread_redaction_mutation_impact(
-            resolver=self._resolver,
-            room_id=room_id,
-            redacted_event_id=redacted_event_id,
-            context="outbound",
-        )
-        self._schedule_fail_open_impact_update(
-            room_id,
-            impact,
-            lambda: self._apply_outbound_redaction_notification_with_impact(
-                room_id,
-                redacted_event_id,
-                impact=impact,
-            ),
-            name="matrix_cache_notify_outbound_redaction",
-            cancelled_message="Ignoring cancelled outbound Matrix redaction cache bookkeeping after successful redact",
-            failure_message="Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
-            log_context={"redacted_event_id": redacted_event_id},
         )
 
     def notify_outbound_redaction(
@@ -475,10 +409,11 @@ class ThreadOutboundWritePolicy:
             if not redacted_event_id:
                 return
 
-            self._schedule_fail_open_room_preflight(
+            # Lookup-dependent outbound mutations stay on the room barrier because earlier outbound writes can create the lookup rows needed to resolve thread impact. Safe parallelization would require reservation-based routing (see ISSUE-189).
+            self._schedule_fail_open_room_update(
                 room_id,
-                lambda: self._resolve_and_route_outbound_redaction_notification(room_id, redacted_event_id),
-                name="matrix_cache_notify_outbound_redaction_preflight",
+                lambda: self._apply_outbound_redaction_notification(room_id, redacted_event_id),
+                name="matrix_cache_notify_outbound_redaction",
                 cancelled_message="Ignoring cancelled outbound Matrix redaction cache bookkeeping after successful redact",
                 failure_message="Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
                 log_context={"redacted_event_id": redacted_event_id},
@@ -546,87 +481,6 @@ class ThreadOutboundWritePolicy:
                 error=str(exc),
                 **log_context,
             )
-
-    def _schedule_fail_open_room_preflight(
-        self,
-        room_id: str,
-        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
-        *,
-        name: str,
-        cancelled_message: str,
-        failure_message: str,
-        log_context: dict[str, object],
-    ) -> None:
-        async def safe_update() -> None:
-            try:
-                await update_coro_factory()
-            except asyncio.CancelledError as exc:
-                self._cache_ops.logger.warning(
-                    cancelled_message,
-                    room_id=room_id,
-                    error=str(exc),
-                    **log_context,
-                )
-            except Exception as exc:
-                self._cache_ops.logger.warning(
-                    failure_message,
-                    room_id=room_id,
-                    error=str(exc),
-                    **log_context,
-                )
-
-        try:
-            self._cache_ops.queue_room_cache_preflight(
-                room_id,
-                safe_update,
-                name=name,
-            )
-        except asyncio.CancelledError as exc:
-            self._cache_ops.logger.warning(
-                cancelled_message,
-                room_id=room_id,
-                error=str(exc),
-                **log_context,
-            )
-        except Exception as exc:
-            self._cache_ops.logger.warning(
-                failure_message,
-                room_id=room_id,
-                error=str(exc),
-                **log_context,
-            )
-
-    def _schedule_fail_open_impact_update(
-        self,
-        room_id: str,
-        impact: MutationThreadImpact,
-        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
-        *,
-        name: str,
-        cancelled_message: str,
-        failure_message: str,
-        log_context: dict[str, object],
-    ) -> None:
-        thread_id = impact.thread_id
-        if thread_id is not None:
-            self._schedule_fail_open_thread_update(
-                room_id,
-                thread_id,
-                update_coro_factory,
-                name=name,
-                cancelled_message=cancelled_message,
-                failure_message=failure_message,
-                log_context=log_context,
-            )
-            return
-        self._schedule_fail_open_room_update(
-            room_id,
-            update_coro_factory,
-            name=name,
-            cancelled_message=cancelled_message,
-            failure_message=failure_message,
-            log_context=log_context,
-        )
 
     def _schedule_fail_open_thread_update(
         self,

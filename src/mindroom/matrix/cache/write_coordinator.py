@@ -60,16 +60,6 @@ class EventCacheWriteCoordinator(Protocol):
     ) -> asyncio.Task[object]:
         """Queue one room-scoped update behind any active predecessor."""
 
-    def queue_room_preflight(
-        self,
-        room_id: str,
-        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
-        *,
-        name: str,
-        log_exceptions: bool = True,
-    ) -> asyncio.Task[object]:
-        """Track one immediate preflight task until it queues the real cache write."""
-
     async def run_room_update(
         self,
         room_id: str,
@@ -118,7 +108,6 @@ class _EventCacheWriteCoordinator:
     logger: structlog.stdlib.BoundLogger
     background_task_owner: object = field(default_factory=object)
     _room_states: dict[str, _RoomSchedulerState] = field(default_factory=dict, init=False)
-    _room_preflight_tasks: dict[str, set[_UpdateTask]] = field(default_factory=dict, init=False)
     _room_update_tasks: dict[str, _UpdateTask] = field(default_factory=dict, init=False)
     _thread_update_tasks: dict[tuple[str, str], _UpdateTask] = field(default_factory=dict, init=False)
     _thread_update_tasks_by_room: dict[str, dict[str, _UpdateTask]] = field(
@@ -182,14 +171,6 @@ class _EventCacheWriteCoordinator:
         return None
 
     def _prune_done_task_maps(self, room_id: str) -> None:
-        room_preflight_tasks = self._room_preflight_tasks.get(room_id)
-        if room_preflight_tasks is not None:
-            pending_preflight_tasks = {task for task in room_preflight_tasks if not task.done()}
-            if pending_preflight_tasks:
-                self._room_preflight_tasks[room_id] = pending_preflight_tasks
-            else:
-                self._room_preflight_tasks.pop(room_id, None)
-
         room_task = self._room_update_tasks.get(room_id)
         if room_task is not None and room_task.done():
             self._room_update_tasks.pop(room_id, None)
@@ -487,8 +468,6 @@ class _EventCacheWriteCoordinator:
 
     def _room_is_idle(self, room_id: str) -> bool:
         self._prune_done_task_maps(room_id)
-        if self._room_preflight_tasks.get(room_id):
-            return False
         state = self._room_states.get(room_id)
         if state is not None and state.entries:
             return False
@@ -505,8 +484,6 @@ class _EventCacheWriteCoordinator:
         ignore_cancelled_room_fences: bool = False,
     ) -> bool:
         self._prune_done_task_maps(room_id)
-        if self._room_preflight_tasks.get(room_id):
-            return False
         state = self._room_states.get(room_id)
         if state is not None:
             for entry in state.entries:
@@ -524,7 +501,6 @@ class _EventCacheWriteCoordinator:
 
     def _fallback_room_tasks(self, room_id: str) -> tuple[_UpdateTask, ...]:
         pending_tasks: list[_UpdateTask] = []
-        pending_tasks.extend(task for task in self._room_preflight_tasks.get(room_id, set()) if not task.done())
         room_task = self._room_update_tasks.get(room_id)
         if room_task is not None and not room_task.done():
             pending_tasks.append(room_task)
@@ -534,7 +510,6 @@ class _EventCacheWriteCoordinator:
 
     def _fallback_thread_tasks(self, room_id: str, thread_id: str) -> tuple[_UpdateTask, ...]:
         pending_tasks: list[_UpdateTask] = []
-        pending_tasks.extend(task for task in self._room_preflight_tasks.get(room_id, set()) if not task.done())
         room_task = self._room_update_tasks.get(room_id)
         if room_task is not None and not room_task.done():
             pending_tasks.append(room_task)
@@ -561,32 +536,6 @@ class _EventCacheWriteCoordinator:
             log_exceptions=log_exceptions,
             emit_room_timing=True,
         )
-
-    def queue_room_preflight(
-        self,
-        room_id: str,
-        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
-        *,
-        name: str,
-        log_exceptions: bool = True,
-    ) -> asyncio.Task[object]:
-        """Track one immediate room-scoped preflight until it queues the ordered cache write."""
-        task = create_background_task(
-            update_coro_factory(),
-            name=name,
-            owner=self.background_task_owner,
-            log_exceptions=log_exceptions,
-        )
-        self._room_preflight_tasks.setdefault(room_id, set()).add(task)
-
-        def finish_preflight(_done_task: _UpdateTask) -> None:
-            self._prune_done_task_maps(room_id)
-            self._wake_waiters(room_id)
-            self._cleanup_room_state(room_id)
-
-        task.add_done_callback(finish_preflight)
-        self._wake_waiters(room_id)
-        return task
 
     async def run_room_update(
         self,
@@ -768,7 +717,6 @@ class _EventCacheWriteCoordinator:
         """Drain any queued cache writes for this coordinator."""
         await wait_for_background_tasks(timeout=5.0, owner=self.background_task_owner)
         self._room_states.clear()
-        self._room_preflight_tasks.clear()
         self._room_update_tasks.clear()
         self._thread_update_tasks.clear()
         self._thread_update_tasks_by_room.clear()
