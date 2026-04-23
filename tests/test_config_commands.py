@@ -25,7 +25,6 @@ from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
@@ -37,29 +36,14 @@ def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
     return resolve_runtime_paths(config_path=config_path)
 
 
-def _final_visible_resolution(event_id: str) -> FinalDeliveryOutcome:
-    """Return one successful terminal outcome for command reply tests."""
-    return FinalDeliveryOutcome(
-        terminal_status="completed",
-        final_visible_event_id=event_id,
-        visible_response_event_id=event_id,
-        response_identity_event_id=event_id,
-        turn_completion_event_id=event_id,
-        last_physical_stream_event_id=None,
-        final_visible_body="ok",
-        delivery_kind="sent",
-        mark_handled=True,
-    )
+def _final_visible_resolution(event_id: str) -> str:
+    """Return one successful response event id for command reply tests."""
+    return event_id
 
 
-def _error_resolution() -> FinalDeliveryOutcome:
-    """Return one retryable no-visible-output outcome for command reply tests."""
-    return FinalDeliveryOutcome(
-        terminal_status="error",
-        final_visible_event_id=None,
-        last_physical_stream_event_id=None,
-        failure_reason="delivery_failed",
-    )
+def _error_resolution() -> None:
+    """Return one failed command reply result with no visible response event."""
+    return None
 
 
 def _command_handler_context(

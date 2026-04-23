@@ -261,9 +261,9 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
     await apply_post_response_effects(
         ResponseOutcome(
             final_delivery_outcome=FinalDeliveryOutcome(
-                terminal_status="completed",
-                final_visible_event_id=None,
-                last_physical_stream_event_id=None,
+                terminal_status="error",
+                event_id=None,
+                failure_reason="suppressed_by_hook",
                 suppressed=True,
             ),
             interactive_target=MessageTarget.resolve(
@@ -298,14 +298,12 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
         ResponseOutcome(
             final_delivery_outcome=FinalDeliveryOutcome(
                 terminal_status="completed",
-                final_visible_event_id=None,
-                visible_response_event_id="$stream",
-                response_identity_event_id="$stream",
-                turn_completion_event_id="$stream",
-                last_physical_stream_event_id="$stream",
+                event_id="$stream",
+                is_visible_response=True,
                 final_visible_body="Choose one",
                 option_map={"1": "yes"},
                 options_list=[{"emoji": "1", "label": "Yes", "value": "yes"}],
+                delivery_kind="sent",
                 mark_handled=True,
             ),
             interactive_target=target,
@@ -338,10 +336,8 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
         ResponseOutcome(
             final_delivery_outcome=FinalDeliveryOutcome(
                 terminal_status="error",
-                final_visible_event_id=None,
-                visible_response_event_id="$stream",
-                turn_completion_event_id="$stream",
-                last_physical_stream_event_id="$stream",
+                event_id="$stream",
+                is_visible_response=True,
                 final_visible_body="Choose one\n\n**[Response interrupted]**",
                 option_map={"1": "yes"},
                 options_list=[{"emoji": "1", "label": "Yes", "value": "yes"}],
@@ -419,11 +415,8 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
             ResponseOutcome(
                 final_delivery_outcome=FinalDeliveryOutcome(
                     terminal_status="completed",
-                    final_visible_event_id="$response",
-                    visible_response_event_id="$response",
-                    response_identity_event_id="$response",
-                    turn_completion_event_id="$response",
-                    last_physical_stream_event_id=None,
+                    event_id="$response",
+                    is_visible_response=True,
                     final_visible_body="visible",
                     delivery_kind="sent",
                     mark_handled=True,
@@ -614,11 +607,8 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
                         terminal_status="completed",
-                        final_visible_event_id="$response",
-                        visible_response_event_id="$response",
-                        response_identity_event_id="$response",
-                        turn_completion_event_id="$response",
-                        last_physical_stream_event_id=None,
+                        event_id="$response",
+                        is_visible_response=True,
                         final_visible_body="ok",
                         delivery_kind="sent",
                         mark_handled=True,
@@ -651,9 +641,9 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             lifecycle_lock.release()
             await asyncio.wait_for(lifecycle_started.wait(), timeout=0.2)
             resolution = await task
-            assert resolution.response_identity_event_id == "$response"
-            assert resolution.turn_completion_event_id == "$response"
-            assert resolution.should_mark_handled is True
+            assert resolution.event_id == "$response"
+            assert resolution.is_visible_response is True
+            assert resolution.mark_handled is True
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
