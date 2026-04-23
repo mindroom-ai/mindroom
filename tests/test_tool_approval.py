@@ -1505,14 +1505,42 @@ async def test_request_approval_discards_pending_request_when_matrix_send_return
 
 
 @pytest.mark.asyncio
-async def test_request_approval_discards_pending_request_when_matrix_send_raises(tmp_path: Path) -> None:
-    """Exceptions during send should not leak approval requests in memory or on disk."""
+async def test_ambiguous_send_failure_preserves_for_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generic send failures should preserve the expired request for runtime recovery."""
     runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr(tool_approval_module, "_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS", 0.05)
+    replayed = asyncio.Event()
+
+    async def _edit_event(room_id: str, event_id: str, content: dict[str, object]) -> bool:
+        assert room_id == "!room:localhost"
+        assert event_id == "$approval"
+        assert content["status"] == "expired"
+        replayed.set()
+        return True
+
     store = initialize_approval_store(
         runtime_paths,
         sender=AsyncMock(side_effect=RuntimeError("send failed")),
-        editor=AsyncMock(),
+        editor=AsyncMock(side_effect=_edit_event),
+        runtime_loop=asyncio.get_running_loop(),
     )
+
+    async def _recover() -> list[PendingApproval]:
+        pending = store.list_unconfirmed_deliveries()[0]
+        store._set_event_delivery(pending.id, "$approval")
+        store._persist_request(pending)
+        return [pending]
+
+    async def _recover_in_rooms(_room_ids: set[str]) -> list[PendingApproval]:
+        return await _recover()
+
+    recover_mock = AsyncMock(side_effect=_recover)
+    recover_in_rooms_mock = AsyncMock(side_effect=_recover_in_rooms)
+    store.recover_unconfirmed_deliveries = recover_mock
+    store.recover_unconfirmed_deliveries_in_rooms = recover_in_rooms_mock
 
     decision = await store.request_approval(
         tool_name="run_shell_command",
@@ -1527,9 +1555,17 @@ async def test_request_approval_discards_pending_request_when_matrix_send_raises
         timeout_seconds=60,
     )
 
+    pending = store.list_unconfirmed_deliveries()
+
     assert decision.status == "expired"
-    assert store._pending_by_id == {}
-    assert list((runtime_paths.storage_root / "approvals").glob("*.json")) == []
+    assert len(pending) == 1
+    assert store._unsynced_resolution_retry_task is not None
+
+    await asyncio.wait_for(replayed.wait(), timeout=1)
+
+    assert pending[0].resolution_synced_at is not None
+    recover_mock.assert_not_awaited()
+    recover_in_rooms_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio

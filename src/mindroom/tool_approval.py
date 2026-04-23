@@ -743,7 +743,7 @@ class ApprovalManager:
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
         return None
 
-    async def request_approval(
+    async def request_approval(  # noqa: PLR0915
         self,
         *,
         tool_name: str,
@@ -796,6 +796,7 @@ class ApprovalManager:
         self._start_pending_send(pending.id, room_id)
 
         sent_event: SentApprovalEvent | None = None
+        preserve_for_recovery = False
         send_failure_reason = _DEFAULT_SEND_FAILURE_REASON
         try:
             try:
@@ -830,6 +831,7 @@ class ApprovalManager:
                     reason=send_failure_reason,
                 )
             else:
+                preserve_for_recovery = True
                 logger.warning(
                     "Failed to send approval Matrix event",
                     approval_id=pending.id,
@@ -846,6 +848,23 @@ class ApprovalManager:
                 thread_id=thread_id,
                 agent_name=agent_name,
             )
+            if preserve_for_recovery:
+                applied_decision = self._apply_decision(
+                    pending.id,
+                    status="expired",
+                    reason=send_failure_reason,
+                    resolved_by=None,
+                )
+                if applied_decision is not None:
+                    self._persist_request(applied_decision[0])
+                    with self._state_lock:
+                        self._pending_by_id.pop(pending.id, None)
+                    decision = applied_decision[1]
+                else:
+                    decision = self._decision_from_pending(pending)
+                self._complete_pending_send(pending.id)
+                self._ensure_unsynced_resolution_retry_task()
+                return decision
             decision = await self._resolve_pending(
                 pending.id,
                 status="expired",
