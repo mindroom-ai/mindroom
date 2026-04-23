@@ -703,6 +703,8 @@ class MultiAgentOrchestrator:
             if fully_reconciled and not pending_after:
                 self._pending_room_leaves.difference_update(room_ids)
                 return set(room_ids)
+            if not pending_after:
+                break
 
         blocked_room_ids = approval_store._room_ids_with_unsynced_resolution_work() & room_ids
         blocked_room_ids.update(
