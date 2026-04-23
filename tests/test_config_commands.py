@@ -553,13 +553,13 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
         ),
     ],
 )
-async def test_mutating_command_records_handled_turn_when_reply_delivery_fails(
+async def test_mutating_command_does_not_record_handled_turn_when_reply_delivery_fails(
     tmp_path: Path,
     command: Command,
     patch_target: str,
     patch_return_value: object,
 ) -> None:
-    """Commands that already changed state must not replay if their confirmation reply fails."""
+    """Mutating commands do not record handled turns when the confirmation reply never lands."""
     context = _command_handler_context(
         tmp_path,
         config=SimpleNamespace(
@@ -588,12 +588,12 @@ async def test_mutating_command_records_handled_turn_when_reply_delivery_fails(
             requester_user_id="@alice:example.org",
         )
 
-    context.record_handled_turn.assert_called_once_with(HandledTurnState.from_source_event_id("$event"))
+    context.record_handled_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_reload_plugins_records_handled_turn_when_reply_delivery_fails(tmp_path: Path) -> None:
-    """Successful plugin reloads must not replay if the confirmation reply never lands."""
+async def test_reload_plugins_does_not_record_handled_turn_when_reply_delivery_fails(tmp_path: Path) -> None:
+    """Successful plugin reloads do not record handled turns when the confirmation reply never lands."""
     reload_plugins = AsyncMock(
         return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 0),
     )
@@ -619,7 +619,7 @@ async def test_reload_plugins_records_handled_turn_when_reply_delivery_fails(tmp
     )
 
     reload_plugins.assert_awaited_once()
-    context.record_handled_turn.assert_called_once_with(HandledTurnState.from_source_event_id("$event"))
+    context.record_handled_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
