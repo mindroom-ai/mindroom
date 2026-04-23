@@ -8,6 +8,7 @@ import json
 import os
 import threading
 import time
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Self
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2025,6 +2026,83 @@ async def test_runtime_retry_recovers_unconfirmed_event_ids(
     editor.assert_awaited_once()
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval-event")
     assert (runtime_paths.storage_root / "approvals" / f"{request_id}.json").exists() is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_retry_is_room_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime retries should not block one room's replay on another room's in-flight send."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr(tool_approval_module, "_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS", 0.01)
+    room_a = "!room-a:localhost"
+    room_b = "!room-b:localhost"
+    room_b_send_started = asyncio.Event()
+    send_blocker = asyncio.Event()
+    room_a_replayed = asyncio.Event()
+
+    async def _send_event(
+        room_id: str,
+        thread_id: str | None,
+        content: dict[str, object],
+    ) -> SentApprovalEvent:
+        del thread_id, content
+        if room_id == room_b:
+            room_b_send_started.set()
+            await send_blocker.wait()
+            return SentApprovalEvent("$approval-b")
+        return SentApprovalEvent("$approval-other")
+
+    async def _edit_event(room_id: str, event_id: str, content: dict[str, object]) -> bool:
+        if room_id == room_a:
+            assert event_id == "$approval-a"
+            assert content["status"] == "expired"
+            room_a_replayed.set()
+        return True
+
+    recoverer = AsyncMock(return_value="$approval-a")
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=AsyncMock(side_effect=_send_event),
+        editor=AsyncMock(side_effect=_edit_event),
+        recoverer=recoverer,
+        runtime_loop=asyncio.get_running_loop(),
+    )
+    pending_room_a = _store_resolved_unconfirmed_request(
+        store,
+        approval_id="room-a-unconfirmed",
+        room_id=room_a,
+    )
+    blocked_task = asyncio.create_task(
+        store.request_approval(
+            tool_name="run_shell_command",
+            arguments={"command": "echo hi"},
+            agent_name="code",
+            room_id=room_b,
+            thread_id="$thread-b",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            matched_rule="run_shell_*",
+            script_path=None,
+            timeout_seconds=60,
+        ),
+    )
+
+    try:
+        await asyncio.wait_for(room_b_send_started.wait(), timeout=1)
+        store._ensure_unsynced_resolution_retry_task()
+        await asyncio.wait_for(room_a_replayed.wait(), timeout=1)
+
+        assert pending_room_a.resolution_synced_at is not None
+        assert blocked_task.done() is False
+        assert room_b in store.pending_send_room_ids()
+        recoverer.assert_awaited_once()
+    finally:
+        blocked_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await blocked_task
+        await shutdown_approval_store()
 
 
 @pytest.mark.asyncio

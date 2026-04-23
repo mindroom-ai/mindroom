@@ -641,7 +641,7 @@ class ApprovalManager:
                 if not room_ids_before_retry:
                     return
                 await self.reconcile_unsynced_approvals(
-                    room_ids=None,
+                    room_ids=room_ids_before_retry,
                     max_attempts=1,
                     backoff="fixed",
                 )
