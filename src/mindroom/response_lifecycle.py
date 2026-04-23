@@ -38,13 +38,6 @@ class SessionStartedWatch:
     create_storage: Callable[[], SqliteDb]
 
 
-@dataclass(frozen=True)
-class DeliveryOutcome:
-    """Terminal delivery facts for lifecycle finalization."""
-
-    final_delivery_outcome: FinalDeliveryOutcome
-
-
 class ResponseLifecycle:
     """Consolidate lifecycle helpers shared across response paths."""
 
@@ -108,13 +101,12 @@ class ResponseLifecycle:
 
     async def finalize(
         self,
-        outcome: DeliveryOutcome,
+        final_delivery_outcome: FinalDeliveryOutcome,
         *,
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
-        final_delivery_outcome = outcome.final_delivery_outcome
         response_event_id = final_delivery_outcome.final_visible_event_id
         try:
             if final_delivery_outcome.terminal_status == "completed":
@@ -157,7 +149,7 @@ class ResponseLifecycle:
                 error=error,
             )
         await self.apply_effects_safely(
-            response_event_id=response_event_id,
+            final_delivery_outcome=final_delivery_outcome,
             post_response_outcome=lambda: build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
@@ -170,13 +162,15 @@ class ResponseLifecycle:
     async def apply_effects_safely(
         self,
         *,
-        response_event_id: str | None,
+        final_delivery_outcome: FinalDeliveryOutcome,
         post_response_outcome: ResponseOutcome | Callable[[], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> None:
         """Apply post-response effects without masking failures before visible delivery."""
+        response_event_id = final_delivery_outcome.final_visible_event_id
         try:
             await apply_post_response_effects(
+                final_delivery_outcome,
                 post_response_outcome() if callable(post_response_outcome) else post_response_outcome,
                 post_response_deps() if callable(post_response_deps) else post_response_deps,
             )

@@ -1703,30 +1703,6 @@ class TeamBot(AgentBot):
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
-        if not prompt.strip():
-            return await self._response_runner.finalize_empty_prompt(
-                ResponseRequest(
-                    room_id=room_id,
-                    reply_to_event_id=reply_to_event_id,
-                    thread_id=thread_id,
-                    thread_history=thread_history,
-                    prompt=prompt,
-                    model_prompt=model_prompt,
-                    existing_event_id=existing_event_id,
-                    existing_event_is_placeholder=existing_event_is_placeholder,
-                    user_id=user_id,
-                    media=media,
-                    attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
-                    response_envelope=response_envelope,
-                    correlation_id=correlation_id,
-                    target=target,
-                    matrix_run_metadata=matrix_run_metadata,
-                    system_enrichment_items=system_enrichment_items,
-                    on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-                ),
-                response_kind="team",
-            )
-
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(

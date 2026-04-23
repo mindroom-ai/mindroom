@@ -85,7 +85,7 @@ from .delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
-from .response_lifecycle import DeliveryOutcome, ResponseLifecycle
+from .response_lifecycle import ResponseLifecycle
 
 if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
@@ -454,11 +454,6 @@ class ResponseRunner:
                 message_id=message_id,
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
-
-    @staticmethod
-    def _should_reraise_user_stop(exc: BaseException) -> bool:
-        """Preserve explicit user-stop cancellations after visible cleanup has finished."""
-        return isinstance(exc, asyncio.CancelledError) and classify_cancel_source(exc) == "user_stop"
 
     @property
     def in_flight_response_count(self) -> int:
@@ -1027,13 +1022,8 @@ class ResponseRunner:
             correlation_id=self._correlation_id_for_request(request),
         )
         final_outcome = await lifecycle.finalize(
-            DeliveryOutcome(
-                final_delivery_outcome=FinalDeliveryOutcome.cancelled_for_empty_prompt(),
-            ),
-            build_post_response_outcome=lambda final_outcome: ResponseOutcome(
-                resolved_event_id=final_outcome.final_visible_event_id,
-                suppressed=final_outcome.suppressed,
-            ),
+            FinalDeliveryOutcome.cancelled_for_empty_prompt(),
+            build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
                 reply_to_event_id=request.reply_to_event_id,
@@ -1041,23 +1031,7 @@ class ResponseRunner:
                 interactive_agent_name=self.deps.agent_name,
             ),
         )
-        return final_outcome.final_visible_event_id
-
-    async def finalize_empty_prompt(
-        self,
-        request: ResponseRequest,
-        *,
-        response_kind: str,
-    ) -> str | None:
-        """Run one empty-prompt request through lifecycle locking and finalization."""
-        return await self._run_locked_response_lifecycle(
-            request,
-            locked_operation=lambda resolved_target: self._finalize_empty_prompt_locked(
-                request,
-                resolved_target=resolved_target,
-                response_kind=response_kind,
-            ),
-        )
+        return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
 
     async def _ensure_request_knowledge_managers(
         self,
@@ -1110,6 +1084,12 @@ class ResponseRunner:
     ) -> str | None:
         """Generate a team response once the per-thread lifecycle lock is held."""
         request = team_request.request
+        if not request.prompt.strip():
+            return await self._finalize_empty_prompt_locked(
+                request,
+                resolved_target=resolved_target,
+                response_kind="team",
+            )
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
@@ -1177,23 +1157,6 @@ class ResponseRunner:
             response_envelope=resolved_response_envelope,
             correlation_id=resolved_correlation_id,
         )
-        if not request.prompt.strip():
-            final_outcome = await lifecycle.finalize(
-                DeliveryOutcome(
-                    final_delivery_outcome=FinalDeliveryOutcome.cancelled_for_empty_prompt(),
-                ),
-                build_post_response_outcome=lambda final_outcome: ResponseOutcome(
-                    resolved_event_id=final_outcome.final_visible_event_id,
-                    suppressed=final_outcome.suppressed,
-                ),
-                post_response_deps=lambda: self.deps.post_response_effects.build_deps(
-                    room_id=request.room_id,
-                    reply_to_event_id=request.reply_to_event_id,
-                    thread_id=resolved_target.resolved_thread_id,
-                    interactive_agent_name=self.deps.agent_name,
-                ),
-            )
-            return final_outcome.final_visible_event_id
         delivery_target = (
             resolved_target
             if request.existing_event_id is None or request.existing_event_is_placeholder
@@ -1440,8 +1403,6 @@ class ResponseRunner:
                             event_id=None,
                             failure_reason=failure_reason,
                         )
-                    if self._should_reraise_user_stop(exc):
-                        raise
                     return
 
                 delivery_stage_started = True
@@ -1591,24 +1552,8 @@ class ResponseRunner:
             )
         assert final_delivery_outcome is not None
         final_outcome = await lifecycle.finalize(
-            DeliveryOutcome(
-                final_delivery_outcome=final_delivery_outcome,
-            ),
-            build_post_response_outcome=lambda final_outcome: ResponseOutcome(
-                resolved_event_id=final_outcome.final_visible_event_id,
-                interactive_event_id=(
-                    final_outcome.final_visible_event_id
-                    if final_outcome.terminal_status == "completed"
-                    and final_outcome.final_visible_body is not None
-                    and not final_outcome.suppressed
-                    else None
-                ),
-                compaction_event_id=(
-                    final_outcome.final_visible_event_id if final_outcome.final_visible_event_id is not None else None
-                ),
-                suppressed=final_outcome.suppressed,
-                option_map=final_outcome.option_map,
-                options_list=final_outcome.options_list,
+            final_delivery_outcome,
+            build_post_response_outcome=lambda _final_outcome: ResponseOutcome(
                 response_run_id=response_run_id,
                 session_id=session_id,
                 session_type=SessionType.TEAM,
@@ -1628,7 +1573,7 @@ class ResponseRunner:
                 persist_response_event_id=persist_response_event_id,
             ),
         )
-        return final_outcome.final_visible_event_id
+        return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
 
     async def run_cancellable_response(
         self,
@@ -2004,9 +1949,6 @@ class ResponseRunner:
         on_delivery_started: Callable[[str | None], None] | None = None,
     ) -> FinalDeliveryOutcome:
         """Process a message and send a response without streaming."""
-        if not request.prompt.strip():
-            return FinalDeliveryOutcome.cancelled_for_empty_prompt()
-
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
         runtime = await self.prepare_non_streaming_runtime(request)
@@ -2084,12 +2026,8 @@ class ResponseRunner:
                         correlation_id=correlation_id,
                     ),
                 )
-                if self._should_reraise_user_stop(exc):
-                    raise
                 return outcome
             failure_reason = cancel_failure_reason(cancel_source)
-            if self._should_reraise_user_stop(exc):
-                raise
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id=None,
@@ -2149,9 +2087,6 @@ class ResponseRunner:
         run_metadata_content_collector: dict[str, Any] | None = None,
     ) -> FinalDeliveryOutcome:
         """Process a message and send a streamed response."""
-        if not request.prompt.strip():
-            return FinalDeliveryOutcome.cancelled_for_empty_prompt()
-
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
         runtime = await self.prepare_streaming_runtime(request)
@@ -2260,8 +2195,6 @@ class ResponseRunner:
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
-            if self._should_reraise_user_stop(error.error):
-                raise error.error from error
             return outcome
         except asyncio.CancelledError as exc:
             self._log_cancelled_response(
@@ -2346,6 +2279,12 @@ class ResponseRunner:
         """Generate one agent response after acquiring the per-thread lock."""
         delivery_thread_id = resolved_target.resolved_thread_id
         resolved_target = resolved_target.with_thread_root(delivery_thread_id)
+        if not request.prompt.strip():
+            return await self._finalize_empty_prompt_locked(
+                request,
+                resolved_target=resolved_target,
+                response_kind="ai",
+            )
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
@@ -2493,22 +2432,8 @@ class ResponseRunner:
             self._log_delivery_failure(response_kind="ai", error=error)
         assert final_delivery_outcome is not None
         final_outcome = await lifecycle.finalize(
-            DeliveryOutcome(
-                final_delivery_outcome=final_delivery_outcome,
-            ),
-            build_post_response_outcome=lambda canonical_outcome: ResponseOutcome(
-                resolved_event_id=canonical_outcome.final_visible_event_id,
-                interactive_event_id=(
-                    canonical_outcome.final_visible_event_id
-                    if canonical_outcome.terminal_status == "completed"
-                    and canonical_outcome.final_visible_body is not None
-                    and not canonical_outcome.suppressed
-                    else None
-                ),
-                compaction_event_id=canonical_outcome.final_visible_event_id,
-                suppressed=canonical_outcome.suppressed,
-                option_map=canonical_outcome.option_map,
-                options_list=canonical_outcome.options_list,
+            final_delivery_outcome,
+            build_post_response_outcome=lambda _canonical_outcome: ResponseOutcome(
                 response_run_id=response_run_id,
                 session_id=session_id,
                 session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
@@ -2530,4 +2455,4 @@ class ResponseRunner:
                 persist_response_event_id=persist_response_event_id,
             ),
         )
-        return final_outcome.final_visible_event_id
+        return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
