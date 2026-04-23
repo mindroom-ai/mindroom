@@ -9892,7 +9892,7 @@ MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
 - **Character-based**: An edit is also triggered when enough new characters have accumulated. The character threshold ramps from 48 characters (fast start) to 240 characters (steady-state) over the ramp-up period.
 - **Ramp-up**: `defaults.streaming.min_update_interval` and `defaults.streaming.interval_ramp_seconds` control how quickly the time-based interval ramps from a fast start to the steady-state value. By default it ramps from 0.5s to 5s over 15 seconds. Setting `interval_ramp_seconds: 0` disables the ramp and uses the steady-state interval immediately.
 - **Shared ramp window**: The same ramp window also controls the built-in character threshold ramp from 48 characters (fast start) to 240 characters (steady-state).
-- **Minimum interval**: A hard floor (0.35s) applies to the normal time, character, and idle-triggered throttled edits.
+- **Minimum interval**: A hard floor (0.35s) applies to character-triggered and idle-triggered throttled edits. Time-triggered edits still follow the current ramped interval.
 - **Idle flush**: `defaults.streaming.max_idle` triggers an edit on the next streaming event after 0.25s without a new delta, but only once `min_char_update_interval` has also elapsed. This is event-driven and does not run on a background timer.
 - **Tool-start boundary refresh**: Visible tool-start markers request an immediate refresh so the marker can surface without waiting for later text. Rapid back-to-back tool starts are coalesced by the single delivery owner instead of forcing one Matrix edit per tool.
 

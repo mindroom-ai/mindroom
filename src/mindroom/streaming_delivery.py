@@ -93,6 +93,7 @@ class _DeliveryRequest:
     allow_empty_progress: bool = False
     prior_delta_at: float | None = None
     completion: asyncio.Future[None] | None = None
+    capture_completion: asyncio.Future[None] | None = None
 
 
 def _raise_progress_delivery_error(error: Exception) -> NoReturn:
@@ -110,9 +111,14 @@ def _queue_delivery_request(
     allow_empty_progress: bool = False,
     prior_delta_at: float | None = None,
     wait_for_delivery: bool = False,
+    wait_for_capture: bool = False,
 ) -> asyncio.Future[None] | None:
     """Queue one non-terminal delivery request for the single delivery owner."""
+    if wait_for_delivery and wait_for_capture:
+        msg = "delivery requests can wait for capture or delivery, not both"
+        raise ValueError(msg)
     completion = asyncio.get_running_loop().create_future() if wait_for_delivery else None
+    capture_completion = asyncio.get_running_loop().create_future() if wait_for_capture else None
     delivery_queue.put_nowait(
         _DeliveryRequest(
             progress_hint=progress_hint,
@@ -122,9 +128,10 @@ def _queue_delivery_request(
             allow_empty_progress=allow_empty_progress,
             prior_delta_at=prior_delta_at,
             completion=completion,
+            capture_completion=capture_completion,
         ),
     )
-    return completion
+    return completion or capture_completion
 
 
 async def _flush_phase_boundary_if_needed(
@@ -137,7 +144,7 @@ async def _flush_phase_boundary_if_needed(
     completion = _queue_delivery_request(
         delivery_queue,
         phase_boundary_flush=True,
-        wait_for_delivery=True,
+        wait_for_capture=True,
     )
     assert completion is not None
     await completion
@@ -327,7 +334,7 @@ async def _shutdown_worker_progress_drain(
     return None
 
 
-async def _drive_stream_delivery(  # noqa: C901, PLR0912
+async def _drive_stream_delivery(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
     streaming: StreamingResponse,
     delivery_queue: asyncio.Queue[_DeliveryRequest | None],
@@ -342,6 +349,7 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
 
         merged_request = request
         completions = [request.completion] if request.completion is not None else []
+        capture_completions = [request.capture_completion] if request.capture_completion is not None else []
         while True:
             try:
                 next_request = delivery_queue.get_nowait()
@@ -352,6 +360,8 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
                 break
             if next_request.completion is not None:
                 completions.append(next_request.completion)
+            if next_request.capture_completion is not None:
+                capture_completions.append(next_request.capture_completion)
             merged_request = _DeliveryRequest(
                 progress_hint=merged_request.progress_hint or next_request.progress_hint,
                 force_refresh=merged_request.force_refresh or next_request.force_refresh,
@@ -365,8 +375,26 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
             )
 
         try:
-            if merged_request.phase_boundary_flush:
-                await streaming.force_flush(client)
+            prepared_phase_boundary_flush = None
+            if merged_request.phase_boundary_flush and (
+                streaming.chars_since_last_update > 0 and streaming.accumulated_text.strip()
+            ):
+                prepared_phase_boundary_flush = streaming._prepare_delivery(
+                    is_final=False,
+                    allow_empty_progress=False,
+                    stream_status=None,
+                )
+            for capture_completion in capture_completions:
+                if not capture_completion.done():
+                    capture_completion.set_result(None)
+            if prepared_phase_boundary_flush is not None:
+                sent = await streaming._send_prepared_delivery(
+                    client,
+                    prepared_delivery=prepared_phase_boundary_flush,
+                    is_final=False,
+                )
+                if sent:
+                    streaming._mark_nonterminal_delivery()
             if merged_request.force_refresh:
                 sent = await streaming._send_or_edit_message(
                     client,
@@ -404,6 +432,9 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
             for completion in completions:
                 if not completion.done():
                     completion.set_exception(exc)
+            for capture_completion in capture_completions:
+                if not capture_completion.done():
+                    capture_completion.set_exception(exc)
             raise
         else:
             for completion in completions:

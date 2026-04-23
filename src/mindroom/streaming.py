@@ -332,17 +332,29 @@ class StreamingResponse:
         """
         if self.chars_since_last_update == 0 or not self.accumulated_text.strip():
             return
-        sent = await self._send_or_edit_message(client)
+        prepared_delivery = self._prepare_delivery(
+            is_final=False,
+            allow_empty_progress=False,
+            stream_status=None,
+        )
+        if prepared_delivery is None:
+            return
+        sent = await self._send_prepared_delivery(
+            client,
+            prepared_delivery=prepared_delivery,
+            is_final=False,
+        )
         if sent:
             self._mark_nonterminal_delivery()
 
     def _mark_nonterminal_delivery(self, *, boundary_refresh: bool = False) -> None:
         """Reset throttle state after a non-terminal send or edit reached Matrix."""
         now = time.time()
+        if self.stream_started_at is None:
+            self.stream_started_at = now
         self.last_update = now
         self.last_delta_at = now
-        if boundary_refresh:
-            self.last_boundary_refresh_at = now
+        self.last_boundary_refresh_at = now if boundary_refresh else None
         self.chars_since_last_update = 0
 
     async def _throttled_send(
@@ -453,6 +465,20 @@ class StreamingResponse:
         if prepared_delivery is None:
             return True
 
+        return await self._send_prepared_delivery(
+            client,
+            prepared_delivery=prepared_delivery,
+            is_final=is_final,
+        )
+
+    async def _send_prepared_delivery(
+        self,
+        client: nio.AsyncClient,
+        *,
+        prepared_delivery: _PreparedStreamingDelivery,
+        is_final: bool,
+    ) -> bool:
+        """Send one already-prepared non-terminal or terminal payload."""
         is_initial_send = self.event_id is None
         send_succeeded = await self._send_content(
             client,
