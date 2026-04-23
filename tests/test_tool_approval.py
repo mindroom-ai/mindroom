@@ -2222,15 +2222,17 @@ async def test_runtime_retry_is_room_scoped(
 
 @pytest.mark.asyncio
 async def test_room_drained_callback_task_is_kept_alive(tmp_path: Path) -> None:
-    """Room-drained callbacks should stay alive until completion."""
+    """Room-drained callbacks must stay strongly referenced while suspended."""
     runtime_paths = test_runtime_paths(tmp_path)
-    callback_invocations = 0
+    callback_started = asyncio.Event()
 
     async def _on_room_drained(room_id: str) -> None:
-        nonlocal callback_invocations
         assert room_id == "!room:localhost"
-        await asyncio.sleep(0.1)
-        callback_invocations += 1
+        loop = asyncio.get_running_loop()
+        never_resolved: asyncio.Future[None] = loop.create_future()
+        callback_started.set()
+        with suppress(asyncio.CancelledError):
+            await never_resolved
 
     store = initialize_approval_store(
         runtime_paths,
@@ -2238,12 +2240,22 @@ async def test_room_drained_callback_task_is_kept_alive(tmp_path: Path) -> None:
         runtime_loop=asyncio.get_running_loop(),
     )
 
-    await store._check_and_notify_room_drained("!room:localhost")
-    await asyncio.sleep(0)
-    gc.collect()
-    await asyncio.sleep(0.2)
+    try:
+        await store._check_and_notify_room_drained("!room:localhost")
+        await asyncio.wait_for(callback_started.wait(), timeout=1.0)
+        gc.collect()
+        await asyncio.sleep(0)
 
-    assert callback_invocations == 1
+        assert len(store._room_drained_callback_tasks) == 1, "Room-drained callback task was lost before completion."
+        ((task,),) = (tuple(store._room_drained_callback_tasks),)
+        assert not task.done(), "Task should still be pending on the never-resolved future."
+    finally:
+        tasks = tuple(store._room_drained_callback_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await shutdown_approval_store()
 
 
 @pytest.mark.asyncio
