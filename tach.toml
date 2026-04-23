@@ -11,6 +11,11 @@
 #   dependency rules.
 # - Use grouped `paths = [...]` only when every grouped module intentionally
 #   shares the exact same policy.
+# - `depends_on` lists runtime imports only. Tach in this repo is configured
+#   to ignore TYPE_CHECKING-only imports, so listing a dep that is imported
+#   solely under `if TYPE_CHECKING:` adds no enforcement and is treated as
+#   noise. When a TYPE_CHECKING-only import becomes a runtime import (or
+#   vice versa), update `depends_on` accordingly in the same PR.
 #
 # Docs:
 # - https://docs.gauge.sh/usage/configuration/
