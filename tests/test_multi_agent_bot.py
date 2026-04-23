@@ -11641,11 +11641,11 @@ class TestMultiAgentOrchestrator:
         sync_runtime_support_services.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_start_replays_unsynced_tool_approval_resolutions_on_bot_ready(
+    async def test_orchestrator_start_recovers_and_replays_tool_approval_resolutions_on_bot_ready(
         self,
         tmp_path: Path,
     ) -> None:
-        """Approval-card reconciliation should run from the first-sync bot-ready path after startup."""
+        """Approval-card reconciliation should recover missing event ids before replaying edits."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
 
@@ -11675,6 +11675,9 @@ class TestMultiAgentOrchestrator:
         async def _setup_rooms(_: list[Any]) -> None:
             call_order.append("setup_rooms")
 
+        async def _recover_approval_deliveries() -> None:
+            call_order.append("recover_approval_deliveries")
+
         async def _sync_approval_resolutions() -> None:
             call_order.append("sync_approval_resolutions")
 
@@ -11687,6 +11690,10 @@ class TestMultiAgentOrchestrator:
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
+            patch(
+                "mindroom.orchestrator.recover_unconfirmed_approval_event_deliveries",
+                side_effect=_recover_approval_deliveries,
+            ),
             patch(
                 "mindroom.orchestrator.sync_unsynced_approval_event_resolutions",
                 side_effect=_sync_approval_resolutions,
@@ -11702,6 +11709,7 @@ class TestMultiAgentOrchestrator:
             "wait_for_homeserver",
             "setup_rooms",
             "support_services",
+            "recover_approval_deliveries",
             "sync_approval_resolutions",
         ]
         bot.try_start.assert_awaited_once()
@@ -11735,6 +11743,9 @@ class TestMultiAgentOrchestrator:
         replay_attempts: list[str] = []
         call_order: list[str] = []
 
+        async def _recover_approval_deliveries() -> None:
+            call_order.append("recover_approval_deliveries")
+
         async def _sync_approval_resolutions() -> None:
             replay_attempts.append("replay")
             if len(replay_attempts) == 1:
@@ -11749,6 +11760,10 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch(
+                "mindroom.orchestrator.recover_unconfirmed_approval_event_deliveries",
+                side_effect=_recover_approval_deliveries,
+            ),
+            patch(
                 "mindroom.orchestrator.sync_unsynced_approval_event_resolutions",
                 side_effect=_sync_approval_resolutions,
             ),
@@ -11761,7 +11776,11 @@ class TestMultiAgentOrchestrator:
             await asyncio.sleep(0)
 
         assert replay_attempts == ["replay", "replay"]
-        assert call_order == ["setup_rooms"]
+        assert call_order == [
+            "recover_approval_deliveries",
+            "setup_rooms",
+            "recover_approval_deliveries",
+        ]
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio

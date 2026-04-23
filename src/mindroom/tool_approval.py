@@ -51,7 +51,7 @@ _DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
-_DEFAULT_UNDELIVERED_RESTART_REASON = "MindRoom restarted before approval request could be delivered to Matrix."
+_DEFAULT_UNCONFIRMED_DELIVERY_RESTART_REASON = "MindRoom restarted before approval delivery could be confirmed."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the displayed arguments are truncated. "
     "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
@@ -315,6 +315,9 @@ class PendingApproval:
         )
 
 
+MatrixApprovalEventRecoverer = Callable[[PendingApproval], Awaitable[str | None]]
+
+
 class ApprovalManager:
     """Track live approvals, persist them, and reconcile Matrix cards."""
 
@@ -324,12 +327,14 @@ class ApprovalManager:
         *,
         sender: MatrixEventSender | None = None,
         editor: MatrixEventEditor | None = None,
+        recoverer: MatrixApprovalEventRecoverer | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._storage_dir = runtime_paths.storage_root / _APPROVALS_DIRNAME
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._send_event = sender
         self._edit_event = editor
+        self._recover_event_id = recoverer
         self._state_lock = threading.Lock()
         self._requests_by_id: dict[str, PendingApproval] = {}
         self._pending_by_id: dict[str, PendingApproval] = {}
@@ -352,12 +357,15 @@ class ApprovalManager:
         *,
         sender: MatrixEventSender | None = None,
         editor: MatrixEventEditor | None = None,
+        recoverer: MatrixApprovalEventRecoverer | None = None,
     ) -> None:
         """Update the Matrix transport callbacks."""
         if sender is not None:
             self._send_event = sender
         if editor is not None:
             self._edit_event = editor
+        if recoverer is not None:
+            self._recover_event_id = recoverer
 
     def _request_path(self, approval_id: str) -> Path:
         return self._storage_dir / f"{approval_id}.json"
@@ -451,15 +459,14 @@ class ApprovalManager:
             if pending.status == "pending":
                 pending.status = "expired"
                 pending.resolution_reason = (
-                    _DEFAULT_RESTART_REASON if pending.event_id is not None else _DEFAULT_UNDELIVERED_RESTART_REASON
+                    _DEFAULT_RESTART_REASON
+                    if pending.event_id is not None
+                    else _DEFAULT_UNCONFIRMED_DELIVERY_RESTART_REASON
                 )
                 pending.resolved_at = _utcnow()
                 pending.resolved_by = None
                 pending.resolution_synced_at = None
-                if pending.event_id is None:
-                    self._delete_request_file(pending.id)
-                else:
-                    self._persist_request(pending)
+                self._persist_request(pending)
 
         with self._state_lock:
             self._requests_by_id = loaded_requests
@@ -490,6 +497,21 @@ class ApprovalManager:
                     approval.status != "pending"
                     and approval.room_id is not None
                     and approval.event_id is not None
+                    and approval.resolution_synced_at is None
+                )
+            ]
+        return sorted(requests, key=lambda approval: approval.resolved_at or approval.requested_at)
+
+    def list_unconfirmed_deliveries(self) -> list[PendingApproval]:
+        """Return resolved approvals that still need their original event ids recovered."""
+        with self._state_lock:
+            requests = [
+                approval
+                for approval in self._requests_by_id.values()
+                if (
+                    approval.status != "pending"
+                    and approval.room_id is not None
+                    and approval.event_id is None
                     and approval.resolution_synced_at is None
                 )
             ]
@@ -1061,6 +1083,32 @@ class ApprovalManager:
                 self._finish_unsynced_resolved_replay(pending.id)
         return synced_requests
 
+    async def recover_unconfirmed_deliveries(self) -> list[PendingApproval]:
+        """Recover missing event ids for resolved approvals before replaying their edits."""
+        recover_event_id = self._recover_event_id
+        if recover_event_id is None:
+            return []
+
+        recovered_requests: list[PendingApproval] = []
+        for pending in self.list_unconfirmed_deliveries():
+            try:
+                recovered_event_id = await recover_event_id(pending)
+            except Exception:
+                logger.warning(
+                    "Failed to recover approval Matrix event id",
+                    approval_id=pending.id,
+                    room_id=pending.room_id,
+                    exc_info=True,
+                )
+                continue
+            if isinstance(recovered_event_id, str) and recovered_event_id:
+                self._set_event_delivery(pending.id, recovered_event_id)
+                self._persist_request(pending)
+                recovered_requests.append(pending)
+                continue
+            self._discard(pending.id)
+        return recovered_requests
+
     @staticmethod
     def _truncated_approval_reason(
         pending: PendingApproval,
@@ -1319,24 +1367,33 @@ async def sync_unsynced_approval_event_resolutions() -> list[PendingApproval]:
     return await manager.sync_unsynced_resolved()
 
 
+async def recover_unconfirmed_approval_event_deliveries() -> list[PendingApproval]:
+    """Recover missing approval event ids before replaying resolved approval edits."""
+    manager = get_approval_store()
+    if manager is None:
+        return []
+    return await manager.recover_unconfirmed_deliveries()
+
+
 def initialize_approval_store(
     runtime_paths: RuntimePaths,
     *,
     sender: MatrixEventSender | None = None,
     editor: MatrixEventEditor | None = None,
+    recoverer: MatrixApprovalEventRecoverer | None = None,
 ) -> ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
 
     storage_dir = runtime_paths.storage_root / _APPROVALS_DIRNAME
     if _MANAGER is not None and _MANAGER.storage_dir == storage_dir:
-        _MANAGER.configure_transport(sender=sender, editor=editor)
+        _MANAGER.configure_transport(sender=sender, editor=editor, recoverer=recoverer)
         return _MANAGER
 
     if _MANAGER is not None:
         _MANAGER.abort_pending(reason=_DEFAULT_REINITIALIZE_REASON)
 
-    _MANAGER = ApprovalManager(runtime_paths, sender=sender, editor=editor)
+    _MANAGER = ApprovalManager(runtime_paths, sender=sender, editor=editor, recoverer=recoverer)
     return _MANAGER
 
 

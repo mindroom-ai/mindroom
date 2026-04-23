@@ -1468,7 +1468,7 @@ class AgentBot:
         if pending is None:
             return False
 
-        return await self._handle_tool_approval_action(
+        await self._handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
             approval_event_id=reply_to_event_id,
@@ -1479,6 +1479,7 @@ class AgentBot:
                 resolved_by=event.sender,
             ),
         )
+        return True
 
     async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle one reaction inside the per-turn thread-history cache scope."""

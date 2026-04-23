@@ -31,6 +31,7 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
     get_approval_store,
     initialize_approval_store,
+    recover_unconfirmed_approval_event_deliveries,
     resolve_tool_approval_approver,
     shutdown_approval_store,
     sync_unsynced_approval_event_resolutions,
@@ -223,6 +224,37 @@ def _reply_event(*, event_id: str, body: str, sender: str = "@user:localhost") -
         },
     }
     return event
+
+
+def _approval_history_event(
+    *,
+    event_id: str,
+    approval_id: str,
+    sender: str = "@mindroom_router:localhost",
+    status: str = "pending",
+) -> nio.UnknownEvent:
+    return nio.UnknownEvent.from_dict(
+        {
+            "type": "io.mindroom.tool_approval",
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "msgtype": "io.mindroom.tool_approval",
+                "body": "Approval required",
+                "tool_name": "run_shell_command",
+                "agent_name": "code",
+                "approval_id": approval_id,
+                "tool_call_id": approval_id,
+                "arguments": {"command": "echo hi"},
+                "requested_at": "2026-04-09T12:00:00+00:00",
+                "expires_at": "2026-04-10T12:00:00+00:00",
+                "status": status,
+                "thread_id": "$thread",
+            },
+        },
+    )
 
 
 def _approval_room() -> MagicMock:
@@ -1672,7 +1704,7 @@ def test_initialize_approval_store_expires_persisted_pending_requests(tmp_path: 
 
 
 def test_initialize_approval_store_expires_undelivered_pending_requests(tmp_path: Path) -> None:
-    """Startup should fail closed for persisted approvals that never recorded an event ID."""
+    """Startup should fail closed but keep unresolved delivery state recoverable across restart."""
     runtime_paths = test_runtime_paths(tmp_path)
     request_id = _create_persisted_pending_request(
         runtime_paths.storage_root / "approvals",
@@ -1683,11 +1715,11 @@ def test_initialize_approval_store_expires_undelivered_pending_requests(tmp_path
     store = initialize_approval_store(runtime_paths)
 
     assert store.list_pending() == []
-    assert request_path.exists() is False
+    assert request_path.exists() is True
     assert request_id in store._requests_by_id
     pending = store._requests_by_id[request_id]
     assert pending.status == "expired"
-    assert pending.resolution_reason == "MindRoom restarted before approval request could be delivered to Matrix."
+    assert pending.resolution_reason == "MindRoom restarted before approval delivery could be confirmed."
     assert pending.event_id is None
 
 
@@ -1706,6 +1738,50 @@ def test_initialize_approval_store_reindexes_persisted_approval_event_ids(tmp_pa
     assert pending.id == request_id
     assert pending.status == "expired"
     assert pending.resolution_synced_at is None
+
+
+@pytest.mark.asyncio
+async def test_recover_unconfirmed_approval_event_deliveries_replays_expired_card(tmp_path: Path) -> None:
+    """Restart recovery should recover missing event ids before replaying the expired-card edit."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_pending_request(
+        runtime_paths.storage_root / "approvals",
+        event_id=None,
+    )
+    recoverer = AsyncMock(return_value="$approval-event")
+    editor = AsyncMock(return_value=True)
+    initialize_approval_store(runtime_paths, editor=editor, recoverer=recoverer)
+
+    recovered_requests = await recover_unconfirmed_approval_event_deliveries()
+    synced_requests = await sync_unsynced_approval_event_resolutions()
+
+    assert [request.id for request in recovered_requests] == [request_id]
+    assert [request.id for request in synced_requests] == [request_id]
+    recoverer.assert_awaited_once()
+    editor.assert_awaited_once()
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval-event")
+    assert (runtime_paths.storage_root / "approvals" / f"{request_id}.json").exists() is False
+
+
+@pytest.mark.asyncio
+async def test_recover_unconfirmed_approval_event_deliveries_discards_missing_cards(tmp_path: Path) -> None:
+    """Restart recovery should discard unconfirmed approvals when no Matrix card can be found."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_pending_request(
+        runtime_paths.storage_root / "approvals",
+        event_id=None,
+    )
+    recoverer = AsyncMock(return_value=None)
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, editor=editor, recoverer=recoverer)
+
+    recovered_requests = await recover_unconfirmed_approval_event_deliveries()
+
+    assert recovered_requests == []
+    recoverer.assert_awaited_once()
+    editor.assert_not_awaited()
+    assert request_id not in store._requests_by_id
+    assert (runtime_paths.storage_root / "approvals" / f"{request_id}.json").exists() is False
 
 
 @pytest.mark.asyncio
@@ -1863,6 +1939,65 @@ async def test_sync_unsynced_approval_event_resolutions_wait_for_router_transpor
     router_client.room_send.assert_awaited_once()
     other_client.room_send.assert_not_awaited()
     assert (runtime_paths.storage_root / "approvals" / f"{request_id}.json").exists() is False
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_recover_approval_event_id_scans_room_history(tmp_path: Path) -> None:
+    """Delivery recovery should recover missing approval event ids from router room history."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+    router_client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+    router_client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!room:localhost",
+            chunk=[_approval_history_event(event_id="$approval-event", approval_id="approval-1")],
+            start="",
+            end=None,
+        ),
+    )
+    router_bot = MagicMock()
+    router_bot.agent_name = "router"
+    router_bot.running = True
+    router_bot.client = router_client
+    _grant_approval_room_access_for_client(router_client)
+    orchestrator.agent_bots = {"router": router_bot}
+    pending = PendingApproval.from_dict(
+        {
+            "id": "approval-1",
+            "tool_name": "run_shell_command",
+            "arguments_preview": {"command": "echo hi"},
+            "arguments_preview_truncated": False,
+            "event_arguments_payload": {"command": "echo hi"},
+            "event_arguments_truncated": False,
+            "agent_name": "code",
+            "room_id": "!room:localhost",
+            "thread_id": "$thread",
+            "requester_id": "@user:localhost",
+            "approver_user_id": "@user:localhost",
+            "matched_rule": "run_shell_*",
+            "script_path": None,
+            "requested_at": "2026-04-09T12:00:00+00:00",
+            "expires_at": "2026-04-10T12:00:00+00:00",
+            "status": "expired",
+            "resolution_reason": "MindRoom restarted before approval delivery could be confirmed.",
+            "resolved_at": "2026-04-09T12:30:00+00:00",
+            "resolved_by": None,
+            "event_id": None,
+            "resolution_synced_at": None,
+        },
+    )
+
+    event_id = await orchestrator._recover_approval_event_id(pending)
+
+    assert event_id == "$approval-event"
+    router_client.room_messages.assert_awaited_once_with(
+        "!room:localhost",
+        start=None,
+        limit=100,
+        message_filter={"types": ["io.mindroom.tool_approval"]},
+        direction=nio.MessageDirection.back,
+    )
 
 
 @pytest.mark.asyncio
@@ -2543,8 +2678,8 @@ async def test_bot_reply_to_unsynced_resolved_approval_does_not_fall_through_to_
 
 
 @pytest.mark.asyncio
-async def test_other_user_reply_to_unsynced_resolved_approval_falls_through_to_chat(tmp_path: Path) -> None:
-    """Replies on a stale card should only be swallowed for the original requester."""
+async def test_other_user_reply_to_unsynced_resolved_approval_is_swallowed(tmp_path: Path) -> None:
+    """Replies on a stale approval card should stay on the approval path for every room member."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = _runtime_bound_config(
         runtime_paths,
@@ -2581,12 +2716,12 @@ async def test_other_user_reply_to_unsynced_resolved_approval_falls_through_to_c
         await bot._on_message(room, second_event)
 
     assert editor.await_count == 1
-    assert bot._turn_controller.handle_text_event.await_count == 1
+    assert bot._turn_controller.handle_text_event.await_count == 0
 
 
 @pytest.mark.asyncio
-async def test_bot_reply_from_wrong_user_falls_through_to_normal_handling(tmp_path: Path) -> None:
-    """Replies from other users should not be swallowed when they cannot resolve the approval."""
+async def test_bot_reply_from_wrong_user_is_swallowed_as_approval_action(tmp_path: Path) -> None:
+    """Replies from other users should not leak into normal chat when anchored to an approval card."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = _runtime_bound_config(
         runtime_paths,
@@ -2611,7 +2746,7 @@ async def test_bot_reply_from_wrong_user_falls_through_to_normal_handling(tmp_pa
         await bot._on_message(room, event)
 
     assert task.done() is False
-    assert bot._turn_controller.handle_text_event.await_count == 1
+    assert bot._turn_controller.handle_text_event.await_count == 0
 
     await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
     decision = await task

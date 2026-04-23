@@ -58,9 +58,11 @@ from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_approval import (
     _DEFAULT_ROUTER_MANAGED_ROOM_REASON,
+    PendingApproval,
     SentApprovalEvent,
     ToolApprovalTransportError,
     initialize_approval_store,
+    recover_unconfirmed_approval_event_deliveries,
     shutdown_approval_store,
     sync_unsynced_approval_event_resolutions,
 )
@@ -482,6 +484,68 @@ class MultiAgentOrchestrator:
         if not self._bot_has_approval_room(bot, room_id):
             return None
         return bot
+
+    @staticmethod
+    def _matches_pending_approval_event(
+        event: nio.Event,
+        *,
+        approval_id: str,
+        sender_user_id: str,
+    ) -> bool:
+        """Return whether one historical event is the original approval card for this approval id."""
+        if not isinstance(event, nio.UnknownEvent):
+            return False
+        if event.type != "io.mindroom.tool_approval" or event.sender != sender_user_id:
+            return False
+        content = event.source.get("content")
+        if not isinstance(content, dict):
+            return False
+        if content.get("approval_id") != approval_id or content.get("status") != "pending":
+            return False
+        relates_to = content.get("m.relates_to")
+        return not (isinstance(relates_to, dict) and relates_to.get("rel_type") == "m.replace")
+
+    async def _recover_approval_event_id(
+        self,
+        pending: PendingApproval,
+    ) -> str | None:
+        """Recover a missing approval event id by scanning recent room history for the original card."""
+        room_id = pending.room_id
+        if room_id is None:
+            return None
+        bot = self._approval_transport_bot(room_id)
+        if bot is None or bot.client is None:
+            msg = "Router approval transport unavailable for delivery recovery."
+            raise RuntimeError(msg)
+        sender_user_id = bot.client.user_id
+        if not isinstance(sender_user_id, str) or not sender_user_id:
+            msg = "Router approval transport is missing its Matrix user id."
+            raise RuntimeError(msg)
+
+        from_token: str | None = None
+        while True:
+            response = await bot.client.room_messages(
+                room_id,
+                start=from_token,
+                limit=100,
+                message_filter={"types": ["io.mindroom.tool_approval"]},
+                direction=nio.MessageDirection.back,
+            )
+            if not isinstance(response, nio.RoomMessagesResponse):
+                msg = f"Failed to scan approval room history for {pending.id}: {response}"
+                raise TypeError(msg)
+            if not response.chunk:
+                return None
+            for event in response.chunk:
+                if self._matches_pending_approval_event(
+                    event,
+                    approval_id=pending.id,
+                    sender_user_id=sender_user_id,
+                ):
+                    return event.event_id
+            if not response.end or response.end == from_token:
+                return None
+            from_token = response.end
 
     async def _edit_approval_event_now(
         self,
@@ -1146,6 +1210,7 @@ class MultiAgentOrchestrator:
             self.runtime_paths,
             sender=self._send_approval_event,
             editor=self._edit_approval_event,
+            recoverer=self._recover_approval_event_id,
         )
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
@@ -1299,8 +1364,9 @@ class MultiAgentOrchestrator:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
 
     async def _sync_unsynced_approval_resolutions(self) -> None:
-        """Replay approval-card edits that were missed before the owning bot was available."""
+        """Recover orphaned approval cards and replay any missed resolved edits."""
         try:
+            await recover_unconfirmed_approval_event_deliveries()
             await sync_unsynced_approval_event_resolutions()
         except Exception as exc:
             logger.warning("tool_approval_resolution_replay_failed", error=str(exc))
