@@ -48,7 +48,13 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
-from mindroom.knowledge import KnowledgeManager, ensure_request_knowledge_managers, get_agent_knowledge
+from mindroom.knowledge import (
+    KnowledgeAvailability,
+    KnowledgeManager,
+    ensure_request_knowledge_managers,
+    format_knowledge_availability_notice,
+    get_agent_knowledge,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -78,6 +84,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history import CompactionOutcome
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
@@ -96,6 +103,20 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
     max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
     missing_sender_label="Unknown",
 )
+
+
+def _append_knowledge_availability_enrichment(
+    system_enrichment_items: Sequence[EnrichmentItem],
+    unavailable_bases: Mapping[str, KnowledgeAvailability],
+) -> tuple[EnrichmentItem, ...]:
+    """Append one volatile knowledge-availability notice when needed."""
+    notice = format_knowledge_availability_notice(unavailable_bases)
+    if notice is None:
+        return tuple(system_enrichment_items)
+    return (
+        *system_enrichment_items,
+        EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
+    )
 
 
 @dataclass
@@ -1155,6 +1176,8 @@ def materialize_exact_team_members(
     materializable_agent_names: set[str] | None = None,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
+    unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact team-member set without silent fallback."""
@@ -1176,6 +1199,8 @@ def materialize_exact_team_members(
             request_knowledge_managers=request_knowledge_managers,
             shared_manager_lookup=shared_manager_lookup,
             on_missing_bases=_on_missing_agent_bases,
+            on_unavailable_bases=unavailable_bases.update if unavailable_bases is not None else None,
+            refresh_owner=refresh_owner,
         )
         return create_agent(
             agent_name,
@@ -1221,6 +1246,7 @@ def _materialize_team_members(
     *,
     session_id: str | None = None,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+    unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact requested team-member set without silent fallback."""
@@ -1239,6 +1265,8 @@ def _materialize_team_members(
         materializable_agent_names=resolve_live_shared_agent_names(orchestrator),
         request_knowledge_managers=request_knowledge_managers,
         shared_manager_lookup=_shared_manager,
+        unavailable_bases=unavailable_bases,
+        refresh_owner=orchestrator.knowledge_refresh_owner,
         reason_prefix=reason_prefix,
     )
 
@@ -1501,6 +1529,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         orchestrator,
         execution_identity,
     )
+    unavailable_bases: dict[str, KnowledgeAvailability] = {}
     try:
         team_members = _materialize_team_members(
             agent_names,
@@ -1508,10 +1537,15 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             execution_identity,
             session_id=session_id,
             request_knowledge_managers=request_knowledge_managers,
+            unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
         )
     except ValueError as exc:
         return str(exc)
+    system_enrichment_items = _append_knowledge_availability_enrichment(
+        system_enrichment_items,
+        unavailable_bases,
+    )
     agents = team_members.agents
 
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
@@ -1854,6 +1888,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         orchestrator,
         execution_identity,
     )
+    unavailable_bases: dict[str, KnowledgeAvailability] = {}
     try:
         team_members = _materialize_team_members(
             requested_agent_names,
@@ -1861,11 +1896,16 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             execution_identity,
             session_id=session_id,
             request_knowledge_managers=request_knowledge_managers,
+            unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
         )
     except ValueError as exc:
         yield str(exc)
         return
+    system_enrichment_items = _append_knowledge_availability_enrichment(
+        system_enrichment_items,
+        unavailable_bases,
+    )
     agent_names = team_members.display_names
     display_names = team_members.display_names
     team: Team | None = None

@@ -173,6 +173,33 @@ def get_agent_knowledge(
     )
 
 
+def format_knowledge_availability_notice(
+    unavailable_bases: Mapping[str, KnowledgeAvailability],
+) -> str | None:
+    """Render one user-facing notice for unavailable or stale knowledge bases."""
+    if not unavailable_bases:
+        return None
+
+    lines: list[str] = []
+    for base_id, availability in sorted(unavailable_bases.items()):
+        if availability is KnowledgeAvailability.INITIALIZING:
+            lines.append(
+                f"Knowledge base `{base_id}` is initializing and unavailable for semantic search this turn. "
+                "Do not claim to have searched it.",
+            )
+        elif availability is KnowledgeAvailability.CONFIG_MISMATCH:
+            lines.append(
+                f"Knowledge base `{base_id}` is refreshing against newer config and may be stale this turn. "
+                "Do not claim to have searched the latest contents.",
+            )
+        elif availability is KnowledgeAvailability.REFRESH_FAILED:
+            lines.append(
+                f"Knowledge base `{base_id}` had a recent refresh failure and may be stale this turn. "
+                "Do not claim to have searched the latest contents.",
+            )
+    return "\n".join(lines) if lines else None
+
+
 @dataclass
 class KnowledgeAccessSupport:
     """Resolve live knowledge access for one runtime without routing through AgentBot."""
@@ -186,6 +213,7 @@ class KnowledgeAccessSupport:
         agent_name: str,
         *,
         request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+        on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
     ) -> Knowledge | None:
         """Return the current knowledge assigned to one or more agent bases."""
         orchestrator = self.runtime.orchestrator
@@ -207,6 +235,7 @@ class KnowledgeAccessSupport:
                 agent_name=agent_name,
                 knowledge_bases=missing_base_ids,
             ),
+            on_unavailable_bases=on_unavailable_bases,
             refresh_owner=refresh_owner,
         )
 

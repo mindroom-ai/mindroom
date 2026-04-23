@@ -15,7 +15,14 @@ from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import ai_response
-from mindroom.knowledge import KnowledgeManager, ensure_request_knowledge_managers, get_agent_knowledge
+from mindroom.hooks import EnrichmentItem
+from mindroom.knowledge import (
+    KnowledgeAvailability,
+    KnowledgeManager,
+    ensure_request_knowledge_managers,
+    format_knowledge_availability_notice,
+    get_agent_knowledge,
+)
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -99,12 +106,20 @@ class DelegateTools(Toolkit):
                 execution_identity=self._execution_identity,
             )
 
+            unavailable_bases: dict[str, KnowledgeAvailability] = {}
             knowledge = get_agent_knowledge(
                 agent_name,
                 self._config,
                 self._runtime_paths,
                 request_knowledge_managers=request_knowledge_managers,
+                on_unavailable_bases=unavailable_bases.update,
             )
+            system_enrichment_items: tuple[EnrichmentItem, ...] = ()
+            notice = format_knowledge_availability_notice(unavailable_bases)
+            if notice is not None:
+                system_enrichment_items = (
+                    EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
+                )
             logger.info(
                 "Delegating task",
                 from_agent=self._agent_name,
@@ -142,6 +157,7 @@ class DelegateTools(Toolkit):
                     include_interactive_questions=False,
                     execution_identity=execution_identity,
                     delegation_depth=self._delegation_depth + 1,
+                    system_enrichment_items=system_enrichment_items,
                 )
         except Exception as e:
             logger.exception(

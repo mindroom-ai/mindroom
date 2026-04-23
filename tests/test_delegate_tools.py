@@ -273,7 +273,7 @@ class TestDelegateKnowledge:
             mock_get.assert_called_once()
             args, kwargs = mock_get.call_args
             assert args == ("researcher", config, runtime_paths)
-            assert set(kwargs["request_knowledge_managers"]) == {"docs"}
+            assert kwargs["request_knowledge_managers"] == {}
             assert "execution_identity" not in kwargs
             ai_kwargs = mock_ai_response.await_args.kwargs
             assert ai_kwargs["agent_name"] == "researcher"

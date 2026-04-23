@@ -17,6 +17,7 @@ from mindroom.knowledge.utils import (
     KnowledgeAccessSupport,
     KnowledgeAvailability,
     ensure_request_knowledge_managers,
+    format_knowledge_availability_notice,
     get_agent_knowledge,
 )
 
@@ -30,6 +31,7 @@ __all__ = [
     "get_agent_knowledge",
     "KnowledgeAccessSupport",
     "KnowledgeAvailability",
+    "format_knowledge_availability_notice",
     "OrchestratorKnowledgeRefreshOwner",
     "StandaloneKnowledgeRefreshOwner",
 ]

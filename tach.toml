@@ -1610,6 +1610,7 @@ expose = [
     "KnowledgeManager",
     "ensure_request_knowledge_managers",
     "ensure_shared_knowledge_manager",
+    "format_knowledge_availability_notice",
     "get_agent_knowledge",
     "get_shared_knowledge_manager_for_config",
     "initialize_shared_knowledge_managers",

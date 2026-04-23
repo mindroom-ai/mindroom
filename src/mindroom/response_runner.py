@@ -38,7 +38,12 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.ingress import is_automation_source_kind
 from mindroom.hooks.types import EVENT_SESSION_STARTED
-from mindroom.knowledge import KnowledgeAccessSupport, ensure_request_knowledge_managers
+from mindroom.knowledge import (
+    KnowledgeAccessSupport,
+    KnowledgeAvailability,
+    ensure_request_knowledge_managers,
+    format_knowledge_availability_notice,
+)
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
@@ -118,6 +123,20 @@ if TYPE_CHECKING:
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
+
+
+def _append_knowledge_availability_enrichment(
+    system_enrichment_items: Sequence[EnrichmentItem],
+    unavailable_bases: Mapping[str, KnowledgeAvailability],
+) -> tuple[EnrichmentItem, ...]:
+    """Append one volatile knowledge-availability notice when needed."""
+    notice = format_knowledge_availability_notice(unavailable_bases)
+    if notice is None:
+        return tuple(system_enrichment_items)
+    return (
+        *system_enrichment_items,
+        EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
+    )
 
 
 def _merge_response_extra_content(
@@ -1713,9 +1732,15 @@ class ResponseRunner:
             turn_recorder.set_run_id(current_run_id)
 
         async def build_response_text() -> str:
+            unavailable_bases: dict[str, KnowledgeAvailability] = {}
             knowledge = self.deps.knowledge_access.for_agent(
                 self.deps.agent_name,
                 request_knowledge_managers=runtime.request_knowledge_managers,
+                on_unavailable_bases=unavailable_bases.update,
+            )
+            system_enrichment_items = _append_knowledge_availability_enrichment(
+                request.system_enrichment_items,
+                unavailable_bases,
             )
             matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
             return await ai_response(
@@ -1741,7 +1766,7 @@ class ResponseRunner:
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 compaction_outcomes_collector=compaction_outcomes,
                 matrix_run_metadata=matrix_run_metadata,
-                system_enrichment_items=request.system_enrichment_items,
+                system_enrichment_items=system_enrichment_items,
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
             )
@@ -1787,9 +1812,15 @@ class ResponseRunner:
         def note_visible_response_event_id(response_event_id: str) -> None:
             turn_recorder.set_response_event_id(response_event_id)
 
+        unavailable_bases: dict[str, KnowledgeAvailability] = {}
         knowledge = self.deps.knowledge_access.for_agent(
             self.deps.agent_name,
             request_knowledge_managers=runtime.request_knowledge_managers,
+            on_unavailable_bases=unavailable_bases.update,
+        )
+        system_enrichment_items = _append_knowledge_availability_enrichment(
+            request.system_enrichment_items,
+            unavailable_bases,
         )
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         response_stream = stream_agent_response(
@@ -1814,7 +1845,7 @@ class ResponseRunner:
             execution_identity=runtime.tool_dispatch.execution_identity,
             compaction_outcomes_collector=compaction_outcomes,
             matrix_run_metadata=matrix_run_metadata,
-            system_enrichment_items=request.system_enrichment_items,
+            system_enrichment_items=system_enrichment_items,
             turn_recorder=turn_recorder,
             pipeline_timing=pipeline_timing,
         )

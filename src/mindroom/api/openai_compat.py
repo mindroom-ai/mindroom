@@ -39,7 +39,11 @@ from mindroom.history.runtime import (
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
 )
-from mindroom.knowledge import KnowledgeAvailability, get_agent_knowledge
+from mindroom.knowledge import (
+    KnowledgeAvailability,
+    format_knowledge_availability_notice,
+    get_agent_knowledge,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.routing import suggest_agent
@@ -659,27 +663,7 @@ def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]
 
 def _knowledge_availability_system_message(unavailable_bases: dict[str, KnowledgeAvailability]) -> str | None:
     """Render one OpenAI-compatible system message for unavailable or stale knowledge."""
-    if not unavailable_bases:
-        return None
-
-    lines: list[str] = []
-    for base_id, availability in sorted(unavailable_bases.items()):
-        if availability is KnowledgeAvailability.INITIALIZING:
-            lines.append(
-                f"Knowledge base `{base_id}` is initializing and unavailable for semantic search this turn. "
-                "Do not claim to have searched it.",
-            )
-        elif availability is KnowledgeAvailability.CONFIG_MISMATCH:
-            lines.append(
-                f"Knowledge base `{base_id}` is refreshing against newer config and may be stale this turn. "
-                "Do not claim to have searched the latest contents.",
-            )
-        elif availability is KnowledgeAvailability.REFRESH_FAILED:
-            lines.append(
-                f"Knowledge base `{base_id}` had a recent refresh failure and may be stale this turn. "
-                "Do not claim to have searched the latest contents.",
-            )
-    return "\n".join(lines) if lines else None
+    return format_knowledge_availability_notice(unavailable_bases)
 
 
 # ---------------------------------------------------------------------------
