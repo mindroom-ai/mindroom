@@ -321,7 +321,6 @@ path = "mindroom.api.sandbox_exec"
 depends_on = [
     "mindroom.constants",
     "mindroom.tool_system.worker_routing",
-    "mindroom.workers.backends.local",
 ]
 
 [[modules]]
@@ -373,7 +372,6 @@ path = "mindroom.api.schedules"
 depends_on = [
     "mindroom",
     "mindroom.api.config_lifecycle",
-    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.rooms",
@@ -1220,18 +1218,12 @@ depends_on = [
     "mindroom.commands.config_commands",
     "mindroom.commands.config_confirmation",
     "mindroom.commands.parsing",
-    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.handled_turns",
-    "mindroom.hooks.types",
     "mindroom.logging_config",
-    "mindroom.matrix.client_visible_messages",
-    "mindroom.matrix.conversation_cache",
     "mindroom.matrix.event_info",
-    "mindroom.message_target",
     "mindroom.scheduling",
     "mindroom.thread_utils",
-    "mindroom.tool_system.plugins",
 ]
 
 [[modules]]
