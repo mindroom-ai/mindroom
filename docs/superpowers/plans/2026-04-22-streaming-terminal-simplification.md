@@ -8,6 +8,23 @@
 
 **Tech Stack:** Python 3.12, pytest, existing hook framework, Matrix streaming delivery pipeline
 
+### Current Merged-Branch Constraints
+
+- This plan is reviewed against the current merged branch tip after `95114dda5`.
+- Explicit cancellation provenance now lives in:
+  - `src/mindroom/cancellation.py`
+  - `src/mindroom/orchestration/runtime.py`
+- Runtime code now treats cancellation provenance as one of:
+  - `user_stop`
+  - `sync_restart`
+  - `interrupted`
+- `delivery_gateway.py` may not import `mindroom.orchestration.runtime` directly without violating Tach boundaries.
+- Task 4 must therefore **not** deduplicate cancellation handling by introducing a forbidden `delivery_gateway.py -> orchestration.runtime` dependency.
+- The real remaining duplication is the `CancelSource -> failure_reason` mapping in:
+  - `src/mindroom/response_runner.py` via `_cancel_failure_reason()`
+  - `src/mindroom/delivery_gateway.py` via `_cancelled_note_update()`
+- `_cancelled_response_update` is already gone on the current tip and is no longer a cleanup target.
+
 ---
 
 ## File Map
@@ -49,6 +66,12 @@
   - Verify visible streamed replies only receive terminal-note updates after visibility.
 - Test: `tests/test_streaming_finalize.py`
   - Verify placeholder cleanup and cancel/error finalize behavior.
+- Verify: `tests/test_sync_task_cancellation.py`
+  - Keep shared cancellation provenance behavior stable while Task 4 narrows terminal delivery cleanup.
+- Verify: `tests/test_ai_error_message_display.py`
+  - Keep user-stop vs restart vs generic interruption messaging stable.
+- Verify: `tests/test_team_scheduler_context.py`
+  - Keep generic interruption and restart-note behavior stable on team paths.
 - Test: `tests/test_multi_agent_bot.py`
   - Verify streaming/regeneration behavior with existing visible replies.
 - Test: `tests/test_final_delivery.py`
@@ -322,12 +345,19 @@ Remove:
 - `_late_failure_with_visible_response`
 - `_late_delivery_failure_outcome`
 - `_late_stream_finalize_preserved_outcome`
-- `_cancelled_response_update`
 
-Unify cancellation classification into one helper.
 Migrate the direct helper imports and tests in `tests/test_multi_agent_bot.py` at the same time instead of leaving them for a later red bar.
 
-- [ ] **Step 4: Normalize retained cancellation reasons and route early empty-prompt exits through canonical terminal hook emission**
+- [ ] **Step 4: Deduplicate only the remaining cancel-source failure-reason mapping in a boundary-safe way**
+
+Do **not** change the merged-branch source of truth for cancellation provenance:
+- `classify_cancel_source()` stays in runtime code
+- `delivery_gateway.py` must not import `mindroom.orchestration.runtime`
+
+If the remaining duplication is removed, do it by extracting only the `CancelSource -> failure_reason` mapping into a boundary-safe lower-level module or helper that both caller layers may import without a Tach violation.
+Keep the current `user_stop` vs `sync_restart` vs generic `interrupted` behavior intact.
+
+- [ ] **Step 5: Normalize retained cancellation reasons and route early empty-prompt exits through canonical terminal hook emission**
 
 Fix both:
 - `src/mindroom/response_runner.py`
@@ -336,12 +366,12 @@ Fix both:
 so empty prompts no longer return raw terminal outcomes that bypass `message:cancelled`.
 Also stop collapsing retained `CancelledError` reasons to empty strings on the kept gateway paths.
 
-- [ ] **Step 5: Run focused reliability and terminal-hook tests**
+- [ ] **Step 6: Run focused reliability, cancellation-provenance, and terminal-hook tests**
 
-Run: `uv run pytest tests/test_streaming_finalize.py tests/test_cancelled_response_hook.py tests/test_multi_agent_bot.py tests/test_ai_user_id.py -q -n auto --no-cov`
+Run: `uv run pytest tests/test_streaming_finalize.py tests/test_cancelled_response_hook.py tests/test_multi_agent_bot.py tests/test_ai_user_id.py tests/test_sync_task_cancellation.py tests/test_ai_error_message_display.py tests/test_team_scheduler_context.py tests/test_streaming_behavior.py -q -n auto --no-cov`
 Expected: PASS
 
-- [ ] **Step 6: Commit the simplification cleanup**
+- [ ] **Step 7: Commit the simplification cleanup**
 
 ```bash
 git add src/mindroom/streaming.py src/mindroom/streaming_delivery.py src/mindroom/response_runner.py src/mindroom/delivery_gateway.py src/mindroom/bot.py tests/test_streaming_finalize.py tests/test_cancelled_response_hook.py tests/test_multi_agent_bot.py tests/test_ai_user_id.py
@@ -398,7 +428,7 @@ git commit -m "docs: clarify final response hook contract"
 Run:
 
 ```bash
-uv run pytest tests/test_hook_execution.py tests/test_streaming_behavior.py tests/test_streaming_finalize.py tests/test_multi_agent_bot.py tests/test_cancelled_response_hook.py tests/test_final_delivery.py tests/test_ai_user_id.py -q -n auto --no-cov
+uv run pytest tests/test_hook_execution.py tests/test_streaming_behavior.py tests/test_streaming_finalize.py tests/test_multi_agent_bot.py tests/test_cancelled_response_hook.py tests/test_final_delivery.py tests/test_ai_user_id.py tests/test_sync_task_cancellation.py tests/test_ai_error_message_display.py tests/test_team_scheduler_context.py -q -n auto --no-cov
 ```
 
 Expected: PASS
@@ -428,7 +458,7 @@ Expected: PASS
 Run:
 
 ```bash
-rg -n "_late_failure_without_visible|_late_failure_with_preserved_stream|_late_failure_with_visible_response|_late_delivery_failure_outcome|_late_stream_finalize_preserved_outcome|_cancelled_response_update|_merge_final_completion_content" src/mindroom
+rg -n "_late_failure_without_visible|_late_failure_with_preserved_stream|_late_failure_with_visible_response|_late_delivery_failure_outcome|_late_stream_finalize_preserved_outcome|_merge_final_completion_content" src/mindroom
 ```
 
 Expected: no matches
