@@ -87,7 +87,7 @@ from mindroom.response_runner import (
     ResponseRunnerDeps,
     prepare_memory_and_model_context,
 )
-from mindroom.streaming import StreamingDeliveryError
+from mindroom.streaming import StreamingDeliveryCancelled, StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -115,6 +115,7 @@ if TYPE_CHECKING:
         CancelledVisibleNoteRequest,
         FinalDeliveryRequest,
         FinalizeStreamedResponseRequest,
+        LateStreamFinalizeFailureRequest,
     )
 
 
@@ -416,6 +417,51 @@ def _build_response_runner(  # noqa: C901, PLR0915
             options_list=transport_outcome.options_list,
         )
 
+    async def _default_resolve_late_stream_finalize_failure(
+        request: LateStreamFinalizeFailureRequest,
+    ) -> FinalDeliveryOutcome:
+        transport_outcome = request.stream_transport_outcome
+        body = transport_outcome.rendered_body or None
+        event_id = transport_outcome.last_physical_stream_event_id
+        has_visible_body = transport_outcome.visible_body_state == "visible_body" and event_id is not None
+        if transport_outcome.visible_body_state == "placeholder_only":
+            return (
+                FinalDeliveryOutcome.cancelled_without_visible_response(
+                    failure_reason=request.failure_reason,
+                )
+                if request.cancelled
+                else FinalDeliveryOutcome.error_without_visible_response(
+                    failure_reason=request.failure_reason,
+                )
+            )
+        if has_visible_body:
+            return (
+                FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
+                    last_physical_stream_event_id=event_id,
+                    final_visible_body=body,
+                    failure_reason=request.failure_reason,
+                    option_map=transport_outcome.option_map,
+                    options_list=transport_outcome.options_list,
+                )
+                if request.cancelled
+                else FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
+                    last_physical_stream_event_id=event_id,
+                    final_visible_body=body,
+                    failure_reason=request.failure_reason,
+                    option_map=transport_outcome.option_map,
+                    options_list=transport_outcome.options_list,
+                )
+            )
+        return (
+            FinalDeliveryOutcome.cancelled_without_visible_response(
+                failure_reason=request.failure_reason,
+            )
+            if request.cancelled
+            else FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason=request.failure_reason,
+            )
+        )
+
     def _open_test_storage(storage: object | None) -> object:
         if isinstance(storage, _SessionStorage):
             return storage.open()
@@ -481,6 +527,9 @@ def _build_response_runner(  # noqa: C901, PLR0915
     )
     delivery_gateway.finalize_streamed_response = AsyncMock(
         side_effect=_default_finalize_streamed_response,
+    )
+    delivery_gateway.resolve_late_stream_finalize_failure = AsyncMock(
+        side_effect=_default_resolve_late_stream_finalize_failure,
     )
     delivery_gateway.emit_terminal_outcome_hooks = AsyncMock(
         side_effect=_default_emit_terminal_outcome_hooks,
@@ -2520,6 +2569,67 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
     assert isinstance(persisted_run.run_id, str)
     assert persisted_run.run_id
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        ("assistant", "Team hello\n\n[interrupted]"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_preserves_structured_stream_cancel_delivery_state(
+    tmp_path: Path,
+) -> None:
+    """Structured team stream cancellation must flow through the dedicated cancelled-delivery path."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_runner.team_response_stream"),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(
+            side_effect=StreamingDeliveryCancelled(
+                asyncio.CancelledError("team stream cancelled"),
+                event_id="$team-msg",
+                accumulated_text="Team hello",
+                tool_trace=[],
+                transport_outcome=_stream_outcome(
+                    "$team-msg",
+                    "Team hello",
+                    terminal_operation="edit",
+                    terminal_result="cancelled",
+                    terminal_status="cancelled",
+                    failure_reason="cancelled_by_user",
+                ),
+            ),
+        )
+
+        resolution = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert resolution.state == "kept_prior_visible_stream_after_cancel"
+    assert resolution.visible_response_event_id == "$team-msg"
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),

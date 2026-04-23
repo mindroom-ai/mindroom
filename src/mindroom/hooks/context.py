@@ -437,7 +437,7 @@ class AfterResponseContext(HookContext):
 
 @dataclass(frozen=True, slots=True)
 class CancelledResponseInfo:
-    """Facts available when a response is cancelled mid-stream."""
+    """Facts available when final delivery ends on the cancelled/failure cleanup path."""
 
     envelope: MessageEnvelope
     visible_response_event_id: str | None = None

@@ -79,13 +79,25 @@ def _merge_tool_trace(existing: list[ToolTraceEntry], incoming: list[ToolTraceEn
 
 def _merge_final_completion_content(accumulated_text: str, final_text: str) -> str:
     """Preserve visible tool markers when a provider emits canonical final content."""
-    tool_marker_lines = [
-        line for line in accumulated_text.splitlines() if _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)
-    ]
+    accumulated_lines = accumulated_text.splitlines()
+    tool_marker_lines = [line for line in accumulated_lines if _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)]
     if not tool_marker_lines:
         return final_text
+    first_tool_marker_index = next(
+        index for index, line in enumerate(accumulated_lines) if _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)
+    )
+    visible_prefix = "\n".join(accumulated_lines[:first_tool_marker_index]).strip()
     tool_marker_block = "\n\n".join(tool_marker_lines)
-    return f"{tool_marker_block}\n\n{final_text}" if final_text else tool_marker_block
+    if not visible_prefix:
+        return f"{tool_marker_block}\n\n{final_text}" if final_text else tool_marker_block
+    if final_text.startswith(visible_prefix):
+        suffix = final_text[len(visible_prefix) :].lstrip("\n")
+        if suffix:
+            return f"{visible_prefix}\n\n{tool_marker_block}\n\n{suffix}"
+        return f"{visible_prefix}\n\n{tool_marker_block}"
+    if final_text:
+        return f"{visible_prefix}\n\n{tool_marker_block}\n\n{final_text}"
+    return f"{visible_prefix}\n\n{tool_marker_block}"
 
 
 @dataclass(frozen=True, slots=True)

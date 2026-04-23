@@ -140,7 +140,7 @@ async def block_secret_reads(ctx):
 | `system:enrich` | Collector | `SystemEnrichContext` | After message enrichment; before AI generation | `add_instruction()` |
 | `message:before_response` | Transformer | `BeforeResponseContext` | After AI generation; before Matrix send (streaming: after stream completes, before final edit) | `draft.response_text`, `draft.suppress` |
 | `message:after_response` | Observer | `AfterResponseContext` | After final Matrix send or edit | None (frozen) |
-| `message:cancelled` | Observer | `CancelledResponseContext` | After a response is cancelled before final delivery completes | None (frozen) |
+| `message:cancelled` | Observer | `CancelledResponseContext` | After final delivery ends without a clean completed visible response, including explicit cancellation and terminal delivery failure recovery | None (frozen) |
 | `agent:started` | Observer | `AgentLifecycleContext` | After bot starts (Matrix login, presence, callbacks registered) | None (frozen) |
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None (frozen) |
 | `bot:ready` | Observer | `AgentLifecycleContext` | After bot completes room joins and initial sync | None (frozen) |
@@ -158,7 +158,7 @@ System-style replies such as command confirmations, routing rejections, dispatch
 
 For `compaction:before` and `compaction:after`, `ctx.messages` contains raw `agno.models.message.Message` objects from the compacted session payload.
 MindRoom does not sanitize attachments, media, tool calls, tool args, provider metadata, citations, reasoning fields, metrics, references, or extra Pydantic fields before these hooks run.
-For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation from a streaming or delivery failure.
+For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation from streaming or delivery failure recovery.
 
 ### Default timeouts
 

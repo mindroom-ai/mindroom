@@ -43,6 +43,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import HistoryScope, ResolvedReplayPlan
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.streaming import _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -1511,6 +1512,50 @@ class TestStreamingCompletion:
         ]
         assert "".join(contents) == "hx"
 
+    def test_project_final_assistant_text_keeps_emitted_state_on_prefix_mismatch(self) -> None:
+        """A mismatched final text must not overwrite internal emitted state when no delta was sent."""
+        assistant_state = openai_compat._AssistantTextStreamState(emitted_text="hx")
+
+        mismatch = openai_compat._project_final_assistant_text("hi", assistant_state)
+        later_extension = openai_compat._project_final_assistant_text("hxy", assistant_state)
+
+        assert mismatch == []
+        assert assistant_state.emitted_text == "hxy"
+        assert later_extension == ["y"]
+
+    def test_streaming_reasoning_only_completion_emits_visible_failure_note(
+        self,
+        app_client: TestClient,
+    ) -> None:
+        """Reasoning-only agent streams must not end as an empty successful completion."""
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+            yield RunContentEvent(reasoning_content="thinking")
+            yield RunCompletedEvent(reasoning_content="thinking")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.strip().split("\n\n")
+            if line.startswith("data: {")
+        ]
+        contents = [
+            chunk["choices"][0]["delta"].get("content", "")
+            for chunk in chunks
+            if "content" in chunk["choices"][0]["delta"]
+        ]
+        assert "".join(contents) == _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
+
     def test_streaming_tool_events_do_not_delay_assistant_text(
         self,
         app_client: TestClient,
@@ -2742,6 +2787,58 @@ class TestTeamCompletion:
             if "content" in chunk["choices"][0]["delta"]
         ]
         assert "".join(contents) == "hx"
+
+    def test_team_streaming_reasoning_only_completion_emits_visible_failure_note(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """Reasoning-only team streams must not end as an empty successful completion."""
+        from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent  # noqa: PLC0415
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(reasoning_content="thinking")
+            yield TeamRunCompletedEvent(reasoning_content="thinking")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.strip().split("\n\n")
+            if line.startswith("data: {")
+        ]
+        contents = [
+            chunk["choices"][0]["delta"].get("content", "")
+            for chunk in chunks
+            if "content" in chunk["choices"][0]["delta"]
+        ]
+        assert "".join(contents) == _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
 
     def test_team_streaming_falls_back_to_final_team_run_output(self, team_app_client: TestClient) -> None:
         """Providers that yield a final TeamRunOutput in stream mode should still emit content."""

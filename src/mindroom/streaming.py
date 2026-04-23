@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn
 from mindroom import interactive
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    NO_VISIBLE_TEXT_AFTER_THINKING_NOTE,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -60,7 +61,7 @@ PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
 _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
-_NO_VISIBLE_TEXT_AFTER_THINKING_NOTE = "**[Model emitted no visible text content after thinking. Please retry.]**"
+_NO_VISIBLE_TEXT_AFTER_THINKING_NOTE = NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 
@@ -197,6 +198,8 @@ class _CommittedDeliveryState:
     accumulated_text: str
     tool_trace: list[ToolTraceEntry]
     placeholder_progress_sent: bool
+    rendered_body: str
+    visible_body_state: Literal["placeholder_only", "visible_body"]
 
 
 @dataclass(frozen=True)
@@ -247,6 +250,12 @@ class StreamingResponse:
     _last_delivered_text: str = field(default="", init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
     _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
+    _last_committed_rendered_body: str | None = field(default=None, init=False, repr=False)
+    _last_committed_visible_body_state: Literal["none", "placeholder_only", "visible_body"] = field(
+        default="none",
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -397,22 +406,26 @@ class StreamingResponse:
         terminal_operation: StreamTerminalOperation = "edit" if self.event_id is not None else "send"
         text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
-        rendered_body = response.formatted_text if (self.accumulated_text.strip() or has_placeholder) else None
-        visible_body_state: Literal["none", "placeholder_only", "visible_body"]
-        if rendered_body is None:
+        attempted_rendered_body = (
+            response.formatted_text if (self.accumulated_text.strip() or has_placeholder) else None
+        )
+        attempted_visible_body_state: Literal["none", "placeholder_only", "visible_body"]
+        if attempted_rendered_body is None:
             terminal_operation = "none"
-            visible_body_state = "none"
+            attempted_visible_body_state = "none"
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
                 terminal_result="not_attempted",
                 terminal_status=final_stream_status,
                 rendered_body=None,
-                visible_body_state=visible_body_state,
+                visible_body_state=attempted_visible_body_state,
                 option_map=None,
                 options_list=None,
             )
-        visible_body_state = "placeholder_only" if rendered_body == _PROGRESS_PLACEHOLDER else "visible_body"
+        attempted_visible_body_state = (
+            "placeholder_only" if attempted_rendered_body == _PROGRESS_PLACEHOLDER else "visible_body"
+        )
         options_list = tuple(response.options_list) if response.options_list is not None else None
         try:
             send_succeeded = await self._send_or_edit_message(
@@ -430,16 +443,17 @@ class StreamingResponse:
                 stream_status=final_stream_status,
                 exc_info=True,
             )
+            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
                 terminal_result="cancelled",
                 terminal_status=final_stream_status,
-                rendered_body=rendered_body,
-                visible_body_state=visible_body_state,
+                rendered_body=committed_rendered_body,
+                visible_body_state=committed_visible_body_state,
                 failure_reason="terminal_update_cancelled",
-                option_map=response.option_map,
-                options_list=options_list,
+                option_map=None,
+                options_list=None,
             )
         except Exception as exc:
             logger.warning(
@@ -450,16 +464,17 @@ class StreamingResponse:
                 reason=str(exc),
                 exc_info=True,
             )
+            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
                 terminal_result="failed",
                 terminal_status=final_stream_status,
-                rendered_body=rendered_body,
-                visible_body_state=visible_body_state,
+                rendered_body=committed_rendered_body,
+                visible_body_state=committed_visible_body_state,
                 failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
-                option_map=response.option_map,
-                options_list=options_list,
+                option_map=None,
+                options_list=None,
             )
         if not send_succeeded:
             logger.warning(
@@ -468,24 +483,25 @@ class StreamingResponse:
                 room_id=self.room_id,
                 stream_status=final_stream_status,
             )
+            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
                 terminal_result="failed",
                 terminal_status=final_stream_status,
-                rendered_body=rendered_body,
-                visible_body_state=visible_body_state,
+                rendered_body=committed_rendered_body,
+                visible_body_state=committed_visible_body_state,
                 failure_reason="terminal_update_failed",
-                option_map=response.option_map,
-                options_list=options_list,
+                option_map=None,
+                options_list=None,
             )
         return StreamTransportOutcome(
             last_physical_stream_event_id=self.event_id,
             terminal_operation=terminal_operation,
             terminal_result="succeeded",
             terminal_status=final_stream_status,
-            rendered_body=rendered_body,
-            visible_body_state=visible_body_state,
+            rendered_body=attempted_rendered_body,
+            visible_body_state=attempted_visible_body_state,
             failure_reason=None,
             option_map=response.option_map,
             options_list=options_list,
@@ -514,7 +530,7 @@ class StreamingResponse:
             client,
             content=prepared_delivery.content,
             display_text=prepared_delivery.display_text,
-            retry_on_failure=retry_on_failure and is_final and self.event_id is not None,
+            retry_on_failure=retry_on_failure and is_final,
         )
         if not send_succeeded:
             if not is_final:
@@ -587,6 +603,10 @@ class StreamingResponse:
                 accumulated_text=self.accumulated_text if self.accumulated_text.strip() else "",
                 tool_trace=deepcopy(self.tool_trace),
                 placeholder_progress_sent=not self.accumulated_text.strip(),
+                rendered_body=canonical_visible_body,
+                visible_body_state=(
+                    "placeholder_only" if canonical_visible_body == _PROGRESS_PLACEHOLDER else "visible_body"
+                ),
             ),
             had_warmup_suffix=bool(warmup_suffix_lines),
         )
@@ -596,7 +616,19 @@ class StreamingResponse:
         self._last_delivered_text = committed_state.accumulated_text
         self._last_delivered_tool_trace = deepcopy(committed_state.tool_trace)
         self._last_placeholder_progress_sent = committed_state.placeholder_progress_sent
+        self._last_committed_rendered_body = committed_state.rendered_body
+        self._last_committed_visible_body_state = committed_state.visible_body_state
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent
+
+    def _committed_terminal_snapshot(
+        self,
+    ) -> tuple[str | None, Literal["none", "placeholder_only", "visible_body"]]:
+        """Return the last visible body that definitely reached Matrix."""
+        if self._last_committed_visible_body_state != "none":
+            return self._last_committed_rendered_body, self._last_committed_visible_body_state
+        if self.event_id is not None and self.placeholder_progress_sent:
+            return _PROGRESS_PLACEHOLDER, "placeholder_only"
+        return None, "none"
 
     def restore_last_delivered_state(self) -> None:
         """Discard buffered state that never reached Matrix after a delivery failure."""

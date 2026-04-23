@@ -74,6 +74,7 @@ _SHELL_EXTRA_ENV_EXCLUDED_NAMES = frozenset({*_EXECUTION_RUNTIME_EXCLUDED_NAMES,
 # tokens (e.g. GITEA_TOKEN) while _API_KEY/_PASSWORD/_SECRET reliably identify
 # provider credentials that should never leak to shell commands.
 _SHELL_EXTRA_ENV_SECRET_SUFFIXES = ("_API_KEY", "_API_KEYS", "_PASSWORD", "_SECRET")
+NO_VISIBLE_TEXT_AFTER_THINKING_NOTE = "**[Model emitted no visible text content after thinking. Please retry.]**"
 
 
 @dataclass(frozen=True)

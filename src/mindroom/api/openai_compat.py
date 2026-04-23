@@ -37,7 +37,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
+from mindroom.constants import (
+    NO_VISIBLE_TEXT_AFTER_THINKING_NOTE,
+    ROUTER_AGENT_NAME,
+    RuntimePaths,
+    runtime_env_flag,
+)
 from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_team_messages_text,
@@ -110,6 +115,8 @@ class _AssistantTextStreamState:
     """Track assistant text already exposed to the SSE client."""
 
     emitted_text: str = ""
+    emitted_any_visible_content: bool = False
+    observed_nonvisible_activity: bool = False
 
 
 def _record_assistant_delta(delta: str, assistant_state: _AssistantTextStreamState) -> list[str]:
@@ -117,6 +124,7 @@ def _record_assistant_delta(delta: str, assistant_state: _AssistantTextStreamSta
     if not delta:
         return []
     assistant_state.emitted_text = f"{assistant_state.emitted_text}{delta}"
+    assistant_state.emitted_any_visible_content = True
     return [delta]
 
 
@@ -126,12 +134,15 @@ def _project_final_assistant_text(
 ) -> list[str]:
     """Project canonical final text onto SSE without rewriting emitted bytes."""
     prior_emitted_text = assistant_state.emitted_text
-    assistant_state.emitted_text = final_text
     if final_text and not prior_emitted_text:
+        assistant_state.emitted_text = final_text
+        assistant_state.emitted_any_visible_content = True
         return [final_text]
     if final_text.startswith(prior_emitted_text):
         suffix = final_text[len(prior_emitted_text) :]
         if suffix:
+            assistant_state.emitted_text = final_text
+            assistant_state.emitted_any_visible_content = True
             return [suffix]
     return []
 
@@ -1089,7 +1100,7 @@ def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> 
     return _format_stream_tool_event(event, tool_state)
 
 
-def _extract_stream_deltas(
+def _extract_stream_deltas(  # noqa: PLR0911
     event: AIStreamChunk,
     tool_state: _ToolStreamState,
     assistant_state: _AssistantTextStreamState,
@@ -1102,18 +1113,25 @@ def _extract_stream_deltas(
     extends the emitted prefix, and otherwise keep the already-emitted text.
     """
     if isinstance(event, RunContentEvent):
+        if event.reasoning_content:
+            assistant_state.observed_nonvisible_activity = True
         if event.content:
             return _record_assistant_delta(str(event.content), assistant_state)
         return []
 
-    if isinstance(event, RunCompletedEvent) and event.content is not None:
-        return _project_final_assistant_text(str(event.content), assistant_state)
+    if isinstance(event, RunCompletedEvent):
+        if event.reasoning_content:
+            assistant_state.observed_nonvisible_activity = True
+        if event.content is not None:
+            return _project_final_assistant_text(str(event.content), assistant_state)
+        return []
 
     if isinstance(event, str):
         return _record_assistant_delta(event, assistant_state)
 
     delta = _extract_stream_text(event, tool_state)
     if delta:
+        assistant_state.emitted_any_visible_content = True
         return [delta]
     return []
 
@@ -1191,6 +1209,16 @@ async def _stream_completion(
                     assistant_state,
                 ):
                     yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
+
+            if (
+                not assistant_state.emitted_text
+                and not assistant_state.emitted_any_visible_content
+                and assistant_state.observed_nonvisible_activity
+            ):
+                yield (
+                    "data: "
+                    f"{_chunk_json(completion_id, created, agent_name, delta={'content': NO_VISIBLE_TEXT_AFTER_THINKING_NOTE})}\n\n"
+                )
 
             # 4. Final chunk with finish_reason
             logger.info("Chat completion sent", model=agent_name, stream=True)
@@ -1589,17 +1617,25 @@ def _classify_team_event(
     return None
 
 
-def _extract_team_stream_deltas(
+def _extract_team_stream_deltas(  # noqa: PLR0911
     event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput,
     tool_state: _ToolStreamState,
     assistant_state: _AssistantTextStreamState,
 ) -> list[str]:
     """Extract team SSE deltas using the same safe suffix-extension rule as agent SSE."""
-    if isinstance(event, TeamContentEvent) and event.content:
-        return _record_assistant_delta(str(event.content), assistant_state)
+    if isinstance(event, TeamContentEvent):
+        if event.reasoning_content:
+            assistant_state.observed_nonvisible_activity = True
+        if event.content:
+            return _record_assistant_delta(str(event.content), assistant_state)
+        return []
 
-    if isinstance(event, TeamRunCompletedEvent) and event.content is not None:
-        return _project_final_assistant_text(str(event.content), assistant_state)
+    if isinstance(event, TeamRunCompletedEvent):
+        if event.reasoning_content:
+            assistant_state.observed_nonvisible_activity = True
+        if event.content is not None:
+            return _project_final_assistant_text(str(event.content), assistant_state)
+        return []
 
     if isinstance(event, (TeamRunOutput, RunOutput)):
         final_text = _format_team_output(event).strip()
@@ -1609,6 +1645,7 @@ def _extract_team_stream_deltas(
 
     delta = _classify_team_event(event, tool_state)
     if delta is not None:
+        assistant_state.emitted_any_visible_content = True
         return [delta]
     return []
 
@@ -1624,7 +1661,7 @@ def _finalize_pending_tools(tool_state: _ToolStreamState) -> str | None:
     return "".join(parts)
 
 
-async def _team_stream_event_generator(
+async def _team_stream_event_generator(  # noqa: C901
     *,
     stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput],
     first_event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput,
@@ -1680,6 +1717,13 @@ async def _team_stream_event_generator(
     pending = _finalize_pending_tools(tool_state)
     if pending:
         yield _chunk(pending)
+
+    if (
+        not assistant_state.emitted_text
+        and not assistant_state.emitted_any_visible_content
+        and assistant_state.observed_nonvisible_activity
+    ):
+        yield _chunk(NO_VISIBLE_TEXT_AFTER_THINKING_NOTE)
 
     # 5. Finish
     logger.info("Team completion sent", team=team_name, stream=True)

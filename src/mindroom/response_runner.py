@@ -85,6 +85,7 @@ from .delivery_gateway import (
     DeliveryGateway,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
+    LateStreamFinalizeFailureRequest,
     SendTextRequest,
     StreamingDeliveryRequest,
     _late_delivery_failure_outcome,
@@ -1401,20 +1402,49 @@ class ResponseRunner:
                         is_team=True,
                         response_event_id=event_id or tracked_event_id,
                     )
-                    late_outcome = _late_stream_finalize_preserved_outcome(
-                        transport_outcome=transport_outcome,
-                        failure_reason="stream_finalize_cancelled",
-                        cancelled=True,
-                    )
-                    if late_outcome is not None:
-                        final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
-                            outcome=late_outcome,
-                            correlation_id=resolved_correlation_id,
-                            envelope=resolved_response_envelope,
+                    final_delivery_outcome = await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                        LateStreamFinalizeFailureRequest(
+                            target=delivery_target,
+                            stream_transport_outcome=transport_outcome,
                             response_kind="team",
-                        )
-                        return
-                    raise
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                            failure_reason="stream_finalize_cancelled",
+                            cancelled=True,
+                        ),
+                    )
+                    return
+                except Exception as error:
+                    self._record_stream_delivery_error(
+                        recorder=team_turn_recorder,
+                        accumulated_text=transport_outcome.rendered_body or "",
+                        tool_trace=[],
+                    )
+                    self._persist_interrupted_recorder(
+                        recorder=team_turn_recorder,
+                        session_scope=session_scope,
+                        session_id=session_id,
+                        execution_identity=tool_dispatch.execution_identity,
+                        run_id=response_run_id,
+                        is_team=True,
+                        response_event_id=event_id or tracked_event_id,
+                    )
+                    final_delivery_outcome = await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                        LateStreamFinalizeFailureRequest(
+                            target=delivery_target,
+                            stream_transport_outcome=transport_outcome,
+                            response_kind="team",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                            failure_reason=str(error),
+                            cancelled=False,
+                        ),
+                    )
+                    return
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply("final")
                     request.pipeline_timing.mark("response_complete")
@@ -1677,7 +1707,7 @@ class ResponseRunner:
             ),
         )
 
-    async def run_cancellable_response(
+    async def run_cancellable_response(  # noqa: C901, PLR0912, PLR0915
         self,
         *,
         room_id: str,
@@ -1762,6 +1792,8 @@ class ResponseRunner:
                 try:
                     await task
                 except asyncio.CancelledError as exc:
+                    if isinstance(exc, StreamingDeliveryCancelled):
+                        raise
                     failure_reason = "sync_restart_cancelled" if is_sync_restart_cancel(exc) else "cancelled_by_user"
                     if on_cancelled is not None:
                         on_cancelled(failure_reason)
@@ -2195,7 +2227,7 @@ class ResponseRunner:
             compaction_outcomes_collector.extend(compaction_outcomes)
         return delivery
 
-    async def process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
+    async def process_and_respond_streaming(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2399,19 +2431,48 @@ class ResponseRunner:
                 is_team=False,
                 response_event_id=transport_outcome.last_physical_stream_event_id,
             )
-            late_outcome = _late_stream_finalize_preserved_outcome(
-                transport_outcome=transport_outcome,
-                failure_reason="stream_finalize_cancelled",
-                cancelled=True,
-            )
-            if late_outcome is not None:
-                return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
-                    outcome=late_outcome,
-                    correlation_id=correlation_id,
-                    envelope=response_envelope,
+            return await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                LateStreamFinalizeFailureRequest(
+                    target=runtime.resolved_target,
+                    stream_transport_outcome=transport_outcome,
                     response_kind=response_kind,
-                )
-            raise
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                    tool_trace=tool_trace if self._show_tool_calls() else None,
+                    extra_content=response_extra_content,
+                    failure_reason="stream_finalize_cancelled",
+                    cancelled=True,
+                ),
+            )
+        except Exception as error:
+            self.deps.logger.exception("Error in late streaming finalization", error=str(error))
+            self._record_stream_delivery_error(
+                recorder=turn_recorder,
+                accumulated_text=transport_outcome.rendered_body or "",
+                tool_trace=tool_trace,
+            )
+            self._persist_interrupted_recorder(
+                recorder=turn_recorder,
+                session_scope=session_scope,
+                session_id=runtime.session_id,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                run_id=run_id,
+                is_team=False,
+                response_event_id=transport_outcome.last_physical_stream_event_id,
+            )
+            return await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                LateStreamFinalizeFailureRequest(
+                    target=runtime.resolved_target,
+                    stream_transport_outcome=transport_outcome,
+                    response_kind=response_kind,
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                    tool_trace=tool_trace if self._show_tool_calls() else None,
+                    extra_content=response_extra_content,
+                    failure_reason=str(error),
+                    cancelled=False,
+                ),
+            )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
