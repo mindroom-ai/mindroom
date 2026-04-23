@@ -482,12 +482,18 @@ class StreamingResponse:
         options_list = tuple(response.options_list) if response.options_list is not None else None
         try:
             retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED
+            retry_terminal_update_immediately = (
+                final_stream_status != STREAM_STATUS_COMPLETED
+                and not restart_interrupted
+                and cancel_source != "sync_restart"
+            )
             send_succeeded = await self._send_or_edit_message(
                 client,
                 is_final=True,
                 allow_empty_progress=has_placeholder,
                 stream_status=final_stream_status,
                 retry_on_failure=retry_terminal_update,
+                retry_without_backoff=retry_terminal_update_immediately,
             )
         except asyncio.CancelledError:
             logger.warning(
@@ -588,6 +594,7 @@ class StreamingResponse:
         allow_empty_progress: bool = False,
         stream_status: str | None = None,
         retry_on_failure: bool = True,
+        retry_without_backoff: bool = False,
     ) -> bool:
         """Send new message or edit existing one."""
         prepared_delivery = self._prepare_delivery(
@@ -604,6 +611,7 @@ class StreamingResponse:
             content=prepared_delivery.content,
             display_text=prepared_delivery.display_text,
             retry_on_failure=retry_on_failure and is_final,
+            retry_without_backoff=retry_without_backoff and is_final,
         )
         if not send_succeeded:
             if not is_final:
@@ -808,9 +816,10 @@ class StreamingResponse:
         content: dict[str, Any],
         display_text: str,
         retry_on_failure: bool = False,
+        retry_without_backoff: bool = False,
     ) -> bool:
         """Send a new event or edit the existing one."""
-        max_retries = 5 if retry_on_failure else 0
+        max_retries = 5 if retry_on_failure else 1 if retry_without_backoff else 0
         total_attempts = max_retries + 1
         for attempt in range(1, total_attempts + 1):
             try:
@@ -835,15 +844,23 @@ class StreamingResponse:
                 if attempt == total_attempts:
                     raise
             if attempt < total_attempts:
-                backoff_seconds = 2**attempt
-                logger.warning(
-                    "Retrying failed terminal streaming update",
-                    attempt=attempt,
-                    event_id=self.event_id,
-                    room_id=self.room_id,
-                    backoff_seconds=backoff_seconds,
-                )
-                await asyncio.sleep(backoff_seconds)
+                if retry_without_backoff:
+                    logger.warning(
+                        "Retrying failed terminal streaming update immediately",
+                        attempt=attempt,
+                        event_id=self.event_id,
+                        room_id=self.room_id,
+                    )
+                else:
+                    backoff_seconds = 2**attempt
+                    logger.warning(
+                        "Retrying failed terminal streaming update",
+                        attempt=attempt,
+                        event_id=self.event_id,
+                        room_id=self.room_id,
+                        backoff_seconds=backoff_seconds,
+                    )
+                    await asyncio.sleep(backoff_seconds)
         return False
 
 

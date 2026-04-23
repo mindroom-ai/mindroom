@@ -268,7 +268,7 @@ FINAL_DELIVERY_POLICY: Mapping[FinalDeliveryState, FinalDeliveryPolicy] = Mappin
             retryable=False,
             should_persist_response_identity=True,
             should_queue_thread_summary=False,
-            should_register_interactive_follow_up=True,
+            should_register_interactive_follow_up=False,
             should_shield_late_failures=True,
         ),
         "kept_prior_visible_response_after_suppression": FinalDeliveryPolicy(

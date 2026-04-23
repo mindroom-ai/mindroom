@@ -181,7 +181,7 @@ def _error_without_visible_response() -> FinalDeliveryOutcome:
                 retryable=False,
                 should_persist_response_identity=True,
                 should_queue_thread_summary=False,
-                should_register_interactive_follow_up=True,
+                should_register_interactive_follow_up=False,
                 should_shield_late_failures=True,
             ),
             id="kept_prior_visible_stream_after_error",

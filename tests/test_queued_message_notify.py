@@ -314,6 +314,35 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
 
 
 @pytest.mark.asyncio
+async def test_post_response_effects_skip_interactive_follow_up_for_preserved_stream_error() -> None:
+    """Failed preserved stream outcomes must not register interactive follow-up on a failed reply."""
+    register_interactive = AsyncMock()
+    target = MessageTarget.resolve(
+        room_id="!room:localhost",
+        thread_id="$thread",
+        reply_to_event_id="$event",
+    )
+
+    await apply_post_response_effects(
+        ResponseOutcome(
+            final_delivery_outcome=FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
+                last_physical_stream_event_id="$stream",
+                final_visible_body="Choose one\n\n**[Response interrupted]**",
+                option_map={"1": "yes"},
+                options_list=[{"emoji": "1", "label": "Yes", "value": "yes"}],
+            ),
+            interactive_target=target,
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            register_interactive=register_interactive,
+        ),
+    )
+
+    register_interactive.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(tmp_path: Path) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)

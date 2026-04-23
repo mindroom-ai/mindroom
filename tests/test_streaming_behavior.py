@@ -2845,6 +2845,82 @@ class TestStreamingBehavior:
         response_hooks.emit_after_response.assert_awaited_once()
         response_hooks.emit_cancelled_response.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_streamed_success_noop_final_transform_keeps_visible_stream_text(self) -> None:
+        """Canonical final content must not rewrite the visible stream unless the hook changes it."""
+        response_envelope = MessageEnvelope(
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="helper",
+            source_kind="message",
+        )
+        response_hooks = SimpleNamespace(
+            apply_before_response=AsyncMock(),
+            apply_final_response_transform=AsyncMock(
+                return_value=SimpleNamespace(
+                    response_text="canonical final",
+                    response_kind="ai",
+                    envelope=response_envelope,
+                ),
+            ),
+            emit_after_response=AsyncMock(),
+            emit_cancelled_response=AsyncMock(),
+        )
+        gateway = DeliveryGateway(
+            DeliveryGatewayDeps(
+                runtime=SimpleNamespace(
+                    client=_make_matrix_client_mock(),
+                    orchestrator=None,
+                    config=self.config,
+                    runtime_started_at=0.0,
+                ),
+                runtime_paths=runtime_paths_for(self.config),
+                agent_name="helper",
+                logger=MagicMock(),
+                redact_message_event=AsyncMock(return_value=True),
+                sender_domain="localhost",
+                resolver=MagicMock(),
+                response_hooks=response_hooks,
+            ),
+        )
+        mock_deliver_final = AsyncMock()
+        object.__setattr__(gateway, "deliver_final", mock_deliver_final)
+
+        outcome = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+                stream_transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$streaming",
+                    terminal_operation="send",
+                    terminal_result="succeeded",
+                    terminal_status="completed",
+                    rendered_body="chunk",
+                    visible_body_state="visible_body",
+                    canonical_final_body_candidate="canonical final",
+                ),
+                initial_delivery_kind="sent",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-final-transform-noop",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome.final_visible_event_id == "$streaming"
+        assert outcome.final_visible_body == "chunk"
+        response_hooks.apply_before_response.assert_not_awaited()
+        response_hooks.apply_final_response_transform.assert_awaited_once()
+        mock_deliver_final.assert_not_awaited()
+        response_hooks.emit_after_response.assert_awaited_once()
+        response_hooks.emit_cancelled_response.assert_not_awaited()
+
 
 class TestStreamingConfig:
     """Tests for StreamingConfig and its wiring into send_streaming_response."""

@@ -1358,7 +1358,7 @@ class DeliveryGateway:
             response_text=final_body_candidate,
             response_kind=request.response_kind,
         )
-        if final_transform_draft.response_text != streamed_text:
+        if final_transform_draft.response_text not in {final_body_candidate, streamed_text}:
             final_outcome = await self.deliver_final(
                 FinalDeliveryRequest(
                     target=request.target,
