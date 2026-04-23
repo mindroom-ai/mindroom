@@ -2692,6 +2692,47 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
     assert resolution.response_identity_event_id == "$team-msg"
 
 
+@pytest.mark.asyncio
+async def test_generate_team_response_helper_routes_placeholder_only_late_failure_through_cleanup_boundary(
+    tmp_path: Path,
+) -> None:
+    """Raw late team failures after sending only Thinking... should use the placeholder cleanup path."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_runner.team_response_stream"),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        coordinator.deps.delivery_gateway.deliver_stream = AsyncMock(side_effect=RuntimeError("stream boom"))
+        coordinator.deps.delivery_gateway.resolve_late_stream_finalize_failure = AsyncMock(
+            return_value=FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason="stream boom",
+            ),
+        )
+
+        resolution = await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert resolution.state == "error_without_visible_response"
+    coordinator.deps.delivery_gateway.resolve_late_stream_finalize_failure.assert_awaited_once()
+    coordinator.deps.delivery_gateway.emit_terminal_outcome_hooks.assert_not_awaited()
+
+
 def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_trace_is_empty(
     tmp_path: Path,
 ) -> None:

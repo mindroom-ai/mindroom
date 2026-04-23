@@ -200,6 +200,8 @@ class _CommittedDeliveryState:
     placeholder_progress_sent: bool
     rendered_body: str
     visible_body_state: Literal["placeholder_only", "visible_body"]
+    option_map: dict[str, str] | None = None
+    options_list: tuple[dict[str, str], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -256,6 +258,8 @@ class StreamingResponse:
         init=False,
         repr=False,
     )
+    _last_committed_option_map: dict[str, str] | None = field(default=None, init=False, repr=False)
+    _last_committed_options_list: tuple[dict[str, str], ...] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -443,7 +447,12 @@ class StreamingResponse:
                 stream_status=final_stream_status,
                 exc_info=True,
             )
-            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
+            (
+                committed_rendered_body,
+                committed_visible_body_state,
+                committed_option_map,
+                committed_options_list,
+            ) = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
@@ -452,8 +461,8 @@ class StreamingResponse:
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
                 failure_reason="terminal_update_cancelled",
-                option_map=None,
-                options_list=None,
+                option_map=committed_option_map,
+                options_list=committed_options_list,
             )
         except Exception as exc:
             logger.warning(
@@ -464,7 +473,12 @@ class StreamingResponse:
                 reason=str(exc),
                 exc_info=True,
             )
-            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
+            (
+                committed_rendered_body,
+                committed_visible_body_state,
+                committed_option_map,
+                committed_options_list,
+            ) = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
@@ -473,8 +487,8 @@ class StreamingResponse:
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
                 failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
-                option_map=None,
-                options_list=None,
+                option_map=committed_option_map,
+                options_list=committed_options_list,
             )
         if not send_succeeded:
             logger.warning(
@@ -483,7 +497,12 @@ class StreamingResponse:
                 room_id=self.room_id,
                 stream_status=final_stream_status,
             )
-            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
+            (
+                committed_rendered_body,
+                committed_visible_body_state,
+                committed_option_map,
+                committed_options_list,
+            ) = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
@@ -492,8 +511,8 @@ class StreamingResponse:
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
                 failure_reason="terminal_update_failed",
-                option_map=None,
-                options_list=None,
+                option_map=committed_option_map,
+                options_list=committed_options_list,
             )
         return StreamTransportOutcome(
             last_physical_stream_event_id=self.event_id,
@@ -566,7 +585,7 @@ class StreamingResponse:
         text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
 
         # Format the text (handles interactive questions if present)
-        response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=is_final)
+        response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
         display_text = response.formatted_text
 
         # Only use latest_thread_event_id for the initial message (not edits)
@@ -607,6 +626,10 @@ class StreamingResponse:
                 visible_body_state=(
                     "placeholder_only" if canonical_visible_body == _PROGRESS_PLACEHOLDER else "visible_body"
                 ),
+                option_map=dict(response.option_map) if response.option_map is not None else None,
+                options_list=(
+                    tuple(dict(item) for item in response.options_list) if response.options_list is not None else None
+                ),
             ),
             had_warmup_suffix=bool(warmup_suffix_lines),
         )
@@ -618,17 +641,39 @@ class StreamingResponse:
         self._last_placeholder_progress_sent = committed_state.placeholder_progress_sent
         self._last_committed_rendered_body = committed_state.rendered_body
         self._last_committed_visible_body_state = committed_state.visible_body_state
+        self._last_committed_option_map = (
+            dict(committed_state.option_map) if committed_state.option_map is not None else None
+        )
+        self._last_committed_options_list = (
+            tuple(dict(item) for item in committed_state.options_list)
+            if committed_state.options_list is not None
+            else None
+        )
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent
 
     def _committed_terminal_snapshot(
         self,
-    ) -> tuple[str | None, Literal["none", "placeholder_only", "visible_body"]]:
+    ) -> tuple[
+        str | None,
+        Literal["none", "placeholder_only", "visible_body"],
+        dict[str, str] | None,
+        tuple[dict[str, str], ...] | None,
+    ]:
         """Return the last visible body that definitely reached Matrix."""
         if self._last_committed_visible_body_state != "none":
-            return self._last_committed_rendered_body, self._last_committed_visible_body_state
+            return (
+                self._last_committed_rendered_body,
+                self._last_committed_visible_body_state,
+                dict(self._last_committed_option_map) if self._last_committed_option_map is not None else None,
+                (
+                    tuple(dict(item) for item in self._last_committed_options_list)
+                    if self._last_committed_options_list is not None
+                    else None
+                ),
+            )
         if self.event_id is not None and self.placeholder_progress_sent:
-            return _PROGRESS_PLACEHOLDER, "placeholder_only"
-        return None, "none"
+            return _PROGRESS_PLACEHOLDER, "placeholder_only", None, None
+        return None, "none", None, None
 
     def restore_last_delivered_state(self) -> None:
         """Discard buffered state that never reached Matrix after a delivery failure."""

@@ -163,6 +163,40 @@ async def test_transport_placeholder_only_cancelled_terminal_update_keeps_commit
 
 
 @pytest.mark.asyncio
+async def test_transport_failed_terminal_update_preserves_committed_interactive_metadata(
+    tmp_path: Path,
+) -> None:
+    """Late terminal failures must keep the committed interactive mapping for the visible streamed question."""
+    config = _config(tmp_path)
+    streaming = _streaming_response(config)
+    streaming.accumulated_text = """```interactive
+{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
+
+    with patch(
+        "mindroom.streaming.send_message_result",
+        new=AsyncMock(
+            return_value=DeliveredMatrixEvent(
+                event_id="$interactive",
+                content_sent={"body": "Choose"},
+            ),
+        ),
+    ):
+        assert await streaming._send_or_edit_message(_client(), is_final=False)
+
+    with patch(
+        "mindroom.streaming.edit_message_result",
+        new=AsyncMock(return_value=None),
+    ):
+        outcome = await streaming.finalize(_client(), restart_interrupted=True)
+
+    assert outcome.terminal_result == "failed"
+    assert outcome.rendered_body is not None
+    assert outcome.option_map == {"✅": "yes", "1": "yes"}
+    assert outcome.options_list == ({"emoji": "✅", "label": "Yes", "value": "yes"},)
+
+
+@pytest.mark.asyncio
 async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_path: Path) -> None:
     """Completed placeholder-backed runs with no visible text must not leave Thinking... behind."""
     config = _config(tmp_path)
