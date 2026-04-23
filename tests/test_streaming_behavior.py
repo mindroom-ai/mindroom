@@ -39,6 +39,8 @@ from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
+    _shutdown_streaming_runtime,
+    _StreamingRuntime,
     build_restart_interrupted_body,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
@@ -1945,6 +1947,53 @@ class TestStreamingBehavior:
             )
 
         assert shutdown_call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_shutdown_streaming_runtime_keeps_unfinished_delivery_task_on_cancellation(self) -> None:
+        """Cancellation during cleanup must preserve the unfinished delivery-task handle for retry."""
+        progress_task = asyncio.create_task(asyncio.sleep(3600))
+        delivery_task = asyncio.create_task(asyncio.sleep(3600))
+        runtime = _StreamingRuntime(
+            delivery_queue=asyncio.Queue(),
+            progress_task=progress_task,
+            delivery_task=delivery_task,
+        )
+        delivery_shutdown_started = asyncio.Event()
+
+        async def finish_progress_shutdown(_pump: object, task: asyncio.Task[None] | None) -> Exception | None:
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            return None
+
+        async def block_delivery_shutdown(
+            _delivery_queue: asyncio.Queue[object | None],
+            task: asyncio.Task[None] | None,
+        ) -> Exception | None:
+            assert task is delivery_task
+            delivery_shutdown_started.set()
+            await asyncio.Event().wait()
+            return None
+
+        with (
+            patch("mindroom.streaming._shutdown_worker_progress_drain", new=finish_progress_shutdown),
+            patch("mindroom.streaming._shutdown_stream_delivery", new=block_delivery_shutdown),
+        ):
+            shutdown_task = asyncio.create_task(_shutdown_streaming_runtime(pump=object(), runtime=runtime))
+            await delivery_shutdown_started.wait()
+            shutdown_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await shutdown_task
+
+        assert runtime.progress_task is None
+        assert runtime.delivery_task is delivery_task
+        assert progress_task.done()
+        assert not delivery_task.done()
+
+        delivery_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await delivery_task
 
     @pytest.mark.asyncio
     async def test_worker_progress_and_content_updates_do_not_overlap_edits(self) -> None:

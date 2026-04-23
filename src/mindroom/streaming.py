@@ -618,12 +618,18 @@ async def _shutdown_streaming_runtime(
     runtime: _StreamingRuntime,
 ) -> _StreamingCleanup:
     """Shut down stream-owned async helpers once and cache the result."""
-    progress_task, runtime.progress_task = runtime.progress_task, None
-    delivery_task, runtime.delivery_task = runtime.delivery_task, None
-    progress_error = await _shutdown_worker_progress_drain(pump, progress_task) if progress_task is not None else None
-    delivery_error = (
-        await _shutdown_stream_delivery(runtime.delivery_queue, delivery_task) if delivery_task is not None else None
-    )
+    progress_error = None
+    if runtime.progress_task is not None:
+        progress_task = runtime.progress_task
+        progress_error = await _shutdown_worker_progress_drain(pump, progress_task)
+        runtime.progress_task = None
+
+    delivery_error = None
+    if runtime.delivery_task is not None:
+        delivery_task = runtime.delivery_task
+        delivery_error = await _shutdown_stream_delivery(runtime.delivery_queue, delivery_task)
+        runtime.delivery_task = None
+
     return _StreamingCleanup(
         progress_error=progress_error,
         delivery_error=delivery_error,
