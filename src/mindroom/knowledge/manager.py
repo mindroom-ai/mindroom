@@ -53,6 +53,7 @@ _SOURCE_SIZE_KEY = "source_size"
 _FAILED_SIGNATURE_RETRY_SECONDS = 300
 _FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
 _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 32
+_POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
 _INDEXING_STATUS_RESETTING = "resetting"
 _INDEXING_STATUS_INDEXING = "indexing"
 _INDEXING_STATUS_COMPLETE = "complete"
@@ -1034,6 +1035,25 @@ class KnowledgeManager:
         ids = result.get("ids", []) or []
         return bool(ids)
 
+    async def _wait_for_source_vectors(
+        self,
+        relative_path: str,
+        *,
+        knowledge: Knowledge | None = None,
+    ) -> bool:
+        """Retry post-insert visibility checks to tolerate brief vector-store lag."""
+        for attempt, delay_seconds in enumerate(_POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS):
+            if attempt > 0:
+                await asyncio.sleep(delay_seconds)
+            has_vectors = await asyncio.to_thread(
+                self._has_vectors_for_source_path,
+                relative_path,
+                knowledge=knowledge,
+            )
+            if has_vectors:
+                return True
+        return False
+
     def _build_reader(self, file_path: Path) -> Reader:
         """Build a per-file reader with conservative chunking for text-like content."""
         base_config = self.config.get_knowledge_base_config(self.base_id)
@@ -1463,8 +1483,7 @@ class KnowledgeManager:
             logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
             return False
 
-        has_vectors = await asyncio.to_thread(
-            self._has_vectors_for_source_path,
+        has_vectors = await self._wait_for_source_vectors(
             relative_path,
             knowledge=target_knowledge,
         )

@@ -893,6 +893,53 @@ async def test_search_during_reindex_returns_results_against_old_collection(
 
 
 @pytest.mark.asyncio
+async def test_reindex_all_retries_transient_shadow_visibility_miss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shadow rebuilds should tolerate a one-shot post-insert visibility miss."""
+    _ShadowChromaDb.collections = {}
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _ShadowChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _ShadowKnowledge)
+
+    docs_path = tmp_path / "knowledge"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "doc-a.md").write_text("old snapshot", encoding="utf-8")
+    config = _make_config(docs_path)
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    await manager.reindex_all()
+
+    (docs_path / "doc-a.md").write_text("new snapshot", encoding="utf-8")
+    (docs_path / "doc-b.md").write_text("new sibling", encoding="utf-8")
+
+    original_has_vectors_for_source_path = manager._has_vectors_for_source_path
+    transient_failures = {"doc-b.md": 1}
+
+    def _flaky_has_vectors(
+        relative_path: str,
+        *,
+        knowledge: object | None = None,
+    ) -> bool:
+        remaining_failures = transient_failures.get(relative_path, 0)
+        if knowledge is not None and knowledge is not manager.get_knowledge() and remaining_failures > 0:
+            transient_failures[relative_path] = remaining_failures - 1
+            return False
+        return original_has_vectors_for_source_path(relative_path, knowledge=knowledge)
+
+    monkeypatch.setattr(manager, "_has_vectors_for_source_path", _flaky_has_vectors)
+
+    indexed_count = await manager.reindex_all()
+
+    assert indexed_count == 2
+    live_results = manager.get_knowledge().search("snapshot", max_results=10)
+    assert {document.content for document in live_results} == {"new snapshot", "new sibling"}
+
+
+@pytest.mark.asyncio
 async def test_reindex_all_failure_preserves_previous_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
