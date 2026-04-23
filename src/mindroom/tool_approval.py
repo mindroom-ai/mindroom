@@ -48,6 +48,7 @@ _DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
     "In ad-hoc invited rooms accepted via accept_invites, approval only works if the router "
     "is already joined there; otherwise retry from a managed room."
 )
+_DEFAULT_APPROVER_LOST_AUTHORIZATION_REASON = "Approver lost authorization."
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
@@ -822,6 +823,75 @@ class ApprovalManager:
             resolved_by=resolved_by,
             resolve_truncated_approval=True,
         )
+
+    async def deny_anchored_request_for_lost_authorization(
+        self,
+        *,
+        approval_event_id: str,
+        room_id: str,
+        resolved_by: str,
+    ) -> AnchoredApprovalActionResult:
+        """Fail closed when the stored approver can no longer resolve the request."""
+        pending = self._anchored_request(
+            approval_event_id=approval_event_id,
+            room_id=room_id,
+        )
+        if pending is None:
+            return AnchoredApprovalActionResult(handled=False)
+        if pending.status != "pending":
+            return AnchoredApprovalActionResult(
+                handled=pending.resolution_synced_at is None and pending.approver_user_id == resolved_by,
+            )
+        if pending.approver_user_id != resolved_by:
+            return AnchoredApprovalActionResult(handled=False)
+        if (
+            await self._resolve_pending(
+                pending.id,
+                status="denied",
+                reason=_DEFAULT_APPROVER_LOST_AUTHORIZATION_REASON,
+                resolved_by=resolved_by,
+            )
+            is not None
+        ):
+            return AnchoredApprovalActionResult(handled=True)
+        refreshed = self._anchored_request(
+            approval_event_id=approval_event_id,
+            room_id=room_id,
+        )
+        return AnchoredApprovalActionResult(
+            handled=refreshed is not None and refreshed.status != "pending" and refreshed.resolution_synced_at is None,
+        )
+
+    async def restate_pending_anchored_request(
+        self,
+        *,
+        approval_event_id: str,
+        room_id: str,
+    ) -> bool:
+        """Re-emit one unchanged pending approval card so the viewer can reconcile local UI state."""
+        pending = self._anchored_request(
+            approval_event_id=approval_event_id,
+            room_id=room_id,
+        )
+        if pending is None or pending.status != "pending" or pending.room_id is None or pending.event_id is None:
+            return False
+        if self._edit_event is None:
+            return False
+        try:
+            return await self._edit_event(
+                pending.room_id,
+                pending.event_id,
+                self._pending_event_content(pending),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to edit approval Matrix event",
+                approval_id=pending.id,
+                room_id=pending.room_id,
+                event_id=pending.event_id,
+                exc_info=True,
+            )
+            return False
 
     async def approve(
         self,

@@ -1416,19 +1416,53 @@ class AgentBot:
         approval_event_id, status, reason = self._approval_response_payload(event)
         if approval_event_id is None or status is None:
             return
-
-        await self._handle_tool_approval_action(
-            room=room,
-            sender_id=event.sender,
+        approval_manager = get_approval_store()
+        if approval_manager is None:
+            return
+        pending = approval_manager.anchored_request_for_event(
             approval_event_id=approval_event_id,
-            action=lambda approval_manager: approval_manager.handle_custom_response(
+            room_id=room.room_id,
+        )
+        if pending is None:
+            return
+        sender_is_requester = pending.approver_user_id == event.sender
+        pending_is_open = pending.status == "pending"
+
+        if not self._sender_can_resolve_tool_approval(room, event.sender):
+            if pending_is_open and sender_is_requester:
+                await approval_manager.deny_anchored_request_for_lost_authorization(
+                    approval_event_id=approval_event_id,
+                    room_id=room.room_id,
+                    resolved_by=event.sender,
+                )
+            return
+
+        result = await approval_manager.handle_custom_response(
+            approval_event_id=approval_event_id,
+            room_id=room.room_id,
+            status=status,
+            reason=reason,
+            resolved_by=event.sender,
+        )
+        orchestrator = self.orchestrator
+        if (
+            result.error_reason is not None
+            and orchestrator is not None
+            and self._should_send_tool_approval_notice(room_id=room.room_id)
+        ):
+            await orchestrator._send_approval_notice(
+                room_id=room.room_id,
+                approval_event_id=approval_event_id,
+                thread_id=result.thread_id,
+                reason=result.error_reason,
+            )
+        if result.handled:
+            return
+        if pending_is_open and not sender_is_requester:
+            await approval_manager.restate_pending_anchored_request(
                 approval_event_id=approval_event_id,
                 room_id=room.room_id,
-                status=status,
-                reason=reason,
-                resolved_by=event.sender,
-            ),
-        )
+            )
 
     @staticmethod
     def _approval_response_payload(
