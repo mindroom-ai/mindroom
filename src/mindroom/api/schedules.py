@@ -317,7 +317,7 @@ async def cancel_schedule(
     room_id: CancelRoomId,
 ) -> CancelScheduleResponse:
     """Cancel a scheduled task by ID."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+    from mindroom.api.config_lifecycle import api_runtime_paths  # noqa: PLC0415
 
     runtime_paths = api_runtime_paths(request)
     resolved_room_id = _resolve_room_id(room_id, runtime_paths=runtime_paths)

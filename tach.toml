@@ -328,6 +328,10 @@ depends_on = [
 path = "mindroom.api.sandbox_protocol"
 depends_on = []
 
+# NOTE (arch-b-7): sandbox modules currently depend on the concrete
+# workers.backends.local backend. Honest definition-site encoding for
+# now; ARCH-B-9 will lift the shared sandbox-relevant types into a
+# workers facade and redirect these deps.
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
@@ -369,7 +373,6 @@ path = "mindroom.api.schedules"
 depends_on = [
     "mindroom",
     "mindroom.api.config_lifecycle",
-    "mindroom.api.main",
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.logging_config",
@@ -1200,7 +1203,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.config_confirmation"
 depends_on = [
-    "mindroom.bot",
     "mindroom.commands.config_commands",
     "mindroom.logging_config",
 ]
