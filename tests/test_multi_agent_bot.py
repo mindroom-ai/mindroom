@@ -172,24 +172,33 @@ def _stream_outcome(
 
 
 def _outcome(
-    state: str,
-    *,
     terminal_status: str,
     final_visible_event_id: str | None = None,
+    visible_response_event_id: str | None = None,
+    response_identity_event_id: str | None = None,
+    turn_completion_event_id: str | None = None,
     last_physical_stream_event_id: str | None = None,
     final_visible_body: str | None = None,
     delivery_kind: str | None = None,
     failure_reason: str | None = None,
+    mark_handled: bool = False,
+    retryable: bool = False,
+    suppressed: bool = False,
     extra_content: dict[str, object] | None = None,
 ) -> FinalDeliveryOutcome:
     return FinalDeliveryOutcome(
-        state=state,
         terminal_status=terminal_status,
         final_visible_event_id=final_visible_event_id,
+        visible_response_event_id=visible_response_event_id,
+        response_identity_event_id=response_identity_event_id,
+        turn_completion_event_id=turn_completion_event_id,
         last_physical_stream_event_id=last_physical_stream_event_id,
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
         failure_reason=failure_reason,
+        mark_handled=mark_handled,
+        retryable=retryable,
+        suppressed=suppressed,
         extra_content=extra_content,
     )
 
@@ -2125,7 +2134,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Non-streaming responses should pass through before/after hooks."""
+        """Direct non-streaming delivery still applies before_response before lifecycle finalization."""
         after_results: list[tuple[str, str, str, str]] = []
         before_calls = 0
 
@@ -2174,7 +2183,7 @@ class TestAgentBot:
         assert delivery.event_id == "$response"
         assert before_calls == 1
         assert bot.client.room_send.await_args.kwargs["content"]["body"] == "Handled [hooked]"
-        assert after_results == [("$response", "Handled [hooked]", "sent", "ai")]
+        assert after_results == []
 
     @pytest.mark.asyncio
     async def test_process_and_respond_passes_active_response_event_ids(
@@ -2235,7 +2244,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Visible streamed success should not be rewritten or suppressed by message:before_response."""
+        """Direct streamed delivery keeps before_response off the post-visible path before lifecycle finalization."""
         after_results: list[tuple[str, str, str, str]] = []
         before_calls = 0
 
@@ -2298,7 +2307,7 @@ class TestAgentBot:
         assert delivery.event_id == "$response"
         assert before_calls == 0
         mock_edit_message.assert_not_awaited()
-        assert after_results == [("$response", "chunk", "sent", "ai")]
+        assert after_results == []
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_passes_active_response_event_ids(
@@ -2723,11 +2732,12 @@ class TestAgentBot:
         )
 
         gateway_outcome = _outcome(
-            "kept_prior_visible_response_after_error",
             terminal_status="error",
             final_visible_event_id="$existing",
+            visible_response_event_id="$existing",
             final_visible_body="",
             failure_reason="delivery_failed",
+            retryable=True,
         )
         bot._delivery_gateway.deliver_final = AsyncMock(return_value=gateway_outcome)
         bot._edit_message = AsyncMock(return_value=False)
@@ -2753,8 +2763,7 @@ class TestAgentBot:
         delivered_request = bot._delivery_gateway.deliver_final.await_args.args[0]
         assert delivered_request.existing_event_is_placeholder is True
         assert delivered_request.response_kind == "system"
-        assert delivered_request.apply_before_hooks is False
-        assert delivery_resolution.state == "kept_prior_visible_response_after_error"
+        assert delivery_resolution.terminal_status == "error"
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_redacts_suppressed_placeholder(
@@ -2920,10 +2929,10 @@ class TestAgentBot:
             ),
         )
 
-        assert outcome.state == "suppression_cleanup_failed"
+        assert outcome.terminal_status == "error"
         assert outcome.visible_response_event_id == "$placeholder"
         assert outcome.response_identity_event_id is None
-        assert outcome.should_mark_handled is True
+        assert outcome.mark_handled is True
         assert outcome.retryable is False
         gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
@@ -2958,10 +2967,15 @@ class TestAgentBot:
         redact_message_event = AsyncMock(return_value=True)
         gateway = replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
         mock_deliver_final = AsyncMock(
-            return_value=FinalDeliveryOutcome.final_visible_delivery(
+            return_value=FinalDeliveryOutcome(
+                terminal_status="completed",
                 final_visible_event_id="$streaming",
+                visible_response_event_id="$streaming",
+                response_identity_event_id="$streaming",
+                turn_completion_event_id="$streaming",
                 final_visible_body="updated text",
                 delivery_kind="edited",
+                mark_handled=True,
             ),
         )
         object.__setattr__(gateway, "deliver_final", mock_deliver_final)
@@ -2979,7 +2993,7 @@ class TestAgentBot:
             ),
         )
 
-        assert outcome.state == "final_visible_delivery"
+        assert outcome.terminal_status == "completed"
         assert outcome.final_visible_event_id == "$streaming"
         assert outcome.final_visible_body == "chunk"
         mock_deliver_final.assert_not_awaited()
@@ -3027,7 +3041,7 @@ class TestAgentBot:
             ),
         )
 
-        assert outcome.state == "cancelled_without_visible_response"
+        assert outcome.terminal_status == "cancelled"
         gateway.deps.redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$thinking",
@@ -3081,11 +3095,13 @@ class TestAgentBot:
                 "generate_response",
                 new=AsyncMock(
                     return_value=_outcome(
-                        "cancelled_with_visible_note",
                         terminal_status="cancelled",
                         final_visible_event_id="$cancelled",
+                        visible_response_event_id="$cancelled",
+                        turn_completion_event_id="$cancelled",
                         final_visible_body="**[Response cancelled by user]**",
                         failure_reason="cancelled_by_user",
+                        retryable=True,
                     ),
                 ),
             ),
@@ -3159,10 +3175,10 @@ class TestAgentBot:
                 ),
             )
 
-        assert delivery.state == "kept_prior_visible_response_after_error"
+        assert delivery.terminal_status == "error"
         assert delivery.visible_response_event_id == "$existing"
         assert delivery.response_identity_event_id is None
-        assert delivery.should_mark_handled is False
+        assert delivery.mark_handled is False
         assert delivery.retryable is True
 
     def test_response_outcome_prefers_terminal_status_over_delivery_kind(self) -> None:
@@ -3170,11 +3186,13 @@ class TestAgentBot:
         assert (
             ResponseRunner._response_outcome(
                 _outcome(
-                    "cancelled_with_visible_note",
                     terminal_status="cancelled",
                     final_visible_event_id="$cancelled",
+                    visible_response_event_id="$cancelled",
+                    turn_completion_event_id="$cancelled",
                     final_visible_body="Cancelled.",
                     delivery_kind="edited",
+                    retryable=True,
                 ),
             )
             == "cancelled"
@@ -3182,10 +3200,11 @@ class TestAgentBot:
         assert (
             ResponseRunner._response_outcome(
                 _outcome(
-                    "kept_prior_visible_response_after_error",
                     terminal_status="error",
                     final_visible_event_id="$error",
+                    visible_response_event_id="$error",
                     final_visible_body="boom",
+                    retryable=True,
                 ),
             )
             == "error"
@@ -3634,9 +3653,14 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
                         final_visible_event_id="$response",
+                        visible_response_event_id="$response",
+                        response_identity_event_id="$response",
+                        turn_completion_event_id="$response",
                         final_visible_body="ok",
+                        mark_handled=True,
                     ),
                 ),
             ) as mock_process,
@@ -3746,9 +3770,14 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
                         final_visible_event_id="$response",
+                        visible_response_event_id="$response",
+                        response_identity_event_id="$response",
+                        turn_completion_event_id="$response",
                         final_visible_body="ok",
+                        mark_handled=True,
                     ),
                 ),
             ) as mock_process,
@@ -3837,10 +3866,15 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond_streaming",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
                         final_visible_event_id="$thinking",
+                        visible_response_event_id="$thinking",
+                        response_identity_event_id="$thinking",
+                        turn_completion_event_id="$thinking",
                         final_visible_body="",
                         delivery_kind="edited",
+                        mark_handled=True,
                     ),
                 ),
             ) as mock_process,
@@ -3927,9 +3961,14 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
                         final_visible_event_id="$response",
+                        visible_response_event_id="$response",
+                        response_identity_event_id="$response",
+                        turn_completion_event_id="$response",
                         final_visible_body="ok",
+                        mark_handled=True,
                     ),
                 ),
             ) as mock_process,
@@ -4021,10 +4060,15 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
                         final_visible_event_id="$thinking",
+                        visible_response_event_id="$thinking",
+                        response_identity_event_id="$thinking",
+                        turn_completion_event_id="$thinking",
                         final_visible_body="ok",
                         delivery_kind="edited",
+                        mark_handled=True,
                     ),
                 ),
             ),
@@ -4289,9 +4333,14 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
                         final_visible_event_id="$response",
+                        visible_response_event_id="$response",
+                        response_identity_event_id="$response",
+                        turn_completion_event_id="$response",
                         final_visible_body="ok",
+                        mark_handled=True,
                     ),
                 ),
             ),
@@ -4626,8 +4675,8 @@ class TestAgentBot:
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert resolution.state == "final_visible_delivery"
-        assert resolution.should_mark_handled is True
+        assert resolution.terminal_status == "completed"
+        assert resolution.mark_handled is True
         assert resolution.visible_response_event_id == "$team-response"
         mock_thread_summary.assert_awaited_once()
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
@@ -4818,8 +4867,8 @@ class TestAgentBot:
                 correlation_id="corr-team-stream-suppress",
             )
 
-        assert resolution.state == "final_visible_delivery"
-        assert resolution.should_mark_handled is True
+        assert resolution.terminal_status == "completed"
+        assert resolution.mark_handled is True
         assert resolution.visible_response_event_id == "$placeholder"
         bot._redact_message_event.assert_not_awaited()
 
@@ -4868,7 +4917,9 @@ class TestAgentBot:
                 correlation_id="corr-team-suppress",
             )
 
-        assert resolution.state == "suppressed_redacted"
+        assert resolution.terminal_status == "cancelled"
+        assert resolution.suppressed is True
+        assert resolution.mark_handled is True
         assert resolution.visible_response_event_id is None
         bot._redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
@@ -7858,9 +7909,14 @@ class TestAgentBot:
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome.final_visible_delivery(
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
                         final_visible_event_id="$response",
+                        visible_response_event_id="$response",
+                        response_identity_event_id="$response",
+                        turn_completion_event_id="$response",
                         final_visible_body="ok",
+                        mark_handled=True,
                     ),
                 ),
             ) as mock_process,
@@ -8430,11 +8486,14 @@ class TestAgentBot:
         mock_send_response = AsyncMock()
         mock_generate_team_response = AsyncMock(
             return_value=_outcome(
-                "final_visible_delivery",
                 terminal_status="completed",
                 final_visible_event_id="$team-response",
+                visible_response_event_id="$team-response",
+                response_identity_event_id="$team-response",
+                turn_completion_event_id="$team-response",
                 final_visible_body="",
                 delivery_kind="sent",
+                mark_handled=True,
             ),
         )
         install_send_response_mock(bot, mock_send_response)
@@ -8996,10 +9055,13 @@ class TestAgentBot:
                 "generate_response",
                 new=AsyncMock(
                     return_value=_outcome(
-                        "suppression_cleanup_failed",
                         terminal_status="error",
+                        final_visible_event_id="$thinking",
+                        visible_response_event_id="$thinking",
+                        turn_completion_event_id="$thinking",
                         last_physical_stream_event_id="$thinking",
                         failure_reason="suppressed_by_hook",
+                        mark_handled=True,
                     ),
                 ),
             ),
@@ -9067,10 +9129,11 @@ class TestAgentBot:
             ),
         )
 
-        assert outcome.state == "kept_prior_visible_response_after_suppression"
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.suppressed is True
         assert outcome.visible_response_event_id == "$existing"
         assert outcome.response_identity_event_id is None
-        assert outcome.should_mark_handled is False
+        assert outcome.mark_handled is False
         gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -9116,10 +9179,10 @@ class TestAgentBot:
                 ),
             )
 
-        assert outcome.state == "kept_prior_visible_response_after_error"
+        assert outcome.terminal_status == "error"
         assert outcome.visible_response_event_id == "$existing"
         assert outcome.response_identity_event_id is None
-        assert outcome.should_mark_handled is False
+        assert outcome.mark_handled is False
         gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -9157,7 +9220,7 @@ class TestAgentBot:
             ),
         )
 
-        assert outcome.state == "error_without_visible_response"
+        assert outcome.terminal_status == "error"
         gateway.deps.redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$thinking",
@@ -9200,7 +9263,7 @@ class TestAgentBot:
             ),
         )
 
-        assert outcome.state == "cancelled_without_visible_response"
+        assert outcome.terminal_status == "cancelled"
         gateway.deps.redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$thinking",
@@ -9254,9 +9317,9 @@ class TestAgentBot:
                 "generate_response",
                 new=AsyncMock(
                     return_value=_outcome(
-                        "error_without_visible_response",
                         terminal_status="error",
                         failure_reason="delivery_failed",
+                        retryable=True,
                     ),
                 ),
             ),

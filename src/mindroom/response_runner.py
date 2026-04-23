@@ -20,7 +20,7 @@ from mindroom.ai import (
 )
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
-from mindroom.cancellation import cancel_failure_reason, is_cancelled_failure_reason
+from mindroom.cancellation import cancel_failure_reason, classify_cancel_source
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -51,7 +51,6 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.orchestration.runtime import CancelSource, classify_cancel_source
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,
     ResponseOutcome,
@@ -59,7 +58,6 @@ from mindroom.post_response_effects import (
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
-    StreamDeliveryState,
     StreamingDeliveryError,
     StreamingResponse,
     clean_partial_reply_text,
@@ -152,46 +150,6 @@ def _strip_visible_tool_markers(text: str) -> str:
     """Remove Matrix-visible tool marker lines from streamed text before replay persistence."""
     filtered_lines = [line for line in text.splitlines() if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)]
     return "\n".join(filtered_lines).rstrip()
-
-
-def _visible_body_state_for_text(
-    text: str,
-) -> tuple[str | None, Literal["none", "placeholder_only", "visible_body"]]:
-    """Classify one rendered body snapshot using the canonical placeholder rule."""
-    stripped_text = text.strip()
-    if not stripped_text:
-        return None, "none"
-    if stripped_text == PROGRESS_PLACEHOLDER:
-        return text, "placeholder_only"
-    return text, "visible_body"
-
-
-def _cancel_failure_reason(cancel_source: CancelSource) -> str:
-    """Return the canonical failure reason for one cancellation provenance."""
-    return cancel_failure_reason(cancel_source)
-
-
-def _stream_transport_outcome_from_delivery_exception(
-    *,
-    error: StreamingDeliveryError,
-    existing_event_id: str | None,
-) -> StreamTransportOutcome:
-    """Convert one streaming delivery exception into the canonical terminal transport snapshot."""
-    if error.transport_outcome is not None:
-        if error.transport_outcome.failure_reason is not None:
-            return error.transport_outcome
-        return replace(error.transport_outcome, failure_reason=str(error.error))
-
-    rendered_body, visible_body_state = _visible_body_state_for_text(error.accumulated_text)
-    return StreamTransportOutcome(
-        last_physical_stream_event_id=error.event_id,
-        terminal_operation="edit" if existing_event_id else "send",
-        terminal_result="failed",
-        terminal_status="error",
-        rendered_body=rendered_body,
-        visible_body_state=visible_body_state,
-        failure_reason=str(error.error),
-    )
 
 
 def _materialize_matrix_run_metadata(
@@ -497,104 +455,10 @@ class ResponseRunner:
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
 
-    def _latest_stream_event_id(
-        self,
-        *,
-        tracked_event_id: MatrixEventId | None,
-        stream_state: StreamDeliveryState | None,
-        fallback_event_id: MatrixEventId | None = None,
-    ) -> MatrixEventId | None:
-        """Prefer the latest visible stream id captured inside the streaming transport."""
-        if stream_state is not None and stream_state.event_id:
-            return stream_state.event_id
-        return tracked_event_id or fallback_event_id
-
-    def _raw_late_stream_transport_outcome(
-        self,
-        *,
-        tracked_event_id: MatrixEventId | None,
-        stream_state: StreamDeliveryState | None,
-        existing_event_id: MatrixEventId | None,
-        existing_event_is_placeholder: bool,
-        placeholder_event_id: MatrixEventId | None,
-        failure_reason: str | None,
-    ) -> StreamTransportOutcome:
-        """Build one canonical transport snapshot for raw late streaming failures."""
-        if stream_state is not None and stream_state.finalization_outcome is not None:
-            transport_outcome = stream_state.finalization_outcome
-            if failure_reason is None or transport_outcome.failure_reason == failure_reason:
-                return transport_outcome
-            return replace(transport_outcome, failure_reason=failure_reason)
-
-        event_id = self._latest_stream_event_id(
-            tracked_event_id=tracked_event_id,
-            stream_state=stream_state,
-            fallback_event_id=placeholder_event_id or (existing_event_id if existing_event_is_placeholder else None),
-        )
-        rendered_body, visible_body_state = _visible_body_state_for_text(
-            stream_state.accumulated_text if stream_state is not None else "",
-        )
-        placeholder_only_event = event_id is not None and (
-            event_id == placeholder_event_id
-            or (existing_event_id is not None and existing_event_is_placeholder and event_id == existing_event_id)
-        )
-        if visible_body_state == "none" and placeholder_only_event:
-            rendered_body = PROGRESS_PLACEHOLDER
-            visible_body_state = "placeholder_only"
-        cancelled = is_cancelled_failure_reason(failure_reason)
-        return StreamTransportOutcome(
-            last_physical_stream_event_id=event_id,
-            terminal_operation="edit" if existing_event_id else "send",
-            terminal_result="cancelled" if cancelled else "failed",
-            terminal_status="cancelled" if cancelled else "error",
-            rendered_body=rendered_body,
-            visible_body_state=visible_body_state,
-            failure_reason=failure_reason,
-        )
-
-    async def _resolve_late_stream_failure(
-        self,
-        *,
-        target: MessageTarget,
-        existing_event_id: MatrixEventId | None,
-        existing_event_is_placeholder: bool,
-        failure_reason: str | None,
-        response_kind: str,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
-        stream_transport_outcome: StreamTransportOutcome | None = None,
-        tracked_event_id: MatrixEventId | None = None,
-        stream_state: StreamDeliveryState | None = None,
-        placeholder_event_id: MatrixEventId | None = None,
-        tool_trace: list[ToolTraceEntry] | tuple[ToolTraceEntry, ...] | None = None,
-        extra_content: Mapping[str, Any] | None = None,
-    ) -> FinalDeliveryOutcome:
-        """Resolve one late streaming failure through the canonical gateway cleanup path."""
-        transport_outcome = stream_transport_outcome or self._raw_late_stream_transport_outcome(
-            tracked_event_id=tracked_event_id,
-            stream_state=stream_state,
-            existing_event_id=existing_event_id,
-            existing_event_is_placeholder=existing_event_is_placeholder,
-            placeholder_event_id=placeholder_event_id,
-            failure_reason=failure_reason,
-        )
-        request_tool_trace = list(tool_trace) if tool_trace is not None else None
-        request_extra_content = dict(extra_content) if extra_content is not None else None
-        return await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
-            LateStreamFinalizeFailureRequest(
-                target=target,
-                stream_transport_outcome=transport_outcome,
-                response_kind=response_kind,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                tool_trace=request_tool_trace,
-                extra_content=request_extra_content,
-                failure_reason=failure_reason or "late_stream_delivery_failure",
-                cancelled=is_cancelled_failure_reason(failure_reason),
-                existing_event_id=existing_event_id,
-                existing_event_is_placeholder=existing_event_is_placeholder,
-            ),
-        )
+    @staticmethod
+    def _should_reraise_user_stop(exc: BaseException) -> bool:
+        """Preserve explicit user-stop cancellations after visible cleanup has finished."""
+        return isinstance(exc, asyncio.CancelledError) and classify_cancel_source(exc) == "user_stop"
 
     @property
     def in_flight_response_count(self) -> int:
@@ -1078,7 +942,7 @@ class ResponseRunner:
             return "error"
         if final_delivery_outcome is not None and final_delivery_outcome.delivery_kind is not None:
             return final_delivery_outcome.delivery_kind
-        if final_delivery_outcome is not None and final_delivery_outcome.has_any_visible_response:
+        if final_delivery_outcome is not None and final_delivery_outcome.visible_response_event_id is not None:
             return "visible_response_preserved"
         return "no_visible_response"
 
@@ -1136,36 +1000,6 @@ class ResponseRunner:
             request=request,
             response_envelope=resolved_response_envelope,
             correlation_id=correlation_id or self._correlation_id_for_request(request),
-        )
-
-    async def _emit_empty_prompt_outcome(
-        self,
-        request: ResponseRequest,
-        *,
-        response_kind: str,
-        failure_reason: str = "empty_response_prompt",
-    ) -> FinalDeliveryOutcome:
-        """Emit the canonical no-visible terminal outcome for one blank prompt request."""
-        resolved_target = request.target or self.deps.resolver.build_message_target(
-            room_id=request.room_id,
-            thread_id=request.thread_id,
-            reply_to_event_id=request.reply_to_event_id,
-        )
-        response_envelope = self._response_envelope_for_request(
-            request,
-            resolved_target=resolved_target,
-        )
-        return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
-            outcome=FinalDeliveryOutcome(
-                state="error_without_visible_response",
-                terminal_status="error",
-                final_visible_event_id=None,
-                last_physical_stream_event_id=None,
-                failure_reason=failure_reason,
-            ),
-            correlation_id=self._correlation_id_for_request(request),
-            envelope=response_envelope,
-            response_kind=response_kind,
         )
 
     async def _ensure_request_knowledge_managers(
@@ -1327,7 +1161,7 @@ class ResponseRunner:
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
         delivery_failure_reason: str | None = None
-        stream_state = StreamDeliveryState()
+        delivery_cancelled = False
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         active_event_ids = self._active_response_event_ids(request.room_id)
         team_turn_recorder = self._build_turn_recorder(
@@ -1366,6 +1200,8 @@ class ResponseRunner:
                 delivery_request.existing_event_id is None or delivery_request.existing_event_is_placeholder
             ):
                 async with typing_indicator(self._client(), request.room_id):
+                    event_id: str | None = None
+                    accumulated = ""
 
                     def build_response_stream() -> AsyncIterator[object]:
                         return team_response_stream(
@@ -1412,7 +1248,6 @@ class ResponseRunner:
                                 header=None,
                                 show_tool_calls=show_tool_calls,
                                 streaming_cls=ReplacementStreamingResponse,
-                                stream_state=stream_state,
                                 pipeline_timing=request.pipeline_timing,
                                 visible_event_id_callback=_note_visible_response_event_id,
                             ),
@@ -1422,8 +1257,6 @@ class ResponseRunner:
                         if event_id:
                             tracked_event_id = event_id
                     except asyncio.CancelledError:
-                        if stream_state.finalization_outcome is not None:
-                            raise
                         self._persist_interrupted_recorder(
                             recorder=team_turn_recorder,
                             session_scope=session_scope,
@@ -1469,17 +1302,20 @@ class ResponseRunner:
                         is_team=True,
                         response_event_id=event_id or tracked_event_id,
                     )
-                    final_delivery_outcome = await self._resolve_late_stream_failure(
-                        target=delivery_target,
-                        existing_event_id=request.existing_event_id,
-                        existing_event_is_placeholder=request.existing_event_is_placeholder,
-                        failure_reason="stream_finalize_cancelled",
-                        response_kind="team",
-                        response_envelope=resolved_response_envelope,
-                        correlation_id=resolved_correlation_id,
-                        stream_transport_outcome=transport_outcome,
-                        tool_trace=None,
-                        extra_content=None,
+                    final_delivery_outcome = await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                        LateStreamFinalizeFailureRequest(
+                            target=delivery_target,
+                            stream_transport_outcome=transport_outcome,
+                            response_kind="team",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                            failure_reason="stream_finalize_cancelled",
+                            cancelled=True,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        ),
                     )
                     return
                 except Exception as error:
@@ -1497,17 +1333,20 @@ class ResponseRunner:
                         is_team=True,
                         response_event_id=event_id or tracked_event_id,
                     )
-                    final_delivery_outcome = await self._resolve_late_stream_failure(
-                        target=delivery_target,
-                        existing_event_id=request.existing_event_id,
-                        existing_event_is_placeholder=request.existing_event_is_placeholder,
-                        failure_reason=str(error),
-                        response_kind="team",
-                        response_envelope=resolved_response_envelope,
-                        correlation_id=resolved_correlation_id,
-                        stream_transport_outcome=transport_outcome,
-                        tool_trace=None,
-                        extra_content=None,
+                    final_delivery_outcome = await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                        LateStreamFinalizeFailureRequest(
+                            target=delivery_target,
+                            stream_transport_outcome=transport_outcome,
+                            response_kind="team",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                            failure_reason=str(error),
+                            cancelled=False,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        ),
                     )
                     return
                 if request.pipeline_timing is not None:
@@ -1585,18 +1424,21 @@ class ResponseRunner:
                             ),
                         )
                     else:
-                        final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
-                            outcome=FinalDeliveryOutcome(
-                                state="cancelled_without_visible_response",
-                                terminal_status="cancelled",
-                                final_visible_event_id=None,
-                                last_physical_stream_event_id=None,
-                                failure_reason=_cancel_failure_reason(classify_cancel_source(exc)),
-                            ),
+                        failure_reason = cancel_failure_reason(classify_cancel_source(exc))
+                        await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
                             correlation_id=resolved_correlation_id,
                             envelope=resolved_response_envelope,
                             response_kind="team",
+                            failure_reason=failure_reason,
                         )
+                        final_delivery_outcome = FinalDeliveryOutcome(
+                            terminal_status="cancelled",
+                            final_visible_event_id=None,
+                            failure_reason=failure_reason,
+                            retryable=True,
+                        )
+                    if self._should_reraise_user_stop(exc):
+                        raise
                     return
 
                 delivery_stage_started = True
@@ -1637,8 +1479,9 @@ class ResponseRunner:
         stream_transport_outcome: StreamTransportOutcome | None = None
 
         def note_task_cancelled(failure_reason: str) -> None:
-            nonlocal delivery_failure_reason
+            nonlocal delivery_failure_reason, delivery_cancelled
             delivery_failure_reason = failure_reason
+            delivery_cancelled = True
 
         try:
             run_message_id = await self.run_cancellable_response(
@@ -1657,10 +1500,35 @@ class ResponseRunner:
             if tracked_event_id is None:
                 tracked_event_id = run_message_id
         except StreamingDeliveryError as error:
-            stream_transport_outcome = _stream_transport_outcome_from_delivery_exception(
-                error=error,
-                existing_event_id=request.existing_event_id,
-            )
+            if error.transport_outcome is not None:
+                stream_transport_outcome = error.transport_outcome
+                if stream_transport_outcome.failure_reason is None:
+                    stream_transport_outcome = replace(
+                        stream_transport_outcome,
+                        failure_reason=str(error.error),
+                    )
+            else:
+                stripped_text = error.accumulated_text.strip()
+                rendered_body: str | None
+                visible_body_state: Literal["none", "placeholder_only", "visible_body"]
+                if not stripped_text:
+                    rendered_body = None
+                    visible_body_state = "none"
+                elif stripped_text == PROGRESS_PLACEHOLDER:
+                    rendered_body = error.accumulated_text
+                    visible_body_state = "placeholder_only"
+                else:
+                    rendered_body = error.accumulated_text
+                    visible_body_state = "visible_body"
+                stream_transport_outcome = StreamTransportOutcome(
+                    last_physical_stream_event_id=error.event_id,
+                    terminal_operation="edit" if request.existing_event_id else "send",
+                    terminal_result="failed",
+                    terminal_status="error",
+                    rendered_body=rendered_body,
+                    visible_body_state=visible_body_state,
+                    failure_reason=str(error.error),
+                )
             if stream_transport_outcome.terminal_status == "cancelled":
                 if stream_transport_outcome.failure_reason == "sync_restart_cancelled":
                     self.deps.logger.info(
@@ -1705,40 +1573,51 @@ class ResponseRunner:
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
+            if self._should_reraise_user_stop(error.error):
+                raise error.error
         except Exception as error:
             if not delivery_stage_started:
                 raise
-            tracked_event_id = self._latest_stream_event_id(
-                tracked_event_id=tracked_event_id,
-                stream_state=stream_state,
-                fallback_event_id=run_message_id,
-            )
+            tracked_event_id = tracked_event_id or run_message_id
             delivery_failure_reason = str(error)
             self._log_delivery_failure(response_kind="team", error=error)
-            final_delivery_outcome = await self._resolve_late_stream_failure(
-                target=delivery_target,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-                failure_reason=delivery_failure_reason,
-                response_kind="team",
-                response_envelope=resolved_response_envelope,
-                correlation_id=resolved_correlation_id,
-                tracked_event_id=tracked_event_id,
-                stream_state=stream_state,
-                placeholder_event_id=run_message_id if request.existing_event_id is None else None,
-            )
         if final_delivery_outcome is None and delivery_failure_reason is not None:
-            final_delivery_outcome = await self._resolve_late_stream_failure(
-                target=delivery_target,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-                failure_reason=delivery_failure_reason,
-                response_kind="team",
-                response_envelope=resolved_response_envelope,
-                correlation_id=resolved_correlation_id,
-                tracked_event_id=tracked_event_id,
-                stream_state=stream_state,
-                placeholder_event_id=run_message_id if request.existing_event_id is None else None,
+            placeholder_event_id = run_message_id if request.existing_event_id is None else None
+            event_id = (
+                tracked_event_id
+                or placeholder_event_id
+                or (request.existing_event_id if request.existing_event_is_placeholder else None)
+            )
+            placeholder_only = event_id is not None and (
+                event_id == placeholder_event_id
+                or (
+                    request.existing_event_id is not None
+                    and request.existing_event_is_placeholder
+                    and event_id == request.existing_event_id
+                )
+            )
+            final_delivery_outcome = await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                LateStreamFinalizeFailureRequest(
+                    target=delivery_target,
+                    stream_transport_outcome=StreamTransportOutcome(
+                        last_physical_stream_event_id=event_id,
+                        terminal_operation="edit" if request.existing_event_id else "send",
+                        terminal_result="failed",
+                        terminal_status="cancelled" if delivery_cancelled else "error",
+                        rendered_body=PROGRESS_PLACEHOLDER if placeholder_only else None,
+                        visible_body_state="placeholder_only" if placeholder_only else "none",
+                        failure_reason=delivery_failure_reason,
+                    ),
+                    response_kind="team",
+                    response_envelope=resolved_response_envelope,
+                    correlation_id=resolved_correlation_id,
+                    tool_trace=None,
+                    extra_content=None,
+                    failure_reason=delivery_failure_reason or "late_stream_delivery_failure",
+                    cancelled=delivery_cancelled,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                ),
             )
         assert final_delivery_outcome is not None
         return await lifecycle.finalize(
@@ -1852,7 +1731,7 @@ class ResponseRunner:
                 try:
                     await task
                 except asyncio.CancelledError as exc:
-                    failure_reason = _cancel_failure_reason(classify_cancel_source(exc))
+                    failure_reason = cancel_failure_reason(classify_cancel_source(exc))
                     if on_cancelled is not None:
                         on_cancelled(failure_reason)
                     self._log_cancelled_response(
@@ -2048,7 +1927,6 @@ class ResponseRunner:
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
-        stream_state: StreamDeliveryState | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> StreamTransportOutcome:
         """Run one streaming AI request and send the streamed Matrix response."""
@@ -2112,7 +1990,6 @@ class ResponseRunner:
                         show_tool_calls=self._show_tool_calls(),
                         extra_content=response_extra_content,
                         tool_trace_collector=tool_trace,
-                        stream_state=stream_state,
                         streaming_cls=StreamingResponse,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=note_visible_response_event_id,
@@ -2122,8 +1999,6 @@ class ResponseRunner:
                     request.pipeline_timing.mark("streaming_complete")
                 return transport_outcome
         except asyncio.CancelledError:
-            if stream_state is not None and stream_state.finalization_outcome is not None:
-                raise
             self._persist_interrupted_recorder(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
@@ -2146,9 +2021,22 @@ class ResponseRunner:
     ) -> FinalDeliveryOutcome:
         """Process a message and send a response without streaming."""
         if not request.prompt.strip():
-            return await self._emit_empty_prompt_outcome(
-                request,
+            resolved_target = request.target or self.deps.resolver.build_message_target(
+                room_id=request.room_id,
+                thread_id=request.thread_id,
+                reply_to_event_id=request.reply_to_event_id,
+            )
+            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                correlation_id=self._correlation_id_for_request(request),
+                envelope=self._response_envelope_for_request(request, resolved_target=resolved_target),
                 response_kind=response_kind,
+                failure_reason="empty_prompt",
+            )
+            return FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                final_visible_event_id=None,
+                failure_reason="empty_prompt",
+                retryable=True,
             )
 
         if request.pipeline_timing is not None:
@@ -2217,7 +2105,7 @@ class ResponseRunner:
                 interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
             )
             if request.existing_event_id:
-                return await self.deps.delivery_gateway.deliver_cancelled_visible_note(
+                outcome = await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                     CancelledVisibleNoteRequest(
                         target=runtime.resolved_target,
                         event_id=request.existing_event_id,
@@ -2228,17 +2116,23 @@ class ResponseRunner:
                         correlation_id=correlation_id,
                     ),
                 )
-            return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
-                outcome=FinalDeliveryOutcome(
-                    state="cancelled_without_visible_response",
-                    terminal_status="cancelled",
-                    final_visible_event_id=None,
-                    last_physical_stream_event_id=None,
-                    failure_reason=_cancel_failure_reason(cancel_source),
-                ),
+                if self._should_reraise_user_stop(exc):
+                    raise
+                return outcome
+            failure_reason = cancel_failure_reason(cancel_source)
+            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
                 correlation_id=correlation_id,
                 envelope=response_envelope,
                 response_kind=response_kind,
+                failure_reason=failure_reason,
+            )
+            if self._should_reraise_user_stop(exc):
+                raise
+            return FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                final_visible_event_id=None,
+                failure_reason=failure_reason,
+                retryable=True,
             )
         except Exception as error:
             self.deps.logger.exception("Error in non-streaming response", error=str(error))
@@ -2290,17 +2184,28 @@ class ResponseRunner:
         response_kind: str = "ai",
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
-        stream_state: StreamDeliveryState | None = None,
         tool_trace_collector: list[Any] | None = None,
         run_metadata_content_collector: dict[str, Any] | None = None,
     ) -> FinalDeliveryOutcome:
         """Process a message and send a streamed response."""
         if not request.prompt.strip():
-            return await self._emit_empty_prompt_outcome(
-                request,
-                response_kind=response_kind,
+            resolved_target = request.target or self.deps.resolver.build_message_target(
+                room_id=request.room_id,
+                thread_id=request.thread_id,
+                reply_to_event_id=request.reply_to_event_id,
             )
-        local_stream_state = stream_state or StreamDeliveryState()
+            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                correlation_id=self._correlation_id_for_request(request),
+                envelope=self._response_envelope_for_request(request, resolved_target=resolved_target),
+                response_kind=response_kind,
+                failure_reason="empty_prompt",
+            )
+            return FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                final_visible_event_id=None,
+                failure_reason="empty_prompt",
+                retryable=True,
+            )
 
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
@@ -2355,16 +2260,40 @@ class ResponseRunner:
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
                     compaction_outcomes=compaction_outcomes,
-                    stream_state=local_stream_state,
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
                 await lifecycle.emit_session_started(session_started_watch)
         except StreamingDeliveryError as error:
-            stream_transport_outcome = _stream_transport_outcome_from_delivery_exception(
-                error=error,
-                existing_event_id=request.existing_event_id,
-            )
+            if error.transport_outcome is not None:
+                stream_transport_outcome = error.transport_outcome
+                if stream_transport_outcome.failure_reason is None:
+                    stream_transport_outcome = replace(
+                        stream_transport_outcome,
+                        failure_reason=str(error.error),
+                    )
+            else:
+                stripped_text = error.accumulated_text.strip()
+                rendered_body: str | None
+                visible_body_state: Literal["none", "placeholder_only", "visible_body"]
+                if not stripped_text:
+                    rendered_body = None
+                    visible_body_state = "none"
+                elif stripped_text == PROGRESS_PLACEHOLDER:
+                    rendered_body = error.accumulated_text
+                    visible_body_state = "placeholder_only"
+                else:
+                    rendered_body = error.accumulated_text
+                    visible_body_state = "visible_body"
+                stream_transport_outcome = StreamTransportOutcome(
+                    last_physical_stream_event_id=error.event_id,
+                    terminal_operation="edit" if request.existing_event_id else "send",
+                    terminal_result="failed",
+                    terminal_status="error",
+                    rendered_body=rendered_body,
+                    visible_body_state=visible_body_state,
+                    failure_reason=str(error.error),
+                )
             if stream_transport_outcome.terminal_status == "cancelled":
                 if stream_transport_outcome.failure_reason == "sync_restart_cancelled":
                     self.deps.logger.info(
@@ -2400,7 +2329,7 @@ class ResponseRunner:
                 run_metadata_content,
                 request.attachment_ids,
             )
-            return await self.deps.delivery_gateway.finalize_streamed_response(
+            outcome = await self.deps.delivery_gateway.finalize_streamed_response(
                 FinalizeStreamedResponseRequest(
                     target=runtime.resolved_target,
                     stream_transport_outcome=stream_transport_outcome,
@@ -2414,6 +2343,9 @@ class ResponseRunner:
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
+            if self._should_reraise_user_stop(error.error):
+                raise error.error
+            return outcome
         except asyncio.CancelledError as exc:
             self._log_cancelled_response(
                 exc=exc,
@@ -2425,21 +2357,31 @@ class ResponseRunner:
             raise
         except Exception as error:
             self.deps.logger.exception("Error in streaming response", error=str(error))
-            return await self._resolve_late_stream_failure(
-                target=runtime.resolved_target,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-                failure_reason=str(error),
-                response_kind=response_kind,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                tracked_event_id=request.existing_event_id,
-                stream_state=local_stream_state,
-                placeholder_event_id=request.existing_event_id if request.existing_event_is_placeholder else None,
-                tool_trace=tool_trace if self._show_tool_calls() else None,
-                extra_content=_merge_response_extra_content(
-                    run_metadata_content,
-                    request.attachment_ids,
+            event_id = request.existing_event_id if request.existing_event_is_placeholder else None
+            return await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                LateStreamFinalizeFailureRequest(
+                    target=runtime.resolved_target,
+                    stream_transport_outcome=StreamTransportOutcome(
+                        last_physical_stream_event_id=request.existing_event_id or event_id,
+                        terminal_operation="edit" if request.existing_event_id else "send",
+                        terminal_result="failed",
+                        terminal_status="error",
+                        rendered_body=PROGRESS_PLACEHOLDER if event_id is not None else None,
+                        visible_body_state="placeholder_only" if event_id is not None else "none",
+                        failure_reason=str(error),
+                    ),
+                    response_kind=response_kind,
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                    tool_trace=list(tool_trace) if self._show_tool_calls() else None,
+                    extra_content=_merge_response_extra_content(
+                        run_metadata_content,
+                        request.attachment_ids,
+                    ),
+                    failure_reason=str(error),
+                    cancelled=False,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
 
@@ -2480,17 +2422,20 @@ class ResponseRunner:
                 is_team=False,
                 response_event_id=transport_outcome.last_physical_stream_event_id,
             )
-            return await self._resolve_late_stream_failure(
-                target=runtime.resolved_target,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-                failure_reason="stream_finalize_cancelled",
-                response_kind=response_kind,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                stream_transport_outcome=transport_outcome,
-                tool_trace=tool_trace if self._show_tool_calls() else None,
-                extra_content=response_extra_content,
+            return await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                LateStreamFinalizeFailureRequest(
+                    target=runtime.resolved_target,
+                    stream_transport_outcome=transport_outcome,
+                    response_kind=response_kind,
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                    tool_trace=list(tool_trace) if self._show_tool_calls() else None,
+                    extra_content=dict(response_extra_content) if response_extra_content is not None else None,
+                    failure_reason="stream_finalize_cancelled",
+                    cancelled=True,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                ),
             )
         except Exception as error:
             self.deps.logger.exception("Error in late streaming finalization", error=str(error))
@@ -2508,17 +2453,20 @@ class ResponseRunner:
                 is_team=False,
                 response_event_id=transport_outcome.last_physical_stream_event_id,
             )
-            return await self._resolve_late_stream_failure(
-                target=runtime.resolved_target,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-                failure_reason=str(error),
-                response_kind=response_kind,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                stream_transport_outcome=transport_outcome,
-                tool_trace=tool_trace if self._show_tool_calls() else None,
-                extra_content=response_extra_content,
+            return await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                LateStreamFinalizeFailureRequest(
+                    target=runtime.resolved_target,
+                    stream_transport_outcome=transport_outcome,
+                    response_kind=response_kind,
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                    tool_trace=list(tool_trace) if self._show_tool_calls() else None,
+                    extra_content=dict(response_extra_content) if response_extra_content is not None else None,
+                    failure_reason=str(error),
+                    cancelled=False,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                ),
             )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
@@ -2597,7 +2545,7 @@ class ResponseRunner:
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
         delivery_failure_reason: str | None = None
-        stream_state = StreamDeliveryState()
+        delivery_cancelled = False
         tool_trace: list[Any] = []
         run_metadata_content: dict[str, Any] = {}
         resolved_correlation_id = self._correlation_id_for_request(request)
@@ -2650,8 +2598,9 @@ class ResponseRunner:
                 tracked_event_id = event_id
 
         def note_task_cancelled(failure_reason: str) -> None:
-            nonlocal delivery_failure_reason
+            nonlocal delivery_failure_reason, delivery_cancelled
             delivery_failure_reason = failure_reason
+            delivery_cancelled = True
 
         async def generate(message_id: str | None) -> None:
             nonlocal final_delivery_outcome, tracked_event_id
@@ -2664,7 +2613,6 @@ class ResponseRunner:
                     run_id=response_run_id,
                     compaction_outcomes_collector=compaction_outcomes,
                     on_delivery_started=note_delivery_started,
-                    stream_state=stream_state,
                     tool_trace_collector=tool_trace,
                     run_metadata_content_collector=run_metadata_content,
                 )
@@ -2695,40 +2643,49 @@ class ResponseRunner:
                 pipeline_timing=request.pipeline_timing,
                 on_cancelled=note_task_cancelled,
             )
-            tracked_event_id = self._latest_stream_event_id(
-                tracked_event_id=tracked_event_id,
-                stream_state=stream_state,
-                fallback_event_id=run_message_id,
-            )
+            tracked_event_id = tracked_event_id or run_message_id
         except Exception as error:
             if not delivery_stage_started:
                 raise
             delivery_failure_reason = str(error)
             self._log_delivery_failure(response_kind="ai", error=error)
-            final_delivery_outcome = await self._resolve_late_stream_failure(
-                target=resolved_target,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-                failure_reason=delivery_failure_reason,
-                response_kind="ai",
-                response_envelope=resolved_response_envelope,
-                correlation_id=resolved_correlation_id,
-                tracked_event_id=tracked_event_id,
-                stream_state=stream_state,
-                placeholder_event_id=run_message_id if request.existing_event_id is None else None,
-            )
         if final_delivery_outcome is None and delivery_failure_reason is not None:
-            final_delivery_outcome = await self._resolve_late_stream_failure(
-                target=resolved_target,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-                failure_reason=delivery_failure_reason,
-                response_kind="ai",
-                response_envelope=resolved_response_envelope,
-                correlation_id=resolved_correlation_id,
-                tracked_event_id=tracked_event_id,
-                stream_state=stream_state,
-                placeholder_event_id=run_message_id if request.existing_event_id is None else None,
+            placeholder_event_id = run_message_id if request.existing_event_id is None else None
+            event_id = (
+                tracked_event_id
+                or placeholder_event_id
+                or (request.existing_event_id if request.existing_event_is_placeholder else None)
+            )
+            placeholder_only = event_id is not None and (
+                event_id == placeholder_event_id
+                or (
+                    request.existing_event_id is not None
+                    and request.existing_event_is_placeholder
+                    and event_id == request.existing_event_id
+                )
+            )
+            final_delivery_outcome = await self.deps.delivery_gateway.resolve_late_stream_finalize_failure(
+                LateStreamFinalizeFailureRequest(
+                    target=resolved_target,
+                    stream_transport_outcome=StreamTransportOutcome(
+                        last_physical_stream_event_id=event_id,
+                        terminal_operation="edit" if request.existing_event_id else "send",
+                        terminal_result="failed",
+                        terminal_status="cancelled" if delivery_cancelled else "error",
+                        rendered_body=PROGRESS_PLACEHOLDER if placeholder_only else None,
+                        visible_body_state="placeholder_only" if placeholder_only else "none",
+                        failure_reason=delivery_failure_reason,
+                    ),
+                    response_kind="ai",
+                    response_envelope=resolved_response_envelope,
+                    correlation_id=resolved_correlation_id,
+                    tool_trace=None,
+                    extra_content=None,
+                    failure_reason=delivery_failure_reason or "late_stream_delivery_failure",
+                    cancelled=delivery_cancelled,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                ),
             )
         assert final_delivery_outcome is not None
         return await lifecycle.finalize(

@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -21,13 +21,14 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
+    STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalizeStreamedResponseRequest
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
@@ -42,12 +43,10 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
-    _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE,
     CANCELLED_RESPONSE_NOTE,
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
-    StreamDeliveryState,
     StreamingDeliveryError,
     StreamingResponse,
     build_restart_interrupted_body,
@@ -779,7 +778,7 @@ class TestStreamingBehavior:
 
         assert mock_edit.await_count == 1
         final_body = mock_edit.await_args.args[3]["body"]
-        assert final_body == "**[Model emitted no visible text content after thinking. Please retry.]**"
+        assert final_body == PROGRESS_PLACEHOLDER
         assert IN_PROGRESS_MARKER not in final_body
 
     @pytest.mark.asyncio
@@ -853,9 +852,9 @@ class TestStreamingBehavior:
         assert accumulated is not None
         assert len(edited_contents) == 1
         final_content, final_text = edited_contents[0]
-        assert final_text == "**[Model emitted no visible text content after thinking. Please retry.]**"
-        assert final_content["body"] == "**[Model emitted no visible text content after thinking. Please retry.]**"
-        assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+        assert final_text == PROGRESS_PLACEHOLDER
+        assert final_content["body"] == PROGRESS_PLACEHOLDER
+        assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
         assert final_content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$original_123"}}
 
     @pytest.mark.asyncio
@@ -1142,7 +1141,7 @@ class TestStreamingBehavior:
 
         with (
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(StreamingDeliveryError),
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -1183,7 +1182,7 @@ class TestStreamingBehavior:
 
         with (
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(StreamingDeliveryError),
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -1216,7 +1215,7 @@ class TestStreamingBehavior:
                 "mindroom.streaming.edit_message_result",
                 new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit", content_sent={})),
             ),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(StreamingDeliveryError),
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -1253,7 +1252,7 @@ class TestStreamingBehavior:
                 "mindroom.streaming.edit_message_result",
                 new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit", content_sent={})),
             ),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(StreamingDeliveryError),
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -1292,7 +1291,7 @@ class TestStreamingBehavior:
 
         with (
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(StreamingDeliveryError),
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -1350,7 +1349,7 @@ class TestStreamingBehavior:
 
             with (
                 patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-                pytest.raises(asyncio.CancelledError),
+                pytest.raises(StreamingDeliveryError),
             ):
                 await send_streaming_response(
                     client=mock_client,
@@ -2240,7 +2239,6 @@ class TestStreamingBehavior:
             await asyncio.sleep(0.4)
             yield "x" * 300
 
-        stream_state = StreamDeliveryState()
         outcome = await send_streaming_response(
             client=mock_client,
             room_id="!test:localhost",
@@ -2250,12 +2248,11 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             response_stream=stream(),
-            stream_state=stream_state,
         )
 
         assert outcome.last_physical_stream_event_id == "$warmup_stream_123"
-        assert stream_state.accumulated_text == "x" * 300
-        assert "Preparing isolated worker" not in stream_state.accumulated_text
+        assert outcome.rendered_body == "x" * 300
+        assert "Preparing isolated worker" not in cast("str", outcome.rendered_body)
 
     @pytest.mark.asyncio
     async def test_hidden_tool_mode_worker_warmup_uses_generic_copy(self) -> None:
@@ -2377,7 +2374,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("terminal_kind", "expected_final_text"),
-        [("cancel", INTERRUPTED_RESPONSE_NOTE), ("complete", _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE)],
+        [("cancel", INTERRUPTED_RESPONSE_NOTE), ("complete", PROGRESS_PLACEHOLDER)],
     )
     async def test_send_streaming_response_terminal_update_ignores_late_progress(
         self,
@@ -2453,7 +2450,7 @@ class TestStreamingBehavior:
 
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             if terminal_kind == "cancel":
-                with pytest.raises(asyncio.CancelledError):
+                with pytest.raises(StreamingDeliveryError):
                     await send_streaming_response(
                         client=mock_client,
                         room_id="!test:localhost",
@@ -2807,16 +2804,7 @@ class TestStreamingBehavior:
                 response_hooks=response_hooks,
             ),
         )
-        final_outcome = FinalDeliveryOutcome(
-            state="final_visible_delivery",
-            terminal_status="completed",
-            final_visible_event_id="$streaming",
-            last_physical_stream_event_id=None,
-            final_visible_body="updated text",
-            delivery_kind="edited",
-        )
-        mock_deliver_final = AsyncMock(return_value=final_outcome)
-        object.__setattr__(gateway, "deliver_final", mock_deliver_final)
+        object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
 
         outcome = await gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
@@ -2838,14 +2826,17 @@ class TestStreamingBehavior:
             ),
         )
 
-        assert outcome is final_outcome
+        assert outcome.terminal_status == "completed"
+        assert outcome.final_visible_event_id == "$streaming"
+        assert outcome.final_visible_body == "updated text"
+        assert outcome.delivery_kind == "sent"
         response_hooks.apply_before_response.assert_not_awaited()
         response_hooks.apply_final_response_transform.assert_awaited_once()
-        mock_deliver_final.assert_awaited_once()
-        delivered_request = mock_deliver_final.await_args.args[0]
-        assert delivered_request.existing_event_id == "$streaming"
-        assert delivered_request.response_text == "updated text"
-        response_hooks.emit_after_response.assert_awaited_once()
+        gateway.edit_text.assert_awaited_once()
+        edited_request = gateway.edit_text.await_args.args[0]
+        assert edited_request.event_id == "$streaming"
+        assert edited_request.new_text == "updated text"
+        response_hooks.emit_after_response.assert_not_awaited()
         response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -2892,9 +2883,6 @@ class TestStreamingBehavior:
                 response_hooks=response_hooks,
             ),
         )
-        mock_deliver_final = AsyncMock()
-        object.__setattr__(gateway, "deliver_final", mock_deliver_final)
-
         outcome = await gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
                 target=MessageTarget.resolve("!test:localhost", None, "$event123"),
@@ -2920,8 +2908,7 @@ class TestStreamingBehavior:
         assert outcome.final_visible_body == "chunk"
         response_hooks.apply_before_response.assert_not_awaited()
         response_hooks.apply_final_response_transform.assert_awaited_once()
-        mock_deliver_final.assert_not_awaited()
-        response_hooks.emit_after_response.assert_awaited_once()
+        response_hooks.emit_after_response.assert_not_awaited()
         response_hooks.emit_cancelled_response.assert_not_awaited()
 
 

@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn
 from mindroom import interactive
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
-    NO_VISIBLE_TEXT_AFTER_THINKING_NOTE,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -63,18 +62,8 @@ CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
 _INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
 INTERRUPTED_RESPONSE_NOTE = _INTERRUPTED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
-_NO_VISIBLE_TEXT_AFTER_THINKING_NOTE = NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
-
-
-@dataclass(slots=True)
-class StreamDeliveryState:
-    """Capture one streaming delivery's latest visible event and terminal outcome."""
-
-    event_id: str | None = None
-    accumulated_text: str = ""
-    finalization_outcome: StreamTransportOutcome | None = None
 
 
 class StreamingDeliveryError(Exception):
@@ -268,8 +257,6 @@ class StreamingResponse:
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
-    observed_reasoning_content: bool = False
-    observed_tool_calls: int = 0
     canonical_final_body_candidate: str | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     _last_delivered_text: str = field(default="", init=False, repr=False)
@@ -384,22 +371,6 @@ class StreamingResponse:
                 resolved_cancel_source = "sync_restart"
             elif cancelled:
                 resolved_cancel_source = "user_stop"
-        observed_nonvisible_activity = (
-            self.observed_reasoning_content or self.observed_tool_calls > 0 or self.placeholder_progress_sent
-        )
-        no_visible_text_error = (
-            error is None
-            and resolved_cancel_source is None
-            and not self.accumulated_text.strip()
-            and observed_nonvisible_activity
-        )
-        if no_visible_text_error:
-            self.accumulated_text = _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
-            if self.extra_content is not None:
-                self.extra_content[STREAM_STATUS_KEY] = STREAM_STATUS_ERROR
-                if isinstance(ai_run_payload, dict):
-                    ai_run_payload["status"] = STREAM_STATUS_ERROR
-            return STREAM_STATUS_ERROR
         if error is not None:
             stripped_text = self.accumulated_text.rstrip()
             error_note = _format_stream_error_note(error)
@@ -436,10 +407,16 @@ class StreamingResponse:
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
         terminal_operation: StreamTerminalOperation = "edit" if self.event_id is not None else "send"
-        text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
+        text_to_send = self.accumulated_text
+        if not text_to_send.strip() and final_stream_status == STREAM_STATUS_COMPLETED:
+            text_to_send = self.canonical_final_body_candidate or ""
+        if not text_to_send.strip():
+            text_to_send = _PROGRESS_PLACEHOLDER
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
         attempted_rendered_body = (
-            response.formatted_text if (self.accumulated_text.strip() or has_placeholder) else None
+            response.formatted_text
+            if (self.accumulated_text.strip() or has_placeholder or response.formatted_text.strip())
+            else None
         )
         attempted_visible_body_state: Literal["none", "placeholder_only", "visible_body"]
         if attempted_rendered_body is None:
@@ -799,8 +776,7 @@ class StreamingResponse:
         retry_without_backoff: bool = False,
     ) -> bool:
         """Send a new event or edit the existing one."""
-        max_retries = 5 if retry_on_failure else 1 if retry_without_backoff else 0
-        total_attempts = max_retries + 1
+        total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
         for attempt in range(1, total_attempts + 1):
             try:
                 if self.event_id is None:
@@ -824,23 +800,12 @@ class StreamingResponse:
                 if attempt == total_attempts:
                     raise
             if attempt < total_attempts:
-                if retry_without_backoff:
-                    logger.warning(
-                        "Retrying failed terminal streaming update immediately",
-                        attempt=attempt,
-                        event_id=self.event_id,
-                        room_id=self.room_id,
-                    )
-                else:
-                    backoff_seconds = 2**attempt
-                    logger.warning(
-                        "Retrying failed terminal streaming update",
-                        attempt=attempt,
-                        event_id=self.event_id,
-                        room_id=self.room_id,
-                        backoff_seconds=backoff_seconds,
-                    )
-                    await asyncio.sleep(backoff_seconds)
+                logger.warning(
+                    "Retrying failed terminal streaming update immediately",
+                    attempt=attempt,
+                    event_id=self.event_id,
+                    room_id=self.room_id,
+                )
         return False
 
 
@@ -877,7 +842,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool = True,
     extra_content: dict[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
-    stream_state: StreamDeliveryState | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
     latest_thread_event_id: str | None = None,
@@ -981,7 +945,13 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             cancel_source = classify_cancel_source(exc)
             _log_stream_cancellation(exc=exc, cancel_source=cancel_source, message_id=streaming.event_id)
             transport_outcome = await streaming.finalize(client, cancel_source=cancel_source)
-            raise
+            raise StreamingDeliveryError(
+                exc,
+                event_id=streaming.event_id,
+                accumulated_text=streaming.accumulated_text,
+                tool_trace=streaming.tool_trace,
+                transport_outcome=transport_outcome,
+            ) from exc
         except Exception as exc:
             delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
             logger.exception("Streaming response failed", error=str(delivery_error))
@@ -1040,10 +1010,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 )
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
-            if stream_state is not None:
-                stream_state.event_id = streaming.event_id
-                stream_state.accumulated_text = streaming.accumulated_text
-                stream_state.finalization_outcome = transport_outcome
 
     assert transport_outcome is not None
     return transport_outcome

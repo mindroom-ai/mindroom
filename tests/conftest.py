@@ -103,79 +103,42 @@ def _make_room_get_event_response(event_id: str) -> nio.RoomGetEventResponse:
 
 
 def _outcome(
-    state: str,
-    *,
     terminal_status: str,
     final_visible_event_id: str | None = None,
+    visible_response_event_id: str | None = None,
+    response_identity_event_id: str | None = None,
+    turn_completion_event_id: str | None = None,
     last_physical_stream_event_id: str | None = None,
     final_visible_body: str | None = None,
     delivery_kind: str | None = None,
     failure_reason: str | None = None,
+    mark_handled: bool = False,
+    retryable: bool = False,
+    suppressed: bool = False,
+    tool_trace: tuple[object, ...] = (),
     extra_content: Mapping[str, object] | None = None,
+    option_map: dict[str, str] | None = None,
+    options_list: tuple[dict[str, str], ...] | None = None,
 ) -> FinalDeliveryOutcome:
     """Build one compact terminal outcome for tests."""
     return FinalDeliveryOutcome(
-        state=state,
         terminal_status=terminal_status,
         final_visible_event_id=final_visible_event_id,
+        visible_response_event_id=visible_response_event_id,
+        response_identity_event_id=response_identity_event_id,
+        turn_completion_event_id=turn_completion_event_id,
         last_physical_stream_event_id=last_physical_stream_event_id,
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
         failure_reason=failure_reason,
+        mark_handled=mark_handled,
+        retryable=retryable,
+        suppressed=suppressed,
+        tool_trace=tool_trace,
         extra_content=dict(extra_content or {}),
+        option_map=option_map,
+        options_list=options_list,
     )
-
-
-def _install_final_delivery_test_compat() -> None:
-    """Provide test-only constructor aliases for deleted FinalDeliveryOutcome helpers."""
-
-    def _constructor(
-        state: str,
-        terminal_status: str,
-    ) -> Callable[..., FinalDeliveryOutcome]:
-        def _build(**kwargs: object) -> FinalDeliveryOutcome:
-            return FinalDeliveryOutcome(
-                state=state,
-                terminal_status=terminal_status,
-                final_visible_event_id=kwargs.pop("final_visible_event_id", None),
-                last_physical_stream_event_id=kwargs.pop("last_physical_stream_event_id", None),
-                final_visible_body=kwargs.pop("final_visible_body", None),
-                delivery_kind=kwargs.pop("delivery_kind", None),
-                failure_reason=kwargs.pop("failure_reason", None),
-                tool_trace=tuple(kwargs.pop("tool_trace", ())),
-                extra_content=dict(kwargs.pop("extra_content", {}) or {}),
-                option_map=kwargs.pop("option_map", None),
-                options_list=tuple(kwargs.pop("options_list", ()) or ()) or None,
-            )
-
-        return _build
-
-    constructors = {
-        "final_visible_delivery": ("final_visible_delivery", "completed"),
-        "keep_prior_visible_stream_after_completed_terminal_failure": (
-            "kept_prior_visible_stream_after_completed_terminal_failure",
-            "completed",
-        ),
-        "keep_prior_visible_stream_after_cancel": ("kept_prior_visible_stream_after_cancel", "cancelled"),
-        "keep_prior_visible_stream_after_error": ("kept_prior_visible_stream_after_error", "error"),
-        "cancelled_with_visible_response": ("cancelled_with_visible_response", "cancelled"),
-        "cancelled_with_visible_note": ("cancelled_with_visible_note", "cancelled"),
-        "cancelled_without_visible_response": ("cancelled_without_visible_response", "cancelled"),
-        "suppressed_without_visible_response": ("suppressed_without_visible_response", "completed"),
-        "kept_prior_visible_response_after_suppression": (
-            "kept_prior_visible_response_after_suppression",
-            "completed",
-        ),
-        "suppressed_redacted": ("suppressed_redacted", "completed"),
-        "suppression_cleanup_failed": ("suppression_cleanup_failed", "error"),
-        "kept_prior_visible_response_after_error": ("kept_prior_visible_response_after_error", "error"),
-        "error_without_visible_response": ("error_without_visible_response", "error"),
-    }
-    for name, (state, terminal_status) in constructors.items():
-        setattr(FinalDeliveryOutcome, name, staticmethod(_constructor(state, terminal_status)))
-
-
-_install_final_delivery_test_compat()
 
 
 class _AutoRoomCache(MutableMapping[str, nio.MatrixRoom]):
@@ -774,24 +737,28 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         if event_id is None:
             if request.existing_event_id is not None:
                 return _outcome(
-                    "kept_prior_visible_response_after_error",
                     terminal_status="error",
                     final_visible_event_id=request.existing_event_id,
+                    visible_response_event_id=request.existing_event_id,
                     final_visible_body=request.response_text,
                     failure_reason="test_mock_no_visible_response",
+                    retryable=True,
                     extra_content=request.extra_content,
                 )
             return _outcome(
-                "error_without_visible_response",
                 terminal_status="error",
                 failure_reason="test_mock_no_visible_response",
+                retryable=True,
             )
         return _outcome(
-            "final_visible_delivery",
             terminal_status="completed",
             final_visible_event_id=event_id,
+            visible_response_event_id=event_id,
+            response_identity_event_id=event_id,
+            turn_completion_event_id=event_id,
             final_visible_body=request.response_text,
             delivery_kind=delivery_kind,
+            mark_handled=True,
             extra_content=request.extra_content,
         )
 
@@ -813,16 +780,19 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             return result
         if result is None:
             return _outcome(
-                "error_without_visible_response",
                 terminal_status="error",
                 failure_reason="test_mock_no_visible_response",
+                retryable=True,
             )
         return _outcome(
-            "final_visible_delivery",
             terminal_status="completed",
             final_visible_event_id=result,
+            visible_response_event_id=result,
+            response_identity_event_id=result,
+            turn_completion_event_id=result,
             final_visible_body="",
             delivery_kind="edited" if existing_event_id is not None else "sent",
+            mark_handled=True,
         )
 
     async def _generate(request: ResponseRequest) -> FinalDeliveryOutcome:

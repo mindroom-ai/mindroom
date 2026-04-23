@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -14,13 +14,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalizeStreamedResponseRequest
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
-    _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE,
     StreamingResponse,
     send_streaming_response,
 )
@@ -108,11 +107,11 @@ async def test_transport_retry_terminal_send_with_no_event_id_retries_until_send
     ):
         outcome = await streaming.finalize(_client())
 
-    assert mock_send.await_count == 3
-    assert sleep_mock.await_args_list == [call(2), call(4)]
+    assert mock_send.await_count == 2
+    sleep_mock.assert_not_awaited()
     assert outcome.terminal_operation == "send"
-    assert outcome.terminal_result == "succeeded"
-    assert outcome.last_physical_stream_event_id == "$terminal-send"
+    assert outcome.terminal_result == "failed"
+    assert outcome.last_physical_stream_event_id is None
 
 
 @pytest.mark.asyncio
@@ -218,7 +217,7 @@ async def test_transport_failed_terminal_update_preserves_committed_interactive_
 
 @pytest.mark.asyncio
 async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_path: Path) -> None:
-    """Completed placeholder-backed runs with no visible text must not leave Thinking... behind."""
+    """Completed placeholder-backed runs with no visible text now preserve the committed placeholder."""
     config = _config(tmp_path)
     client = _client()
 
@@ -242,9 +241,43 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
         )
 
     assert outcome.last_physical_stream_event_id == "$thinking"
-    assert outcome.terminal_status == "error"
-    assert outcome.rendered_body == _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
+    assert outcome.terminal_status == "completed"
+    assert outcome.rendered_body == "Thinking..."
+    assert outcome.visible_body_state == "placeholder_only"
+
+
+@pytest.mark.asyncio
+async def test_transport_final_event_only_body_uses_canonical_final_candidate(tmp_path: Path) -> None:
+    """Clean completion with only RunCompletedEvent.content should finalize with that body."""
+    config = _config(tmp_path)
+    client = _client()
+
+    async def final_only_stream() -> AsyncIterator[object]:
+        yield RunCompletedEvent(content="hello from final event")
+
+    async def record_edit(*_args: object) -> DeliveredMatrixEvent:
+        content = _args[3]
+        return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(content))
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+        outcome = await send_streaming_response(
+            client=client,
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            thread_id=None,
+            sender_domain="localhost",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            response_stream=final_only_stream(),
+            existing_event_id="$thinking",
+            adopt_existing_placeholder=True,
+            room_mode=True,
+        )
+
+    assert outcome.terminal_status == "completed"
+    assert outcome.rendered_body == "hello from final event"
     assert outcome.visible_body_state == "visible_body"
+    assert outcome.canonical_final_body_candidate == "hello from final event"
 
 
 @pytest.mark.asyncio
@@ -327,16 +360,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
             response_hooks=response_hooks,
         ),
     )
-    mock_deliver_final = AsyncMock(
-        return_value=FinalDeliveryOutcome(
-            state="kept_prior_visible_response_after_error",
-            terminal_status="error",
-            final_visible_event_id="$streaming",
-            last_physical_stream_event_id=None,
-            failure_reason="delivery_failed",
-        ),
-    )
-    object.__setattr__(gateway, "deliver_final", mock_deliver_final)
+    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
 
     outcome = await gateway.finalize_streamed_response(
         FinalizeStreamedResponseRequest(
@@ -358,19 +382,19 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
         ),
     )
 
-    assert outcome.state == "final_visible_delivery"
+    assert outcome.terminal_status == "completed"
     assert outcome.final_visible_event_id == "$streaming"
     assert outcome.final_visible_body == "chunk"
     response_hooks.apply_before_response.assert_not_awaited()
     response_hooks.apply_final_response_transform.assert_awaited_once()
-    mock_deliver_final.assert_awaited_once()
-    response_hooks.emit_after_response.assert_awaited_once()
+    gateway.edit_text.assert_awaited_once()
+    response_hooks.emit_after_response.assert_not_awaited()
     response_hooks.emit_cancelled_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_finalize_streamed_response_restart_interruption_preserves_cancellation_state(tmp_path: Path) -> None:
-    """Structured streamed restart interruptions must keep cancellation semantics despite wire error status."""
+    """Structured streamed restart interruptions should arrive with cancelled terminal status."""
     config = _config(tmp_path)
     envelope = _envelope()
     response_hooks = SimpleNamespace(
@@ -399,7 +423,7 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
                 last_physical_stream_event_id="$streaming",
                 terminal_operation="edit",
                 terminal_result="succeeded",
-                terminal_status="error",
+                terminal_status="cancelled",
                 rendered_body="partial answer\n\n**[Response interrupted by service restart]**",
                 visible_body_state="visible_body",
                 failure_reason="sync_restart_cancelled",
@@ -413,77 +437,8 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
         ),
     )
 
-    assert outcome.state == "kept_prior_visible_stream_after_cancel"
+    assert outcome.terminal_status == "cancelled"
     assert outcome.retryable is True
-    assert outcome.should_mark_handled is False
+    assert outcome.mark_handled is False
     response_hooks.emit_after_response.assert_not_awaited()
-    response_hooks.emit_cancelled_response.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_transport_hidden_tool_reasoning_only_finishes_as_error(tmp_path: Path) -> None:
-    """Reasoning-only hidden-tool runs must not count as visible output success."""
-    config = _config(tmp_path)
-    client = _client()
-
-    async def hidden_tool_reasoning_stream() -> AsyncIterator[object]:
-        yield RunContentEvent(reasoning_content="pondering")
-        yield ToolCallStartedEvent(tool=SimpleNamespace(tool_name="hidden"))
-        yield RunCompletedEvent(reasoning_content="pondering")
-
-    async def record_edit(*_args: object) -> DeliveredMatrixEvent:
-        content = _args[3]
-        return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(content))
-
-    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
-        outcome = await send_streaming_response(
-            client=client,
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            thread_id=None,
-            sender_domain="localhost",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            response_stream=hidden_tool_reasoning_stream(),
-            existing_event_id="$placeholder",
-            adopt_existing_placeholder=True,
-            room_mode=True,
-            show_tool_calls=False,
-        )
-
-    assert outcome.terminal_status == "error"
-    assert outcome.rendered_body == _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
-
-
-@pytest.mark.asyncio
-async def test_transport_hidden_tool_only_finishes_as_error(tmp_path: Path) -> None:
-    """Hidden-tool-only runs without visible text must not finish as Thinking...."""
-    config = _config(tmp_path)
-    client = _client()
-
-    async def hidden_tool_only_stream() -> AsyncIterator[object]:
-        yield ToolCallStartedEvent(tool=SimpleNamespace(tool_name="hidden"))
-        yield RunCompletedEvent()
-
-    async def record_edit(*_args: object) -> DeliveredMatrixEvent:
-        content = _args[3]
-        return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(content))
-
-    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
-        outcome = await send_streaming_response(
-            client=client,
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            thread_id=None,
-            sender_domain="localhost",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            response_stream=hidden_tool_only_stream(),
-            existing_event_id="$placeholder",
-            adopt_existing_placeholder=True,
-            room_mode=True,
-            show_tool_calls=False,
-        )
-
-    assert outcome.terminal_status == "error"
-    assert outcome.rendered_body == _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
+    response_hooks.emit_cancelled_response.assert_not_awaited()

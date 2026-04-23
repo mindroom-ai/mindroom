@@ -213,7 +213,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     ).resolved_thread_id
 
     response_text = ""
-    side_effect_committed = False
 
     if command.type == CommandType.HELP:
         topic = command.args.get("topic")
@@ -228,7 +227,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         else:
             try:
                 response_text = _format_plugin_reload_summary(await context.reload_plugins())
-                side_effect_committed = True
             except Exception as exc:
                 context.logger.exception("Plugin reload command failed", error=str(exc))
                 response_text = f"❌ Plugin reload failed: {exc}"
@@ -243,7 +241,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         # Get mentioned agents from the command text
         mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
 
-        task_id, response_text = await schedule_task(
+        _, response_text = await schedule_task(
             runtime=_scheduling_runtime(context, room),
             room_id=room.room_id,
             thread_id=effective_thread_id,
@@ -251,7 +249,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             full_text=full_text,
             mentioned_agents=mentioned_agents,
         )
-        side_effect_committed = task_id is not None
 
     elif command.type == CommandType.LIST_SCHEDULES:
         response_text = await list_scheduled_tasks(
@@ -278,8 +275,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 room_id=room.room_id,
                 task_id=task_id,
             )
-        side_effect_committed = response_text.startswith("✅")
-
     elif command.type == CommandType.EDIT_SCHEDULE:
         task_id = command.args["task_id"]
         full_text = command.args["full_text"]
@@ -291,7 +286,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             scheduled_by=requester_user_id,
             thread_id=effective_thread_id,
         )
-        side_effect_committed = response_text.startswith("✅")
 
     elif command.type == CommandType.CONFIG:
         # Handle config command
@@ -373,5 +367,3 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     response_event_id=response_event_id,
                 ),
             )
-        elif side_effect_committed:
-            context.record_handled_turn(HandledTurnState.from_source_event_id(event.event_id))

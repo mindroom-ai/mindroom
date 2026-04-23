@@ -122,22 +122,16 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             if chunk.tool_trace is not None:
                 streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
         elif isinstance(chunk, RunContentEvent):
-            if chunk.reasoning_content:
-                streaming.observed_reasoning_content = True
             if chunk.content:
                 text_chunk = str(chunk.content)
             else:
                 _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue
         elif isinstance(chunk, RunCompletedEvent):
-            if chunk.reasoning_content:
-                streaming.observed_reasoning_content = True
             if chunk.content is not None:
                 streaming.canonical_final_body_candidate = str(chunk.content)
             continue
         elif isinstance(chunk, ToolCallStartedEvent):
-            if chunk.tool is not None:
-                streaming.observed_tool_calls += 1
             if not streaming.show_tool_calls:
                 if chunk.tool is not None:
                     streaming._ensure_hidden_tool_gap()

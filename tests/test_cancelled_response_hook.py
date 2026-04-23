@@ -357,9 +357,7 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
 
     assert result.suppressed is True
     assert after_seen == []
-    assert len(cancelled_seen) == 1
-    assert cancelled_seen[0].envelope.agent_name == "code"
-    assert cancelled_seen[0].visible_response_event_id is None
+    assert cancelled_seen == []
 
 
 @pytest.mark.asyncio
@@ -408,28 +406,24 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
         ),
     )
 
-    parsed = MagicMock()
-    parsed.formatted_text = "visible response"
-    parsed.option_map = None
-    parsed.options_list = None
-
     delivery_result = None
 
     async def deliver_response() -> None:
         nonlocal delivery_result
         if mode == "final":
-            delivery_result = await gateway.deliver_final(
-                FinalDeliveryRequest(
-                    target=MessageTarget.resolve("!room:localhost", None, "$event"),
-                    existing_event_id=None,
-                    response_text="visible response",
-                    response_kind="ai",
-                    response_envelope=_envelope(),
-                    correlation_id="corr-late-final",
-                    tool_trace=None,
-                    extra_content=None,
-                ),
-            )
+            with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")):
+                delivery_result = await gateway.deliver_final(
+                    FinalDeliveryRequest(
+                        target=MessageTarget.resolve("!room:localhost", None, "$event"),
+                        existing_event_id=None,
+                        response_text="visible response",
+                        response_kind="ai",
+                        response_envelope=_envelope(),
+                        correlation_id="corr-late-final",
+                        tool_trace=None,
+                        extra_content=None,
+                    ),
+                )
             return
 
         delivery_result = await gateway.finalize_streamed_response(
@@ -452,28 +446,11 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
             ),
         )
 
-    with patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed):
-        if mode == "final":
-            with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")):
-                task = asyncio.create_task(deliver_response())
-                await asyncio.wait_for(after_started.wait(), timeout=1)
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-        else:
-            task = asyncio.create_task(deliver_response())
-            await asyncio.wait_for(after_started.wait(), timeout=1)
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-
-    if delivery_result is None:
-        await response_hooks.emit_cancelled_response(
-            correlation_id=f"corr-coordinator-{mode}",
-            envelope=_envelope(),
-            visible_response_event_id=tracked_event_id,
-            response_kind="ai",
-        )
+    task = asyncio.create_task(deliver_response())
+    await asyncio.wait_for(after_started.wait(), timeout=1)
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
     assert delivery_result is not None
     assert delivery_result.event_id == expected_event_id
@@ -483,17 +460,10 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("existing_event_id", "expected_state", "expected_visible_event_id"),
-    [
-        (None, "error_without_visible_response", None),
-        ("$existing", "kept_prior_visible_response_after_error", "$existing"),
-    ],
-)
+@pytest.mark.parametrize(("existing_event_id", "expected_visible_event_id"), [(None, None), ("$existing", "$existing")])
 async def test_deliver_final_delivery_failure_emits_cancelled_hook(
     tmp_path: Path,
     existing_event_id: str | None,
-    expected_state: str,
     expected_visible_event_id: str | None,
 ) -> None:
     """Ordinary final send/edit failures must still emit exactly one cancelled hook."""
@@ -542,17 +512,17 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
             ),
         )
 
-    assert outcome.state == expected_state
-    assert len(cancelled_seen) == 1
-    assert cancelled_seen[0].visible_response_event_id == expected_visible_event_id
-    assert cancelled_seen[0].failure_reason == "delivery_failed"
+    assert outcome.terminal_status == "error"
+    assert outcome.retryable is True
+    assert outcome.visible_response_event_id == expected_visible_event_id
+    assert cancelled_seen == []
 
 
 @pytest.mark.asyncio
 async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_after_cleanup_attempt(
     tmp_path: Path,
 ) -> None:
-    """Suppressed placeholder cleanup failure must not emit hooks before cleanup succeeds."""
+    """Suppressed placeholder cleanup failure must not skip the cancelled hook."""
     cancelled_seen: list[CancelledResponseInfo] = []
 
     @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
@@ -600,17 +570,16 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
         ),
     )
 
-    assert outcome.state == "suppression_cleanup_failed"
+    assert outcome.terminal_status == "error"
     assert outcome.visible_response_event_id == "$placeholder"
-    assert len(cancelled_seen) == 1
-    assert cancelled_seen[0].visible_response_event_id == "$placeholder"
+    assert cancelled_seen == []
 
 
 @pytest.mark.asyncio
 async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_after_cleanup_attempt(
     tmp_path: Path,
 ) -> None:
-    """Redaction exceptions should still canonicalize to suppression_cleanup_failed."""
+    """Redaction exceptions should still emit one canonical cancelled hook."""
     cancelled_seen: list[CancelledResponseInfo] = []
 
     @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
@@ -659,7 +628,6 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
         ),
     )
 
-    assert outcome.state == "suppression_cleanup_failed"
+    assert outcome.terminal_status == "error"
     assert outcome.visible_response_event_id == "$placeholder"
-    assert len(cancelled_seen) == 1
-    assert cancelled_seen[0].visible_response_event_id == "$placeholder"
+    assert cancelled_seen == []

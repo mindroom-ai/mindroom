@@ -225,8 +225,7 @@ class _StreamingAttemptState:
     assistant_text: str = ""
     full_response: str = ""
     tool_count: int = 0
-    observed_tool_calls: int = 0
-    observed_reasoning_content: bool = False
+    canonical_final_body_candidate: str | None = None
     pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     latest_model_id: str | None = None
@@ -319,7 +318,7 @@ def _find_matching_pending_stream_tool(
 
 def _stream_attempt_has_progress(state: _StreamingAttemptState) -> bool:
     """Return whether one streaming attempt already observed agent-visible work."""
-    return bool(state.assistant_text or state.observed_tool_calls)
+    return bool(state.assistant_text or state.completed_tools or state.pending_tools)
 
 
 def _is_run_cancelled_boilerplate(content: str) -> bool:
@@ -608,7 +607,6 @@ def _track_stream_tool_started(
     show_tool_calls: bool,
 ) -> None:
     """Track started tool-call metadata for streaming output."""
-    state.observed_tool_calls += 1
     display_tool_index = state.tool_count + 1 if show_tool_calls else None
     tool_msg, trace_entry = format_tool_started_event(event.tool, tool_index=display_tool_index)
     if trace_entry is not None:
@@ -1269,11 +1267,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     try:
         async for event in stream_generator:
             if isinstance(event, RunContentEvent):
-                if event.reasoning_content:
-                    state.observed_reasoning_content = True
                 if not event.content:
-                    if event.reasoning_content:
-                        yield event
                     continue
                 if not state.first_token_logged:
                     state.first_token_logged = True
@@ -1316,18 +1310,10 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
 
             if isinstance(event, RunCompletedEvent):
                 state.completed_run_event = event
-                if event.reasoning_content:
-                    state.observed_reasoning_content = True
                 if event.content is not None:
-                    final_text = str(event.content)
-                    state.assistant_text = final_text
-                    state.full_response = final_text
-                    if state_updated is not None:
-                        state_updated()
+                    state.canonical_final_body_candidate = str(event.content)
                     yield event
                     continue
-                if event.reasoning_content:
-                    yield event
                 continue
 
             if isinstance(event, RunCancelledEvent):
@@ -1643,7 +1629,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 room_id=room_id,
                                 metrics=fallback_metrics,
                                 context_input_tokens=state.latest_request_input_tokens,
-                                tool_count=state.observed_tool_calls,
+                                tool_count=len(state.completed_tools) + len(state.pending_tools),
                             )
                             if cancelled_metadata:
                                 run_metadata_collector.update(cancelled_metadata)
@@ -1691,7 +1677,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         tool_count=(
                             len(state.completed_run_event.tools)
                             if state.completed_run_event is not None and state.completed_run_event.tools is not None
-                            else state.observed_tool_calls
+                            else len(state.completed_tools) + len(state.pending_tools)
                         ),
                     )
                     if run_metadata:

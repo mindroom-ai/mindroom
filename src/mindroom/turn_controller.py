@@ -282,21 +282,6 @@ class TurnController:
         """Mark one or more source events as handled by the same terminal outcome."""
         self.deps.turn_store.record_turn(handled_turn)
 
-    def _mark_handled_delivery(
-        self,
-        handled_turn: HandledTurnState,
-        *,
-        response_event_id: str | None = None,
-        visible_echo_event_id: str | None = None,
-    ) -> None:
-        """Persist one handled turn while preserving both identity and visible linkage."""
-        resolved_handled_turn = handled_turn
-        if response_event_id is not None:
-            resolved_handled_turn = resolved_handled_turn.with_response_event_id(response_event_id)
-        if visible_echo_event_id is not None:
-            resolved_handled_turn = resolved_handled_turn.with_visible_echo_event_id(visible_echo_event_id)
-        self._mark_source_events_responded(resolved_handled_turn)
-
     def _has_newer_unresponded_in_thread(
         self,
         event: _TextDispatchEvent,
@@ -765,7 +750,7 @@ class TurnController:
             ),
         )
         response_event_id = final_outcome.response_identity_event_id
-        if final_outcome.should_mark_handled and response_event_id is not None:
+        if final_outcome.mark_handled and response_event_id is not None:
             self._mark_source_events_responded(
                 HandledTurnState.from_source_event_id(
                     selection.question_event_id,
@@ -1002,10 +987,10 @@ class TurnController:
                 ),
             )
             if response_event_id is not None:
-                self._mark_handled_delivery(
-                    handled_turn,
-                    response_event_id=response_event_id,
-                    visible_echo_event_id=response_event_id,
+                self._mark_source_events_responded(
+                    handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
+                        response_event_id
+                    ),
                 )
                 if dispatch_timing is not None:
                     dispatch_timing.mark_first_visible_reply("final")
@@ -1037,10 +1022,10 @@ class TurnController:
                 error=error,
             )
             if response_event_id is not None:
-                self._mark_handled_delivery(
-                    handled_turn,
-                    response_event_id=response_event_id,
-                    visible_echo_event_id=response_event_id,
+                self._mark_source_events_responded(
+                    handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
+                        response_event_id
+                    ),
                 )
             if dispatch_timing is not None and response_event_id is not None:
                 dispatch_timing.mark_first_visible_reply("final")
@@ -1165,18 +1150,25 @@ class TurnController:
                 error=failure,
             )
             if response_event_id is not None:
-                self._mark_handled_delivery(
-                    handled_turn,
-                    response_event_id=response_event_id,
-                    visible_echo_event_id=response_event_id,
+                self._mark_source_events_responded(
+                    handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
+                        response_event_id
+                    ),
                 )
             return
-        if final_outcome.should_mark_handled:
-            self._mark_handled_delivery(
-                handled_turn,
-                response_event_id=final_outcome.response_identity_event_id,
-                visible_echo_event_id=final_outcome.visible_response_event_id,
-            )
+        if final_outcome.mark_handled and (
+            final_outcome.response_identity_event_id is not None or final_outcome.visible_response_event_id is not None
+        ):
+            resolved_handled_turn = handled_turn
+            if final_outcome.response_identity_event_id is not None:
+                resolved_handled_turn = resolved_handled_turn.with_response_event_id(
+                    final_outcome.response_identity_event_id,
+                )
+            if final_outcome.visible_response_event_id is not None:
+                resolved_handled_turn = resolved_handled_turn.with_visible_echo_event_id(
+                    final_outcome.visible_response_event_id,
+                )
+            self._mark_source_events_responded(resolved_handled_turn)
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""

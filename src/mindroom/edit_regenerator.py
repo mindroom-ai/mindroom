@@ -300,7 +300,7 @@ class EditRegenerator:
             ),
         )
 
-        if regenerated_resolution.should_mark_handled:
+        if regenerated_resolution.mark_handled:
             self._record_turn_record(
                 replace(
                     regeneration_turn_record,
@@ -312,7 +312,7 @@ class EditRegenerator:
         else:
             if needs_turn_record_backfill:
                 self._record_turn_record(regeneration_turn_record)
-            if regenerated_resolution.state == "kept_prior_visible_response_after_error":
+            if regenerated_resolution.retryable and not regenerated_resolution.suppressed:
                 self._logger().warning(
                     "Regeneration failed; keeping existing visible response",
                     original_event_id=original_event_id,

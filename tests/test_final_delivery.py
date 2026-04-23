@@ -1,400 +1,135 @@
-"""Canonical policy tests for terminal delivery states."""
+"""Direct tests for the retained terminal delivery fields."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
 
 @dataclass(frozen=True)
-class _PolicyExpectation:
+class _Expectation:
     visible_response_event_id: str | None
     response_identity_event_id: str | None
     turn_completion_event_id: str | None
-    emits_after_response: bool
-    emits_cancelled_response: bool
-    should_mark_handled: bool
+    mark_handled: bool
     retryable: bool
-    should_persist_response_identity: bool
-    should_queue_thread_summary: bool
-    should_register_interactive_follow_up: bool
-    should_shield_late_failures: bool
-
-
-def _outcome(
-    state: str,
-    *,
-    terminal_status: str,
-    final_visible_event_id: str | None = None,
-    last_physical_stream_event_id: str | None = None,
-    final_visible_body: str | None = None,
-    delivery_kind: str | None = None,
-    failure_reason: str | None = None,
-) -> FinalDeliveryOutcome:
-    return FinalDeliveryOutcome(
-        state=state,
-        terminal_status=terminal_status,
-        final_visible_event_id=final_visible_event_id,
-        last_physical_stream_event_id=last_physical_stream_event_id,
-        final_visible_body=final_visible_body,
-        delivery_kind=delivery_kind,
-        failure_reason=failure_reason,
-    )
-
-
-def _final_visible_delivery() -> FinalDeliveryOutcome:
-    return _outcome(
-        "final_visible_delivery",
-        terminal_status="completed",
-        final_visible_event_id="$final",
-        final_visible_body="hello",
-        delivery_kind="sent",
-    )
-
-
-def _kept_prior_visible_stream_after_completed_terminal_failure() -> FinalDeliveryOutcome:
-    return _outcome(
-        "kept_prior_visible_stream_after_completed_terminal_failure",
-        terminal_status="completed",
-        last_physical_stream_event_id="$stream",
-        final_visible_body="partial",
-    )
-
-
-def _kept_prior_visible_stream_after_cancel() -> FinalDeliveryOutcome:
-    return _outcome(
-        "kept_prior_visible_stream_after_cancel",
-        terminal_status="cancelled",
-        last_physical_stream_event_id="$stream",
-        final_visible_body="partial",
-    )
-
-
-def _kept_prior_visible_stream_after_error() -> FinalDeliveryOutcome:
-    return _outcome(
-        "kept_prior_visible_stream_after_error",
-        terminal_status="error",
-        last_physical_stream_event_id="$stream",
-        final_visible_body="partial",
-    )
-
-
-def _cancelled_with_visible_response() -> FinalDeliveryOutcome:
-    return _outcome(
-        "cancelled_with_visible_response",
-        terminal_status="cancelled",
-        final_visible_event_id="$existing",
-        final_visible_body="existing reply",
-    )
-
-
-def _cancelled_with_visible_note() -> FinalDeliveryOutcome:
-    return _outcome(
-        "cancelled_with_visible_note",
-        terminal_status="cancelled",
-        final_visible_event_id="$cancel-note",
-        final_visible_body="Cancelled.",
-        delivery_kind="edited",
-    )
-
-
-def _cancelled_without_visible_response() -> FinalDeliveryOutcome:
-    return _outcome("cancelled_without_visible_response", terminal_status="cancelled")
-
-
-def _suppressed_without_visible_response() -> FinalDeliveryOutcome:
-    return _outcome("suppressed_without_visible_response", terminal_status="completed")
-
-
-def _kept_prior_visible_response_after_suppression() -> FinalDeliveryOutcome:
-    return _outcome(
-        "kept_prior_visible_response_after_suppression",
-        terminal_status="completed",
-        final_visible_event_id="$existing",
-        final_visible_body="existing reply",
-    )
-
-
-def _suppressed_redacted() -> FinalDeliveryOutcome:
-    return _outcome(
-        "suppressed_redacted",
-        terminal_status="completed",
-        last_physical_stream_event_id="$suppressed",
-    )
-
-
-def _suppression_cleanup_failed() -> FinalDeliveryOutcome:
-    return _outcome(
-        "suppression_cleanup_failed",
-        terminal_status="error",
-        last_physical_stream_event_id="$suppressed",
-    )
-
-
-def _kept_prior_visible_response_after_error() -> FinalDeliveryOutcome:
-    return _outcome(
-        "kept_prior_visible_response_after_error",
-        terminal_status="error",
-        final_visible_event_id="$existing",
-        final_visible_body="existing reply",
-    )
-
-
-def _error_without_visible_response() -> FinalDeliveryOutcome:
-    return _outcome("error_without_visible_response", terminal_status="error")
 
 
 @pytest.mark.parametrize(
-    ("builder", "expected"),
+    ("outcome", "expected"),
     [
         pytest.param(
-            _final_visible_delivery,
-            _PolicyExpectation(
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                final_visible_event_id="$final",
                 visible_response_event_id="$final",
                 response_identity_event_id="$final",
                 turn_completion_event_id="$final",
-                emits_after_response=True,
-                emits_cancelled_response=False,
-                should_mark_handled=True,
-                retryable=False,
-                should_persist_response_identity=True,
-                should_queue_thread_summary=True,
-                should_register_interactive_follow_up=True,
-                should_shield_late_failures=True,
+                final_visible_body="hello",
+                delivery_kind="sent",
+                mark_handled=True,
             ),
-            id="final_visible_delivery",
+            _Expectation("$final", "$final", "$final", True, False),
+            id="completed-visible-delivery",
         ),
         pytest.param(
-            _kept_prior_visible_stream_after_completed_terminal_failure,
-            _PolicyExpectation(
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                final_visible_event_id="$stream",
                 visible_response_event_id="$stream",
                 response_identity_event_id="$stream",
                 turn_completion_event_id="$stream",
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=True,
-                retryable=False,
-                should_persist_response_identity=True,
-                should_queue_thread_summary=True,
-                should_register_interactive_follow_up=True,
-                should_shield_late_failures=True,
+                final_visible_body="partial",
+                mark_handled=True,
             ),
-            id="kept_prior_visible_stream_after_completed_terminal_failure",
+            _Expectation("$stream", "$stream", "$stream", True, False),
+            id="completed-preserved-visible-stream",
         ),
         pytest.param(
-            _kept_prior_visible_stream_after_cancel,
-            _PolicyExpectation(
+            FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                final_visible_event_id="$stream",
                 visible_response_event_id="$stream",
-                response_identity_event_id=None,
                 turn_completion_event_id="$stream",
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=False,
+                final_visible_body="partial",
+                failure_reason="cancelled_by_user",
                 retryable=True,
-                should_persist_response_identity=False,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=True,
             ),
-            id="kept_prior_visible_stream_after_cancel",
+            _Expectation("$stream", None, "$stream", False, True),
+            id="cancelled-visible-stream",
         ),
         pytest.param(
-            _kept_prior_visible_stream_after_error,
-            _PolicyExpectation(
+            FinalDeliveryOutcome(
+                terminal_status="error",
+                final_visible_event_id="$stream",
                 visible_response_event_id="$stream",
                 response_identity_event_id="$stream",
                 turn_completion_event_id="$stream",
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=True,
-                retryable=False,
-                should_persist_response_identity=True,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=True,
+                final_visible_body="partial",
+                failure_reason="terminal_update_failed",
+                mark_handled=True,
             ),
-            id="kept_prior_visible_stream_after_error",
+            _Expectation("$stream", "$stream", "$stream", True, False),
+            id="error-visible-stream",
         ),
         pytest.param(
-            _cancelled_with_visible_response,
-            _PolicyExpectation(
-                visible_response_event_id="$existing",
-                response_identity_event_id=None,
-                turn_completion_event_id="$existing",
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=False,
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                final_visible_event_id=None,
+                failure_reason="suppressed_by_hook",
+                mark_handled=True,
+                suppressed=True,
+            ),
+            _Expectation(None, None, None, True, False),
+            id="suppressed-without-visible-response",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="error",
+                final_visible_event_id="$placeholder",
+                visible_response_event_id="$placeholder",
+                turn_completion_event_id="$placeholder",
+                failure_reason="suppressed_by_hook",
+                mark_handled=True,
+            ),
+            _Expectation("$placeholder", None, "$placeholder", True, False),
+            id="suppression-cleanup-failed",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="error",
+                final_visible_event_id=None,
+                failure_reason="delivery_failed",
                 retryable=True,
-                should_persist_response_identity=False,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=True,
             ),
-            id="cancelled_with_visible_response",
-        ),
-        pytest.param(
-            _cancelled_with_visible_note,
-            _PolicyExpectation(
-                visible_response_event_id="$cancel-note",
-                response_identity_event_id=None,
-                turn_completion_event_id="$cancel-note",
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=False,
-                retryable=True,
-                should_persist_response_identity=False,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=True,
-            ),
-            id="cancelled_with_visible_note",
-        ),
-        pytest.param(
-            _cancelled_without_visible_response,
-            _PolicyExpectation(
-                visible_response_event_id=None,
-                response_identity_event_id=None,
-                turn_completion_event_id=None,
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=False,
-                retryable=True,
-                should_persist_response_identity=False,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=False,
-            ),
-            id="cancelled_without_visible_response",
-        ),
-        pytest.param(
-            _kept_prior_visible_response_after_suppression,
-            _PolicyExpectation(
-                visible_response_event_id="$existing",
-                response_identity_event_id=None,
-                turn_completion_event_id=None,
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=False,
-                retryable=True,
-                should_persist_response_identity=False,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=False,
-            ),
-            id="kept_prior_visible_response_after_suppression",
-        ),
-        pytest.param(
-            _suppressed_without_visible_response,
-            _PolicyExpectation(
-                visible_response_event_id=None,
-                response_identity_event_id=None,
-                turn_completion_event_id=None,
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=True,
-                retryable=False,
-                should_persist_response_identity=False,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=False,
-            ),
-            id="suppressed_without_visible_response",
-        ),
-        pytest.param(
-            _suppressed_redacted,
-            _PolicyExpectation(
-                visible_response_event_id=None,
-                response_identity_event_id=None,
-                turn_completion_event_id=None,
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=True,
-                retryable=False,
-                should_persist_response_identity=False,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=False,
-            ),
-            id="suppressed_redacted",
-        ),
-        pytest.param(
-            _suppression_cleanup_failed,
-            _PolicyExpectation(
-                visible_response_event_id="$suppressed",
-                response_identity_event_id=None,
-                turn_completion_event_id="$suppressed",
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=True,
-                retryable=False,
-                should_persist_response_identity=False,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=True,
-            ),
-            id="suppression_cleanup_failed",
-        ),
-        pytest.param(
-            _kept_prior_visible_response_after_error,
-            _PolicyExpectation(
-                visible_response_event_id="$existing",
-                response_identity_event_id=None,
-                turn_completion_event_id=None,
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=False,
-                retryable=True,
-                should_persist_response_identity=False,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=False,
-            ),
-            id="kept_prior_visible_response_after_error",
-        ),
-        pytest.param(
-            _error_without_visible_response,
-            _PolicyExpectation(
-                visible_response_event_id=None,
-                response_identity_event_id=None,
-                turn_completion_event_id=None,
-                emits_after_response=False,
-                emits_cancelled_response=True,
-                should_mark_handled=False,
-                retryable=True,
-                should_persist_response_identity=False,
-                should_queue_thread_summary=False,
-                should_register_interactive_follow_up=False,
-                should_shield_late_failures=False,
-            ),
-            id="error_without_visible_response",
+            _Expectation(None, None, None, False, True),
+            id="error-without-visible-response",
         ),
     ],
 )
-def test_final_delivery_policy_table(
-    builder: Callable[[], FinalDeliveryOutcome],
-    expected: _PolicyExpectation,
+def test_final_delivery_outcomes_use_explicit_fields(
+    outcome: FinalDeliveryOutcome,
+    expected: _Expectation,
 ) -> None:
-    """Every terminal state should project policy from one canonical row."""
-    outcome = builder()
-
+    """Call sites should rely on explicit fields, not a state-policy projection."""
     assert outcome.visible_response_event_id == expected.visible_response_event_id
     assert outcome.response_identity_event_id == expected.response_identity_event_id
     assert outcome.turn_completion_event_id == expected.turn_completion_event_id
-    assert outcome.emits_after_response is expected.emits_after_response
-    assert outcome.emits_cancelled_response is expected.emits_cancelled_response
-    assert outcome.should_mark_handled is expected.should_mark_handled
+    assert outcome.mark_handled is expected.mark_handled
     assert outcome.retryable is expected.retryable
-    assert outcome.should_persist_response_identity is expected.should_persist_response_identity
-    assert outcome.should_queue_thread_summary is expected.should_queue_thread_summary
-    assert outcome.should_register_interactive_follow_up is expected.should_register_interactive_follow_up
-    assert outcome.should_shield_late_failures is expected.should_shield_late_failures
+
+
+def test_final_delivery_outcome_requires_visible_response_before_identity() -> None:
+    """Response identity must remain anchored to a visible response event."""
+    with pytest.raises(ValueError, match="response_identity_event_id requires visible_response_event_id"):
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            final_visible_event_id="$final",
+            response_identity_event_id="$final",
+        )
 
 
 def test_stream_transport_outcome_rejects_rendered_body_without_visible_state() -> None:

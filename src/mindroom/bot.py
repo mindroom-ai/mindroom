@@ -1723,17 +1723,17 @@ class TeamBot(AgentBot):
                 agent_name=self.agent_name,
                 source_kind="message",
             )
-            return await self._delivery_gateway.emit_terminal_outcome_hooks(
-                outcome=FinalDeliveryOutcome(
-                    state="error_without_visible_response",
-                    terminal_status="error",
-                    final_visible_event_id=None,
-                    last_physical_stream_event_id=None,
-                    failure_reason="empty_team_prompt",
-                ),
+            await self._delivery_gateway.deps.response_hooks.emit_cancelled_response(
                 correlation_id=correlation_id or reply_to_event_id or room_id,
                 envelope=fallback_envelope,
                 response_kind="team",
+                failure_reason="empty_prompt",
+            )
+            return FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                final_visible_event_id=None,
+                failure_reason="empty_prompt",
+                retryable=True,
             )
 
         assert self.client is not None
@@ -1787,7 +1787,6 @@ class TeamBot(AgentBot):
                     correlation_id=correlation_id or reply_to_event_id or room_id,
                     tool_trace=None,
                     extra_content=None,
-                    apply_before_hooks=False,
                 ),
             )
         assert team_resolution.mode is not None

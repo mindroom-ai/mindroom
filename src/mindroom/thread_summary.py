@@ -41,6 +41,8 @@ _MARKDOWN_HEADING_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s+")
 _MARKDOWN_BLOCKQUOTE_RE = re.compile(r"(?m)^\s{0,3}>\s?")
 _MARKDOWN_LIST_ITEM_RE = re.compile(r"(?m)^\s*(?:[-+*]|\d+\.)\s+")
 _PREQUEUE_CONCURRENCY_MARGIN = 2
+_SUMMARY_TEMPERATURE = 0.2
+
 # In-memory tracking of last summarized message count per thread.
 # Key: "{room_id}:{thread_id}", value: message count at last summary.
 _last_summary_counts: dict[str, int] = {}
@@ -295,7 +297,7 @@ async def _generate_summary(
     model_name = config.defaults.thread_summary_model or "default"
     model = model_loading.get_model_instance(config, runtime_paths, model_name)
     if isinstance(model, _SupportsTemperature):
-        model.temperature = config.defaults.thread_summary_temperature
+        model.temperature = _SUMMARY_TEMPERATURE
     else:
         model_class = type(model).__name__
         logger.warning(
