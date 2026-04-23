@@ -637,7 +637,7 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
 async def test_process_and_respond_streaming_preserves_user_stop_outcome(
     tmp_path: Path,
 ) -> None:
-    """Explicit user-stop during streamed delivery should return the real finalized outcome."""
+    """Explicit user-stop during streamed delivery should finalize, then re-raise cancellation."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -679,16 +679,16 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
             AsyncMock(return_value=expected_outcome),
         )
 
-        outcome = await coordinator.process_and_respond_streaming(
-            _response_request(
-                prompt="Hello",
-                user_id="@alice:localhost",
-                thread_id="$thread-root",
-            ),
-            run_id="run-1",
-        )
+        with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
+            await coordinator.process_and_respond_streaming(
+                _response_request(
+                    prompt="Hello",
+                    user_id="@alice:localhost",
+                    thread_id="$thread-root",
+                ),
+                run_id="run-1",
+            )
 
-    assert outcome is expected_outcome
     coordinator.deps.delivery_gateway.finalize_streamed_response.assert_awaited_once()
 
 

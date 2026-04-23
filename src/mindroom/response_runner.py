@@ -1399,7 +1399,7 @@ class ResponseRunner:
                                 ),
                                 canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
                                 failure_reason=fallback_stream_outcome.failure_reason or "stream_finalize_cancelled",
-                                tool_trace=tuple(),
+                                tool_trace=(),
                             )
                         else:
                             final_delivery_outcome = FinalDeliveryOutcome(
@@ -1411,7 +1411,7 @@ class ResponseRunner:
                                 ),
                                 canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
                                 failure_reason=fallback_stream_outcome.failure_reason or "stream_finalize_error",
-                                tool_trace=tuple(),
+                                tool_trace=(),
                             )
                 if finalized_cleanly and request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply("final")
@@ -2329,7 +2329,7 @@ class ResponseRunner:
                 ),
             )
             if self._should_reraise_user_stop(error.error):
-                return outcome
+                raise error.error from error
             return outcome
         except asyncio.CancelledError as exc:
             self._log_cancelled_response(
