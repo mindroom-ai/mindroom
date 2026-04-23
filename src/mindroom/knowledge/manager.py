@@ -392,6 +392,7 @@ class KnowledgeManager:
     )
     _git_lfs_checked: bool = field(default=False, init=False)
     _git_lfs_repository_ready: bool = field(default=False, init=False)
+    _cached_persisted_indexing_state: _PersistedIndexingState | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
@@ -416,6 +417,7 @@ class KnowledgeManager:
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
         self._git_repo_present = (self.knowledge_path / ".git").is_dir()
         persisted_state = self._load_persisted_indexing_state()
+        self._cached_persisted_indexing_state = persisted_state
         collection_name = (
             persisted_state.collection
             if persisted_state is not None and persisted_state.collection is not None
@@ -540,6 +542,14 @@ class KnowledgeManager:
         if published_revision is not None:
             payload["published_revision"] = published_revision
         self._indexing_settings_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        self._cached_persisted_indexing_state = _PersistedIndexingState(
+            settings=self._indexing_settings,
+            status=status,
+            collection=collection,
+            availability=availability,
+            last_published_at=last_published_at,
+            published_revision=published_revision,
+        )
 
     def _save_persisted_indexing_settings(self) -> None:
         self._save_persisted_indexing_state(

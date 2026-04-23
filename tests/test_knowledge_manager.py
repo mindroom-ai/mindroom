@@ -2037,6 +2037,44 @@ async def test_get_knowledge_for_base_reuses_published_shared_manager(
 
 
 @pytest.mark.asyncio
+async def test_get_knowledge_for_base_uses_cached_persisted_state_on_request_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-base request resolution should not reload persisted indexing state from disk."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={
+                "docs": KnowledgeBaseConfig(path=str(docs_path), watch=False),
+            },
+        ),
+        _runtime_paths(tmp_path / "config.yaml", tmp_path),
+    )
+
+    try:
+        managers = await initialize_shared_knowledge_managers(config, runtime_paths_for(config))
+        manager = managers["docs"]
+        load_persisted_state = MagicMock(side_effect=AssertionError("request path should not hit disk"))
+        monkeypatch.setattr(manager, "_load_persisted_indexing_state", load_persisted_state)
+
+        knowledge = _get_knowledge_for_base("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+        assert knowledge is manager.get_knowledge()
+        assert load_persisted_state.call_count == 0
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_get_knowledge_for_base_treats_uninitialized_published_manager_as_initializing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

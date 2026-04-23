@@ -113,7 +113,7 @@ def _get_knowledge_for_base(
             on_availability(KnowledgeAvailability.INITIALIZING)
         return None
 
-    persisted_state = published_manager._load_persisted_indexing_state()
+    persisted_state = published_manager._cached_persisted_indexing_state
     if (
         persisted_state is not None
         and persisted_state.availability == KnowledgeAvailability.REFRESH_FAILED.value
