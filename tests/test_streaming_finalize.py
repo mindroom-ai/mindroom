@@ -248,7 +248,7 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
 
 @pytest.mark.asyncio
 async def test_transport_final_event_only_body_uses_canonical_final_candidate(tmp_path: Path) -> None:
-    """Clean completion with only RunCompletedEvent.content should finalize with that body."""
+    """Final-only provider content should stay pre-visible until the gateway applies before_response."""
     config = _config(tmp_path)
     client = _client()
 
@@ -275,8 +275,10 @@ async def test_transport_final_event_only_body_uses_canonical_final_candidate(tm
         )
 
     assert outcome.terminal_status == "completed"
-    assert outcome.rendered_body == "hello from final event"
-    assert outcome.visible_body_state == "visible_body"
+    assert outcome.rendered_body == "Thinking..."
+    assert outcome.visible_body_state == "placeholder_only"
+    assert outcome.terminal_operation == "none"
+    assert outcome.terminal_result == "not_attempted"
     assert outcome.canonical_final_body_candidate == "hello from final event"
 
 

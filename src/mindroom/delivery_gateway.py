@@ -562,25 +562,7 @@ class DeliveryGateway:
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-            if request.existing_event_id is not None and not request.existing_event_is_placeholder:
-                return FinalDeliveryOutcome(
-                    terminal_status="cancelled",
-                    final_visible_event_id=request.existing_event_id,
-                    visible_response_event_id=request.existing_event_id,
-                    turn_completion_event_id=request.existing_event_id,
-                    failure_reason=failure_reason,
-                    retryable=True,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
-            return FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                final_visible_event_id=None,
-                failure_reason=failure_reason,
-                retryable=True,
-                tool_trace=tuple(request.tool_trace or ()),
-                extra_content=request.extra_content,
-            )
+            raise
         except Exception as error:
             failure_reason = str(error)
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
@@ -1065,6 +1047,30 @@ class DeliveryGateway:
                     cancelled=False,
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
+                ),
+            )
+
+        if (
+            not stream_outcome.had_visible_body_before_terminal
+            and stream_outcome.canonical_final_body_candidate is not None
+            and stream_outcome.visible_body_state in {"none", "placeholder_only"}
+        ):
+            existing_event_id = request.existing_event_id
+            existing_event_is_placeholder = request.existing_event_is_placeholder
+            if stream_outcome.visible_body_state == "placeholder_only":
+                existing_event_id = streamed_event_id
+                existing_event_is_placeholder = True
+            return await self.deliver_final(
+                FinalDeliveryRequest(
+                    target=request.target,
+                    existing_event_id=existing_event_id,
+                    existing_event_is_placeholder=existing_event_is_placeholder,
+                    response_text=stream_outcome.canonical_final_body_candidate,
+                    response_kind=request.response_kind,
+                    response_envelope=request.response_envelope,
+                    correlation_id=request.correlation_id,
+                    tool_trace=request.tool_trace,
+                    extra_content=request.extra_content,
                 ),
             )
 

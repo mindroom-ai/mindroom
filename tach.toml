@@ -297,16 +297,22 @@ path = "mindroom.delivery_gateway"
 depends_on = [
     "mindroom.cancellation",
     "mindroom.constants",
+    "mindroom.final_delivery",
     "mindroom.matrix.client_delivery",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
 ]
 
 [[modules]]
+path = "mindroom.final_delivery"
+depends_on = ["mindroom.tool_system.events"]
+
+[[modules]]
 path = "mindroom.edit_regenerator"
 depends_on = [
     "mindroom.coalescing",
     "mindroom.conversation_resolver",
+    "mindroom.final_delivery",
     "mindroom.handled_turns",
     "mindroom.hooks.ingress",
     "mindroom.matrix.client_visible_messages",
@@ -429,6 +435,7 @@ depends_on = [
     "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.final_delivery",
     "mindroom.history.interrupted_replay",
     "mindroom.history.turn_recorder",
     "mindroom.knowledge",
@@ -947,6 +954,7 @@ depends_on = [
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
+    "mindroom.final_delivery",
     "mindroom.hooks.sender",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
@@ -1133,11 +1141,11 @@ depends_on = [
 path = "mindroom.streaming"
 depends_on = [
     "mindroom.constants",
+    "mindroom.final_delivery",
     "mindroom.interactive",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
     "mindroom.message_target",
-    "mindroom.orchestration.runtime",
     "mindroom.streaming_delivery",
     "mindroom.streaming_warmup",
     "mindroom.tool_system.runtime_context",
@@ -1161,6 +1169,7 @@ depends_on = [
 path = "mindroom.post_response_effects"
 depends_on = [
     "mindroom.delivery_gateway",
+    "mindroom.final_delivery",
     "mindroom.matrix.conversation_cache",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
@@ -1185,6 +1194,7 @@ depends_on = [
     "mindroom.commands.handler",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.final_delivery",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
     "mindroom.matrix.event_info",

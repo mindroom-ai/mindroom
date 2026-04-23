@@ -44,6 +44,7 @@ from mindroom.ai import (
     stream_agent_response,
 )
 from mindroom.bot import AgentBot
+from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
@@ -536,6 +537,149 @@ def _response_request(
         model_prompt=model_prompt,
         user_id=user_id,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_streaming", [False, True])
+async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
+    tmp_path: Path,
+    use_streaming: bool,
+) -> None:
+    """Blank prompts should emit one canonical message:cancelled hook through lifecycle finalization."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=use_streaming)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
+
+        outcome = await coordinator.generate_response(
+            _response_request(prompt="   ", user_id="@alice:localhost"),
+        )
+
+    assert outcome.terminal_status == "cancelled"
+    coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+    assert (
+        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+            "failure_reason"
+        ]
+        == "empty_prompt"
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_propagates_before_response_cancellation_to_runner(
+    tmp_path: Path,
+) -> None:
+    """Pre-send before_response cancellation must reach the runner cancellation handler."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello!")),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+        coordinator._persist_interrupted_recorder = MagicMock()
+        coordinator.deps.delivery_gateway.deps.response_hooks.apply_before_response = AsyncMock(
+            side_effect=asyncio.CancelledError(USER_STOP_CANCEL_MSG),
+        )
+
+        with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
+            await coordinator.process_and_respond(
+                ResponseRequest(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$user_msg",
+                    thread_id="$thread-root",
+                    thread_history=(),
+                    prompt="Hello",
+                    user_id="@alice:localhost",
+                    existing_event_id="$thinking",
+                    existing_event_is_placeholder=True,
+                ),
+                run_id="run-1",
+            )
+
+    coordinator._persist_interrupted_recorder.assert_called_once()
+    coordinator.deps.delivery_gateway.deps.redact_message_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_and_respond_streaming_preserves_user_stop_outcome(
+    tmp_path: Path,
+) -> None:
+    """Explicit user-stop during streamed delivery should return the real finalized outcome."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+        )
+        expected_outcome = FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            final_visible_event_id="$streaming",
+            visible_response_event_id="$streaming",
+            turn_completion_event_id="$streaming",
+            final_visible_body="partial answer\n\n**[Response cancelled by user]**",
+            failure_reason="cancelled_by_user",
+            retryable=True,
+        )
+        coordinator.generate_streaming_ai_response = AsyncMock(
+            side_effect=StreamingDeliveryError(
+                asyncio.CancelledError(USER_STOP_CANCEL_MSG),
+                event_id="$streaming",
+                accumulated_text="partial answer",
+                tool_trace=[],
+                transport_outcome=_stream_outcome(
+                    "$streaming",
+                    "partial answer\n\n**[Response cancelled by user]**",
+                    terminal_operation="edit",
+                    terminal_result="succeeded",
+                    terminal_status="cancelled",
+                    failure_reason="cancelled_by_user",
+                ),
+            ),
+        )
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "finalize_streamed_response",
+            AsyncMock(return_value=expected_outcome),
+        )
+
+        outcome = await coordinator.process_and_respond_streaming(
+            _response_request(
+                prompt="Hello",
+                user_id="@alice:localhost",
+                thread_id="$thread-root",
+            ),
+            run_id="run-1",
+        )
+
+    assert outcome is expected_outcome
+    coordinator.deps.delivery_gateway.finalize_streamed_response.assert_awaited_once()
 
 
 def test_session_started_event_is_registered() -> None:

@@ -404,8 +404,28 @@ class StreamingResponse:
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
+        had_visible_body_before_terminal = self._last_committed_visible_body_state == "visible_body"
         terminal_operation: StreamTerminalOperation = "edit" if self.event_id is not None else "send"
         text_to_send = self.accumulated_text
+        if (
+            final_stream_status == STREAM_STATUS_COMPLETED
+            and not text_to_send.strip()
+            and self.canonical_final_body_candidate is not None
+            and not had_visible_body_before_terminal
+        ):
+            committed_rendered_body, committed_visible_body_state, _, _ = self._committed_terminal_snapshot()
+            return StreamTransportOutcome(
+                last_physical_stream_event_id=self.event_id,
+                terminal_operation="none",
+                terminal_result="not_attempted",
+                terminal_status=final_stream_status,
+                rendered_body=committed_rendered_body,
+                visible_body_state=committed_visible_body_state,
+                had_visible_body_before_terminal=False,
+                canonical_final_body_candidate=self.canonical_final_body_candidate,
+                option_map=None,
+                options_list=None,
+            )
         if not text_to_send.strip() and final_stream_status == STREAM_STATUS_COMPLETED:
             text_to_send = self.canonical_final_body_candidate or ""
         if not text_to_send.strip():
@@ -427,6 +447,7 @@ class StreamingResponse:
                 terminal_status=final_stream_status,
                 rendered_body=None,
                 visible_body_state=attempted_visible_body_state,
+                had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=self.canonical_final_body_candidate,
                 option_map=None,
                 options_list=None,
@@ -471,6 +492,7 @@ class StreamingResponse:
                 terminal_status=final_stream_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
+                had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=self.canonical_final_body_candidate,
                 failure_reason="terminal_update_cancelled",
                 option_map=committed_option_map,
@@ -498,6 +520,7 @@ class StreamingResponse:
                 terminal_status=final_stream_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
+                had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=self.canonical_final_body_candidate,
                 failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
                 option_map=committed_option_map,
@@ -523,6 +546,7 @@ class StreamingResponse:
                 terminal_status=final_stream_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
+                had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=self.canonical_final_body_candidate,
                 failure_reason="terminal_update_failed",
                 option_map=committed_option_map,
@@ -535,6 +559,7 @@ class StreamingResponse:
             terminal_status=final_stream_status,
             rendered_body=attempted_rendered_body,
             visible_body_state=attempted_visible_body_state,
+            had_visible_body_before_terminal=had_visible_body_before_terminal,
             canonical_final_body_candidate=self.canonical_final_body_candidate,
             failure_reason=None,
             option_map=response.option_map,

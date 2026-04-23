@@ -1573,8 +1573,6 @@ class ResponseRunner:
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
-            if self._should_reraise_user_stop(error.error):
-                raise error.error from None
         except Exception as error:
             if not delivery_stage_started:
                 raise
@@ -2021,23 +2019,7 @@ class ResponseRunner:
     ) -> FinalDeliveryOutcome:
         """Process a message and send a response without streaming."""
         if not request.prompt.strip():
-            resolved_target = request.target or self.deps.resolver.build_message_target(
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                reply_to_event_id=request.reply_to_event_id,
-            )
-            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                correlation_id=self._correlation_id_for_request(request),
-                envelope=self._response_envelope_for_request(request, resolved_target=resolved_target),
-                response_kind=response_kind,
-                failure_reason="empty_prompt",
-            )
-            return FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                final_visible_event_id=None,
-                failure_reason="empty_prompt",
-                retryable=True,
-            )
+            return FinalDeliveryOutcome.cancelled_for_empty_prompt()
 
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
@@ -2189,23 +2171,7 @@ class ResponseRunner:
     ) -> FinalDeliveryOutcome:
         """Process a message and send a streamed response."""
         if not request.prompt.strip():
-            resolved_target = request.target or self.deps.resolver.build_message_target(
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                reply_to_event_id=request.reply_to_event_id,
-            )
-            await self.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                correlation_id=self._correlation_id_for_request(request),
-                envelope=self._response_envelope_for_request(request, resolved_target=resolved_target),
-                response_kind=response_kind,
-                failure_reason="empty_prompt",
-            )
-            return FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                final_visible_event_id=None,
-                failure_reason="empty_prompt",
-                retryable=True,
-            )
+            return FinalDeliveryOutcome.cancelled_for_empty_prompt()
 
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
@@ -2344,7 +2310,7 @@ class ResponseRunner:
                 ),
             )
             if self._should_reraise_user_stop(error.error):
-                raise error.error from None
+                return outcome
             return outcome
         except asyncio.CancelledError as exc:
             self._log_cancelled_response(

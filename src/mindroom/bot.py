@@ -90,7 +90,6 @@ from .delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
     EditTextRequest,
-    FinalDeliveryRequest,
     ResponseHookService,
     SendTextRequest,
 )
@@ -1706,35 +1705,7 @@ class TeamBot(AgentBot):
     ) -> FinalDeliveryOutcome:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
-            resolved_target = target or self._conversation_resolver.build_message_target(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-            )
-            fallback_envelope = response_envelope or MessageEnvelope(
-                source_event_id=reply_to_event_id or "",
-                room_id=room_id,
-                target=resolved_target,
-                requester_id=user_id or "",
-                sender_id=user_id or "",
-                body=prompt,
-                attachment_ids=tuple(attachment_ids or ()),
-                mentioned_agents=(),
-                agent_name=self.agent_name,
-                source_kind="message",
-            )
-            await self._delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                correlation_id=correlation_id or reply_to_event_id or room_id,
-                envelope=fallback_envelope,
-                response_kind="team",
-                failure_reason="empty_prompt",
-            )
-            return FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                final_visible_event_id=None,
-                failure_reason="empty_prompt",
-                retryable=True,
-            )
+            return FinalDeliveryOutcome.cancelled_for_empty_prompt()
 
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
@@ -1776,18 +1747,59 @@ class TeamBot(AgentBot):
                 agent_name=self.agent_name,
                 source_kind="message",
             )
-            return await self._delivery_gateway.deliver_final(
-                FinalDeliveryRequest(
-                    target=resolved_target,
-                    existing_event_id=existing_event_id,
-                    existing_event_is_placeholder=existing_event_is_placeholder,
+            resolved_correlation_id = correlation_id or reply_to_event_id or room_id
+            response_event_id: str | None = None
+            if existing_event_id is not None:
+                edited = await self._edit_message(
+                    room_id=room_id,
+                    event_id=existing_event_id,
+                    new_text=team_resolution.reason,
+                    thread_id=resolved_target.resolved_thread_id,
+                )
+                if edited:
+                    response_event_id = existing_event_id
+            else:
+                response_event_id = await self._send_response(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
                     response_text=team_resolution.reason,
+                    thread_id=resolved_target.resolved_thread_id,
+                    target=resolved_target,
+                )
+            if response_event_id is None:
+                await self._delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                    correlation_id=resolved_correlation_id,
+                    envelope=fallback_envelope,
+                    visible_response_event_id=existing_event_id,
                     response_kind="system",
-                    response_envelope=fallback_envelope,
-                    correlation_id=correlation_id or reply_to_event_id or room_id,
-                    tool_trace=None,
-                    extra_content=None,
-                ),
+                    failure_reason="delivery_failed",
+                )
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    final_visible_event_id=existing_event_id,
+                    visible_response_event_id=existing_event_id,
+                    failure_reason="delivery_failed",
+                    retryable=True,
+                )
+            await self._delivery_gateway.deps.response_hooks.emit_after_response(
+                correlation_id=resolved_correlation_id,
+                envelope=fallback_envelope,
+                response_text=team_resolution.reason,
+                response_event_id=response_event_id,
+                delivery_kind="edited" if existing_event_id is not None else "sent",
+                response_kind="system",
+                continue_on_cancelled=True,
+            )
+            return FinalDeliveryOutcome(
+                terminal_status="completed",
+                final_visible_event_id=response_event_id,
+                visible_response_event_id=response_event_id,
+                response_identity_event_id=response_event_id,
+                turn_completion_event_id=response_event_id,
+                last_physical_stream_event_id=response_event_id if existing_event_is_placeholder else None,
+                final_visible_body=team_resolution.reason,
+                delivery_kind="edited" if existing_event_id is not None else "sent",
+                mark_handled=True,
             )
         assert team_resolution.mode is not None
 

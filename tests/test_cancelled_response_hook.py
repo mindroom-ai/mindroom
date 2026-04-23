@@ -17,9 +17,10 @@ from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
+    FinalizeStreamedResponseRequest,
     ResponseHookService,
 )
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -504,6 +505,100 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
     assert outcome.retryable is True
     assert outcome.visible_response_event_id == expected_visible_event_id
     assert cancelled_seen == []
+
+
+@pytest.mark.asyncio
+async def test_final_only_provider_runs_before_response_then_after_response_once(
+    tmp_path: Path,
+) -> None:
+    """Final-only provider content must go through before_response before the first visible text lands."""
+    before_seen: list[str] = []
+    after_seen: list[tuple[str, str]] = []
+    cancelled_seen: list[CancelledResponseInfo] = []
+
+    @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+    async def before(ctx: BeforeResponseContext) -> None:
+        before_seen.append(ctx.draft.response_text)
+        ctx.draft.response_text = "hooked final body"
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def after(ctx: AfterResponseContext) -> None:
+        after_seen.append((ctx.result.response_text, ctx.result.delivery_kind))
+
+    @hook(EVENT_MESSAGE_CANCELLED)
+    async def on_cancelled(ctx: CancelledResponseContext) -> None:
+        cancelled_seen.append(ctx.info)
+
+    registry = HookRegistry.from_plugins([_plugin("test-final-only-provider", [before, after, on_cancelled])])
+    config, response_hooks = _response_hook_service(tmp_path, registry)
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=response_hooks.hook_context.runtime,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=MagicMock(),
+            response_hooks=response_hooks,
+        ),
+    )
+    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
+
+    outcome = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            stream_transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$thinking",
+                terminal_operation="none",
+                terminal_result="not_attempted",
+                terminal_status="completed",
+                rendered_body="Thinking...",
+                visible_body_state="placeholder_only",
+                canonical_final_body_candidate="final body",
+            ),
+            initial_delivery_kind="sent",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-final-only-provider",
+            tool_trace=None,
+            extra_content=None,
+            existing_event_id="$thinking",
+            existing_event_is_placeholder=True,
+        ),
+    )
+
+    runner = SimpleNamespace(
+        deps=SimpleNamespace(
+            delivery_gateway=SimpleNamespace(
+                deps=SimpleNamespace(response_hooks=response_hooks),
+            ),
+        ),
+        _log_post_response_effects_failure=MagicMock(),
+        _emit_pipeline_timing_summary=MagicMock(),
+        _response_outcome=MagicMock(return_value=None),
+    )
+    lifecycle = ResponseLifecycle(
+        runner=runner,
+        response_kind="ai",
+        request=MagicMock(),
+        response_envelope=_envelope(),
+        correlation_id="corr-final-only-provider",
+    )
+
+    finalized = await lifecycle.finalize(
+        DeliveryOutcome(final_delivery_outcome=outcome),
+        build_post_response_outcome=lambda delivered: ResponseOutcome(final_delivery_outcome=delivered),
+        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+    )
+
+    assert before_seen == ["final body"]
+    assert after_seen == [("hooked final body", "edited")]
+    assert cancelled_seen == []
+    assert finalized.final_visible_body == "hooked final body"
+    gateway.edit_text.assert_awaited_once()
+    assert gateway.edit_text.await_args.args[0].event_id == "$thinking"
+    assert gateway.edit_text.await_args.args[0].new_text == "hooked final body"
 
 
 @pytest.mark.asyncio

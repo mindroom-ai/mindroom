@@ -2690,12 +2690,12 @@ class TestAgentBot:
         assert mock_edit_message.await_args.args[3]["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
 
     @pytest.mark.asyncio
-    async def test_team_generate_response_nonteam_fallback_uses_gateway_delivery(
+    async def test_team_generate_response_nonteam_fallback_emits_after_response_without_before_response(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Non-team fallback should still go through the terminal delivery gateway."""
+        """Non-team fallback should deliver directly and emit only the terminal after_response hook."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         team_member = config.get_ids(runtime_paths)["general"]
@@ -2731,16 +2731,10 @@ class TestAgentBot:
             reason="No team available",
         )
 
-        gateway_outcome = _outcome(
-            terminal_status="error",
-            final_visible_event_id="$existing",
-            visible_response_event_id="$existing",
-            final_visible_body="",
-            failure_reason="delivery_failed",
-            retryable=True,
-        )
-        bot._delivery_gateway.deliver_final = AsyncMock(return_value=gateway_outcome)
-        bot._edit_message = AsyncMock(return_value=False)
+        bot._edit_message = AsyncMock(return_value=True)
+        bot._delivery_gateway.deliver_final = AsyncMock()
+        bot._delivery_gateway.deps.response_hooks.emit_after_response = AsyncMock()
+        bot._delivery_gateway.deps.response_hooks.emit_cancelled_response = AsyncMock()
 
         with (
             patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
@@ -2759,11 +2753,17 @@ class TestAgentBot:
                 correlation_id="corr-nonteam-fallback",
             )
 
-        bot._delivery_gateway.deliver_final.assert_awaited_once()
-        delivered_request = bot._delivery_gateway.deliver_final.await_args.args[0]
-        assert delivered_request.existing_event_is_placeholder is True
-        assert delivered_request.response_kind == "system"
-        assert delivery_resolution.terminal_status == "error"
+        bot._delivery_gateway.deliver_final.assert_not_awaited()
+        bot._edit_message.assert_awaited_once_with(
+            room_id="!test:localhost",
+            event_id="$existing",
+            new_text="No team available",
+            thread_id="$thread",
+        )
+        bot._delivery_gateway.deps.response_hooks.emit_after_response.assert_awaited_once()
+        bot._delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
+        assert delivery_resolution.terminal_status == "completed"
+        assert delivery_resolution.response_identity_event_id == "$existing"
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_redacts_suppressed_placeholder(
@@ -9234,7 +9234,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A cancelled before-response hook must still redact a visible placeholder."""
+        """A cancelled before-response hook must redact the placeholder and propagate cancellation."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
@@ -9249,21 +9249,21 @@ class TestAgentBot:
             ),
         )
 
-        outcome = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                existing_event_id="$thinking",
-                existing_event_is_placeholder=True,
-                response_text="Updated answer",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-deliver-before-hook-cancel",
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
+        with pytest.raises(asyncio.CancelledError, match="hook cancelled"):
+            await gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                    existing_event_id="$thinking",
+                    existing_event_is_placeholder=True,
+                    response_text="Updated answer",
+                    response_kind="ai",
+                    response_envelope=response_envelope,
+                    correlation_id="corr-deliver-before-hook-cancel",
+                    tool_trace=None,
+                    extra_content=None,
+                ),
+            )
 
-        assert outcome.terminal_status == "cancelled"
         gateway.deps.redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$thinking",

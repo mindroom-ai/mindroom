@@ -31,6 +31,7 @@ class StreamTransportOutcome:  # noqa: D101
     terminal_status: TerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
+    had_visible_body_before_terminal: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     option_map: dict[str, str] | None = None
@@ -94,3 +95,13 @@ class FinalDeliveryOutcome:  # noqa: D101
     @property
     def response_text(self) -> str:  # noqa: D102
         return self.final_visible_body or ""
+
+    @classmethod
+    def cancelled_for_empty_prompt(cls) -> FinalDeliveryOutcome:
+        """Return the canonical empty-prompt terminal outcome."""
+        return cls(
+            terminal_status="cancelled",
+            final_visible_event_id=None,
+            failure_reason="empty_prompt",
+            retryable=True,
+        )
