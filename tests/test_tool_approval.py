@@ -2788,8 +2788,8 @@ async def test_bot_reply_denial_strips_matrix_rich_reply_fallback(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_bot_reply_to_unsynced_resolved_approval_does_not_fall_through_to_chat(tmp_path: Path) -> None:
-    """Replies on a visually stale approval card should still be swallowed until the resolved edit syncs."""
+async def test_late_reply_on_resolved_unsynced_approval_replays_edit(tmp_path: Path) -> None:
+    """A late reply on a stale resolved approval card should replay the resolved edit."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = _runtime_bound_config(
         runtime_paths,
@@ -2800,7 +2800,7 @@ async def test_bot_reply_to_unsynced_resolved_approval_does_not_fall_through_to_
     bot = _agent_bot(tmp_path, config=config)
     bot._turn_controller.handle_text_event = AsyncMock()
     sender = AsyncMock(return_value=_sent_approval_event())
-    editor = AsyncMock(return_value=False)
+    editor = AsyncMock(side_effect=[False, True])
     store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
 
     assert pending is not None
@@ -2825,8 +2825,9 @@ async def test_bot_reply_to_unsynced_resolved_approval_does_not_fall_through_to_
     ):
         await bot._on_message(room, second_event)
 
-    assert editor.await_count == 1
+    assert editor.await_count == 2
     assert bot._turn_controller.handle_text_event.await_count == 0
+    assert store.anchored_request_for_event(approval_event_id="$approval", room_id="!room:localhost") is None
 
 
 @pytest.mark.asyncio
@@ -2842,7 +2843,7 @@ async def test_other_user_reply_to_unsynced_resolved_approval_is_swallowed(tmp_p
     bot = _agent_bot(tmp_path, config=config)
     bot._turn_controller.handle_text_event = AsyncMock()
     sender = AsyncMock(return_value=_sent_approval_event())
-    editor = AsyncMock(return_value=False)
+    editor = AsyncMock(side_effect=[False, False])
     store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
 
     assert pending is not None
@@ -2867,8 +2868,79 @@ async def test_other_user_reply_to_unsynced_resolved_approval_is_swallowed(tmp_p
     ):
         await bot._on_message(room, second_event)
 
-    assert editor.await_count == 1
+    assert editor.await_count == 2
     assert bot._turn_controller.handle_text_event.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_late_reaction_on_resolved_unsynced_approval_replays_edit(tmp_path: Path) -> None:
+    """A late reaction on a stale resolved approval card should replay the resolved edit."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    bot = _agent_bot(tmp_path, config=config)
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock(side_effect=[False, True])
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    first_reaction = nio.ReactionEvent.from_dict(
+        {
+            "type": "m.reaction",
+            "event_id": "$reaction-1",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$approval",
+                    "key": "✅",
+                },
+            },
+        },
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await bot._handle_reaction_inner(room, first_reaction)
+
+    decision = await task
+
+    assert decision.status == "approved"
+    assert store.anchored_request_for_event(approval_event_id="$approval", room_id="!room:localhost") is not None
+
+    second_reaction = nio.ReactionEvent.from_dict(
+        {
+            "type": "m.reaction",
+            "event_id": "$reaction-2",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$approval",
+                    "key": "✅",
+                },
+            },
+        },
+    )
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await bot._handle_reaction_inner(room, second_reaction)
+
+    assert editor.await_count == 2
+    assert store.anchored_request_for_event(approval_event_id="$approval", room_id="!room:localhost") is None
 
 
 @pytest.mark.asyncio

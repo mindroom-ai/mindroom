@@ -863,9 +863,13 @@ class ApprovalManager:
         if pending is None:
             return AnchoredApprovalActionResult(handled=False)
         if pending.status != "pending":
-            return AnchoredApprovalActionResult(
-                handled=pending.resolution_synced_at is None and pending.approver_user_id == resolved_by,
-            )
+            if pending.resolution_synced_at is None:
+                await self.replay_resolved_card_for_room(
+                    approval_event_id=approval_event_id,
+                    room_id=room_id,
+                )
+                return AnchoredApprovalActionResult(handled=True)
+            return AnchoredApprovalActionResult(handled=False)
         if pending.approver_user_id != resolved_by:
             return AnchoredApprovalActionResult(handled=False)
         truncated_reason = self._truncated_approval_reason(pending, status=status)
