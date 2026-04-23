@@ -591,6 +591,10 @@ class ThreadLiveWritePolicy:
             )
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
+            await self._cache_ops.invalidate_room_threads(
+                room_id,
+                reason="live_thread_lookup_unavailable",
+            )
             await self._cache_ops.queue_room_cache_update(
                 room_id,
                 lambda: _apply_thread_message_mutation(
@@ -603,6 +607,7 @@ class ThreadLiveWritePolicy:
                     context="live",
                     room_level_skip_message=room_level_skip_message,
                     invalidate_on_append_failure=True,
+                    allow_room_invalidation=False,
                 ),
                 name="matrix_cache_append_live_event",
             )
@@ -741,13 +746,18 @@ class ThreadLiveWritePolicy:
             )
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
-            queue_started = time.perf_counter()
+            invalidate_started = time.perf_counter()
             append_metrics: dict[str, str | int | float | bool] = {}
+            await self._cache_ops.invalidate_room_threads(
+                room_id,
+                reason="live_thread_lookup_unavailable",
+            )
+            append_metrics["invalidate_ms"] = round((time.perf_counter() - invalidate_started) * 1000, 1)
+            queue_started = time.perf_counter()
             outcome = "room_invalidated"
 
             async def invalidate_room() -> bool:
-                invalidate_started = time.perf_counter()
-                invalidated = await _apply_thread_message_mutation(
+                return await _apply_thread_message_mutation(
                     cache_ops=self._cache_ops,
                     room_id=room_id,
                     event_info=event_info,
@@ -757,9 +767,8 @@ class ThreadLiveWritePolicy:
                     context="live",
                     room_level_skip_message=room_level_skip_message,
                     invalidate_on_append_failure=True,
+                    allow_room_invalidation=False,
                 )
-                append_metrics["invalidate_ms"] = round((time.perf_counter() - invalidate_started) * 1000, 1)
-                return invalidated
 
             try:
                 await self._cache_ops.queue_room_cache_update(
