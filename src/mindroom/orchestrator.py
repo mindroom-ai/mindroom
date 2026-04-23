@@ -278,6 +278,7 @@ class MultiAgentOrchestrator:
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _approval_known_joined_room_ids: set[str] | None = field(default=None, init=False, repr=False)
+    _pending_room_leaves: set[str] = field(default_factory=set, init=False, repr=False)
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -650,6 +651,21 @@ class MultiAgentOrchestrator:
 
         return await self._drain_approval_state_for_rooms(room_ids, approval_store=approval_store)
 
+    async def _on_approval_room_drained(self, room_id: str) -> None:
+        """Retry one deferred router leave after approval replay catches up."""
+        if room_id not in self._pending_room_leaves:
+            return
+        self._pending_room_leaves.discard(room_id)
+
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is None or not router_bot.running or router_bot.client is None:
+            return
+
+        rooms_to_leave = await router_bot._room_lifecycle.rooms_to_actually_leave()
+        if room_id not in rooms_to_leave:
+            return
+        await router_bot._room_lifecycle.leave_unconfigured_rooms(room_ids=[room_id])
+
     @staticmethod
     def _rooms_with_unsynced_approval_state(
         room_ids: set[str],
@@ -684,18 +700,22 @@ class MultiAgentOrchestrator:
                     reason=_REMOVED_APPROVAL_ROOM_REASON,
                 )
 
-        await approval_store.recover_unconfirmed_deliveries_in_rooms(room_ids)
-
         for attempt in range(3):
+            with suppress(Exception):
+                await approval_store.recover_unconfirmed_deliveries_in_rooms(room_ids)
             await approval_store.sync_unsynced_resolved(room_ids=room_ids)
             blocked_room_ids = self._rooms_with_unsynced_approval_state(room_ids, approval_store=approval_store)
             if not blocked_room_ids:
+                self._pending_room_leaves.difference_update(room_ids)
                 return set(room_ids)
             if attempt < 2:
                 await asyncio.sleep(2**attempt)
 
         blocked_room_ids = self._rooms_with_unsynced_approval_state(room_ids, approval_store=approval_store)
-        return set(room_ids) - blocked_room_ids
+        finalized_room_ids = set(room_ids) - blocked_room_ids
+        self._pending_room_leaves.difference_update(finalized_room_ids)
+        self._pending_room_leaves.update(blocked_room_ids)
+        return finalized_room_ids
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
@@ -1277,6 +1297,7 @@ class MultiAgentOrchestrator:
             sender=self._send_approval_event,
             editor=self._edit_approval_event,
             recoverer=self._recover_approval_event_id,
+            on_room_drained=self._on_approval_room_drained,
             runtime_loop=self._runtime_loop,
         )
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)

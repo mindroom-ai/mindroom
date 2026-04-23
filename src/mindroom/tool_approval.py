@@ -319,6 +319,7 @@ class PendingApproval:
 
 
 MatrixApprovalEventRecoverer = Callable[[PendingApproval], Awaitable[str | None]]
+ApprovalRoomDrainedCallback = Callable[[str], Awaitable[None]]
 
 
 class ApprovalManager:
@@ -331,6 +332,7 @@ class ApprovalManager:
         sender: MatrixEventSender | None = None,
         editor: MatrixEventEditor | None = None,
         recoverer: MatrixApprovalEventRecoverer | None = None,
+        on_room_drained: ApprovalRoomDrainedCallback | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._storage_dir = runtime_paths.storage_root / _APPROVALS_DIRNAME
@@ -338,6 +340,7 @@ class ApprovalManager:
         self._send_event = sender
         self._edit_event = editor
         self._recover_event_id = recoverer
+        self._on_room_drained = on_room_drained
         self._state_lock = threading.Lock()
         self._requests_by_id: dict[str, PendingApproval] = {}
         self._pending_by_id: dict[str, PendingApproval] = {}
@@ -366,6 +369,7 @@ class ApprovalManager:
         sender: MatrixEventSender | None = None,
         editor: MatrixEventEditor | None = None,
         recoverer: MatrixApprovalEventRecoverer | None = None,
+        on_room_drained: ApprovalRoomDrainedCallback | None = None,
     ) -> None:
         """Update the Matrix transport callbacks."""
         if sender is not None:
@@ -374,6 +378,8 @@ class ApprovalManager:
             self._edit_event = editor
         if recoverer is not None:
             self._recover_event_id = recoverer
+        if on_room_drained is not None:
+            self._on_room_drained = on_room_drained
 
     def _request_path(self, approval_id: str) -> Path:
         return self._storage_dir / f"{approval_id}.json"
@@ -566,6 +572,13 @@ class ApprovalManager:
     def _has_unsynced_resolution_work(self) -> bool:
         return self._has_unsynced_resolved() or self._has_unconfirmed_deliveries()
 
+    def _room_ids_with_unsynced_resolution_work(self) -> set[str]:
+        room_ids = {pending.room_id for pending in self.list_unsynced_resolved() if pending.room_id is not None}
+        room_ids.update(
+            pending.room_id for pending in self.list_unconfirmed_deliveries() if pending.room_id is not None
+        )
+        return room_ids
+
     def list_unsynced_resolved_in_rooms(self, room_ids: set[str]) -> list[PendingApproval]:
         """Return resolved approvals in the given rooms whose Matrix cards still need one edit."""
         return [approval for approval in self.list_unsynced_resolved() if approval.room_id in room_ids]
@@ -605,16 +618,28 @@ class ApprovalManager:
         try:
             while self._has_unsynced_resolution_work():
                 await asyncio.sleep(_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS)
-                if not self._has_unsynced_resolution_work():
+                room_ids_before_retry = self._room_ids_with_unsynced_resolution_work()
+                if not room_ids_before_retry:
                     return
                 await self.recover_unconfirmed_deliveries()
                 await self.sync_unsynced_resolved()
+                await self._notify_drained_rooms(
+                    room_ids_before_retry - self._room_ids_with_unsynced_resolution_work(),
+                )
         finally:
             with self._state_lock:
                 if self._unsynced_resolution_retry_task is current_task:
                     self._unsynced_resolution_retry_task = None
             if self._has_unsynced_resolution_work():
                 self._ensure_unsynced_resolution_retry_task()
+
+    async def _notify_drained_rooms(self, room_ids: set[str]) -> None:
+        on_room_drained = self._on_room_drained
+        if not room_ids or on_room_drained is None:
+            return
+        for room_id in room_ids:
+            with suppress(Exception):
+                await on_room_drained(room_id)
 
     async def cancel_unsynced_resolution_retry_task(self) -> None:
         """Stop the runtime retry loop for unsynced approval resolution edits."""
@@ -1695,6 +1720,7 @@ def initialize_approval_store(
     sender: MatrixEventSender | None = None,
     editor: MatrixEventEditor | None = None,
     recoverer: MatrixApprovalEventRecoverer | None = None,
+    on_room_drained: ApprovalRoomDrainedCallback | None = None,
     runtime_loop: asyncio.AbstractEventLoop | None = None,
 ) -> ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
@@ -1706,7 +1732,12 @@ def initialize_approval_store(
 
     storage_dir = runtime_paths.storage_root / _APPROVALS_DIRNAME
     if _MANAGER is not None and _MANAGER.storage_dir == storage_dir:
-        _MANAGER.configure_transport(sender=sender, editor=editor, recoverer=recoverer)
+        _MANAGER.configure_transport(
+            sender=sender,
+            editor=editor,
+            recoverer=recoverer,
+            on_room_drained=on_room_drained,
+        )
         if runtime_loop is not None:
             _MANAGER._runtime_loop = runtime_loop
         _MANAGER._ensure_unsynced_resolution_retry_task()
@@ -1715,7 +1746,13 @@ def initialize_approval_store(
     if _MANAGER is not None:
         _MANAGER.abort_pending(reason=_DEFAULT_REINITIALIZE_REASON)
 
-    _MANAGER = ApprovalManager(runtime_paths, sender=sender, editor=editor, recoverer=recoverer)
+    _MANAGER = ApprovalManager(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        recoverer=recoverer,
+        on_room_drained=on_room_drained,
+    )
     _MANAGER._runtime_loop = runtime_loop
     _MANAGER._ensure_unsynced_resolution_retry_task()
     return _MANAGER
