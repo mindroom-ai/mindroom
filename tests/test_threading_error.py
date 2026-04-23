@@ -3046,6 +3046,156 @@ class TestThreadingBehavior:
         event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$room-message:localhost")
 
     @pytest.mark.asyncio
+    async def test_live_threaded_redaction_bypasses_sibling_thread_barrier(self) -> None:
+        """Live threaded redactions should start without waiting for sibling-thread writes."""
+        room_id = "!test:localhost"
+        thread_a_id = "$thread-a:localhost"
+        thread_b_id = "$thread-b:localhost"
+        coordinator = _runtime_write_coordinator()
+        event_cache = _runtime_event_cache()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+        sibling_update_started = asyncio.Event()
+        redaction_started = asyncio.Event()
+        redaction_started_at: float | None = None
+        sibling_hold_released_at: float | None = None
+
+        async def blocking_sibling_thread_update() -> None:
+            nonlocal sibling_hold_released_at
+            sibling_update_started.set()
+            await asyncio.sleep(0.2)
+            sibling_hold_released_at = time.perf_counter()
+
+        async def redact_event(room_id_arg: str, redacted_event_id: str) -> bool:
+            nonlocal redaction_started_at
+            assert room_id_arg == room_id
+            assert redacted_event_id == "$thread-message:localhost"
+            redaction_started_at = time.perf_counter()
+            redaction_started.set()
+            return True
+
+        access._live._resolver.resolve_redaction_thread_impact = AsyncMock(
+            return_value=MutationThreadImpact.threaded(thread_a_id),
+        )
+        event_cache.redact_event = AsyncMock(side_effect=redact_event)
+        sibling_task = coordinator.queue_thread_update(
+            room_id,
+            thread_b_id,
+            blocking_sibling_thread_update,
+            name="matrix_cache_blocking_sibling_thread_update",
+        )
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.event_id = "$redaction:localhost"
+        redaction_event.redacts = "$thread-message:localhost"
+
+        try:
+            await asyncio.wait_for(sibling_update_started.wait(), timeout=1.0)
+
+            live_task = asyncio.create_task(access.apply_redaction(room_id, redaction_event))
+            await asyncio.wait_for(redaction_started.wait(), timeout=0.1)
+            await asyncio.wait_for(live_task, timeout=0.1)
+
+            assert sibling_task.done() is False
+            assert redaction_started_at is not None
+            assert sibling_hold_released_at is None
+
+            await asyncio.wait_for(sibling_task, timeout=1.0)
+
+            assert sibling_hold_released_at is not None
+            assert redaction_started_at < sibling_hold_released_at
+            event_cache.redact_event.assert_awaited_once_with(room_id, "$thread-message:localhost")
+            event_cache.mark_thread_stale.assert_awaited_once_with(
+                room_id,
+                thread_a_id,
+                reason="live_redaction",
+            )
+        finally:
+            await asyncio.wait_for(
+                asyncio.gather(sibling_task, return_exceptions=True),
+                timeout=1.0,
+            )
+            await coordinator.wait_for_room_idle(room_id)
+
+    @pytest.mark.asyncio
+    async def test_live_threaded_redaction_waits_for_same_thread_predecessor(self) -> None:
+        """Live threaded redactions must stay behind earlier same-thread writes."""
+        room_id = "!test:localhost"
+        thread_a_id = "$thread-a:localhost"
+        coordinator = _runtime_write_coordinator()
+        event_cache = _runtime_event_cache()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+        predecessor_started = asyncio.Event()
+        release_predecessor = asyncio.Event()
+        redaction_started = asyncio.Event()
+        live_task: asyncio.Task[None] | None = None
+
+        async def blocking_same_thread_update() -> None:
+            predecessor_started.set()
+            await release_predecessor.wait()
+
+        async def redact_event(_room_id: str, _redacted_event_id: str) -> bool:
+            redaction_started.set()
+            return True
+
+        access._live._resolver.resolve_redaction_thread_impact = AsyncMock(
+            return_value=MutationThreadImpact.threaded(thread_a_id),
+        )
+        event_cache.redact_event = AsyncMock(side_effect=redact_event)
+        predecessor_task = coordinator.queue_thread_update(
+            room_id,
+            thread_a_id,
+            blocking_same_thread_update,
+            name="matrix_cache_blocking_same_thread_update",
+        )
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.event_id = "$redaction:localhost"
+        redaction_event.redacts = "$thread-message:localhost"
+
+        try:
+            await asyncio.wait_for(predecessor_started.wait(), timeout=1.0)
+
+            live_task = asyncio.create_task(access.apply_redaction(room_id, redaction_event))
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(redaction_started.wait(), timeout=0.1)
+            assert live_task.done() is False
+
+            release_predecessor.set()
+            await asyncio.wait_for(redaction_started.wait(), timeout=1.0)
+            await asyncio.wait_for(live_task, timeout=1.0)
+
+            event_cache.redact_event.assert_awaited_once_with(room_id, "$thread-message:localhost")
+            event_cache.mark_thread_stale.assert_awaited_once_with(
+                room_id,
+                thread_a_id,
+                reason="live_redaction",
+            )
+        finally:
+            release_predecessor.set()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    predecessor_task,
+                    *(task for task in [live_task] if task is not None),
+                    return_exceptions=True,
+                ),
+                timeout=1.0,
+            )
+            await coordinator.wait_for_room_idle(room_id)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("timing_enabled_for_test", [False, True], ids=["timing_disabled", "timing_enabled"])
     async def test_live_unknown_event_waits_for_same_room_write_barrier(
         self,
