@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.matrix.cache.event_cache import ThreadCacheState
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 THREAD_CACHE_MAX_AGE_SECONDS = 300.0
+
+
+class ThreadCacheStateLike(Protocol):
+    """Structural contract for durable thread cache freshness state."""
+
+    validated_at: float | None
+    invalidated_at: float | None
+    invalidation_reason: str | None
+    room_invalidated_at: float | None
+    room_invalidation_reason: str | None
 
 
 def latest_visible_thread_event_id(history: Sequence[ResolvedVisibleMessage]) -> str | None:
@@ -23,7 +32,7 @@ def latest_visible_thread_event_id(history: Sequence[ResolvedVisibleMessage]) ->
 
 
 def thread_cache_rejection_reason(
-    cache_state: ThreadCacheState | None,
+    cache_state: ThreadCacheStateLike | None,
     *,
     runtime_started_at: float | None,
     now: float | None = None,
@@ -48,7 +57,7 @@ def thread_cache_rejection_reason(
 
 
 def thread_cache_state_is_usable(
-    cache_state: ThreadCacheState | None,
+    cache_state: ThreadCacheStateLike | None,
     *,
     runtime_started_at: float | None,
     now: float | None = None,

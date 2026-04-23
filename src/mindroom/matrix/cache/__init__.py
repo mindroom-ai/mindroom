@@ -17,6 +17,10 @@ Main invariants:
 - Thread invalidation is durable state first, with fail-closed deletion only when stale markers cannot be written.
 """
 
+from .agent_message_snapshot import (
+    AgentMessageSnapshot,
+    AgentMessageSnapshotUnavailable,
+)
 from .event_cache import ConversationEventCache, ThreadCacheState
 from .event_cache_events import normalize_nio_event_for_cache
 from .thread_cache_helpers import thread_cache_rejection_reason, thread_cache_state_is_usable
@@ -41,6 +45,8 @@ __all__ = [
     "THREAD_HISTORY_SOURCE_DIAGNOSTIC",
     "THREAD_HISTORY_SOURCE_HOMESERVER",
     "THREAD_HISTORY_SOURCE_STALE_CACHE",
+    "AgentMessageSnapshot",
+    "AgentMessageSnapshotUnavailable",
     "ConversationEventCache",
     "EventCacheWriteCoordinator",
     "ThreadCacheState",
