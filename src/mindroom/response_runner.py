@@ -20,7 +20,7 @@ from mindroom.ai import (
 )
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
-from mindroom.cancellation import cancel_failure_reason, classify_cancel_source
+from mindroom.cancellation import cancel_failure_reason
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -74,6 +74,7 @@ from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
+from mindroom.orchestration.runtime import classify_cancel_source
 
 from .delivery_gateway import (
     CancelledVisibleNoteRequest,

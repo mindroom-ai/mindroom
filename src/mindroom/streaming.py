@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from mindroom import interactive
-from mindroom.cancellation import CancelSource, cancel_failure_reason, classify_cancel_source
+from mindroom.cancellation import CancelSource, cancel_failure_reason
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -25,6 +25,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.runtime import classify_cancel_source
 from mindroom.streaming_delivery import (
     StreamInputChunk,
     _consume_stream_with_progress_supervision,
