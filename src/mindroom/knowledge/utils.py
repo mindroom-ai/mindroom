@@ -261,7 +261,17 @@ class MultiKnowledgeVectorDb:
 
     # Agno Knowledge.__post_init__ calls exists()/create(); this adapter intentionally
     # lies because KnowledgeManager already owns the underlying DB lifecycle.
-    vector_dbs: list[_KnowledgeVectorDb]
+    vector_dbs: list[_KnowledgeVectorDb | Callable[[], _KnowledgeVectorDb | None]]
+
+    def _resolved_vector_dbs(self) -> list[_KnowledgeVectorDb]:
+        """Return the current vector DB instances for every merged source."""
+        resolved_vector_dbs: list[_KnowledgeVectorDb] = []
+        for source in self.vector_dbs:
+            vector_db = source() if callable(source) else source
+            if vector_db is None:
+                continue
+            resolved_vector_dbs.append(vector_db)
+        return resolved_vector_dbs
 
     def exists(self) -> bool:
         """Present as already-initialized to satisfy Knowledge.__post_init__."""
@@ -280,7 +290,7 @@ class MultiKnowledgeVectorDb:
     ) -> list[Document]:
         """Search each assigned vector database and interleave merged results."""
         results_by_db: list[list[Document]] = []
-        for vector_db in self.vector_dbs:
+        for vector_db in self._resolved_vector_dbs():
             try:
                 results = vector_db.search(query=query, limit=limit, filters=filters)
             except Exception:
@@ -321,7 +331,7 @@ class MultiKnowledgeVectorDb:
                 return []
             return results
 
-        results_by_db = await asyncio.gather(*[_search_one(vdb) for vdb in self.vector_dbs])
+        results_by_db = await asyncio.gather(*[_search_one(vdb) for vdb in self._resolved_vector_dbs()])
         return _interleave_documents(list(results_by_db), limit)
 
 
@@ -352,12 +362,16 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
         return None
     if len(knowledges) == 1:
         return knowledges[0]
-    vector_dbs = [knowledge.vector_db for knowledge in knowledges if knowledge.vector_db is not None]
-    if not vector_dbs:
+    vector_db_sources = [
+        (lambda knowledge=knowledge: cast("_KnowledgeVectorDb | None", knowledge.vector_db))
+        for knowledge in knowledges
+        if knowledge.vector_db is not None
+    ]
+    if not vector_db_sources:
         return None
     return Knowledge(
         name=f"{agent_name}_multi_knowledge",
-        vector_db=MultiKnowledgeVectorDb(vector_dbs=[cast("_KnowledgeVectorDb", vdb) for vdb in vector_dbs]),
+        vector_db=MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
         max_results=max(knowledge.max_results for knowledge in knowledges),
     )
 

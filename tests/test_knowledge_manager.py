@@ -37,7 +37,7 @@ from mindroom.knowledge.shared_managers import (
     initialize_shared_knowledge_managers,
     shutdown_shared_knowledge_managers,
 )
-from mindroom.knowledge.utils import KnowledgeAvailability, _get_knowledge_for_base
+from mindroom.knowledge.utils import KnowledgeAvailability, _get_knowledge_for_base, get_agent_knowledge
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -231,6 +231,19 @@ class _ShadowChromaDb:
 
     def exists(self) -> bool:
         return self.collection_name in self.collections
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, object] | list[object] | None = None,
+    ) -> list[Document]:
+        _ = (query, filters)
+        return [
+            Document(content=item["content"], meta_data=dict(item["metadata"]))
+            for item in self.collections.get(self.collection_name, [])[:limit]
+        ]
 
 
 def _mind_private_agent(
@@ -1050,6 +1063,70 @@ async def test_initialize_shared_knowledge_managers_rebuilds_after_refresh_faile
         assert payload["availability"] == "ready"
     finally:
         await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_multi_base_knowledge_reads_current_vector_db_after_shadow_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Merged multi-base knowledge should follow manager vector DB swaps lazily."""
+    _ShadowChromaDb.collections = {}
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _ShadowChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _ShadowKnowledge)
+
+    research_path = tmp_path / "research"
+    legal_path = tmp_path / "legal"
+    research_path.mkdir(parents=True, exist_ok=True)
+    legal_path.mkdir(parents=True, exist_ok=True)
+    (research_path / "doc-a.md").write_text("research old", encoding="utf-8")
+    (legal_path / "doc-b.md").write_text("legal stable", encoding="utf-8")
+
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="Help",
+                    rooms=[],
+                    knowledge_bases=["research", "legal"],
+                ),
+            },
+            models={},
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(path=str(research_path), watch=False),
+                "legal": KnowledgeBaseConfig(path=str(legal_path), watch=False),
+            },
+        ),
+        runtime_paths,
+    )
+
+    managers = {
+        "research": KnowledgeManager(base_id="research", config=config, runtime_paths=runtime_paths),
+        "legal": KnowledgeManager(base_id="legal", config=config, runtime_paths=runtime_paths),
+    }
+    await managers["research"].reindex_all()
+    await managers["legal"].reindex_all()
+    managers["research"].get_knowledge().max_results = 5
+    managers["legal"].get_knowledge().max_results = 5
+
+    merged_knowledge = get_agent_knowledge(
+        "assistant",
+        config,
+        runtime_paths,
+        shared_manager_lookup=managers.get,
+    )
+    assert merged_knowledge is not None
+
+    initial_results = merged_knowledge.search("knowledge", max_results=10)
+    assert {document.content for document in initial_results} == {"research old", "legal stable"}
+
+    (research_path / "doc-a.md").write_text("research new", encoding="utf-8")
+    await managers["research"].reindex_all()
+
+    refreshed_results = merged_knowledge.search("knowledge", max_results=10)
+    assert {document.content for document in refreshed_results} == {"research new", "legal stable"}
 
 
 @pytest.mark.asyncio
