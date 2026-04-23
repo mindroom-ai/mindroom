@@ -78,6 +78,22 @@ class _SupportsTemperature(Protocol):
     temperature: float | None
 
 
+def _should_apply_summary_temperature(model: object) -> bool:
+    """Return whether thread summaries should set a runtime temperature override."""
+    if not isinstance(model, _SupportsTemperature):
+        return False
+
+    provider = str(getattr(model, "provider", "") or "").lower()
+    module_name = type(model).__module__
+
+    # Vertex Claude rejects the temperature field for some newer models, so avoid
+    # forcing a summary-specific override on that provider family.
+    if provider == "vertexai" and module_name.startswith("agno.models.vertexai.claude"):
+        return False
+
+    return True
+
+
 def normalize_thread_summary_text(raw_text: str) -> str:
     """Strip common markdown formatting and collapse the result to one plain-text line."""
     normalized = raw_text.strip()
@@ -296,14 +312,15 @@ async def _generate_summary(
     """Generate a one-line summary of a thread conversation via LLM."""
     model_name = config.defaults.thread_summary_model or "default"
     model = model_loading.get_model_instance(config, runtime_paths, model_name)
-    if isinstance(model, _SupportsTemperature):
+    if _should_apply_summary_temperature(model):
         model.temperature = _SUMMARY_TEMPERATURE
     else:
         model_class = type(model).__name__
         logger.warning(
-            f"Thread summary model class {model_class} does not support a runtime temperature override; continuing with provider defaults",
+            "Thread summary model does not support a runtime temperature override or should use provider defaults; continuing without override",
             model_class=model_class,
             model_name=model_name,
+            model_provider=getattr(model, "provider", None),
         )
 
     conversation = _build_conversation_text(thread_history)

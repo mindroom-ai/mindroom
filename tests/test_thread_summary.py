@@ -363,6 +363,15 @@ class _TemperatureAwareModel:
 
     def __init__(self, temperature: float | None = None) -> None:
         self.temperature = temperature
+        self.provider = "Anthropic"
+
+
+class _VertexAIClaudeLikeModel(_TemperatureAwareModel):
+    """Model stub matching the Vertex Claude provider surface."""
+
+    def __init__(self, temperature: float | None = None) -> None:
+        super().__init__(temperature=temperature)
+        self.provider = "VertexAI"
 
 
 class _ModelWithoutTemperature:
@@ -1437,11 +1446,52 @@ class TestGenerateSummary:
         warning_messages = [
             record.getMessage()
             for record in caplog.records
-            if "does not support a runtime temperature override" in record.getMessage()
+            if "should use provider defaults" in record.getMessage()
         ]
         assert len(warning_messages) == 1
         assert "_ModelWithoutTemperature" in warning_messages[0]
-        assert "does not support a runtime temperature override" in warning_messages[0]
+        assert "should use provider defaults" in warning_messages[0]
+
+    async def test_generate_summary_skips_temperature_override_for_vertex_claude(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Vertex Claude summaries should avoid runtime temperature overrides."""
+        history = _make_thread_history(3)
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        mock_model = _VertexAIClaudeLikeModel()
+        mock_model.__class__.__module__ = "agno.models.vertexai.claude"
+        mock_response = MagicMock()
+        mock_response.content = _ThreadSummary(summary="🧵 Vertex Claude summary")
+        monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)
+        setup_logging(level="WARNING", runtime_paths=_logging_runtime_paths(tmp_path))
+        caplog.clear()
+        root_logger = logging.getLogger()
+        root_logger.addHandler(caplog.handler)
+
+        try:
+            with (
+                caplog.at_level("WARNING", logger="mindroom.thread_summary"),
+                patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
+                patch("mindroom.thread_summary.Agent"),
+                patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
+            ):
+                result = await _generate_summary(history, config, rp)
+        finally:
+            root_logger.removeHandler(caplog.handler)
+
+        assert result == "🧵 Vertex Claude summary"
+        assert mock_model.temperature is None
+        warning_messages = [
+            record.getMessage()
+            for record in caplog.records
+            if "should use provider defaults" in record.getMessage()
+        ]
+        assert len(warning_messages) == 1
+        assert "_VertexAIClaudeLikeModel" in warning_messages[0]
 
     async def test_prompt_good_examples_are_stable_and_within_hard_limit(self) -> None:
         """Prompt GOOD examples should be short and avoid transient-status wording."""
