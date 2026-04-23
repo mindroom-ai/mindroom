@@ -276,6 +276,7 @@ class MultiAgentOrchestrator:
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
+    _approval_known_joined_room_ids: set[str] | None = field(default=None, init=False, repr=False)
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -465,15 +466,17 @@ class MultiAgentOrchestrator:
             ),
         )
 
-    @staticmethod
     def _bot_has_approval_room(
+        self,
         bot: AgentBot | TeamBot,
         room_id: str,
     ) -> bool:
         """Return whether one bot can safely post into an approval room."""
         if bot.client is None:
             return False
-        return room_id in tuple(bot.client.rooms)
+        return room_id in tuple(bot.client.rooms) or (
+            self._approval_known_joined_room_ids is not None and room_id in self._approval_known_joined_room_ids
+        )
 
     def _approval_transport_bot(
         self,
@@ -1389,11 +1392,19 @@ class MultiAgentOrchestrator:
 
     async def _sync_unsynced_approval_resolutions(self) -> None:
         """Recover orphaned approval cards and replay any missed resolved edits."""
+        previous_known_joined_room_ids = self._approval_known_joined_room_ids
         try:
+            router_bot = self._router_bot()
+            if router_bot is not None and router_bot.client is not None:
+                joined_rooms = await get_joined_rooms(router_bot.client)
+                if joined_rooms is not None:
+                    self._approval_known_joined_room_ids = set(joined_rooms)
             await recover_unconfirmed_approval_event_deliveries()
             await sync_unsynced_approval_event_resolutions()
         except Exception as exc:
             logger.warning("tool_approval_resolution_replay_failed", error=str(exc))
+        finally:
+            self._approval_known_joined_room_ids = previous_known_joined_room_ids
 
     async def _handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Replay any unsynced approval edits once one bot is fully synced and room-ready."""

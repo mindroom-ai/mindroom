@@ -1764,6 +1764,49 @@ async def test_recover_unconfirmed_approval_event_deliveries_replays_expired_car
 
 
 @pytest.mark.asyncio
+async def test_recover_unconfirmed_approvals_uses_authoritative_room_list(tmp_path: Path) -> None:
+    """Restart recovery should use joined_rooms when the router cache is still cold."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_pending_request(
+        runtime_paths.storage_root / "approvals",
+        event_id=None,
+    )
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+    router_client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+    router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
+    router_client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!room:localhost",
+            chunk=[_approval_history_event(event_id="$approval-event", approval_id=request_id)],
+            start="",
+            end=None,
+        ),
+    )
+    router_client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$edit-event", room_id="!room:localhost"),
+    )
+    router_bot = MagicMock()
+    router_bot.agent_name = "router"
+    router_bot.running = True
+    router_bot.client = router_client
+    router_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest-thread-event")
+    orchestrator.agent_bots = {"router": router_bot}
+    initialize_approval_store(
+        runtime_paths,
+        editor=orchestrator._edit_approval_event,
+        recoverer=orchestrator._recover_approval_event_id,
+    )
+
+    await orchestrator._sync_unsynced_approval_resolutions()
+
+    router_client.joined_rooms.assert_awaited_once()
+    router_client.room_messages.assert_awaited_once()
+    router_client.room_send.assert_awaited_once()
+    assert (runtime_paths.storage_root / "approvals" / f"{request_id}.json").exists() is False
+
+
+@pytest.mark.asyncio
 async def test_recover_unconfirmed_approval_event_deliveries_discards_missing_cards(tmp_path: Path) -> None:
     """Restart recovery should discard unconfirmed approvals when no Matrix card can be found."""
     runtime_paths = test_runtime_paths(tmp_path)
