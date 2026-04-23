@@ -900,7 +900,6 @@ class DeliveryGateway:
         event_id: str | None,
         response_text: str,
         canonical_final_body_candidate: str | None,
-        delivery_kind: Literal["sent", "edited"],
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
     ) -> FinalDeliveryOutcome | None:
@@ -924,7 +923,7 @@ class DeliveryGateway:
             is_visible_response=True,
             final_visible_body=interactive_response.formatted_text,
             canonical_final_body_candidate=canonical_final_body_candidate,
-            delivery_kind=delivery_kind,
+            delivery_kind="edited",
             mark_handled=True,
             tool_trace=tuple(tool_trace or ()),
             extra_content=extra_content,
@@ -1135,7 +1134,6 @@ class DeliveryGateway:
                         event_id=streamed_event_id,
                         response_text=final_transform_draft.response_text,
                         canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
-                        delivery_kind=request.initial_delivery_kind,
                         tool_trace=request.tool_trace,
                         extra_content=request.extra_content,
                     )

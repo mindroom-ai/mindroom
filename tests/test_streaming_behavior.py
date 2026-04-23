@@ -2829,7 +2829,7 @@ class TestStreamingBehavior:
         assert outcome.terminal_status == "completed"
         assert outcome.final_visible_event_id == "$streaming"
         assert outcome.final_visible_body == "updated text"
-        assert outcome.delivery_kind == "sent"
+        assert outcome.delivery_kind == "edited"
         response_hooks.apply_before_response.assert_not_awaited()
         response_hooks.apply_final_response_transform.assert_awaited_once()
         gateway.edit_text.assert_awaited_once()
