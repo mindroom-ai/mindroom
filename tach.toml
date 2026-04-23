@@ -572,6 +572,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.mcp.manager",
     "mindroom.mcp.registry",
+    "mindroom.mcp.toolkit",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_support",
     "mindroom.scheduling", "mindroom.tool_system.plugins", "mindroom.tool_system.skills",
@@ -788,6 +789,14 @@ path = "mindroom.mcp.registry"
 depends_on = [
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.registry_state",
+    "mindroom.mcp.toolkit",
+]
+
+[[modules]]
+path = "mindroom.mcp.toolkit"
+depends_on = [
+    "mindroom.mcp.manager",
+    "mindroom.mcp.types",
 ]
 
 [[modules]]
