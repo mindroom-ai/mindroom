@@ -102,12 +102,26 @@ When `show_tool_calls` is disabled for an entity, tool markers are omitted from 
 
 ## Cancellation and Errors
 
-Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)). When cancelled, the streamed message is finalized with:
+Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)). An explicit user stop finalizes the streamed message with:
 
 ```
 <partial text so far>
 
 **[Response cancelled by user]**
+```
+
+Other non-error interruptions finalize the streamed message with one of these notes:
+
+```
+<partial text so far>
+
+**[Response interrupted]**
+```
+
+```
+<partial text so far>
+
+**[Response interrupted by service restart]**
 ```
 
 If an error occurs during streaming, the message is finalized with:
