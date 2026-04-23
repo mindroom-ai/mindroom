@@ -314,7 +314,6 @@ def _agent_response_handled_turn(
     return HandledTurnState.from_source_event_id(
         event_id,
         response_event_id=response_event_id,
-        visible_echo_event_id=response_event_id,
         source_event_prompts=source_event_prompts,
     ).with_response_context(
         response_owner=agent_name,
@@ -3134,7 +3133,6 @@ class TestAgentBot:
         tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(event.event_id)
             .with_response_event_id("$cancelled")
-            .with_visible_echo_event_id("$cancelled"),
         )
 
     @pytest.mark.asyncio
@@ -7573,7 +7571,6 @@ class TestAgentBot:
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$reply",
-                visible_echo_event_id="$reply",
             ),
         )
 
@@ -7637,7 +7634,9 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
 
-        tracker.record_handled_turn.assert_not_called()
+        tracker.record_handled_turn.assert_called_once_with(
+            HandledTurnState.from_source_event_id(event.event_id),
+        )
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_uses_thread_snapshot_without_full_history(
@@ -8506,7 +8505,6 @@ class TestAgentBot:
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$team-response",
-                visible_echo_event_id="$team-response",
             ),
         )
 
@@ -8582,7 +8580,6 @@ class TestAgentBot:
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$response",
-                visible_echo_event_id="$response",
             ),
         )
 
@@ -8664,7 +8661,6 @@ class TestAgentBot:
         expected_handled_turn = replace(
             expected_handled_turn,
             response_event_id="$error",
-            visible_echo_event_id="$error",
             conversation_target=MessageTarget.resolve(
                 room_id=room.room_id,
                 thread_id=None,
@@ -8836,7 +8832,6 @@ class TestAgentBot:
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$error",
-                visible_echo_event_id="$error",
             ),
         )
 
@@ -8977,7 +8972,6 @@ class TestAgentBot:
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$error",
-                visible_echo_event_id="$error",
             ),
         )
 
@@ -9052,7 +9046,6 @@ class TestAgentBot:
             HandledTurnState.from_source_event_id(
                 "$event",
                 response_event_id="$thinking",
-                visible_echo_event_id="$thinking",
             ),
         )
 
