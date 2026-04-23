@@ -1111,6 +1111,59 @@ class ResponseRunner:
             correlation_id=correlation_id or self._correlation_id_for_request(request),
         )
 
+    async def _finalize_empty_prompt_locked(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        response_kind: str,
+    ) -> str | None:
+        """Finalize one empty prompt through the canonical response lifecycle."""
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
+        request = await self._prepare_request_after_lock(request)
+        lifecycle = self._build_lifecycle(
+            response_kind=response_kind,
+            request=request,
+            response_envelope=self._response_envelope_for_request(
+                request,
+                resolved_target=resolved_target,
+            ),
+            correlation_id=self._correlation_id_for_request(request),
+        )
+        final_outcome = await lifecycle.finalize(
+            DeliveryOutcome(
+                final_delivery_outcome=FinalDeliveryOutcome.cancelled_for_empty_prompt(),
+            ),
+            build_post_response_outcome=lambda final_outcome: ResponseOutcome(
+                resolved_event_id=final_outcome.final_visible_event_id,
+                suppressed=final_outcome.suppressed,
+            ),
+            post_response_deps=lambda: self.deps.post_response_effects.build_deps(
+                room_id=request.room_id,
+                reply_to_event_id=request.reply_to_event_id,
+                thread_id=resolved_target.resolved_thread_id,
+                interactive_agent_name=self.deps.agent_name,
+            ),
+        )
+        return final_outcome.final_visible_event_id
+
+    async def finalize_empty_prompt(
+        self,
+        request: ResponseRequest,
+        *,
+        response_kind: str,
+    ) -> str | None:
+        """Run one empty-prompt request through lifecycle locking and finalization."""
+        return await self._run_locked_response_lifecycle(
+            request,
+            locked_operation=lambda resolved_target: self._finalize_empty_prompt_locked(
+                request,
+                resolved_target=resolved_target,
+                response_kind=response_kind,
+            ),
+        )
+
     async def _ensure_request_knowledge_managers(
         self,
         agent_names: list[str],

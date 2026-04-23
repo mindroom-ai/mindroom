@@ -1482,31 +1482,6 @@ class AgentBot:
             Event ID of the visible response, or None if no visible response landed.
 
         """
-        if not prompt.strip():
-            resolved_target = target or self._conversation_resolver.build_message_target(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-            )
-            await self._delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                correlation_id=correlation_id or reply_to_event_id or room_id,
-                envelope=response_envelope
-                or MessageEnvelope(
-                    source_event_id=reply_to_event_id,
-                    room_id=room_id,
-                    target=resolved_target,
-                    requester_id=user_id or self.matrix_id.full_id,
-                    sender_id=user_id or self.matrix_id.full_id,
-                    body=prompt,
-                    attachment_ids=tuple(attachment_ids or ()),
-                    mentioned_agents=(),
-                    agent_name=self.agent_name,
-                    source_kind="message",
-                ),
-                response_kind="ai",
-                failure_reason="empty_prompt",
-            )
-            return None
         return await self._response_runner.generate_response(
             ResponseRequest(
                 room_id=room_id,
@@ -1729,30 +1704,28 @@ class TeamBot(AgentBot):
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
-            resolved_target = target or self._conversation_resolver.build_message_target(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-            )
-            await self._delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                correlation_id=correlation_id or reply_to_event_id or room_id,
-                envelope=response_envelope
-                or MessageEnvelope(
-                    source_event_id=reply_to_event_id,
+            return await self._response_runner.finalize_empty_prompt(
+                ResponseRequest(
                     room_id=room_id,
-                    target=resolved_target,
-                    requester_id=user_id or self.matrix_id.full_id,
-                    sender_id=user_id or self.matrix_id.full_id,
-                    body=prompt,
-                    attachment_ids=tuple(attachment_ids or ()),
-                    mentioned_agents=(),
-                    agent_name=self.agent_name,
-                    source_kind="message",
+                    reply_to_event_id=reply_to_event_id,
+                    thread_id=thread_id,
+                    thread_history=thread_history,
+                    prompt=prompt,
+                    model_prompt=model_prompt,
+                    existing_event_id=existing_event_id,
+                    existing_event_is_placeholder=existing_event_is_placeholder,
+                    user_id=user_id,
+                    media=media,
+                    attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                    target=target,
+                    matrix_run_metadata=matrix_run_metadata,
+                    system_enrichment_items=system_enrichment_items,
+                    on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                 ),
                 response_kind="team",
-                failure_reason="empty_prompt",
             )
-            return None
 
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
