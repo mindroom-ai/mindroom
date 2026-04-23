@@ -367,6 +367,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.schedules"
 depends_on = [
+    "mindroom",
     "mindroom.api.config_lifecycle",
     "mindroom.api.main",
     "mindroom.config.main",
@@ -1214,8 +1215,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.handler"
 depends_on = [
-    "mindroom.agents",
-    "mindroom.authorization",
     "mindroom.commands.config_commands",
     "mindroom.commands.config_confirmation",
     "mindroom.commands.parsing",
@@ -1227,16 +1226,10 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.event_info",
-    "mindroom.matrix.identity",
     "mindroom.message_target",
-    "mindroom.runtime_resolution",
     "mindroom.scheduling",
     "mindroom.thread_utils",
-    "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
-    "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.skills",
-    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
