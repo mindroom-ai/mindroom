@@ -20,7 +20,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
 )
-from mindroom.final_delivery import StreamTerminalOperation, StreamTransportOutcome
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -108,12 +108,9 @@ def _build_streaming_delivery_error(
         tool_trace=streaming.tool_trace,
         transport_outcome=StreamTransportOutcome(
             last_physical_stream_event_id=streaming.event_id,
-            terminal_operation="edit" if streaming.event_id is not None else "send",
-            terminal_result="failed",
             terminal_status=terminal_status,
             rendered_body=rendered_body,
             visible_body_state=visible_body_state,
-            had_visible_body_before_terminal=streaming._last_committed_visible_body_state == "visible_body",
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=failure_reason,
         ),
@@ -511,24 +508,19 @@ class StreamingResponse:
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
-        had_visible_body_before_terminal = self._last_committed_visible_body_state == "visible_body"
-        terminal_operation: StreamTerminalOperation = "edit" if self.event_id is not None else "send"
         text_to_send = self.accumulated_text
         if (
             final_stream_status == STREAM_STATUS_COMPLETED
             and not text_to_send.strip()
             and canonical_final_body_candidate is not None
-            and not had_visible_body_before_terminal
+            and self._last_committed_visible_body_state != "visible_body"
         ):
             committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
-                terminal_operation="none",
-                terminal_result="not_attempted",
                 terminal_status=terminal_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
-                had_visible_body_before_terminal=False,
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason,
             )
@@ -544,16 +536,12 @@ class StreamingResponse:
         )
         attempted_visible_body_state: Literal["none", "placeholder_only", "visible_body"]
         if attempted_rendered_body is None:
-            terminal_operation = "none"
             attempted_visible_body_state = "none"
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
-                terminal_operation=terminal_operation,
-                terminal_result="not_attempted",
                 terminal_status=terminal_status,
                 rendered_body=None,
                 visible_body_state=attempted_visible_body_state,
-                had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason,
             )
@@ -589,12 +577,9 @@ class StreamingResponse:
             ) = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
-                terminal_operation=terminal_operation,
-                terminal_result="cancelled",
                 terminal_status=terminal_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
-                had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason or "terminal_update_cancelled",
             )
@@ -613,12 +598,9 @@ class StreamingResponse:
             ) = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
-                terminal_operation=terminal_operation,
-                terminal_result="failed",
                 terminal_status=terminal_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
-                had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason or f"terminal_update_exception:{exc.__class__.__name__}",
             )
@@ -635,23 +617,17 @@ class StreamingResponse:
             ) = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
-                terminal_operation=terminal_operation,
-                terminal_result="failed",
                 terminal_status=terminal_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
-                had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason or "terminal_update_failed",
             )
         return StreamTransportOutcome(
             last_physical_stream_event_id=self.event_id,
-            terminal_operation=terminal_operation,
-            terminal_result="succeeded",
             terminal_status=terminal_status,
             rendered_body=attempted_rendered_body,
             visible_body_state=attempted_visible_body_state,
-            had_visible_body_before_terminal=had_visible_body_before_terminal,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
         )

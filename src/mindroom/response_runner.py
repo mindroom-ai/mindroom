@@ -676,7 +676,6 @@ class ResponseRunner:
                 event_id=visible_event_id,
                 is_visible_response=visible_event_id is not None,
                 final_visible_body=fallback_stream_outcome.rendered_body if preserved_visible_stream else None,
-                canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
                 failure_reason=failure_reason,
                 tool_trace=tuple(finalize_request.tool_trace or ()),
                 extra_content=finalize_request.extra_content,
@@ -1693,8 +1692,6 @@ class ResponseRunner:
                     target=delivery_target,
                     stream_transport_outcome=StreamTransportOutcome(
                         last_physical_stream_event_id=event_id,
-                        terminal_operation="edit" if request.existing_event_id else "send",
-                        terminal_result="failed",
                         terminal_status="cancelled" if delivery_cancelled else "error",
                         rendered_body=PROGRESS_PLACEHOLDER if placeholder_only else None,
                         visible_body_state="placeholder_only" if placeholder_only else "none",
@@ -2401,8 +2398,6 @@ class ResponseRunner:
                     target=runtime.resolved_target,
                     stream_transport_outcome=StreamTransportOutcome(
                         last_physical_stream_event_id=request.existing_event_id or event_id,
-                        terminal_operation="edit" if request.existing_event_id else "send",
-                        terminal_result="failed",
                         terminal_status="error",
                         rendered_body=PROGRESS_PLACEHOLDER if event_id is not None else None,
                         visible_body_state="placeholder_only" if event_id is not None else "none",
@@ -2657,8 +2652,6 @@ class ResponseRunner:
                     target=resolved_target,
                     stream_transport_outcome=StreamTransportOutcome(
                         last_physical_stream_event_id=event_id,
-                        terminal_operation="edit" if request.existing_event_id else "send",
-                        terminal_result="failed",
                         terminal_status="cancelled" if delivery_cancelled else "error",
                         rendered_body=PROGRESS_PLACEHOLDER if placeholder_only else None,
                         visible_body_state="placeholder_only" if placeholder_only else "none",

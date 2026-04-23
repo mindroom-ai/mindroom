@@ -648,7 +648,6 @@ class DeliveryGateway:
                     event_id=request.existing_event_id,
                     is_visible_response=True,
                     final_visible_body=display_text,
-                    canonical_final_body_candidate=draft.response_text,
                     delivery_kind="edited",
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
@@ -716,7 +715,6 @@ class DeliveryGateway:
             event_id=event_id,
             is_visible_response=True,
             final_visible_body=display_text,
-            canonical_final_body_candidate=draft.response_text,
             delivery_kind="sent",
             tool_trace=tuple(draft.tool_trace or ()),
             extra_content=draft.extra_content,
@@ -861,7 +859,6 @@ class DeliveryGateway:
         target: MessageTarget,
         event_id: str | None,
         response_text: str,
-        canonical_final_body_candidate: str | None,
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
     ) -> FinalDeliveryOutcome | None:
@@ -884,7 +881,6 @@ class DeliveryGateway:
             event_id=event_id,
             is_visible_response=True,
             final_visible_body=interactive_response.formatted_text,
-            canonical_final_body_candidate=canonical_final_body_candidate,
             delivery_kind="edited",
             tool_trace=tuple(tool_trace or ()),
             extra_content=extra_content,
@@ -973,7 +969,6 @@ class DeliveryGateway:
                     event_id=visible_stream_event_id,
                     is_visible_response=True,
                     final_visible_body=streamed_text or None,
-                    canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
                     failure_reason=failure_reason,
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
@@ -1040,7 +1035,6 @@ class DeliveryGateway:
                     event_id=visible_stream_event_id,
                     is_visible_response=True,
                     final_visible_body=streamed_text or None,
-                    canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
                     failure_reason=failure_reason,
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
@@ -1063,8 +1057,7 @@ class DeliveryGateway:
             )
 
         if (
-            not stream_outcome.had_visible_body_before_terminal
-            and stream_outcome.canonical_final_body_candidate is not None
+            stream_outcome.canonical_final_body_candidate is not None
             and stream_outcome.visible_body_state in {"none", "placeholder_only"}
         ):
             existing_event_id = request.existing_event_id
@@ -1086,7 +1079,7 @@ class DeliveryGateway:
                 ),
             )
 
-        if stream_outcome.terminal_result != "succeeded":
+        if stream_outcome.failure_reason is not None and stream_outcome.visible_body_state != "visible_body":
             failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
             if stream_outcome.visible_body_state == "placeholder_only":
                 return await self._cleanup_completed_placeholder_only_stream(
@@ -1118,7 +1111,6 @@ class DeliveryGateway:
                     event_id=visible_stream_event_id,
                     is_visible_response=True,
                     final_visible_body=streamed_text or None,
-                    canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
                     failure_reason=failure_reason,
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
@@ -1179,7 +1171,6 @@ class DeliveryGateway:
                         target=request.target,
                         event_id=streamed_event_id,
                         response_text=final_transform_draft.response_text,
-                        canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
                         tool_trace=request.tool_trace,
                         extra_content=request.extra_content,
                     )
@@ -1217,7 +1208,6 @@ class DeliveryGateway:
             event_id=streamed_event_id,
             is_visible_response=True,
             final_visible_body=streamed_text or interactive_response.formatted_text,
-            canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
             delivery_kind=request.initial_delivery_kind,
             tool_trace=tuple(request.tool_trace or ()),
             extra_content=request.extra_content,

@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
 
-StreamTerminalOperation = Literal["none", "send", "edit"]
-StreamTerminalResult = Literal["not_attempted", "succeeded", "failed", "cancelled"]
 TerminalStatus = Literal["completed", "cancelled", "error"]
 VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
 VisibleDeliveryKind = Literal["sent", "edited"]
@@ -26,12 +24,9 @@ def _copy_options(value: tuple[dict[str, str], ...] | list[dict[str, str]] | Non
 @dataclass(frozen=True)
 class StreamTransportOutcome:  # noqa: D101
     last_physical_stream_event_id: str | None
-    terminal_operation: StreamTerminalOperation
-    terminal_result: StreamTerminalResult
     terminal_status: TerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
-    had_visible_body_before_terminal: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
 
@@ -50,7 +45,6 @@ class FinalDeliveryOutcome:  # noqa: D101
     event_id: str | None
     is_visible_response: bool = False
     final_visible_body: str | None = None
-    canonical_final_body_candidate: str | None = None
     delivery_kind: VisibleDeliveryKind | None = None
     failure_reason: str | None = None
     suppressed: bool = False

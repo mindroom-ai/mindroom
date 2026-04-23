@@ -225,7 +225,6 @@ class _StreamingAttemptState:
     assistant_text: str = ""
     full_response: str = ""
     tool_count: int = 0
-    canonical_final_body_candidate: str | None = None
     observed_tool_calls: int = 0
     pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
@@ -1272,7 +1271,6 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
             if isinstance(event, RunCompletedEvent):
                 state.completed_run_event = event
                 if event.content is not None:
-                    state.canonical_final_body_candidate = str(event.content)
                     yield event
                     continue
                 continue
