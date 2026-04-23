@@ -1616,13 +1616,7 @@ class ResponseRunner:
                 stream_state=stream_state,
                 fallback_event_id=run_message_id,
             )
-            delivery_failure_reason = (
-                "sync_restart_cancelled"
-                if isinstance(error, asyncio.CancelledError) and is_sync_restart_cancel(error)
-                else "cancelled_by_user"
-                if isinstance(error, asyncio.CancelledError)
-                else str(error)
-            )
+            delivery_failure_reason = str(error)
             self._log_delivery_failure(response_kind="team", error=error)
             final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=_late_delivery_failure_outcome(
@@ -2601,13 +2595,7 @@ class ResponseRunner:
         except Exception as error:
             if not delivery_stage_started:
                 raise
-            delivery_failure_reason = (
-                "sync_restart_cancelled"
-                if isinstance(error, asyncio.CancelledError) and is_sync_restart_cancel(error)
-                else "cancelled_by_user"
-                if isinstance(error, asyncio.CancelledError)
-                else str(error)
-            )
+            delivery_failure_reason = str(error)
             self._log_delivery_failure(response_kind="ai", error=error)
             final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=_late_delivery_failure_outcome(

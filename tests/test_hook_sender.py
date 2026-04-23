@@ -19,6 +19,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.conversation_resolver import MessageContext
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -1390,6 +1391,42 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
     )
 
     bot._turn_policy.plan_turn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hook_dispatch_command_reply_preserves_original_envelope_metadata(tmp_path: Path) -> None:
+    """Router command replies should preserve hook-dispatch depth/source metadata."""
+    bot = _agent_bot(tmp_path, agent_name="router")
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hook-dispatch-command",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": "!help",
+                "com.mindroom.source_kind": "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:message:received",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            },
+        },
+    )
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
+    bot._delivery_gateway.deliver_final = AsyncMock(
+        return_value=FinalDeliveryOutcome.final_visible_delivery(
+            final_visible_event_id="$reply",
+            final_visible_body="help",
+        ),
+    )
+    replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
+
+    await bot._turn_controller._dispatch_text_message(room, event, "@mindroom_router:localhost")
+
+    request = bot._delivery_gateway.deliver_final.await_args.args[0]
+    assert request.response_envelope.source_kind == "hook_dispatch"
+    assert request.response_envelope.hook_source == "origin-plugin:message:received"
+    assert request.response_envelope.message_received_depth == 1
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import nio
@@ -631,6 +631,8 @@ class TurnController:
         event: _TextDispatchEvent,
         requester_user_id: str,
         command: Command,
+        *,
+        source_envelope: MessageEnvelope | None = None,
     ) -> None:
         """Run one explicit command executor path from the turn controller."""
         event = await self.deps.normalizer.resolve_text_event(
@@ -651,17 +653,21 @@ class TurnController:
                 reply_to_event_id=reply_to_event_id,
                 event_source=reply_to_event.source if reply_to_event is not None else None,
             )
-            response_envelope = MessageEnvelope(
-                source_event_id=event.event_id,
-                room_id=room_id,
-                target=target,
-                requester_id=requester_user_id,
-                sender_id=requester_user_id,
-                body=event.body,
-                attachment_ids=(),
-                mentioned_agents=(),
-                agent_name=self.deps.agent_name,
-                source_kind="command",
+            response_envelope = (
+                replace(source_envelope, target=target, body=event.body)
+                if source_envelope is not None
+                else MessageEnvelope(
+                    source_event_id=event.event_id,
+                    room_id=room_id,
+                    target=target,
+                    requester_id=requester_user_id,
+                    sender_id=requester_user_id,
+                    body=event.body,
+                    attachment_ids=(),
+                    mentioned_agents=(),
+                    agent_name=self.deps.agent_name,
+                    source_kind="command",
+                )
             )
             final_outcome = await self.deps.delivery_gateway.deliver_final(
                 FinalDeliveryRequest(
@@ -1428,6 +1434,7 @@ class TurnController:
                         event=event,
                         requester_user_id=requester_user_id,
                         command=command,
+                        source_envelope=dispatch.envelope,
                     )
                 return
             if self._has_newer_unresponded_in_thread(
