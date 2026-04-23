@@ -47,6 +47,7 @@ class StreamTransportOutcome:
     options_list: tuple[dict[str, str], ...] | None = None
 
     def __post_init__(self) -> None:
+        """Normalize optional mappings and validate stream delivery invariants."""
         object.__setattr__(self, "option_map", dict(self.option_map) if self.option_map else None)
         object.__setattr__(
             self,
@@ -68,15 +69,19 @@ class StreamTransportOutcome:
 
     @property
     def has_any_physical_stream_event(self) -> bool:
+        """Whether streaming emitted any Matrix event at all."""
         return self.last_physical_stream_event_id is not None
 
     @property
     def has_rendered_visible_body(self) -> bool:
+        """Whether the transport ended with a visible response body."""
         return self.visible_body_state == "visible_body"
 
 
 @dataclass(frozen=True)
 class FinalDeliveryPolicy:
+    """Policy knobs derived from each canonical final delivery state."""
+
     emits_after_response: bool
     emits_cancelled_response: bool
     visible_response_event_source: EventIdSource
@@ -172,22 +177,82 @@ FINAL_DELIVERY_POLICY: dict[FinalDeliveryState, FinalDeliveryPolicy] = {
         True,
     ),
     "kept_prior_visible_response_after_suppression": _policy(
-        False, True, "final_visible_event", "none", "none", False, True, False, False, False, False
+        False,
+        True,
+        "final_visible_event",
+        "none",
+        "none",
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
     ),
     "kept_prior_visible_response_after_error": _policy(
-        False, True, "final_visible_event", "none", "none", False, True, False, False, False, False
+        False,
+        True,
+        "final_visible_event",
+        "none",
+        "none",
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
     ),
     "cancelled_with_visible_response": _policy(
-        False, True, "final_visible_event", "none", "final_visible_event", False, True, False, False, False, True
+        False,
+        True,
+        "final_visible_event",
+        "none",
+        "final_visible_event",
+        False,
+        True,
+        False,
+        False,
+        False,
+        True,
     ),
     "cancelled_with_visible_note": _policy(
-        False, True, "final_visible_event", "none", "final_visible_event", False, True, False, False, False, True
+        False,
+        True,
+        "final_visible_event",
+        "none",
+        "final_visible_event",
+        False,
+        True,
+        False,
+        False,
+        False,
+        True,
     ),
     "cancelled_without_visible_response": _policy(
-        False, True, "none", "none", "none", False, True, False, False, False, False
+        False,
+        True,
+        "none",
+        "none",
+        "none",
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
     ),
     "suppressed_without_visible_response": _policy(
-        False, True, "none", "none", "none", True, False, False, False, False, False
+        False,
+        True,
+        "none",
+        "none",
+        "none",
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
     ),
     "suppressed_redacted": _policy(False, True, "none", "none", "none", True, False, False, False, False, False),
     "suppression_cleanup_failed": _policy(
@@ -204,7 +269,17 @@ FINAL_DELIVERY_POLICY: dict[FinalDeliveryState, FinalDeliveryPolicy] = {
         True,
     ),
     "error_without_visible_response": _policy(
-        False, True, "none", "none", "none", False, True, False, False, False, False
+        False,
+        True,
+        "none",
+        "none",
+        "none",
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
     ),
 }
 
@@ -226,6 +301,7 @@ class FinalDeliveryOutcome:
     options_list: tuple[dict[str, str], ...] | None = None
 
     def __post_init__(self) -> None:
+        """Freeze mutable fields and validate visible-delivery consistency."""
         object.__setattr__(self, "tool_trace", tuple(self.tool_trace))
         object.__setattr__(self, "extra_content", dict(self.extra_content or {}))
         object.__setattr__(self, "option_map", dict(self.option_map) if self.option_map else None)
@@ -240,6 +316,7 @@ class FinalDeliveryOutcome:
 
     @property
     def policy(self) -> FinalDeliveryPolicy:
+        """Return the semantic policy for this outcome state."""
         return FINAL_DELIVERY_POLICY[self.state]
 
     def _event_id_from(self, source: EventIdSource) -> str | None:
@@ -251,66 +328,82 @@ class FinalDeliveryOutcome:
 
     @property
     def visible_response_event_id(self) -> str | None:
+        """Event ID callers should treat as the visible response."""
         return self._event_id_from(self.policy.visible_response_event_source)
 
     @property
     def response_identity_event_id(self) -> str | None:
+        """Event ID that should anchor response identity persistence."""
         return self._event_id_from(self.policy.response_identity_event_source)
 
     @property
     def turn_completion_event_id(self) -> str | None:
+        """Event ID that should be recorded as the completed turn artifact."""
         return self._event_id_from(self.policy.turn_completion_event_source)
 
     @property
     def emits_after_response(self) -> bool:
+        """Whether after-response hooks should run for this outcome."""
         return self.policy.emits_after_response
 
     @property
     def emits_cancelled_response(self) -> bool:
+        """Whether cancelled-response hooks should run for this outcome."""
         return self.policy.emits_cancelled_response
 
     @property
     def should_mark_handled(self) -> bool:
+        """Whether the source turn should be marked handled."""
         return self.policy.should_mark_handled
 
     @property
     def retryable(self) -> bool:
+        """Whether the caller may safely retry this delivery path."""
         return self.policy.retryable
 
     @property
     def should_persist_response_identity(self) -> bool:
+        """Whether response identity metadata should be persisted."""
         return self.policy.should_persist_response_identity
 
     @property
     def should_queue_thread_summary(self) -> bool:
+        """Whether thread-summary work should run after delivery."""
         return self.policy.should_queue_thread_summary
 
     @property
     def should_register_interactive_follow_up(self) -> bool:
+        """Whether interactive follow-up state should be registered."""
         return self.policy.should_register_interactive_follow_up
 
     @property
     def should_shield_late_failures(self) -> bool:
+        """Whether late hook failures should be downgraded to logging."""
         return self.policy.should_shield_late_failures
 
     @property
     def has_final_visible_delivery(self) -> bool:
+        """Whether this outcome produced the final visible response."""
         return self.state == "final_visible_delivery"
 
     @property
     def has_any_visible_response(self) -> bool:
+        """Whether any visible response remains associated with the turn."""
         return self.visible_response_event_id is not None
 
     @property
     def event_id(self) -> str | None:
+        """Compatibility alias for the visible response event ID."""
         return self.visible_response_event_id
 
     @property
     def response_text(self) -> str:
+        """Compatibility alias for the final visible response body."""
         return self.final_visible_body or ""
 
     @property
     def suppressed(self) -> bool:
+        """Whether delivery ended in a suppression state."""
         return self.state in {
             "kept_prior_visible_response_after_suppression",
             "suppressed_without_visible_response",

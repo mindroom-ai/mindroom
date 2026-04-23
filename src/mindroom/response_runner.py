@@ -2122,7 +2122,7 @@ class ResponseRunner:
                     request.pipeline_timing.mark("streaming_complete")
                 return transport_outcome
         except asyncio.CancelledError:
-            if stream_state.finalization_outcome is not None:
+            if stream_state is not None and stream_state.finalization_outcome is not None:
                 raise
             self._persist_interrupted_recorder(
                 recorder=turn_recorder,
@@ -2217,7 +2217,7 @@ class ResponseRunner:
                 interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
             )
             if request.existing_event_id:
-                outcome = await self.deps.delivery_gateway.deliver_cancelled_visible_note(
+                return await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                     CancelledVisibleNoteRequest(
                         target=runtime.resolved_target,
                         event_id=request.existing_event_id,
@@ -2228,20 +2228,18 @@ class ResponseRunner:
                         correlation_id=correlation_id,
                     ),
                 )
-            else:
-                outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
-                    outcome=FinalDeliveryOutcome(
-                        state="cancelled_without_visible_response",
-                        terminal_status="cancelled",
-                        final_visible_event_id=None,
-                        last_physical_stream_event_id=None,
-                        failure_reason=_cancel_failure_reason(cancel_source),
-                    ),
-                    correlation_id=correlation_id,
-                    envelope=response_envelope,
-                    response_kind=response_kind,
-                )
-            return outcome
+            return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
+                outcome=FinalDeliveryOutcome(
+                    state="cancelled_without_visible_response",
+                    terminal_status="cancelled",
+                    final_visible_event_id=None,
+                    last_physical_stream_event_id=None,
+                    failure_reason=_cancel_failure_reason(cancel_source),
+                ),
+                correlation_id=correlation_id,
+                envelope=response_envelope,
+                response_kind=response_kind,
+            )
         except Exception as error:
             self.deps.logger.exception("Error in non-streaming response", error=str(error))
             raise
@@ -2402,7 +2400,7 @@ class ResponseRunner:
                 run_metadata_content,
                 request.attachment_ids,
             )
-            outcome = await self.deps.delivery_gateway.finalize_streamed_response(
+            return await self.deps.delivery_gateway.finalize_streamed_response(
                 FinalizeStreamedResponseRequest(
                     target=runtime.resolved_target,
                     stream_transport_outcome=stream_transport_outcome,
@@ -2416,7 +2414,6 @@ class ResponseRunner:
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
-            return outcome
         except asyncio.CancelledError as exc:
             self._log_cancelled_response(
                 exc=exc,

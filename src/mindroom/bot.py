@@ -1723,7 +1723,7 @@ class TeamBot(AgentBot):
                 agent_name=self.agent_name,
                 source_kind="message",
             )
-            final_outcome = await self._delivery_gateway.emit_terminal_outcome_hooks(
+            return await self._delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=FinalDeliveryOutcome(
                     state="error_without_visible_response",
                     terminal_status="error",
@@ -1735,7 +1735,6 @@ class TeamBot(AgentBot):
                 envelope=fallback_envelope,
                 response_kind="team",
             )
-            return final_outcome
 
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
@@ -1777,7 +1776,7 @@ class TeamBot(AgentBot):
                 agent_name=self.agent_name,
                 source_kind="message",
             )
-            final_outcome = await self._delivery_gateway.deliver_final(
+            return await self._delivery_gateway.deliver_final(
                 FinalDeliveryRequest(
                     target=resolved_target,
                     existing_event_id=existing_event_id,
@@ -1791,7 +1790,6 @@ class TeamBot(AgentBot):
                     apply_before_hooks=False,
                 ),
             )
-            return final_outcome
         assert team_resolution.mode is not None
 
         resolved_target = target or self._conversation_resolver.build_message_target(

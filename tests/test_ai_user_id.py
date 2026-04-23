@@ -9,7 +9,7 @@ from contextvars import Context
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -112,6 +112,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Generator
     from pathlib import Path
 
+T = TypeVar("T")
+
 
 def _stream_outcome(
     event_id: str | None,
@@ -134,7 +136,7 @@ def _stream_outcome(
     )
 
 
-def _set_gateway_method(gateway: DeliveryGateway, name: str, value: Any) -> Any:
+def _set_gateway_method(gateway: DeliveryGateway, name: str, value: T) -> T:
     object.__setattr__(gateway, name, value)
     return value
 
@@ -613,14 +615,18 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
             return "Hello!"
 
         mock_ai.side_effect = fake_ai_response
-        coordinator.deps.delivery_gateway.deliver_final.side_effect = AsyncMock(
-            side_effect=lambda *_args, **_kwargs: (
-                sequence.append(("deliver", None, None, None))
-                or MagicMock(
-                    event_id="$response_id",
-                    response_text="Hello!",
-                    delivery_kind="sent",
-                )
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_final",
+            AsyncMock(
+                side_effect=lambda *_args, **_kwargs: (
+                    sequence.append(("deliver", None, None, None))
+                    or MagicMock(
+                        event_id="$response_id",
+                        response_text="Hello!",
+                        delivery_kind="sent",
+                    )
+                ),
             ),
         )
 
@@ -927,14 +933,18 @@ async def test_session_started_hooks_continue_after_runtime_error(tmp_path: Path
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
-        coordinator.deps.delivery_gateway.deliver_final.side_effect = AsyncMock(
-            side_effect=lambda *_args, **_kwargs: (
-                sequence.append("deliver")
-                or MagicMock(
-                    event_id="$response_id",
-                    response_text="Hello!",
-                    delivery_kind="sent",
-                )
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_final",
+            AsyncMock(
+                side_effect=lambda *_args, **_kwargs: (
+                    sequence.append("deliver")
+                    or MagicMock(
+                        event_id="$response_id",
+                        response_text="Hello!",
+                        delivery_kind="sent",
+                    )
+                ),
             ),
         )
 
@@ -1516,8 +1526,10 @@ async def test_generate_response_locked_persists_interrupted_history_when_final_
             )
             return "Hello!"
 
-        coordinator.deps.delivery_gateway.deliver_final = AsyncMock(
-            side_effect=asyncio.CancelledError("delivery cancel"),
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_final",
+            AsyncMock(side_effect=asyncio.CancelledError("delivery cancel")),
         )
 
         with patch.object(
@@ -1592,8 +1604,10 @@ async def test_generate_response_locked_delivery_cancel_with_visible_tools_repla
             history_storage=history_storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
-        coordinator.deps.delivery_gateway.deliver_final = AsyncMock(
-            side_effect=asyncio.CancelledError("delivery cancel"),
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_final",
+            AsyncMock(side_effect=asyncio.CancelledError("delivery cancel")),
         )
 
         resolution = await coordinator.generate_response_locked(
@@ -2332,8 +2346,10 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps.delivery_gateway.deliver_final = AsyncMock(
-            side_effect=asyncio.CancelledError("delivery cancel"),
+        _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "deliver_final",
+            AsyncMock(side_effect=asyncio.CancelledError("delivery cancel")),
         )
 
         async def fake_team_response(*_args: object, **kwargs: object) -> str:
@@ -2606,6 +2622,11 @@ async def test_generate_team_response_helper_routes_placeholder_only_late_failur
                 ),
             ),
         )
+        emit_terminal_outcome_hooks = _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "emit_terminal_outcome_hooks",
+            AsyncMock(),
+        )
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
@@ -2615,7 +2636,7 @@ async def test_generate_team_response_helper_routes_placeholder_only_late_failur
 
     assert resolution.state == "error_without_visible_response"
     coordinator.deps.delivery_gateway.resolve_late_stream_finalize_failure.assert_awaited_once()
-    coordinator.deps.delivery_gateway.emit_terminal_outcome_hooks.assert_not_awaited()
+    emit_terminal_outcome_hooks.assert_not_awaited()
 
 
 def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_trace_is_empty(

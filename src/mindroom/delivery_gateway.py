@@ -35,7 +35,6 @@ from mindroom.hooks.types import (
 from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.orchestration.runtime import classify_cancel_source
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     StreamDeliveryState,
@@ -86,7 +85,6 @@ class ResponseHookService:
         )
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_BEFORE_RESPONSE):
             return draft
-
         context = BeforeResponseContext(
             **self.hook_context.base_kwargs(EVENT_MESSAGE_BEFORE_RESPONSE, correlation_id),
             draft=draft,
@@ -175,6 +173,17 @@ class ResponseHookService:
             ),
         )
         await emit(self.hook_context.registry, EVENT_MESSAGE_CANCELLED, context)
+
+
+def _classify_cancel_source(exc: asyncio.CancelledError) -> CancelSource:
+    """Return the visible cancellation provenance for delivery-layer cancellations."""
+    if len(exc.args) == 0:
+        return "interrupted"
+    if exc.args[0] == "user_stop":
+        return "user_stop"
+    if exc.args[0] == "sync_restart":
+        return "sync_restart"
+    return "interrupted"
 
 
 @dataclass(frozen=True)
@@ -476,7 +485,7 @@ class DeliveryGateway:
         fallback: str | None = None,
     ) -> str:
         """Normalize CancelledError values to the canonical cancellation reason strings."""
-        reason = cancel_failure_reason(classify_cancel_source(error))
+        reason = cancel_failure_reason(_classify_cancel_source(error))
         if reason:
             return reason
         normalized_fallback = (fallback or "").strip()
@@ -702,7 +711,10 @@ class DeliveryGateway:
         )
         return False
 
-    async def deliver_final(self, request: FinalDeliveryRequest) -> FinalDeliveryOutcome:  # noqa: C901, PLR0911
+    async def deliver_final(  # noqa: C901, PLR0911, PLR0912, PLR0915
+        self,
+        request: FinalDeliveryRequest,
+    ) -> FinalDeliveryOutcome:
         """Apply before/after hooks around one final send or edit."""
 
         async def before_response_failure_outcome(
@@ -1130,7 +1142,7 @@ class DeliveryGateway:
             conversation_cache=self.deps.resolver.deps.conversation_cache,
         )
 
-    async def finalize_streamed_response(  # noqa: C901, PLR0911
+    async def finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
