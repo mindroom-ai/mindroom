@@ -19,7 +19,6 @@ from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.conversation_resolver import MessageContext
-from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -1395,7 +1394,7 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
 
 @pytest.mark.asyncio
 async def test_hook_dispatch_command_reply_preserves_original_envelope_metadata(tmp_path: Path) -> None:
-    """Router command replies should preserve hook-dispatch depth/source metadata."""
+    """Router command replies should preserve hook-dispatch targeting metadata."""
     bot = _agent_bot(tmp_path, agent_name="router")
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     event = nio.RoomMessageText.from_dict(
@@ -1413,23 +1412,14 @@ async def test_hook_dispatch_command_reply_preserves_original_envelope_metadata(
         },
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._delivery_gateway.deliver_final = AsyncMock(
-        return_value=FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$reply",
-            is_visible_response=True,
-            final_visible_body="help",
-            delivery_kind="sent",
-        ),
-    )
+    bot._delivery_gateway.send_text = AsyncMock(return_value="$reply")
     replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
 
     await bot._turn_controller._dispatch_text_message(room, event, "@mindroom_router:localhost")
 
-    request = bot._delivery_gateway.deliver_final.await_args.args[0]
-    assert request.response_envelope.source_kind == "hook_dispatch"
-    assert request.response_envelope.hook_source == "origin-plugin:message:received"
-    assert request.response_envelope.message_received_depth == 1
+    request = bot._delivery_gateway.send_text.await_args.args[0]
+    assert request.target.resolved_thread_id == "$hook-dispatch-command"
+    assert request.target.reply_to_event_id == "$hook-dispatch-command"
 
 
 @pytest.mark.asyncio
