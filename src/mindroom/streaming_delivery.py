@@ -110,6 +110,7 @@ def _queue_delivery_request(
     phase_boundary_flush: bool = False,
     allow_empty_progress: bool = False,
     prior_delta_at: float | None = None,
+    boundary_refresh_prior_delta_at: float | None = None,
     wait_for_capture: bool = False,
 ) -> asyncio.Future[None] | None:
     """Queue one non-terminal delivery request for the single delivery owner."""
@@ -122,7 +123,11 @@ def _queue_delivery_request(
             phase_boundary_flush=phase_boundary_flush,
             allow_empty_progress=allow_empty_progress,
             prior_delta_at=prior_delta_at,
-            boundary_refresh_prior_delta_at=prior_delta_at if boundary_refresh else None,
+            boundary_refresh_prior_delta_at=(
+                (prior_delta_at if boundary_refresh_prior_delta_at is None else boundary_refresh_prior_delta_at)
+                if boundary_refresh
+                else None
+            ),
             capture_completion=capture_completion,
         ),
     )
@@ -176,6 +181,7 @@ async def _apply_visible_text_chunk(
         force_refresh=force_refresh,
         boundary_refresh=boundary_refresh,
         prior_delta_at=None if force_refresh else prior_delta_at,
+        boundary_refresh_prior_delta_at=streaming.last_delta_at if boundary_refresh else None,
         wait_for_capture=wait_for_capture,
     )
     if completion is not None:
@@ -203,8 +209,19 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             if not streaming.show_tool_calls:
                 await _flush_phase_boundary_if_needed(streaming, delivery_queue)
                 if chunk.tool is not None:
+                    cleared_terminal_failures = any(
+                        warmup.last_event.phase == "failed"
+                        for warmup in streaming._warmup_state.active_warmups.values()
+                    )
                     streaming._warmup_state.clear_terminal_failures()
                     streaming._ensure_hidden_tool_gap()
+                    _queue_delivery_request(
+                        delivery_queue,
+                        force_refresh=cleared_terminal_failures,
+                        progress_hint=not cleared_terminal_failures,
+                        allow_empty_progress=cleared_terminal_failures and not streaming.accumulated_text.strip(),
+                    )
+                    continue
                 _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue
 
@@ -418,6 +435,8 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
                 await streaming._send_or_edit_message(
                     client,
                     allow_empty_progress=merged_request.allow_empty_progress,
+                    boundary_refresh=merged_request.boundary_refresh,
+                    capture_completions=tuple(boundary_refresh_capture_completions),
                 )
             elif merged_request.boundary_refresh:
                 current_time = time.time()

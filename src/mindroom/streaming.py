@@ -340,11 +340,11 @@ class StreamingResponse:
         now = time.time()
         if self.stream_started_at is None:
             self.stream_started_at = now
-        self.last_update = now
         delivery_matches_live_state = (
             self.accumulated_text == committed_state.accumulated_text and self.tool_trace == committed_state.tool_trace
         )
         if delivery_matches_live_state:
+            self.last_update = now
             self.last_delta_at = now
             self.last_boundary_refresh_at = now if boundary_refresh else None
             self.chars_since_last_update = 0
