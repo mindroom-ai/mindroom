@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
-    from ._shared import MemoryResult
+    from .shared import MemoryResult
 
 _USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
 

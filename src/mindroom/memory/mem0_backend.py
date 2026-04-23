@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
-from ._policy import (
+from .policy import (
     agent_scope_user_id,
     build_team_user_id,
     effective_storage_paths_for_context,
@@ -16,7 +16,7 @@ from ._policy import (
     get_team_ids_for_agent,
     storage_paths_for_scope_user_id,
 )
-from ._shared import MEM0_REPLICA_KEY, MemoryNotFoundError, MemoryResult, ScopedMemoryCrud, ScopedMemoryWriter
+from .shared import MEM0_REPLICA_KEY, MemoryNotFoundError, MemoryResult, ScopedMemoryCrud, ScopedMemoryWriter
 
 if TYPE_CHECKING:
     from pathlib import Path

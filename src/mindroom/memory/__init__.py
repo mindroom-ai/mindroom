@@ -1,6 +1,5 @@
 """Memory management for MindRoom agents and teams."""
 
-from mindroom.memory._prompting import strip_user_turn_time_prefix
 from mindroom.memory.auto_flush import (
     MemoryAutoFlushWorker,
     auto_flush_enabled,
@@ -19,6 +18,7 @@ from mindroom.memory.functions import (
     store_conversation_memory,
     update_agent_memory,
 )
+from mindroom.memory.prompting import strip_user_turn_time_prefix
 
 __all__ = [
     "MemoryAutoFlushWorker",

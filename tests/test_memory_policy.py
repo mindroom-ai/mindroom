@@ -9,7 +9,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.memory._policy import (
+from mindroom.memory.policy import (
     agent_scope_user_id,
     effective_storage_paths_for_context,
     get_allowed_memory_user_ids,

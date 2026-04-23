@@ -674,17 +674,23 @@ path = "mindroom.memory"
 depends_on = [
     "mindroom.config.main",
     "mindroom.constants", "mindroom.tool_system.worker_routing",
-    "mindroom.memory._policy",
+    "mindroom.memory.policy",
     "mindroom.memory.auto_flush",
     "mindroom.memory.functions",
-    "mindroom.memory._prompting",
+    "mindroom.memory.prompting",
 ]
 
 [[modules]]
-path = "mindroom.memory._policy"
+path = "mindroom.memory.policy"
 depends_on = [
-    "mindroom.memory._shared",
+    "mindroom.memory.shared",
     "mindroom.runtime_resolution",
+]
+visibility = [
+    "mindroom.memory",
+    "mindroom.memory.file_backend",
+    "mindroom.memory.functions",
+    "mindroom.memory.mem0_backend",
 ]
 
 [[modules]]
@@ -702,25 +708,25 @@ depends_on = [
 path = "mindroom.memory.functions"
 depends_on = [
     "mindroom.logging_config",
-    "mindroom.memory._file_backend",
-    "mindroom.memory._mem0_backend",
-    "mindroom.memory._policy",
-    "mindroom.memory._prompting",
-    "mindroom.memory._shared",
+    "mindroom.memory.file_backend",
+    "mindroom.memory.mem0_backend",
+    "mindroom.memory.policy",
+    "mindroom.memory.prompting",
+    "mindroom.memory.shared",
     "mindroom.memory.config",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory", "mindroom.memory.auto_flush"]
 
 [[modules]]
-path = "mindroom.memory._shared"
+path = "mindroom.memory.shared"
 depends_on = []
 visibility = [
     "mindroom.memory",
-    "mindroom.memory._file_backend",
-    "mindroom.memory._mem0_backend",
-    "mindroom.memory._policy",
-    "mindroom.memory._prompting",
+    "mindroom.memory.file_backend",
+    "mindroom.memory.mem0_backend",
+    "mindroom.memory.policy",
+    "mindroom.memory.prompting",
     "mindroom.memory.functions",
 ]
 
@@ -737,29 +743,29 @@ depends_on = [
 visibility = ["mindroom.memory.functions"]
 
 [[modules]]
-path = "mindroom.memory._file_backend"
+path = "mindroom.memory.file_backend"
 depends_on = [
     "mindroom.constants",
     "mindroom.logging_config",
-    "mindroom.memory._policy",
-    "mindroom.memory._shared",
+    "mindroom.memory.policy",
+    "mindroom.memory.shared",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory.functions"]
 
 [[modules]]
-path = "mindroom.memory._mem0_backend"
+path = "mindroom.memory.mem0_backend"
 depends_on = [
     "mindroom.logging_config",
-    "mindroom.memory._policy",
-    "mindroom.memory._shared",
+    "mindroom.memory.policy",
+    "mindroom.memory.shared",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory.functions"]
 
 [[modules]]
-path = "mindroom.memory._prompting"
-depends_on = ["mindroom.memory._shared"]
+path = "mindroom.memory.prompting"
+depends_on = ["mindroom.memory.shared"]
 visibility = ["mindroom.memory", "mindroom.memory.functions"]
 
 [[modules]]

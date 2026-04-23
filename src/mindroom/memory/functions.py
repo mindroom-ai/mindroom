@@ -10,7 +10,7 @@ from mindroom.logging_config import get_logger
 from mindroom.memory.config import create_memory_instance
 from mindroom.timing import timed
 
-from ._file_backend import (
+from .file_backend import (
     add_file_agent_memory,
     append_agent_daily_file_memory,
     delete_file_agent_memory,
@@ -21,7 +21,7 @@ from ._file_backend import (
     store_file_conversation_memory,
     update_file_agent_memory,
 )
-from ._mem0_backend import (
+from .mem0_backend import (
     add_mem0_agent_memory,
     delete_mem0_agent_memory,
     get_mem0_agent_memory,
@@ -30,18 +30,18 @@ from ._mem0_backend import (
     store_mem0_conversation_memory,
     update_mem0_agent_memory,
 )
-from ._policy import (
+from .policy import (
     agent_scope_user_id,
     caller_uses_file_memory_backend,
     resolve_file_memory_resolution,
     team_uses_file_memory_backend,
     use_file_memory_backend,
 )
-from ._prompting import (
+from .prompting import (
     _format_memories_as_context,
     build_memory_messages,
 )
-from ._shared import MemoryResult, new_memory_id
+from .shared import MemoryResult, new_memory_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-    from ._shared import ScopedMemoryCrud
+    from .shared import ScopedMemoryCrud
 
 logger = get_logger(__name__)
 

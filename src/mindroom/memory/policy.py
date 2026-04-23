@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.runtime_resolution import resolve_agent_runtime
 
-from ._shared import FileMemoryResolution
+from .shared import FileMemoryResolution
 
 if TYPE_CHECKING:
     from pathlib import Path

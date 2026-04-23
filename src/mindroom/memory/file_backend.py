@@ -11,7 +11,7 @@ from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
-from ._policy import (
+from .policy import (
     agent_name_from_scope_user_id,
     agent_scope_user_id,
     build_team_user_id,
@@ -21,7 +21,7 @@ from ._policy import (
     resolve_file_memory_resolution,
     storage_paths_for_scope_user_id,
 )
-from ._shared import (
+from .shared import (
     FILE_MEMORY_DAILY_DIR,
     FILE_MEMORY_DEFAULT_DIRNAME,
     FILE_MEMORY_ENTRY_PATTERN,

@@ -38,7 +38,7 @@ from mindroom.memory import (
 from mindroom.memory import (
     update_agent_memory as public_update_agent_memory,
 )
-from mindroom.memory._prompting import _format_memories_as_context
+from mindroom.memory.prompting import _format_memories_as_context
 from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
@@ -46,7 +46,7 @@ from tests.memory_test_support import MockTeamConfig
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.memory._shared import MemoryResult
+    from mindroom.memory.shared import MemoryResult
 
 
 async def add_agent_memory(
