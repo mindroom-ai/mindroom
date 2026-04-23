@@ -61,12 +61,19 @@ _INDEXING_STATUSES = {
     _INDEXING_STATUS_INDEXING,
     _INDEXING_STATUS_COMPLETE,
 }
+_INDEXING_AVAILABILITY_INITIALIZING = "initializing"
+_INDEXING_AVAILABILITY_READY = "ready"
+_INDEXING_AVAILABILITY_REFRESH_FAILED = "refresh_failed"
 
 
 @dataclass(frozen=True)
 class _PersistedIndexingState:
     settings: tuple[str, ...]
     status: Literal["resetting", "indexing", "complete"]
+    collection: str | None = None
+    availability: str | None = None
+    last_published_at: str | None = None
+    published_revision: str | None = None
 
 
 def _resolve_knowledge_path(
@@ -352,14 +359,13 @@ class KnowledgeManager:
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
         self._git_repo_present = (self.knowledge_path / ".git").is_dir()
-
-        vector_db = ChromaDb(
-            collection=_collection_name(self.base_id, self.knowledge_path),
-            path=str(self._base_storage_path),
-            persistent_client=True,
-            embedder=_create_embedder(self.config, self.runtime_paths),
+        persisted_state = self._load_persisted_indexing_state()
+        collection_name = (
+            persisted_state.collection
+            if persisted_state is not None and persisted_state.collection is not None
+            else self._default_collection_name()
         )
-        self._knowledge = Knowledge(vector_db=vector_db)
+        self._knowledge = self._build_knowledge(collection_name)
 
     def _set_settings(
         self,
@@ -408,6 +414,10 @@ class KnowledgeManager:
 
         settings: tuple[str, ...] | None = None
         status: Literal["resetting", "indexing", "complete"] | None = None
+        collection: str | None = None
+        availability: str | None = None
+        last_published_at: str | None = None
+        published_revision: str | None = None
         if isinstance(payload, list):
             if all(isinstance(item, str) for item in payload):
                 settings = tuple(payload)
@@ -422,10 +432,31 @@ class KnowledgeManager:
             ):
                 settings = tuple(raw_settings)
                 status = raw_status
+                raw_collection = payload.get("collection")
+                collection = raw_collection if isinstance(raw_collection, str) and raw_collection else None
+                raw_availability = payload.get("availability")
+                availability = raw_availability if isinstance(raw_availability, str) and raw_availability else None
+                raw_last_published_at = payload.get("last_published_at")
+                last_published_at = (
+                    raw_last_published_at if isinstance(raw_last_published_at, str) and raw_last_published_at else None
+                )
+                raw_published_revision = payload.get("published_revision")
+                published_revision = (
+                    raw_published_revision
+                    if isinstance(raw_published_revision, str) and raw_published_revision
+                    else None
+                )
 
         if settings is None or status is None:
             return None
-        return _PersistedIndexingState(settings, status)
+        return _PersistedIndexingState(
+            settings,
+            status,
+            collection=collection,
+            availability=availability,
+            last_published_at=last_published_at,
+            published_revision=published_revision,
+        )
 
     def _load_persisted_indexing_settings(self) -> tuple[str, ...] | None:
         persisted_state = self._load_persisted_indexing_state()
@@ -434,20 +465,34 @@ class KnowledgeManager:
     def _save_persisted_indexing_state(
         self,
         status: Literal["resetting", "indexing", "complete"],
+        *,
+        collection: str | None = None,
+        availability: str | None = None,
+        last_published_at: str | None = None,
+        published_revision: str | None = None,
     ) -> None:
-        self._indexing_settings_path.write_text(
-            json.dumps(
-                {
-                    "settings": list(self._indexing_settings),
-                    "status": status,
-                },
-                sort_keys=True,
-            ),
-            encoding="utf-8",
-        )
+        payload: dict[str, object] = {
+            "settings": list(self._indexing_settings),
+            "status": status,
+        }
+        if collection is not None:
+            payload["collection"] = collection
+        if availability is not None:
+            payload["availability"] = availability
+        if last_published_at is not None:
+            payload["last_published_at"] = last_published_at
+        if published_revision is not None:
+            payload["published_revision"] = published_revision
+        self._indexing_settings_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
     def _save_persisted_indexing_settings(self) -> None:
-        self._save_persisted_indexing_state(_INDEXING_STATUS_COMPLETE)
+        self._save_persisted_indexing_state(
+            _INDEXING_STATUS_COMPLETE,
+            collection=self._current_collection_name(),
+            availability=_INDEXING_AVAILABILITY_READY,
+            last_published_at=datetime.now(tz=UTC).isoformat(),
+            published_revision=self._git_last_successful_commit,
+        )
 
     def _load_git_lfs_hydrated_head(self) -> str | None:
         try:
@@ -885,8 +930,14 @@ class KnowledgeManager:
         elapsed_ns = time.time_ns() - failed_at_ns
         return elapsed_ns < _FAILED_SIGNATURE_RETRY_NS
 
-    def _has_vectors_for_source_path(self, relative_path: str) -> bool:
-        vector_db = self._knowledge.vector_db
+    def _has_vectors_for_source_path(
+        self,
+        relative_path: str,
+        *,
+        knowledge: Knowledge | None = None,
+    ) -> bool:
+        target_knowledge = knowledge or self._knowledge
+        vector_db = target_knowledge.vector_db
         if not isinstance(vector_db, ChromaDb):
             return True
         if not vector_db.exists():
@@ -919,11 +970,43 @@ class KnowledgeManager:
         )
         return configured_reader
 
+    def _default_collection_name(self) -> str:
+        return _collection_name(self.base_id, self._knowledge_source_path())
+
+    def _current_collection_name(self) -> str:
+        vector_db = self._knowledge.vector_db
+        if isinstance(vector_db, ChromaDb):
+            return vector_db.collection_name
+        return self._default_collection_name()
+
+    def _shadow_collection_name(self, live_collection_name: str) -> str:
+        default_collection = self._default_collection_name()
+        pending_collection = f"{default_collection}_pending"
+        return pending_collection if live_collection_name == default_collection else default_collection
+
+    def _build_vector_db(self, collection_name: str) -> ChromaDb:
+        return ChromaDb(
+            collection=collection_name,
+            path=str(self._base_storage_path),
+            persistent_client=True,
+            embedder=_create_embedder(self.config, self.runtime_paths),
+        )
+
+    def _build_knowledge(self, collection_name: str) -> Knowledge:
+        return Knowledge(vector_db=self._build_vector_db(collection_name))
+
+    def _reset_vector_db(self, vector_db: ChromaDb) -> None:
+        vector_db.delete()
+        vector_db.create()
+
+    def _delete_vector_db(self, vector_db: ChromaDb) -> None:
+        vector_db.delete()
+
     def _reset_collection(self) -> None:
-        if self._knowledge.vector_db is None:
+        vector_db = self._knowledge.vector_db
+        if not isinstance(vector_db, ChromaDb):
             return
-        self._knowledge.vector_db.delete()
-        self._knowledge.vector_db.create()
+        self._reset_vector_db(vector_db)
 
     def _load_indexed_files_from_vector_db(self) -> dict[str, tuple[int, int] | None]:
         """Load indexed source paths and optional file signatures from the vector collection."""
@@ -1263,7 +1346,15 @@ class KnowledgeManager:
             self._watch_task = None
             logger.info("Knowledge folder watcher stopped", base_id=self.base_id)
 
-    async def _index_file_locked(self, resolved_path: Path, *, upsert: bool) -> bool:
+    async def _index_file_locked(
+        self,
+        resolved_path: Path,
+        *,
+        upsert: bool,
+        knowledge: Knowledge | None = None,
+        indexed_files: set[str] | None = None,
+        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+    ) -> bool:
         """Index one file while the caller owns the operation lock."""
         relative_path = self._relative_path(resolved_path)
         source_mtime_ns, source_size = self._file_signature(resolved_path)
@@ -1273,13 +1364,14 @@ class KnowledgeManager:
             _SOURCE_SIZE_KEY: source_size,
         }
         reader = self._build_reader(resolved_path)
+        target_knowledge = knowledge or self._knowledge
 
         try:
             if upsert:
                 # Agno/Chroma upsert keys by content hash, so stale chunks from an older
                 # version of the same file can remain unless we clear by source metadata first.
-                await asyncio.to_thread(self._knowledge.remove_vectors_by_metadata, {_SOURCE_PATH_KEY: relative_path})
-            await self._knowledge.ainsert(
+                await asyncio.to_thread(target_knowledge.remove_vectors_by_metadata, {_SOURCE_PATH_KEY: relative_path})
+            await target_knowledge.ainsert(
                 path=str(resolved_path),
                 metadata=metadata,
                 upsert=upsert,
@@ -1289,21 +1381,40 @@ class KnowledgeManager:
             logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
             return False
 
-        has_vectors = await asyncio.to_thread(self._has_vectors_for_source_path, relative_path)
+        has_vectors = await asyncio.to_thread(
+            self._has_vectors_for_source_path,
+            relative_path,
+            knowledge=target_knowledge,
+        )
         if not has_vectors:
             logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
-            async with self._state_lock:
-                self._indexed_files.discard(relative_path)
-                self._indexed_signatures.pop(relative_path, None)
+            if indexed_files is not None and indexed_signatures is not None:
+                indexed_files.discard(relative_path)
+                indexed_signatures.pop(relative_path, None)
+            else:
+                async with self._state_lock:
+                    self._indexed_files.discard(relative_path)
+                    self._indexed_signatures.pop(relative_path, None)
             return False
 
-        async with self._state_lock:
-            self._indexed_files.add(relative_path)
-            self._indexed_signatures[relative_path] = (source_mtime_ns, source_size)
+        if indexed_files is not None and indexed_signatures is not None:
+            indexed_files.add(relative_path)
+            indexed_signatures[relative_path] = (source_mtime_ns, source_size)
+        else:
+            async with self._state_lock:
+                self._indexed_files.add(relative_path)
+                self._indexed_signatures[relative_path] = (source_mtime_ns, source_size)
         logger.info("Indexed knowledge file", base_id=self.base_id, path=relative_path)
         return True
 
-    async def _reindex_files_locked(self, files: list[Path]) -> int:
+    async def _reindex_files_locked(
+        self,
+        files: list[Path],
+        *,
+        knowledge: Knowledge | None = None,
+        indexed_files: set[str] | None = None,
+        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+    ) -> int:
         """Reindex resolved files with bounded concurrency while holding the operation lock."""
         if not files:
             return 0
@@ -1312,14 +1423,28 @@ class KnowledgeManager:
         if concurrency <= 1:
             indexed_count = 0
             for file_path in files:
-                indexed_count += int(await self._index_file_locked(file_path, upsert=True))
+                indexed_count += int(
+                    await self._index_file_locked(
+                        file_path,
+                        upsert=True,
+                        knowledge=knowledge,
+                        indexed_files=indexed_files,
+                        indexed_signatures=indexed_signatures,
+                    ),
+                )
             return indexed_count
 
         semaphore = asyncio.Semaphore(concurrency)
 
         async def _index_one(file_path: Path) -> bool:
             async with semaphore:
-                return await self._index_file_locked(file_path, upsert=True)
+                return await self._index_file_locked(
+                    file_path,
+                    upsert=True,
+                    knowledge=knowledge,
+                    indexed_files=indexed_files,
+                    indexed_signatures=indexed_signatures,
+                )
 
         results = await asyncio.gather(*(_index_one(file_path) for file_path in files))
         return sum(int(indexed) for indexed in results)
@@ -1329,14 +1454,73 @@ class KnowledgeManager:
         files = self.list_files()
 
         async with self._lock:
-            await asyncio.to_thread(self._save_persisted_indexing_state, _INDEXING_STATUS_RESETTING)
-            await asyncio.to_thread(self._reset_collection)
+            persisted_state = await asyncio.to_thread(self._load_persisted_indexing_state)
+            live_collection_name = self._current_collection_name()
+            has_published_snapshot = (
+                persisted_state is not None
+                and persisted_state.status == _INDEXING_STATUS_COMPLETE
+                and await asyncio.to_thread(self._has_existing_index)
+            )
+            if not has_published_snapshot:
+                await asyncio.to_thread(
+                    self._save_persisted_indexing_state,
+                    _INDEXING_STATUS_RESETTING,
+                    collection=live_collection_name,
+                    availability=_INDEXING_AVAILABILITY_INITIALIZING,
+                )
+                await asyncio.to_thread(self._reset_collection)
+                async with self._state_lock:
+                    self._indexed_files.clear()
+                    self._indexed_signatures.clear()
+                await asyncio.to_thread(
+                    self._save_persisted_indexing_state,
+                    _INDEXING_STATUS_INDEXING,
+                    collection=live_collection_name,
+                    availability=_INDEXING_AVAILABILITY_INITIALIZING,
+                )
+                indexed_count = await self._reindex_files_locked(files)
+                await asyncio.to_thread(self._save_persisted_indexing_settings)
+                return indexed_count
+
+            shadow_knowledge = self._build_knowledge(self._shadow_collection_name(live_collection_name))
+            shadow_vector_db = shadow_knowledge.vector_db
+            if not isinstance(shadow_vector_db, ChromaDb):
+                msg = "Knowledge reindex shadow collection requires a ChromaDb vector database"
+                raise TypeError(msg)
+            assert persisted_state is not None
+            await asyncio.to_thread(self._reset_vector_db, shadow_vector_db)
+            shadow_indexed_files: set[str] = set()
+            shadow_indexed_signatures: dict[str, tuple[int, int] | None] = {}
+            last_published_at = persisted_state.last_published_at
+            published_revision = persisted_state.published_revision
+            try:
+                indexed_count = await self._reindex_files_locked(
+                    files,
+                    knowledge=shadow_knowledge,
+                    indexed_files=shadow_indexed_files,
+                    indexed_signatures=shadow_indexed_signatures,
+                )
+            except Exception:
+                await asyncio.to_thread(self._delete_vector_db, shadow_vector_db)
+                await asyncio.to_thread(
+                    self._save_persisted_indexing_state,
+                    _INDEXING_STATUS_COMPLETE,
+                    collection=live_collection_name,
+                    availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
+                    last_published_at=last_published_at,
+                    published_revision=published_revision,
+                )
+                raise
+
+            previous_vector_db = self._knowledge.vector_db
+            # Keep the Knowledge object stable so any already-resolved handles see the swap atomically.
+            self._knowledge.vector_db = shadow_vector_db
             async with self._state_lock:
-                self._indexed_files.clear()
-                self._indexed_signatures.clear()
-            await asyncio.to_thread(self._save_persisted_indexing_state, _INDEXING_STATUS_INDEXING)
-            indexed_count = await self._reindex_files_locked(files)
+                self._indexed_files = shadow_indexed_files
+                self._indexed_signatures = shadow_indexed_signatures
             await asyncio.to_thread(self._save_persisted_indexing_settings)
+            if isinstance(previous_vector_db, ChromaDb):
+                await asyncio.to_thread(self._delete_vector_db, previous_vector_db)
             return indexed_count
 
     async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:

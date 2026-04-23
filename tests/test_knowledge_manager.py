@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -46,7 +47,6 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 class _DummyVectorDb:
@@ -141,6 +141,96 @@ class _DummyChromaDb:
 
     def exists(self) -> bool:
         return True
+
+
+class _ShadowCollection:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def get(
+        self,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        include: list[str] | None = None,
+        where: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        _ = include
+        selected_all = list(_ShadowChromaDb.collections.get(self._name, []))
+        if where:
+            key, value = next(iter(where.items()))
+            selected_all = [item for item in selected_all if item["metadata"].get(key) == value]
+        selected = selected_all[offset:] if limit is None else selected_all[offset : offset + limit]
+        ids = [str(index) for index in range(offset, offset + len(selected))]
+        return {"ids": ids, "metadatas": [dict(item["metadata"]) for item in selected]}
+
+
+class _ShadowClient:
+    def get_collection(self, name: str) -> _ShadowCollection:
+        return _ShadowCollection(name)
+
+
+class _ShadowKnowledge:
+    def __init__(self, vector_db: _DummyVectorDb) -> None:
+        self.vector_db = vector_db
+
+    async def ainsert(
+        self,
+        *,
+        path: str,
+        metadata: dict[str, object],
+        upsert: bool,
+        reader: object | None = None,
+    ) -> None:
+        _ = (upsert, reader)
+        _ShadowChromaDb.collections.setdefault(self.vector_db.collection_name, []).append(
+            {
+                "content": Path(path).read_text(encoding="utf-8"),
+                "metadata": dict(metadata),
+            },
+        )
+
+    def remove_vectors_by_metadata(self, metadata: dict[str, object]) -> bool:
+        collection_name = self.vector_db.collection_name
+        existing = _ShadowChromaDb.collections.get(collection_name, [])
+        filtered = [
+            item for item in existing if not all(item["metadata"].get(key) == value for key, value in metadata.items())
+        ]
+        _ShadowChromaDb.collections[collection_name] = filtered
+        return len(filtered) != len(existing)
+
+    def search(
+        self,
+        query: str,
+        max_results: int | None = None,
+        filters: dict[str, object] | list[object] | None = None,
+        search_type: str | None = None,
+    ) -> list[Document]:
+        _ = (query, filters, search_type)
+        limit = 5 if max_results is None else max_results
+        return [
+            Document(content=item["content"], meta_data=dict(item["metadata"]))
+            for item in _ShadowChromaDb.collections.get(self.vector_db.collection_name, [])[:limit]
+        ]
+
+
+class _ShadowChromaDb:
+    collections: ClassVar[dict[str, list[dict[str, object]]]] = {}
+
+    def __init__(self, *, collection: str, **_: object) -> None:
+        self.collection_name = collection
+        self.client = _ShadowClient()
+        self.collections.setdefault(collection, [])
+
+    def delete(self) -> bool:
+        self.collections.pop(self.collection_name, None)
+        return True
+
+    def create(self) -> None:
+        self.collections[self.collection_name] = []
+
+    def exists(self) -> bool:
+        return self.collection_name in self.collections
 
 
 def _mind_private_agent(
@@ -677,7 +767,15 @@ async def test_reindex_all_uses_bounded_file_concurrency(dummy_manager: Knowledg
     active = 0
     max_active = 0
 
-    async def _fake_index(resolved_path: Path, *, upsert: bool) -> bool:
+    async def _fake_index(
+        resolved_path: Path,
+        *,
+        upsert: bool,
+        knowledge: object | None = None,
+        indexed_files: set[str] | None = None,
+        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+    ) -> bool:
+        _ = (knowledge, indexed_files, indexed_signatures)
         nonlocal active, max_active
         assert upsert is True
         assert resolved_path.is_file()
@@ -693,6 +791,146 @@ async def test_reindex_all_uses_bounded_file_concurrency(dummy_manager: Knowledg
 
     assert indexed_count == 3
     assert max_active == min(3, _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES)
+
+
+@pytest.mark.asyncio
+async def test_search_during_reindex_returns_results_against_old_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live reads should stay on the previously published snapshot until swap completion."""
+    _ShadowChromaDb.collections = {}
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _ShadowChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _ShadowKnowledge)
+
+    docs_path = tmp_path / "knowledge"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "doc-a.md").write_text("old snapshot", encoding="utf-8")
+    config = _make_config(docs_path)
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    await manager.reindex_all()
+
+    (docs_path / "doc-a.md").write_text("new snapshot", encoding="utf-8")
+    (docs_path / "doc-b.md").write_text("new sibling", encoding="utf-8")
+
+    started_shadow_build = asyncio.Event()
+    release_shadow_build = asyncio.Event()
+    original_index_file_locked = manager._index_file_locked
+
+    async def _block_shadow_build(
+        resolved_path: Path,
+        *,
+        upsert: bool,
+        knowledge: object | None = None,
+        indexed_files: set[str] | None = None,
+        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+    ) -> bool:
+        if knowledge is not None and knowledge is not manager.get_knowledge() and not started_shadow_build.is_set():
+            started_shadow_build.set()
+            await release_shadow_build.wait()
+        return await original_index_file_locked(
+            resolved_path,
+            upsert=upsert,
+            knowledge=knowledge,
+            indexed_files=indexed_files,
+            indexed_signatures=indexed_signatures,
+        )
+
+    monkeypatch.setattr(manager, "_index_file_locked", _block_shadow_build)
+
+    reindex_task = asyncio.create_task(manager.reindex_all())
+    await started_shadow_build.wait()
+
+    live_results = manager.get_knowledge().search("snapshot", max_results=10)
+    assert [document.content for document in live_results] == ["old snapshot"]
+
+    release_shadow_build.set()
+    indexed_count = await reindex_task
+
+    assert indexed_count == 2
+    live_results = manager.get_knowledge().search("snapshot", max_results=10)
+    assert {document.content for document in live_results} == {"new snapshot", "new sibling"}
+
+
+@pytest.mark.asyncio
+async def test_reindex_all_failure_preserves_previous_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed full rebuild should keep serving the last published snapshot."""
+    _ShadowChromaDb.collections = {}
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _ShadowChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _ShadowKnowledge)
+
+    docs_path = tmp_path / "knowledge"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "doc-a.md").write_text("stable snapshot", encoding="utf-8")
+    config = _make_config(docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    await manager.reindex_all()
+    live_collection_name = manager._current_collection_name()
+
+    (docs_path / "doc-a.md").write_text("broken refresh", encoding="utf-8")
+    original_index_file_locked = manager._index_file_locked
+    failure_message = "shadow rebuild failed"
+
+    async def _fail_shadow_build(
+        resolved_path: Path,
+        *,
+        upsert: bool,
+        knowledge: object | None = None,
+        indexed_files: set[str] | None = None,
+        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+    ) -> bool:
+        if knowledge is not None and knowledge is not manager.get_knowledge():
+            await original_index_file_locked(
+                resolved_path,
+                upsert=upsert,
+                knowledge=knowledge,
+                indexed_files=indexed_files,
+                indexed_signatures=indexed_signatures,
+            )
+            raise RuntimeError(failure_message)
+        return await original_index_file_locked(
+            resolved_path,
+            upsert=upsert,
+            knowledge=knowledge,
+            indexed_files=indexed_files,
+            indexed_signatures=indexed_signatures,
+        )
+
+    monkeypatch.setattr(manager, "_index_file_locked", _fail_shadow_build)
+
+    with pytest.raises(RuntimeError, match=failure_message):
+        await manager.reindex_all()
+
+    live_results = manager.get_knowledge().search("snapshot", max_results=10)
+    assert [document.content for document in live_results] == ["stable snapshot"]
+
+    payload = json.loads(manager._indexing_settings_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "complete"
+    assert payload["collection"] == live_collection_name
+    assert payload["availability"] == "refresh_failed"
+
+    availability: list[KnowledgeAvailability] = []
+    knowledge = _get_knowledge_for_base(
+        "research",
+        config=config,
+        runtime_paths=runtime_paths,
+        shared_manager_lookup=lambda _base_id: manager,
+        on_availability=availability.append,
+    )
+    assert knowledge is manager.get_knowledge()
+    assert availability == [KnowledgeAvailability.REFRESH_FAILED]
 
 
 @pytest.mark.asyncio
@@ -871,10 +1109,11 @@ async def test_initialize_shared_knowledge_managers_resumes_partial_index_when_c
             "b.md",
         }
         payload = json.loads(manager._indexing_settings_path.read_text(encoding="utf-8"))
-        assert payload == {
-            "settings": list(manager._indexing_settings),
-            "status": "complete",
-        }
+        assert payload["settings"] == list(manager._indexing_settings)
+        assert payload["status"] == "complete"
+        assert payload["collection"] == manager._current_collection_name()
+        assert payload["availability"] == "ready"
+        assert isinstance(payload["last_published_at"], str)
         reset_collection.assert_not_called()
     finally:
         await shutdown_shared_knowledge_managers()
@@ -1836,8 +2075,21 @@ async def test_interrupted_reindex_restart_resumes_partial_progress(
     original_index_file_locked = interrupted_manager._index_file_locked
     indexed_paths: list[str] = []
 
-    async def _interrupt_after_first_file(resolved_path: Path, *, upsert: bool) -> bool:
-        indexed = await original_index_file_locked(resolved_path, upsert=upsert)
+    async def _interrupt_after_first_file(
+        resolved_path: Path,
+        *,
+        upsert: bool,
+        knowledge: object | None = None,
+        indexed_files: set[str] | None = None,
+        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+    ) -> bool:
+        indexed = await original_index_file_locked(
+            resolved_path,
+            upsert=upsert,
+            knowledge=knowledge,
+            indexed_files=indexed_files,
+            indexed_signatures=indexed_signatures,
+        )
         indexed_paths.append(interrupted_manager._relative_path(resolved_path))
         if len(indexed_paths) == 1:
             message = "simulated crash"
@@ -1850,10 +2102,10 @@ async def test_interrupted_reindex_restart_resumes_partial_progress(
         await interrupted_manager.reindex_all()
 
     interrupted_payload = json.loads(interrupted_manager._indexing_settings_path.read_text(encoding="utf-8"))
-    assert interrupted_payload == {
-        "settings": list(interrupted_manager._indexing_settings),
-        "status": "indexing",
-    }
+    assert interrupted_payload["settings"] == list(interrupted_manager._indexing_settings)
+    assert interrupted_payload["status"] == "indexing"
+    assert interrupted_payload["collection"] == interrupted_manager._current_collection_name()
+    assert interrupted_payload["availability"] == "initializing"
     assert {metadata["source_path"] for metadata in _DummyChromaDb.metadatas if isinstance(metadata, dict)} == {
         indexed_paths[0],
     }
@@ -1871,10 +2123,11 @@ async def test_interrupted_reindex_restart_resumes_partial_progress(
             "b.md",
         }
         resumed_payload = json.loads(resumed_manager._indexing_settings_path.read_text(encoding="utf-8"))
-        assert resumed_payload == {
-            "settings": list(resumed_manager._indexing_settings),
-            "status": "complete",
-        }
+        assert resumed_payload["settings"] == list(resumed_manager._indexing_settings)
+        assert resumed_payload["status"] == "complete"
+        assert resumed_payload["collection"] == resumed_manager._current_collection_name()
+        assert resumed_payload["availability"] == "ready"
+        assert isinstance(resumed_payload["last_published_at"], str)
         reset_collection.assert_not_called()
     finally:
         await shutdown_shared_knowledge_managers()

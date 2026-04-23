@@ -113,6 +113,15 @@ def _get_knowledge_for_base(
             on_availability(KnowledgeAvailability.INITIALIZING)
         return None
 
+    persisted_state = published_manager._load_persisted_indexing_state()
+    if (
+        persisted_state is not None
+        and persisted_state.availability == KnowledgeAvailability.REFRESH_FAILED.value
+        and on_availability is not None
+    ):
+        on_availability(KnowledgeAvailability.REFRESH_FAILED)
+        return published_manager.get_knowledge()
+
     manager = get_shared_knowledge_manager_for_config(
         base_id,
         config=config,
