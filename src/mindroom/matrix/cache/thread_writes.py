@@ -677,8 +677,9 @@ class ThreadLiveWritePolicy:
 
         outcome = "ok"
         try:
-            appended = await self._cache_ops.queue_room_cache_update(
+            appended = await self._cache_ops.queue_thread_cache_update(
                 room_id,
+                thread_id,
                 append_and_invalidate,
                 name="matrix_cache_append_live_event",
             )
