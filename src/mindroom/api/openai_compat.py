@@ -666,6 +666,15 @@ def _knowledge_availability_system_message(unavailable_bases: dict[str, Knowledg
     return format_knowledge_availability_notice(unavailable_bases)
 
 
+def _prepend_knowledge_availability_notice(
+    prompt: str,
+    unavailable_bases: dict[str, KnowledgeAvailability],
+) -> str:
+    """Prefix the prompt with the degraded-knowledge notice when shared bases are unavailable."""
+    availability_hint = _knowledge_availability_system_message(unavailable_bases)
+    return f"{availability_hint}\n\n{prompt}" if availability_hint else prompt
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -798,6 +807,7 @@ async def chat_completions(
                 thread_history,
                 req.user,
                 execution_identity=execution_identity,
+                refresh_owner=knowledge_refresh_owner,
             )
         else:
             with tool_execution_identity(execution_identity):
@@ -811,6 +821,7 @@ async def chat_completions(
                     thread_history,
                     req.user,
                     execution_identity=execution_identity,
+                    refresh_owner=knowledge_refresh_owner,
                 )
     else:
         # Resolve knowledge base for this agent
@@ -1141,6 +1152,8 @@ def _build_team(
     execution_identity: ToolExecutionIdentity | None,
     scope_context: ScopeSessionContext | None = None,
     session_id: str | None = None,
+    unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> tuple[list[Agent], Team, TeamMode]:
     """Create member agents and build one agno.Team for a configured team.
 
@@ -1159,6 +1172,8 @@ def _build_team(
         execution_identity=execution_identity,
         session_id=session_id,
         include_openai_compat_guidance=True,
+        unavailable_bases=unavailable_bases,
+        refresh_owner=refresh_owner,
         reason_prefix=f"Team '{team_name}'",
     )
     try:
@@ -1246,11 +1261,13 @@ async def _non_stream_team_completion(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
     agents: list[Agent] = []
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
+    unavailable_bases: dict[str, KnowledgeAvailability] = {}
     try:
         with open_bound_scope_session_context(
             agents=[],
@@ -1269,6 +1286,8 @@ async def _non_stream_team_completion(
                     execution_identity,
                     scope_context,
                     session_id,
+                    unavailable_bases,
+                    refresh_owner,
                 )
             except ValueError as e:
                 return _error_response(500, str(e), error_type="server_error")
@@ -1282,6 +1301,7 @@ async def _non_stream_team_completion(
             )
 
             try:
+                prompt = _prepend_knowledge_availability_notice(prompt, unavailable_bases)
                 team_run_input = await _prepare_openai_team_run_input(
                     scope_context=scope_context,
                     team_name=team_name,
@@ -1346,6 +1366,7 @@ async def _stream_team_completion(  # noqa: C901
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     stack = ExitStack()
@@ -1353,6 +1374,7 @@ async def _stream_team_completion(  # noqa: C901
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
+    unavailable_bases: dict[str, KnowledgeAvailability] = {}
 
     async def _cleanup() -> None:
         if stream is not None:
@@ -1384,6 +1406,8 @@ async def _stream_team_completion(  # noqa: C901
                     execution_identity,
                     scope_context,
                     session_id,
+                    unavailable_bases,
+                    refresh_owner,
                 )
         except ValueError as e:
             await _cleanup()
@@ -1398,6 +1422,7 @@ async def _stream_team_completion(  # noqa: C901
         )
 
         try:
+            prompt = _prepend_knowledge_availability_notice(prompt, unavailable_bases)
             team_run_input = await _prepare_openai_team_run_input(
                 scope_context=scope_context,
                 team_name=team_name,

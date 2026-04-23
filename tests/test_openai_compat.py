@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from contextvars import Context
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 if TYPE_CHECKING:
@@ -2276,6 +2276,73 @@ class TestTeamCompletion:
         run_input = mock_team.arun.call_args.args[0]
         assert run_input == "Build a feature"
 
+    def test_team_non_streaming_unready_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
+        """Non-streaming team completions should prepend the degraded knowledge notice."""
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
+        from mindroom.team_exact_members import ResolvedExactTeamMembers  # noqa: PLC0415
+
+        scheduled_base_ids: list[str] = []
+
+        class _FakeRefreshOwner:
+            def schedule_refresh(self, base_id: str) -> None:
+                scheduled_base_ids.append(f"refresh:{base_id}")
+
+            def schedule_initial_load(self, base_id: str) -> None:
+                scheduled_base_ids.append(base_id)
+
+            def is_refreshing(self, base_id: str) -> bool:
+                _ = base_id
+                return False
+
+        mock_team = _make_test_team()
+        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team consensus result"))
+        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
+
+        def fake_materialize(
+            requested_agent_names: list[str],
+            **kwargs: object,
+        ) -> ResolvedExactTeamMembers:
+            unavailable_bases = cast("dict[str, KnowledgeAvailability] | None", kwargs["unavailable_bases"])
+            refresh_owner = kwargs["refresh_owner"]
+            assert unavailable_bases is not None
+            assert refresh_owner is team_app_client.app.state.knowledge_refresh_owner
+            unavailable_bases["docs"] = KnowledgeAvailability.INITIALIZING
+            refresh_owner.schedule_initial_load("docs")
+            return ResolvedExactTeamMembers(
+                requested_agent_names=requested_agent_names,
+                agents=mock_agents,
+                display_names=["GeneralAgent", "CodeAgent"],
+                materialized_agent_names=set(requested_agent_names),
+                failed_agent_names=[],
+            )
+
+        team_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
+        with (
+            patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
+            patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build a feature")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build a feature"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert (
+            "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
+            in mock_prepare.await_args.kwargs["prompt"]
+        )
+        assert scheduled_base_ids == ["docs"]
+
     def test_team_non_streaming_formats_plain_run_output_fallback(self, team_app_client: TestClient) -> None:
         """Non-streaming team completions should format plain RunOutput fallbacks like the main runtime."""
         from mindroom.teams import TeamMode  # noqa: PLC0415
@@ -2433,6 +2500,78 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         run_input = mock_team.arun.call_args.args[0]
         assert run_input == "Build it"
+
+    def test_team_streaming_config_mismatch_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
+        """Streaming team completions should prepend the stale-knowledge notice."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
+        from mindroom.team_exact_members import ResolvedExactTeamMembers  # noqa: PLC0415
+
+        scheduled_base_ids: list[str] = []
+
+        class _FakeRefreshOwner:
+            def schedule_refresh(self, base_id: str) -> None:
+                scheduled_base_ids.append(f"refresh:{base_id}")
+
+            def schedule_initial_load(self, base_id: str) -> None:
+                scheduled_base_ids.append(base_id)
+
+            def is_refreshing(self, base_id: str) -> bool:
+                _ = base_id
+                return False
+
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="Hello world!")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        def fake_materialize(
+            requested_agent_names: list[str],
+            **kwargs: object,
+        ) -> ResolvedExactTeamMembers:
+            unavailable_bases = cast("dict[str, KnowledgeAvailability] | None", kwargs["unavailable_bases"])
+            refresh_owner = kwargs["refresh_owner"]
+            assert unavailable_bases is not None
+            assert refresh_owner is team_app_client.app.state.knowledge_refresh_owner
+            unavailable_bases["docs"] = KnowledgeAvailability.CONFIG_MISMATCH
+            refresh_owner.schedule_refresh("docs")
+            return ResolvedExactTeamMembers(
+                requested_agent_names=requested_agent_names,
+                agents=mock_agents,
+                display_names=["GeneralAgent", "CodeAgent"],
+                materialized_agent_names=set(requested_agent_names),
+                failed_agent_names=[],
+            )
+
+        team_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
+        with (
+            patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
+            patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert (
+            "Knowledge base `docs` is refreshing against newer config and may be stale this turn."
+            in mock_prepare.await_args.kwargs["prompt"]
+        )
+        assert scheduled_base_ids == ["refresh:docs"]
 
     def test_team_streaming_falls_back_to_final_team_run_output(self, team_app_client: TestClient) -> None:
         """Providers that yield a final TeamRunOutput in stream mode should still emit content."""
