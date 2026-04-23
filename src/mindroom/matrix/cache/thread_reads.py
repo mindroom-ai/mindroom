@@ -55,7 +55,11 @@ class ThreadReadPolicy:
         coordinator = self._coordinator()
         if coordinator is None:
             return
-        await coordinator.wait_for_thread_idle(room_id, thread_id)
+        await coordinator.wait_for_thread_idle(
+            room_id,
+            thread_id,
+            ignore_cancelled_room_fences=True,
+        )
 
     def _full_history_result(
         self,

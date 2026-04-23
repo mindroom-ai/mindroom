@@ -5854,7 +5854,11 @@ class TestThreadingBehavior:
             await asyncio.gather(cancelled_room_task, return_exceptions=True)
 
             await asyncio.wait_for(
-                coordinator.wait_for_thread_idle("!test:localhost", "$thread-c:localhost"),
+                coordinator.wait_for_thread_idle(
+                    "!test:localhost",
+                    "$thread-c:localhost",
+                    ignore_cancelled_room_fences=True,
+                ),
                 timeout=0.1,
             )
             assert first_thread_task.done() is False

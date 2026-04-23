@@ -94,8 +94,18 @@ class EventCacheWriteCoordinator(Protocol):
     async def wait_for_room_idle(self, room_id: str) -> None:
         """Wait for one room's queued updates to drain."""
 
-    async def wait_for_thread_idle(self, room_id: str, thread_id: str) -> None:
-        """Wait for room-wide and same-thread queued updates to drain."""
+    async def wait_for_thread_idle(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        ignore_cancelled_room_fences: bool = False,
+    ) -> None:
+        """Wait for room-wide and same-thread queued updates to drain.
+
+        Set ``ignore_cancelled_room_fences`` only for read-style callers that can
+        safely bypass cancelled room fences preserving write ordering.
+        """
 
     async def close(self) -> None:
         """Drain and tear down the coordinator."""
@@ -675,14 +685,24 @@ class _EventCacheWriteCoordinator:
             return
         await self._wait_for_room_idle_without_timing(room_id)
 
-    async def wait_for_thread_idle(self, room_id: str, thread_id: str) -> None:
-        """Wait for room-wide and same-thread queued updates to drain."""
+    async def wait_for_thread_idle(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        ignore_cancelled_room_fences: bool = False,
+    ) -> None:
+        """Wait for room-wide and same-thread queued updates to drain.
+
+        Set ``ignore_cancelled_room_fences`` only for read-style callers that can
+        safely bypass cancelled room fences preserving write ordering.
+        """
         while True:
             self._reevaluate_room(room_id)
             if self._thread_is_idle(
                 room_id,
                 thread_id,
-                ignore_cancelled_room_fences=True,
+                ignore_cancelled_room_fences=ignore_cancelled_room_fences,
             ):
                 return
 
@@ -703,7 +723,7 @@ class _EventCacheWriteCoordinator:
             if self._thread_is_idle(
                 room_id,
                 thread_id,
-                ignore_cancelled_room_fences=True,
+                ignore_cancelled_room_fences=ignore_cancelled_room_fences,
             ):
                 self._discard_waiter(room_id, waiter)
                 return
