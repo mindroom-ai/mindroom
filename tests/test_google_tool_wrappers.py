@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import mindroom.custom_tools._google_oauth as google_oauth_module
+import mindroom.custom_tools.google_oauth as google_oauth_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.gmail import GmailTools

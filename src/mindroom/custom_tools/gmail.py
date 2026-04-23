@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.gmail import GmailTools as AgnoGmailTools
 
-from mindroom.custom_tools._google_oauth import ScopedGoogleOAuthMixin
+from mindroom.custom_tools.google_oauth import ScopedGoogleOAuthMixin
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
