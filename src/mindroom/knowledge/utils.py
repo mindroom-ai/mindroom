@@ -121,6 +121,14 @@ def _get_knowledge_for_base(
     ):
         on_availability(KnowledgeAvailability.REFRESH_FAILED)
         return published_manager.get_knowledge()
+    if (
+        persisted_state is None
+        or persisted_state.status != "complete"
+        or persisted_state.availability != KnowledgeAvailability.READY.value
+    ):
+        if on_availability is not None:
+            on_availability(KnowledgeAvailability.INITIALIZING)
+        return None
 
     manager = get_shared_knowledge_manager_for_config(
         base_id,

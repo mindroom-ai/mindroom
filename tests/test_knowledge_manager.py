@@ -2037,6 +2037,53 @@ async def test_get_knowledge_for_base_reuses_published_shared_manager(
 
 
 @pytest.mark.asyncio
+async def test_get_knowledge_for_base_treats_uninitialized_published_manager_as_initializing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Published shared managers without a ready snapshot should still report INITIALIZING."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={
+                "docs": KnowledgeBaseConfig(path=str(docs_path), watch=False),
+            },
+        ),
+        _runtime_paths(tmp_path / "config.yaml", tmp_path),
+    )
+
+    try:
+        await ensure_shared_knowledge_manager(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            reindex_on_create=False,
+            initialize_on_create=False,
+        )
+        availability: list[KnowledgeAvailability] = []
+
+        knowledge = _get_knowledge_for_base(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            on_availability=availability.append,
+        )
+
+        assert knowledge is None
+        assert availability == [KnowledgeAvailability.INITIALIZING]
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_get_knowledge_for_base_serves_last_good_snapshot_on_config_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
