@@ -675,7 +675,6 @@ path = "mindroom.memory"
 depends_on = [
     "mindroom.config.main",
     "mindroom.constants", "mindroom.tool_system.worker_routing",
-    "mindroom.memory.policy",
     "mindroom.memory.auto_flush",
     "mindroom.memory.functions",
     "mindroom.memory.prompting",
@@ -688,7 +687,6 @@ depends_on = [
     "mindroom.runtime_resolution",
 ]
 visibility = [
-    "mindroom.memory",
     "mindroom.memory.file_backend",
     "mindroom.memory.functions",
     "mindroom.memory.mem0_backend",
@@ -723,7 +721,6 @@ visibility = ["mindroom.memory", "mindroom.memory.auto_flush"]
 path = "mindroom.memory.shared"
 depends_on = []
 visibility = [
-    "mindroom.memory",
     "mindroom.memory.file_backend",
     "mindroom.memory.mem0_backend",
     "mindroom.memory.policy",
@@ -794,10 +791,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.mcp.toolkit"
-depends_on = [
-    "mindroom.mcp.manager",
-    "mindroom.mcp.types",
-]
+depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.cache"

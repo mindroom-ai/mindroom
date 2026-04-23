@@ -3,7 +3,7 @@
 Last updated: 2026-03-18
 
 **Status: ~90% complete.**
-Core auto-flush exists (`memory/auto_flush.py`, `memory/_file_backend.py`).
+Core auto-flush exists (`memory/auto_flush.py`, `memory/file_backend.py`).
 The full config surface (`MemoryAutoFlushConfig`) is implemented including stale cleanup (`stale_ttl_seconds`) and max-dirty-age fallback (`max_dirty_age_seconds`).
 Auto-flush defaults to disabled (`enabled: false`) with a 30-minute flush interval (`flush_interval_seconds: 1800`).
 Remaining: optional daily curation pass (not yet implemented).
