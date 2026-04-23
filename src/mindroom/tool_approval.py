@@ -481,6 +481,15 @@ class ApprovalManager:
         with self._state_lock:
             return set(self._pending_send_room_index)
 
+    async def _wait_for_all_pending_sends(self) -> bool:
+        while True:
+            room_ids = self.pending_send_room_ids()
+            if not room_ids:
+                return True
+            await self.wait_for_pending_sends_in_rooms(room_ids, timeout=None)
+            if not self.pending_send_room_ids():
+                return True
+
     def _set_event_delivery(self, approval_id: str, event_id: str) -> None:
         with self._state_lock:
             pending = self._requests_by_id.get(approval_id)
@@ -572,6 +581,16 @@ class ApprovalManager:
     def _has_unsynced_resolution_work(self) -> bool:
         return self._has_unsynced_resolved() or self._has_unconfirmed_deliveries()
 
+    def _has_unsynced_resolution_work_in_rooms(self, room_ids: set[str]) -> bool:
+        with self._state_lock:
+            return any(
+                approval.status != "pending"
+                and approval.room_id is not None
+                and approval.room_id in room_ids
+                and approval.resolution_synced_at is None
+                for approval in self._requests_by_id.values()
+            )
+
     def _room_ids_with_unsynced_resolution_work(self) -> set[str]:
         room_ids = {pending.room_id for pending in self.list_unsynced_resolved() if pending.room_id is not None}
         room_ids.update(
@@ -621,8 +640,11 @@ class ApprovalManager:
                 room_ids_before_retry = self._room_ids_with_unsynced_resolution_work()
                 if not room_ids_before_retry:
                     return
-                await self.recover_unconfirmed_deliveries()
-                await self.sync_unsynced_resolved()
+                await self.reconcile_unsynced_approvals(
+                    room_ids=None,
+                    max_attempts=1,
+                    backoff="fixed",
+                )
                 await self._notify_drained_rooms(
                     room_ids_before_retry - self._room_ids_with_unsynced_resolution_work(),
                 )
@@ -791,7 +813,8 @@ class ApprovalManager:
                 )
                 if applied_decision is not None:
                     self._persist_request(applied_decision[0])
-                self._discard(pending.id)
+                    with self._state_lock:
+                        self._pending_by_id.pop(pending.id, None)
                 self._complete_pending_send(pending.id)
                 raise
         except Exception as exc:
@@ -1448,6 +1471,46 @@ class ApprovalManager:
             self._discard(pending.id)
         return recovered_requests
 
+    async def reconcile_unsynced_approvals(
+        self,
+        *,
+        room_ids: set[str] | None = None,
+        max_attempts: int = 3,
+        backoff: Literal["exponential", "fixed"] = "exponential",
+        fixed_backoff_seconds: float = 1.0,
+    ) -> bool:
+        """Run approval reconciliation until the selected scope is clear or attempts run out."""
+        if max_attempts <= 0:
+            return not (
+                self._has_unsynced_resolution_work()
+                if room_ids is None
+                else self._has_unsynced_resolution_work_in_rooms(room_ids)
+            )
+
+        for attempt in range(max_attempts):
+            if room_ids is None:
+                await self._wait_for_all_pending_sends()
+            else:
+                await self.wait_for_pending_sends_in_rooms(room_ids, timeout=None)
+            with suppress(Exception):
+                if room_ids is None:
+                    await self.recover_unconfirmed_deliveries()
+                else:
+                    await self.recover_unconfirmed_deliveries_in_rooms(room_ids)
+            with suppress(Exception):
+                await self.sync_unsynced_resolved(room_ids=room_ids)
+            has_work = (
+                self._has_unsynced_resolution_work()
+                if room_ids is None
+                else self._has_unsynced_resolution_work_in_rooms(room_ids)
+            )
+            if not has_work:
+                return True
+            if attempt + 1 < max_attempts:
+                delay = 2**attempt if backoff == "exponential" else fixed_backoff_seconds
+                await asyncio.sleep(delay)
+        return False
+
     @staticmethod
     def _truncated_approval_reason(
         pending: PendingApproval,
@@ -1772,13 +1835,11 @@ async def shutdown_approval_store(
     await manager.wait_for_pending_sends_in_rooms(manager.pending_send_room_ids(), timeout=None)
     await manager.shutdown(reason=reason)
     with suppress(Exception):
-        await manager.recover_unconfirmed_deliveries()
-    for attempt in range(3):
-        with suppress(Exception):
-            await manager.sync_unsynced_resolved()
-        if not manager._has_unsynced_resolved():
-            break
-        await asyncio.sleep(2**attempt)
+        await manager.reconcile_unsynced_approvals(
+            room_ids=None,
+            max_attempts=3,
+            backoff="exponential",
+        )
     await manager.cancel_unsynced_resolution_retry_task()
     _MANAGER = None
     _clear_script_cache()

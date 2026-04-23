@@ -1638,6 +1638,12 @@ class AgentBot:
         )
         if anchored_pending is None or anchored_pending.approver_user_id != sender_id:
             return False
+        if anchored_pending.status != "pending" and anchored_pending.resolution_synced_at is None:
+            await approval_manager.replay_resolved_card_for_room(
+                approval_event_id=approval_event_id,
+                room_id=room.room_id,
+            )
+            return True
         result = await approval_manager.deny_anchored_request_for_lost_authorization(
             approval_event_id=approval_event_id,
             room_id=room.room_id,

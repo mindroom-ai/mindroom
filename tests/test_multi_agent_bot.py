@@ -13180,6 +13180,68 @@ class TestMultiAgentOrchestrator:
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
+    async def test_deferred_leave_re_drains_for_new_approvals(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Deferred room leaves should re-drain the room before retrying the router leave."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+
+        router_client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        router_bot = MagicMock()
+        router_bot.agent_name = "router"
+        router_bot.running = True
+        router_bot.client = router_client
+        router_bot._room_lifecycle.rooms_to_actually_leave = AsyncMock(return_value=["!R:server"])
+        router_bot._room_lifecycle.leave_unconfigured_rooms = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+
+        store = initialize_approval_store(
+            runtime_paths,
+            sender=AsyncMock(return_value=SentApprovalEvent("$approval-new")),
+            editor=AsyncMock(return_value=False),
+            runtime_loop=asyncio.get_running_loop(),
+        )
+        store._allow_unsynced_resolution_retries = False
+        task = asyncio.create_task(
+            store.request_approval(
+                tool_name="run_shell_command",
+                arguments={"command": "echo hi"},
+                agent_name="code",
+                room_id="!R:server",
+                thread_id="$thread",
+                requester_id="@user:localhost",
+                approver_user_id="@user:localhost",
+                matched_rule="run_shell_*",
+                script_path=None,
+                timeout_seconds=60,
+            ),
+        )
+
+        async with asyncio.timeout(1):
+            while True:
+                pending = store.list_pending()
+                if pending and pending[0].event_id is not None:
+                    break
+                await asyncio.sleep(0)
+
+        orchestrator._pending_room_leaves.add("!R:server")
+
+        try:
+            with patch("mindroom.orchestrator.asyncio.sleep", new=AsyncMock()):
+                await orchestrator._on_approval_room_drained("!R:server")
+
+            decision = await task
+
+            assert decision.status == "expired"
+            router_bot._room_lifecycle.leave_unconfigured_rooms.assert_not_awaited()
+            assert "!R:server" in orchestrator._pending_room_leaves
+            assert store.list_unsynced_resolved_in_rooms({"!R:server"}) != []
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
     async def test_router_does_not_leave_room_when_unsynced_approvals_remain(
         self,
         tmp_path: Path,

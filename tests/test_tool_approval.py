@@ -8,6 +8,7 @@ import json
 import os
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -209,6 +210,42 @@ async def _request_tool_approval(
         if pending and pending[0].event_id is not None:
             break
     return store, task, pending[0] if pending else None
+
+
+def _store_resolved_unconfirmed_request(
+    store: ApprovalManager,
+    *,
+    approval_id: str,
+    room_id: str = "!room:localhost",
+) -> PendingApproval:
+    requested_at = datetime.now(UTC)
+    pending = PendingApproval(
+        id=approval_id,
+        tool_name="run_shell_command",
+        arguments={},
+        arguments_preview={"command": "echo hi"},
+        arguments_preview_truncated=False,
+        event_arguments_payload={"command": "echo hi"},
+        event_arguments_truncated=False,
+        agent_name="code",
+        room_id=room_id,
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        matched_rule="run_shell_*",
+        script_path=None,
+        requested_at=requested_at,
+        expires_at=requested_at + timedelta(minutes=5),
+        status="expired",
+        resolution_reason="Use a safer command",
+        resolved_at=requested_at + timedelta(seconds=1),
+        resolved_by="@user:localhost",
+        event_id=None,
+        resolution_synced_at=None,
+    )
+    store._store_request(pending)
+    store._persist_request(pending)
+    return pending
 
 
 def _reply_event(*, event_id: str, body: str, sender: str = "@user:localhost") -> MagicMock:
@@ -1118,8 +1155,8 @@ async def test_request_approval_cancellation_marks_request_expired(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_request_approval_cancellation_during_send_expires_persisted_pending_request(tmp_path: Path) -> None:
-    """Cancelling while the approval card is still sending should clean up the persisted pending request."""
+async def test_ambiguous_cancel_preserves_request_for_recovery(tmp_path: Path) -> None:
+    """Cancelling during send should leave a recoverable resolved request behind."""
     runtime_paths = test_runtime_paths(tmp_path)
 
     async def _blocked_send(*_args: object) -> SentApprovalEvent:
@@ -1127,8 +1164,9 @@ async def test_request_approval_cancellation_during_send_expires_persisted_pendi
         return _sent_approval_event()
 
     sender = AsyncMock(side_effect=_blocked_send)
-    editor = AsyncMock()
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    editor = AsyncMock(return_value=True)
+    recoverer = AsyncMock(return_value="$approval")
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor, recoverer=recoverer)
     task = asyncio.create_task(
         store.request_approval(
             tool_name="run_shell_command",
@@ -1152,9 +1190,24 @@ async def test_request_approval_cancellation_during_send_expires_persisted_pendi
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert store._pending_by_id == {}
-    assert (runtime_paths.storage_root / "approvals" / f"{pending[0].id}.json").exists() is False
+    request_path = runtime_paths.storage_root / "approvals" / f"{pending[0].id}.json"
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+
+    assert store.list_pending() == []
+    assert payload["status"] == "expired"
+    assert payload["resolution_reason"] == "Tool approval request was cancelled."
+    assert payload["event_id"] is None
+    assert payload["resolution_synced_at"] is None
     editor.assert_not_awaited()
+
+    recovered = await store.recover_unconfirmed_deliveries()
+    synced = await store.sync_unsynced_resolved()
+
+    assert [request.id for request in recovered] == [pending[0].id]
+    assert [request.id for request in synced] == [pending[0].id]
+    assert request_path.exists() is False
+    recoverer.assert_awaited_once()
+    editor.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1711,6 +1764,88 @@ async def test_shutdown_reconciles_unsynced_approvals(tmp_path: Path) -> None:
         await shutdown_approval_store()
 
     assert editor.await_count == 2
+    assert pending.resolution_synced_at is not None
+    assert request_path.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_unsynced_approvals_recovers_then_syncs_in_one_loop(tmp_path: Path) -> None:
+    """Each retry attempt should repeat recovery and replay until the room is fully clean."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        runtime_paths,
+        editor=editor,
+        recoverer=AsyncMock(return_value="$approval"),
+    )
+    pending = _store_resolved_unconfirmed_request(store, approval_id="recover-and-sync")
+    request_path = runtime_paths.storage_root / "approvals" / f"{pending.id}.json"
+    real_recover = store.recover_unconfirmed_deliveries
+    real_sync = store.sync_unsynced_resolved
+    recover_attempts = 0
+
+    async def _recover() -> list[PendingApproval]:
+        nonlocal recover_attempts
+        recover_attempts += 1
+        if recover_attempts == 1:
+            msg = "transient recovery failure"
+            raise RuntimeError(msg)
+        return await real_recover()
+
+    with (
+        patch.object(store, "recover_unconfirmed_deliveries", new=AsyncMock(side_effect=_recover)) as recover_mock,
+        patch.object(store, "sync_unsynced_resolved", new=AsyncMock(side_effect=real_sync)) as sync_mock,
+        patch("mindroom.tool_approval.asyncio.sleep", new=AsyncMock()),
+    ):
+        reconciled = await store.reconcile_unsynced_approvals(
+            room_ids=None,
+            max_attempts=3,
+            backoff="exponential",
+        )
+
+    assert reconciled is True
+    assert recover_mock.await_count == 2
+    assert sync_mock.await_count == 2
+    assert pending.event_id == "$approval"
+    assert pending.resolution_synced_at is not None
+    assert request_path.exists() is False
+    assert store._has_unsynced_resolution_work() is False
+
+
+@pytest.mark.asyncio
+async def test_shutdown_uses_full_reconcile_loop(tmp_path: Path) -> None:
+    """Shutdown should rerun recovery inside each retry attempt before replaying the edit."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        runtime_paths,
+        editor=editor,
+        recoverer=AsyncMock(return_value="$approval"),
+    )
+    pending = _store_resolved_unconfirmed_request(store, approval_id="shutdown-recover-and-sync")
+    request_path = runtime_paths.storage_root / "approvals" / f"{pending.id}.json"
+    real_recover = store.recover_unconfirmed_deliveries
+    real_sync = store.sync_unsynced_resolved
+    recover_attempts = 0
+
+    async def _recover() -> list[PendingApproval]:
+        nonlocal recover_attempts
+        recover_attempts += 1
+        if recover_attempts == 1:
+            msg = "transient recovery failure"
+            raise RuntimeError(msg)
+        return await real_recover()
+
+    with (
+        patch.object(store, "recover_unconfirmed_deliveries", new=AsyncMock(side_effect=_recover)) as recover_mock,
+        patch.object(store, "sync_unsynced_resolved", new=AsyncMock(side_effect=real_sync)) as sync_mock,
+        patch("mindroom.tool_approval.asyncio.sleep", new=AsyncMock()),
+    ):
+        await shutdown_approval_store()
+
+    assert recover_mock.await_count == 2
+    assert sync_mock.await_count == 2
+    assert pending.event_id == "$approval"
     assert pending.resolution_synced_at is not None
     assert request_path.exists() is False
 
@@ -3380,6 +3515,44 @@ async def test_requester_lost_authorization_resolves_card_closed(tmp_path: Path)
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
     assert editor.await_args.args[2]["status"] == "denied"
     assert editor.await_args.args[2]["resolution_reason"] == "Approver lost authorization."
+
+
+@pytest.mark.asyncio
+async def test_auth_drift_replays_resolved_card(tmp_path: Path) -> None:
+    """Lost authorization on an already resolved card should replay the stored terminal edit."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    bot = _agent_bot(tmp_path, config=config)
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock(side_effect=[False, True])
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    await store.deny(pending.id, reason="Use a safer command", resolved_by="@user:localhost")
+    decision = await task
+
+    assert decision.status == "denied"
+    assert pending.resolution_synced_at is None
+
+    room = _approval_room()
+    event = _custom_response_event(
+        approval_event_id="$approval",
+        status="approved",
+    )
+
+    with patch("mindroom.bot.is_authorized_sender", return_value=False):
+        await bot._on_unknown_event(room, event)
+
+    assert editor.await_count == 2
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+    assert editor.await_args.args[2]["status"] == "denied"
+    assert editor.await_args.args[2]["resolution_reason"] == "Use a safer command"
+    assert store.anchored_request_for_event(approval_event_id="$approval", room_id="!room:localhost") is None
 
 
 @pytest.mark.asyncio

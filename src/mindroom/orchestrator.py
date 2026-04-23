@@ -655,7 +655,6 @@ class MultiAgentOrchestrator:
         """Retry one deferred router leave after approval replay catches up."""
         if room_id not in self._pending_room_leaves:
             return
-        self._pending_room_leaves.discard(room_id)
 
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None or not router_bot.running or router_bot.client is None:
@@ -663,24 +662,19 @@ class MultiAgentOrchestrator:
 
         rooms_to_leave = await router_bot._room_lifecycle.rooms_to_actually_leave()
         if room_id not in rooms_to_leave:
+            self._pending_room_leaves.discard(room_id)
             return
+        approval_store = get_approval_store()
+        if approval_store is not None:
+            finalized_room_ids = await self._drain_approval_state_for_rooms(
+                {room_id},
+                approval_store=approval_store,
+            )
+            if room_id not in finalized_room_ids:
+                return
+        else:
+            self._pending_room_leaves.discard(room_id)
         await router_bot._room_lifecycle.leave_unconfigured_rooms(room_ids=[room_id])
-
-    @staticmethod
-    def _rooms_with_unsynced_approval_state(
-        room_ids: set[str],
-        *,
-        approval_store: ApprovalManager,
-    ) -> set[str]:
-        blocked_room_ids = {
-            pending.room_id
-            for pending in approval_store.list_unsynced_resolved_in_rooms(room_ids)
-            if pending.room_id is not None
-        }
-        blocked_room_ids.update(
-            pending.room_id for pending in approval_store.list_unconfirmed_deliveries() if pending.room_id in room_ids
-        )
-        return blocked_room_ids
 
     async def _drain_approval_state_for_rooms(
         self,
@@ -699,19 +693,16 @@ class MultiAgentOrchestrator:
                     pending.id,
                     reason=_REMOVED_APPROVAL_ROOM_REASON,
                 )
+        fully_reconciled = await approval_store.reconcile_unsynced_approvals(
+            room_ids=room_ids,
+            max_attempts=3,
+            backoff="exponential",
+        )
+        if fully_reconciled:
+            self._pending_room_leaves.difference_update(room_ids)
+            return set(room_ids)
 
-        for attempt in range(3):
-            with suppress(Exception):
-                await approval_store.recover_unconfirmed_deliveries_in_rooms(room_ids)
-            await approval_store.sync_unsynced_resolved(room_ids=room_ids)
-            blocked_room_ids = self._rooms_with_unsynced_approval_state(room_ids, approval_store=approval_store)
-            if not blocked_room_ids:
-                self._pending_room_leaves.difference_update(room_ids)
-                return set(room_ids)
-            if attempt < 2:
-                await asyncio.sleep(2**attempt)
-
-        blocked_room_ids = self._rooms_with_unsynced_approval_state(room_ids, approval_store=approval_store)
+        blocked_room_ids = approval_store._room_ids_with_unsynced_resolution_work() & room_ids
         finalized_room_ids = set(room_ids) - blocked_room_ids
         self._pending_room_leaves.difference_update(finalized_room_ids)
         self._pending_room_leaves.update(blocked_room_ids)
