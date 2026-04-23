@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -387,78 +387,6 @@ class DeliveryGateway:
         if not redacted:
             return failure_reason or f"failed to redact suppressed response {event_id}"
         return None
-
-    def _late_finalize_fallback_outcome(
-        self,
-        request: FinalizeStreamedResponseRequest,
-    ) -> FinalDeliveryOutcome:
-        """Return the preserved visible stream outcome when retry finalization also fails."""
-        stream_outcome = request.stream_transport_outcome
-        preserved_visible_stream = (
-            stream_outcome.has_rendered_visible_body
-            and stream_outcome.last_physical_stream_event_id is not None
-        )
-        visible_event_id = (
-            stream_outcome.last_physical_stream_event_id
-            if preserved_visible_stream
-            else (
-                request.existing_event_id
-                if request.existing_event_id is not None and not request.existing_event_is_placeholder
-                else None
-            )
-        )
-        if stream_outcome.terminal_status == "cancelled":
-            return FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                event_id=visible_event_id,
-                is_visible_response=visible_event_id is not None,
-                final_visible_body=stream_outcome.rendered_body if preserved_visible_stream else None,
-                canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
-                failure_reason=stream_outcome.failure_reason or "stream_finalize_cancelled",
-                retryable=True,
-                tool_trace=tuple(request.tool_trace or ()),
-                extra_content=request.extra_content,
-            )
-        return FinalDeliveryOutcome(
-            terminal_status="error",
-            event_id=visible_event_id,
-            is_visible_response=visible_event_id is not None,
-            final_visible_body=stream_outcome.rendered_body if preserved_visible_stream else None,
-            canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
-            failure_reason=stream_outcome.failure_reason or "stream_finalize_error",
-            mark_handled=preserved_visible_stream,
-            retryable=not preserved_visible_stream,
-            tool_trace=tuple(request.tool_trace or ()),
-            extra_content=request.extra_content,
-        )
-
-    async def finalize_streamed_response_after_late_failure(
-        self,
-        request: FinalizeStreamedResponseRequest,
-        *,
-        terminal_status: Literal["cancelled", "error"],
-        failure_reason: str,
-        retry_error_log_message: str,
-    ) -> FinalDeliveryOutcome:
-        """Retry streamed finalization under a terminal failure and preserve visible output on another failure."""
-        late_failure_request = replace(
-            request,
-            stream_transport_outcome=replace(
-                request.stream_transport_outcome,
-                terminal_status=terminal_status,
-                failure_reason=failure_reason,
-            ),
-        )
-        try:
-            return await self.finalize_streamed_response(late_failure_request)
-        except asyncio.CancelledError:
-            return self._late_finalize_fallback_outcome(late_failure_request)
-        except Exception as error:
-            self.deps.logger.exception(
-                retry_error_log_message,
-                error=str(error),
-            )
-            return self._late_finalize_fallback_outcome(late_failure_request)
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
