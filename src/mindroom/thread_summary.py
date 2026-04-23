@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import nio
 from agno.agent import Agent
+from agno.models.vertexai.claude import Claude as VertexAIClaude
 from pydantic import BaseModel, Field
 
 from mindroom import model_loading
@@ -41,7 +42,6 @@ _MARKDOWN_HEADING_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s+")
 _MARKDOWN_BLOCKQUOTE_RE = re.compile(r"(?m)^\s{0,3}>\s?")
 _MARKDOWN_LIST_ITEM_RE = re.compile(r"(?m)^\s*(?:[-+*]|\d+\.)\s+")
 _PREQUEUE_CONCURRENCY_MARGIN = 2
-_SUMMARY_TEMPERATURE = 0.2
 
 # In-memory tracking of last summarized message count per thread.
 # Key: "{room_id}:{thread_id}", value: message count at last summary.
@@ -76,6 +76,31 @@ class _SupportsTemperature(Protocol):
     """Protocol for model instances that accept a temperature override."""
 
     temperature: float | None
+
+
+def _configure_summary_model_temperature(
+    model: object,
+    *,
+    summary_temperature: float | None,
+    model_name: str,
+) -> None:
+    """Prepare the summary model's temperature setting for one request."""
+    if isinstance(model, VertexAIClaude):
+        # Vertex Claude's rawPredict helper rejects a temperature field entirely.
+        model.temperature = None
+        return
+    if isinstance(model, _SupportsTemperature):
+        model.temperature = summary_temperature
+        return
+    if summary_temperature is None:
+        return
+
+    model_class = type(model).__name__
+    logger.warning(
+        f"Thread summary model class {model_class} does not support a runtime temperature override; continuing with provider defaults",
+        model_class=model_class,
+        model_name=model_name,
+    )
 
 
 def normalize_thread_summary_text(raw_text: str) -> str:
@@ -296,15 +321,11 @@ async def _generate_summary(
     """Generate a one-line summary of a thread conversation via LLM."""
     model_name = config.defaults.thread_summary_model or "default"
     model = model_loading.get_model_instance(config, runtime_paths, model_name)
-    if isinstance(model, _SupportsTemperature):
-        model.temperature = _SUMMARY_TEMPERATURE
-    else:
-        model_class = type(model).__name__
-        logger.warning(
-            f"Thread summary model class {model_class} does not support a runtime temperature override; continuing with provider defaults",
-            model_class=model_class,
-            model_name=model_name,
-        )
+    _configure_summary_model_temperature(
+        model,
+        summary_temperature=config.defaults.thread_summary_temperature,
+        model_name=model_name,
+    )
 
     conversation = _build_conversation_text(thread_history)
     session_hash = hashlib.sha256(conversation.encode()).hexdigest()[:8]
