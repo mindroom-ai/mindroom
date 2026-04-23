@@ -340,6 +340,7 @@ class ApprovalManager:
         self._requests_by_id: dict[str, PendingApproval] = {}
         self._pending_by_id: dict[str, PendingApproval] = {}
         self._approval_id_by_event_id: dict[str, str] = {}
+        self._in_flight_send_room_ids: dict[str, str] = {}
         self._replay_in_progress: set[str] = set()
         self._load_existing()
 
@@ -434,6 +435,20 @@ class ApprovalManager:
     def _pending_requests_snapshot(self) -> list[PendingApproval]:
         with self._state_lock:
             return list(self._pending_by_id.values())
+
+    def _start_in_flight_send(self, approval_id: str, room_id: str) -> None:
+        with self._state_lock:
+            self._in_flight_send_room_ids[approval_id] = room_id
+
+    def _finish_in_flight_send(self, approval_id: str) -> None:
+        with self._state_lock:
+            self._in_flight_send_room_ids.pop(approval_id, None)
+
+    def _in_flight_send_ids_for_rooms(self, room_ids: set[str]) -> tuple[str, ...]:
+        with self._state_lock:
+            return tuple(
+                approval_id for approval_id, room_id in self._in_flight_send_room_ids.items() if room_id in room_ids
+            )
 
     def _set_event_delivery(self, approval_id: str, event_id: str) -> None:
         with self._state_lock:
@@ -602,6 +617,7 @@ class ApprovalManager:
         )
         self._store_request(pending)
         self._persist_request(pending)
+        self._start_in_flight_send(pending.id, room_id)
 
         sent_event: SentApprovalEvent | None = None
         send_failure_reason = _DEFAULT_SEND_FAILURE_REASON
@@ -623,6 +639,8 @@ class ApprovalManager:
                     self._persist_request(applied_decision[0])
                 self._discard(pending.id)
                 raise
+            finally:
+                self._finish_in_flight_send(pending.id)
         except Exception as exc:
             if isinstance(exc, ToolApprovalTransportError):
                 send_failure_reason = exc.reason
@@ -1114,6 +1132,7 @@ class ApprovalManager:
     def _discard(self, approval_id: str) -> None:
         delete_request_file = False
         with self._state_lock:
+            self._in_flight_send_room_ids.pop(approval_id, None)
             pending = self._pending_by_id.pop(approval_id, None)
             if pending is None:
                 pending = self._requests_by_id.get(approval_id)
@@ -1158,6 +1177,22 @@ class ApprovalManager:
             finally:
                 self._finish_unsynced_resolved_replay(pending.id)
         return synced_requests
+
+    async def wait_for_in_flight_sends_in_rooms(
+        self,
+        room_ids: set[str],
+        timeout_seconds: float,
+    ) -> bool:
+        """Wait for approval event sends already in flight for the given rooms to complete."""
+        if not room_ids:
+            return True
+        deadline = asyncio.get_running_loop().time() + max(timeout_seconds, 0.0)
+        while self._in_flight_send_ids_for_rooms(room_ids):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.05, remaining))
+        return True
 
     async def recover_unconfirmed_deliveries(self) -> list[PendingApproval]:
         """Recover missing event ids for resolved approvals before replaying their edits."""
