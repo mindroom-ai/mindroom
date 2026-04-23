@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
+
+CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
 
 _TASK_CANCEL_SOURCES: dict[asyncio.Task[Any], str] = {}
 
@@ -32,3 +34,24 @@ def build_cancelled_error(reason: str | None) -> asyncio.CancelledError:
         if cancel_msg is not None:
             return asyncio.CancelledError(cancel_msg)
     return asyncio.CancelledError(reason or "Run cancelled")
+
+
+def cancel_failure_reason(cancel_source: CancelSource) -> str:
+    """Return the canonical failure reason for one cancellation provenance."""
+    if cancel_source == "sync_restart":
+        return "sync_restart_cancelled"
+    if cancel_source == "user_stop":
+        return "cancelled_by_user"
+    return "interrupted"
+
+
+def is_cancelled_failure_reason(failure_reason: str | None) -> bool:
+    """Return whether one structured failure reason should keep cancellation semantics."""
+    normalized_reason = (failure_reason or "").strip().lower()
+    return normalized_reason in {
+        "cancelled_by_user",
+        "interrupted",
+        "sync_restart_cancelled",
+        "stream_finalize_cancelled",
+        "terminal_update_cancelled",
+    }

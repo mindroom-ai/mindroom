@@ -295,6 +295,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delivery_gateway"
 depends_on = [
+    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.matrix.client_delivery",
     "mindroom.runtime_protocols",
@@ -425,6 +426,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_runtime",
+    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.history.interrupted_replay",

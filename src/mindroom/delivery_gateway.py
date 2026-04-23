@@ -10,6 +10,7 @@ from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom import constants, interactive
+from mindroom.cancellation import CancelSource, cancel_failure_reason, is_cancelled_failure_reason
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     AfterResponseContext,
@@ -56,8 +57,6 @@ if TYPE_CHECKING:
     from mindroom.streaming_delivery import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
-
-CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
 
 
 @dataclass
@@ -423,16 +422,10 @@ class DeliveryGateway:
     def _cancelled_note_update(self, *, cancel_source: CancelSource) -> tuple[str, dict[str, str], str]:
         """Return the terminal note body, content metadata, and failure reason."""
         cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=cancel_source)
-        if cancel_source == "sync_restart":
-            failure_reason = "sync_restart_cancelled"
-        elif cancel_source == "user_stop":
-            failure_reason = "cancelled_by_user"
-        else:
-            failure_reason = "interrupted"
         return (
             cancelled_text,
             {constants.STREAM_STATUS_KEY: stream_status},
-            failure_reason,
+            cancel_failure_reason(cancel_source),
         )
 
     def _current_stream_body(self, outcome: StreamTransportOutcome) -> str:
@@ -1217,8 +1210,11 @@ class DeliveryGateway:
         visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
         streamed_text = self._current_stream_body(stream_outcome)
         final_body_candidate = stream_outcome.canonical_final_body_candidate or streamed_text
+        cancelled_stream_outcome = stream_outcome.terminal_status == "cancelled" or is_cancelled_failure_reason(
+            stream_outcome.failure_reason,
+        )
 
-        if stream_outcome.terminal_status == "cancelled":
+        if cancelled_stream_outcome:
             preserved_outcome = self._preserved_existing_visible_response_outcome(
                 request=request,
                 failure_reason=stream_outcome.failure_reason or "stream_finalize_cancelled",

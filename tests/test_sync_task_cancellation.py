@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.cancellation import cancel_failure_reason, is_cancelled_failure_reason
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
@@ -257,6 +258,25 @@ async def test_classify_cancel_source_sync_restart() -> None:
 async def test_classify_cancel_source_unknown_returns_interrupted() -> None:
     """Untagged cancellations should surface as generic interruptions."""
     assert classify_cancel_source(asyncio.CancelledError()) == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_cancel_failure_reason_matches_cancel_source() -> None:
+    """Failure reasons should stay aligned with the shared cancel provenance mapping."""
+    assert cancel_failure_reason("user_stop") == "cancelled_by_user"
+    assert cancel_failure_reason("sync_restart") == "sync_restart_cancelled"
+    assert cancel_failure_reason("interrupted") == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_is_cancelled_failure_reason_covers_structured_stream_cancellation_reasons() -> None:
+    """Structured streamed cancellation reasons should preserve cancellation semantics."""
+    assert is_cancelled_failure_reason("cancelled_by_user") is True
+    assert is_cancelled_failure_reason("sync_restart_cancelled") is True
+    assert is_cancelled_failure_reason("interrupted") is True
+    assert is_cancelled_failure_reason("stream_finalize_cancelled") is True
+    assert is_cancelled_failure_reason("terminal_update_cancelled") is True
+    assert is_cancelled_failure_reason("terminal_update_failed") is False
 
 
 @pytest.mark.asyncio

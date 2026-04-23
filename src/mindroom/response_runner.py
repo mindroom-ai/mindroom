@@ -20,6 +20,7 @@ from mindroom.ai import (
 )
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
+from mindroom.cancellation import cancel_failure_reason, is_cancelled_failure_reason
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -168,11 +169,7 @@ def _visible_body_state_for_text(
 
 def _cancel_failure_reason(cancel_source: CancelSource) -> str:
     """Return the canonical failure reason for one cancellation provenance."""
-    if cancel_source == "sync_restart":
-        return "sync_restart_cancelled"
-    if cancel_source == "user_stop":
-        return "cancelled_by_user"
-    return "interrupted"
+    return cancel_failure_reason(cancel_source)
 
 
 class HandledCancelledResponse(asyncio.CancelledError):
@@ -535,17 +532,6 @@ class ResponseRunner:
             return stream_state.event_id
         return tracked_event_id or fallback_event_id
 
-    def _is_cancelled_stream_failure_reason(self, failure_reason: str | None) -> bool:
-        """Return whether one structured streamed failure reason represents cancellation."""
-        normalized_reason = (failure_reason or "").strip().lower()
-        return normalized_reason in {
-            "cancelled_by_user",
-            "interrupted",
-            "sync_restart_cancelled",
-            "stream_finalize_cancelled",
-            "terminal_update_cancelled",
-        }
-
     def _raw_late_stream_transport_outcome(
         self,
         *,
@@ -578,7 +564,7 @@ class ResponseRunner:
         if visible_body_state == "none" and placeholder_only_event:
             rendered_body = PROGRESS_PLACEHOLDER
             visible_body_state = "placeholder_only"
-        cancelled = self._is_cancelled_stream_failure_reason(failure_reason)
+        cancelled = is_cancelled_failure_reason(failure_reason)
         return StreamTransportOutcome(
             last_physical_stream_event_id=event_id,
             terminal_operation="edit" if existing_event_id else "send",
@@ -626,7 +612,7 @@ class ResponseRunner:
                 tool_trace=request_tool_trace,
                 extra_content=request_extra_content,
                 failure_reason=failure_reason or "late_stream_delivery_failure",
-                cancelled=self._is_cancelled_stream_failure_reason(failure_reason),
+                cancelled=is_cancelled_failure_reason(failure_reason),
                 existing_event_id=existing_event_id,
                 existing_event_is_placeholder=existing_event_is_placeholder,
             ),

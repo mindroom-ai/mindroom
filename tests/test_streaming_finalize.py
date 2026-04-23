@@ -366,6 +366,58 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_finalize_streamed_response_restart_interruption_preserves_cancellation_state(tmp_path: Path) -> None:
+    """Structured streamed restart interruptions must keep cancellation semantics despite wire error status."""
+    config = _config(tmp_path)
+    envelope = _envelope()
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=Mock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    outcome = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            stream_transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$streaming",
+                terminal_operation="edit",
+                terminal_result="succeeded",
+                terminal_status="error",
+                rendered_body="partial answer\n\n**[Response interrupted by service restart]**",
+                visible_body_state="visible_body",
+                failure_reason="sync_restart_cancelled",
+            ),
+            initial_delivery_kind="edited",
+            response_kind="ai",
+            response_envelope=envelope,
+            correlation_id="corr-stream-restart-cancelled",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert outcome.state == "kept_prior_visible_stream_after_cancel"
+    assert outcome.retryable is True
+    assert outcome.should_mark_handled is False
+    response_hooks.emit_after_response.assert_not_awaited()
+    response_hooks.emit_cancelled_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_transport_hidden_tool_reasoning_only_finishes_as_error(tmp_path: Path) -> None:
     """Reasoning-only hidden-tool runs must not count as visible output success."""
     config = _config(tmp_path)
