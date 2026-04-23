@@ -1306,6 +1306,19 @@ class ResponseRunner:
                         terminal_status="cancelled",
                         failure_reason="stream_finalize_cancelled",
                     )
+                    preserved_visible_stream = (
+                        cancelled_transport_outcome.has_rendered_visible_body
+                        and cancelled_transport_outcome.last_physical_stream_event_id is not None
+                    )
+                    visible_event_id = (
+                        cancelled_transport_outcome.last_physical_stream_event_id
+                        if preserved_visible_stream
+                        else (
+                            request.existing_event_id
+                            if request.existing_event_id is not None and not request.existing_event_is_placeholder
+                            else None
+                        )
+                    )
                     try:
                         final_delivery_outcome = await self.deps.delivery_gateway.finalize_streamed_response(
                             FinalizeStreamedResponseRequest(
@@ -1321,49 +1334,12 @@ class ResponseRunner:
                                 existing_event_is_placeholder=request.existing_event_is_placeholder,
                             ),
                         )
-                    except asyncio.CancelledError:
-                        preserved_visible_stream = (
-                            cancelled_transport_outcome.visible_body_state == "visible_body"
-                            and cancelled_transport_outcome.last_physical_stream_event_id is not None
-                        )
-                        visible_event_id = (
-                            cancelled_transport_outcome.last_physical_stream_event_id
-                            if preserved_visible_stream
-                            else (
-                                request.existing_event_id
-                                if request.existing_event_id is not None and not request.existing_event_is_placeholder
-                                else None
+                    except (asyncio.CancelledError, Exception) as error:
+                        if not isinstance(error, asyncio.CancelledError):
+                            self.deps.logger.exception(
+                                "Error finalizing cancelled team streamed response",
+                                error=str(error),
                             )
-                        )
-                        final_delivery_outcome = FinalDeliveryOutcome(
-                            terminal_status="cancelled",
-                            event_id=visible_event_id,
-                            is_visible_response=visible_event_id is not None,
-                            final_visible_body=cancelled_transport_outcome.rendered_body
-                            if preserved_visible_stream
-                            else None,
-                            canonical_final_body_candidate=cancelled_transport_outcome.canonical_final_body_candidate,
-                            failure_reason=cancelled_transport_outcome.failure_reason,
-                            retryable=True,
-                        )
-                    except Exception as error:
-                        self.deps.logger.exception(
-                            "Error finalizing cancelled team streamed response",
-                            error=str(error),
-                        )
-                        preserved_visible_stream = (
-                            cancelled_transport_outcome.visible_body_state == "visible_body"
-                            and cancelled_transport_outcome.last_physical_stream_event_id is not None
-                        )
-                        visible_event_id = (
-                            cancelled_transport_outcome.last_physical_stream_event_id
-                            if preserved_visible_stream
-                            else (
-                                request.existing_event_id
-                                if request.existing_event_id is not None and not request.existing_event_is_placeholder
-                                else None
-                            )
-                        )
                         final_delivery_outcome = FinalDeliveryOutcome(
                             terminal_status="cancelled",
                             event_id=visible_event_id,
@@ -1396,6 +1372,19 @@ class ResponseRunner:
                         terminal_status="error",
                         failure_reason=str(error),
                     )
+                    preserved_visible_stream = (
+                        errored_transport_outcome.has_rendered_visible_body
+                        and errored_transport_outcome.last_physical_stream_event_id is not None
+                    )
+                    visible_event_id = (
+                        errored_transport_outcome.last_physical_stream_event_id
+                        if preserved_visible_stream
+                        else (
+                            request.existing_event_id
+                            if request.existing_event_id is not None and not request.existing_event_is_placeholder
+                            else None
+                        )
+                    )
                     try:
                         final_delivery_outcome = await self.deps.delivery_gateway.finalize_streamed_response(
                             FinalizeStreamedResponseRequest(
@@ -1411,50 +1400,12 @@ class ResponseRunner:
                                 existing_event_is_placeholder=request.existing_event_is_placeholder,
                             ),
                         )
-                    except asyncio.CancelledError:
-                        preserved_visible_stream = (
-                            errored_transport_outcome.visible_body_state == "visible_body"
-                            and errored_transport_outcome.last_physical_stream_event_id is not None
-                        )
-                        visible_event_id = (
-                            errored_transport_outcome.last_physical_stream_event_id
-                            if preserved_visible_stream
-                            else (
-                                request.existing_event_id
-                                if request.existing_event_id is not None and not request.existing_event_is_placeholder
-                                else None
+                    except (asyncio.CancelledError, Exception) as finalize_error:
+                        if not isinstance(finalize_error, asyncio.CancelledError):
+                            self.deps.logger.exception(
+                                "Error finalizing errored team streamed response",
+                                error=str(finalize_error),
                             )
-                        )
-                        final_delivery_outcome = FinalDeliveryOutcome(
-                            terminal_status="error",
-                            event_id=visible_event_id,
-                            is_visible_response=visible_event_id is not None,
-                            final_visible_body=errored_transport_outcome.rendered_body
-                            if preserved_visible_stream
-                            else None,
-                            canonical_final_body_candidate=errored_transport_outcome.canonical_final_body_candidate,
-                            failure_reason=errored_transport_outcome.failure_reason,
-                            mark_handled=preserved_visible_stream,
-                            retryable=not preserved_visible_stream,
-                        )
-                    except Exception as finalize_error:
-                        self.deps.logger.exception(
-                            "Error finalizing errored team streamed response",
-                            error=str(finalize_error),
-                        )
-                        preserved_visible_stream = (
-                            errored_transport_outcome.visible_body_state == "visible_body"
-                            and errored_transport_outcome.last_physical_stream_event_id is not None
-                        )
-                        visible_event_id = (
-                            errored_transport_outcome.last_physical_stream_event_id
-                            if preserved_visible_stream
-                            else (
-                                request.existing_event_id
-                                if request.existing_event_id is not None and not request.existing_event_is_placeholder
-                                else None
-                            )
-                        )
                         final_delivery_outcome = FinalDeliveryOutcome(
                             terminal_status="error",
                             event_id=visible_event_id,
@@ -2454,6 +2405,19 @@ class ResponseRunner:
                 terminal_status="cancelled",
                 failure_reason="stream_finalize_cancelled",
             )
+            preserved_visible_stream = (
+                cancelled_transport_outcome.has_rendered_visible_body
+                and cancelled_transport_outcome.last_physical_stream_event_id is not None
+            )
+            visible_event_id = (
+                cancelled_transport_outcome.last_physical_stream_event_id
+                if preserved_visible_stream
+                else (
+                    request.existing_event_id
+                    if request.existing_event_id is not None and not request.existing_event_is_placeholder
+                    else None
+                )
+            )
             try:
                 return await self.deps.delivery_gateway.finalize_streamed_response(
                     FinalizeStreamedResponseRequest(
@@ -2469,49 +2433,12 @@ class ResponseRunner:
                         existing_event_is_placeholder=request.existing_event_is_placeholder,
                     ),
                 )
-            except asyncio.CancelledError:
-                preserved_visible_stream = (
-                    cancelled_transport_outcome.visible_body_state == "visible_body"
-                    and cancelled_transport_outcome.last_physical_stream_event_id is not None
-                )
-                visible_event_id = (
-                    cancelled_transport_outcome.last_physical_stream_event_id
-                    if preserved_visible_stream
-                    else (
-                        request.existing_event_id
-                        if request.existing_event_id is not None and not request.existing_event_is_placeholder
-                        else None
+            except (asyncio.CancelledError, Exception) as error:
+                if not isinstance(error, asyncio.CancelledError):
+                    self.deps.logger.exception(
+                        "Error finalizing cancelled streamed response",
+                        error=str(error),
                     )
-                )
-                return FinalDeliveryOutcome(
-                    terminal_status="cancelled",
-                    event_id=visible_event_id,
-                    is_visible_response=visible_event_id is not None,
-                    final_visible_body=cancelled_transport_outcome.rendered_body if preserved_visible_stream else None,
-                    canonical_final_body_candidate=cancelled_transport_outcome.canonical_final_body_candidate,
-                    failure_reason=cancelled_transport_outcome.failure_reason,
-                    retryable=True,
-                    tool_trace=tuple(tool_trace) if self._show_tool_calls() else (),
-                    extra_content=dict(response_extra_content) if response_extra_content is not None else None,
-                )
-            except Exception as error:
-                self.deps.logger.exception(
-                    "Error finalizing cancelled streamed response",
-                    error=str(error),
-                )
-                preserved_visible_stream = (
-                    cancelled_transport_outcome.visible_body_state == "visible_body"
-                    and cancelled_transport_outcome.last_physical_stream_event_id is not None
-                )
-                visible_event_id = (
-                    cancelled_transport_outcome.last_physical_stream_event_id
-                    if preserved_visible_stream
-                    else (
-                        request.existing_event_id
-                        if request.existing_event_id is not None and not request.existing_event_is_placeholder
-                        else None
-                    )
-                )
                 return FinalDeliveryOutcome(
                     terminal_status="cancelled",
                     event_id=visible_event_id,
@@ -2544,6 +2471,19 @@ class ResponseRunner:
                 terminal_status="error",
                 failure_reason=str(error),
             )
+            preserved_visible_stream = (
+                errored_transport_outcome.has_rendered_visible_body
+                and errored_transport_outcome.last_physical_stream_event_id is not None
+            )
+            visible_event_id = (
+                errored_transport_outcome.last_physical_stream_event_id
+                if preserved_visible_stream
+                else (
+                    request.existing_event_id
+                    if request.existing_event_id is not None and not request.existing_event_is_placeholder
+                    else None
+                )
+            )
             try:
                 return await self.deps.delivery_gateway.finalize_streamed_response(
                     FinalizeStreamedResponseRequest(
@@ -2559,50 +2499,12 @@ class ResponseRunner:
                         existing_event_is_placeholder=request.existing_event_is_placeholder,
                     ),
                 )
-            except asyncio.CancelledError:
-                preserved_visible_stream = (
-                    errored_transport_outcome.visible_body_state == "visible_body"
-                    and errored_transport_outcome.last_physical_stream_event_id is not None
-                )
-                visible_event_id = (
-                    errored_transport_outcome.last_physical_stream_event_id
-                    if preserved_visible_stream
-                    else (
-                        request.existing_event_id
-                        if request.existing_event_id is not None and not request.existing_event_is_placeholder
-                        else None
+            except (asyncio.CancelledError, Exception) as finalize_error:
+                if not isinstance(finalize_error, asyncio.CancelledError):
+                    self.deps.logger.exception(
+                        "Error finalizing errored streamed response",
+                        error=str(finalize_error),
                     )
-                )
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=visible_event_id,
-                    is_visible_response=visible_event_id is not None,
-                    final_visible_body=errored_transport_outcome.rendered_body if preserved_visible_stream else None,
-                    canonical_final_body_candidate=errored_transport_outcome.canonical_final_body_candidate,
-                    failure_reason=errored_transport_outcome.failure_reason,
-                    mark_handled=preserved_visible_stream,
-                    retryable=not preserved_visible_stream,
-                    tool_trace=tuple(tool_trace) if self._show_tool_calls() else (),
-                    extra_content=dict(response_extra_content) if response_extra_content is not None else None,
-                )
-            except Exception as finalize_error:
-                self.deps.logger.exception(
-                    "Error finalizing errored streamed response",
-                    error=str(finalize_error),
-                )
-                preserved_visible_stream = (
-                    errored_transport_outcome.visible_body_state == "visible_body"
-                    and errored_transport_outcome.last_physical_stream_event_id is not None
-                )
-                visible_event_id = (
-                    errored_transport_outcome.last_physical_stream_event_id
-                    if preserved_visible_stream
-                    else (
-                        request.existing_event_id
-                        if request.existing_event_id is not None and not request.existing_event_is_placeholder
-                        else None
-                    )
-                )
                 return FinalDeliveryOutcome(
                     terminal_status="error",
                     event_id=visible_event_id,
