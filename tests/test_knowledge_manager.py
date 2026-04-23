@@ -945,6 +945,102 @@ async def test_reindex_all_failure_preserves_previous_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_rebuilds_after_refresh_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persisted refresh_failed snapshot should force a full rebuild on the next shared-manager refresh."""
+    _ShadowChromaDb.collections = {}
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _ShadowChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _ShadowKnowledge)
+
+    docs_path = tmp_path / "knowledge"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "doc-a.md").write_text("stable snapshot", encoding="utf-8")
+    config = _make_config(docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    try:
+        manager = (
+            await initialize_shared_knowledge_managers(
+                config,
+                runtime_paths,
+                reindex_on_create=True,
+            )
+        )["research"]
+        original_index_file_locked = manager._index_file_locked
+        failure_message = "shadow rebuild failed"
+
+        (docs_path / "doc-a.md").write_text("broken refresh", encoding="utf-8")
+
+        async def _fail_shadow_build(
+            resolved_path: Path,
+            *,
+            upsert: bool,
+            knowledge: object | None = None,
+            indexed_files: set[str] | None = None,
+            indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+        ) -> bool:
+            if knowledge is not None and knowledge is not manager.get_knowledge():
+                await original_index_file_locked(
+                    resolved_path,
+                    upsert=upsert,
+                    knowledge=knowledge,
+                    indexed_files=indexed_files,
+                    indexed_signatures=indexed_signatures,
+                )
+                raise RuntimeError(failure_message)
+            return await original_index_file_locked(
+                resolved_path,
+                upsert=upsert,
+                knowledge=knowledge,
+                indexed_files=indexed_files,
+                indexed_signatures=indexed_signatures,
+            )
+
+        monkeypatch.setattr(manager, "_index_file_locked", _fail_shadow_build)
+
+        with pytest.raises(RuntimeError, match=failure_message):
+            await manager.reindex_all()
+
+        initialize_calls: list[str] = []
+        sync_calls: list[str] = []
+        original_initialize = KnowledgeManager.initialize
+        original_sync_indexed_files = KnowledgeManager.sync_indexed_files
+
+        async def _record_initialize(self: KnowledgeManager) -> None:
+            initialize_calls.append(self.base_id)
+            return await original_initialize(self)
+
+        async def _record_sync_indexed_files(self: KnowledgeManager) -> dict[str, int]:
+            sync_calls.append(self.base_id)
+            return await original_sync_indexed_files(self)
+
+        monkeypatch.setattr(KnowledgeManager, "initialize", _record_initialize)
+        monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", _record_sync_indexed_files)
+
+        (docs_path / "doc-a.md").write_text("recovered snapshot", encoding="utf-8")
+        recovered_manager = (
+            await initialize_shared_knowledge_managers(
+                config,
+                runtime_paths,
+                reindex_on_create=False,
+            )
+        )["research"]
+
+        assert recovered_manager is not manager
+        assert initialize_calls == ["research"]
+        assert sync_calls == []
+        results = recovered_manager.get_knowledge().search("snapshot", max_results=10)
+        assert [document.content for document in results] == ["recovered snapshot"]
+
+        payload = json.loads(recovered_manager._indexing_settings_path.read_text(encoding="utf-8"))
+        assert payload["availability"] == "ready"
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_sync_indexed_files_skips_unchanged_files(dummy_manager: KnowledgeManager) -> None:
     """sync_indexed_files should not upsert files when persisted signatures match disk."""
     file_path = dummy_manager.knowledge_path / "doc.md"

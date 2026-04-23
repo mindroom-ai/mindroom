@@ -279,11 +279,12 @@ async def _ensure_shared_knowledge_manager_for_target(
     async with _shared_knowledge_manager_init_lock(target.key.base_id):
         existing = _shared_knowledge_managers.get(target.key.base_id)
         if existing is not None:
+            persisted_state = existing._load_persisted_indexing_state()
             if existing.needs_full_reindex(
                 config,
                 target.binding.storage_root,
                 target.binding.knowledge_path,
-            ):
+            ) or (persisted_state is not None and persisted_state.availability == "refresh_failed"):
                 preserved_runtime_mode = (
                     _shared_manager_background_runtime_mode(existing) if not reconcile_existing_runtime else None
                 )
