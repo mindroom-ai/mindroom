@@ -41,6 +41,8 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+from mindroom.response_lifecycle import DeliveryOutcome, ResponseLifecycle
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
@@ -2836,7 +2838,35 @@ class TestStreamingBehavior:
         edited_request = gateway.edit_text.await_args.args[0]
         assert edited_request.event_id == "$streaming"
         assert edited_request.new_text == "updated text"
-        response_hooks.emit_after_response.assert_not_awaited()
+        runner = SimpleNamespace(
+            deps=SimpleNamespace(
+                delivery_gateway=SimpleNamespace(
+                    deps=SimpleNamespace(response_hooks=response_hooks),
+                ),
+            ),
+            _log_post_response_effects_failure=MagicMock(),
+            _emit_pipeline_timing_summary=MagicMock(),
+            _response_outcome=MagicMock(return_value=None),
+        )
+        lifecycle = ResponseLifecycle(
+            runner=runner,
+            response_kind="ai",
+            request=MagicMock(),
+            response_envelope=response_envelope,
+            correlation_id="corr-final-transform-success",
+        )
+        finalized = await lifecycle.finalize(
+            DeliveryOutcome(final_delivery_outcome=outcome),
+            build_post_response_outcome=lambda delivered: ResponseOutcome(final_delivery_outcome=delivered),
+            post_response_deps=PostResponseEffectsDeps(logger=MagicMock()),
+        )
+
+        assert finalized.delivery_kind == "edited"
+        assert finalized.response_text == "updated text"
+        response_hooks.emit_after_response.assert_awaited_once()
+        after_kwargs = response_hooks.emit_after_response.await_args.kwargs
+        assert after_kwargs["response_text"] == "updated text"
+        assert after_kwargs["delivery_kind"] == "edited"
         response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -2908,7 +2938,35 @@ class TestStreamingBehavior:
         assert outcome.final_visible_body == "chunk"
         response_hooks.apply_before_response.assert_not_awaited()
         response_hooks.apply_final_response_transform.assert_awaited_once()
-        response_hooks.emit_after_response.assert_not_awaited()
+        runner = SimpleNamespace(
+            deps=SimpleNamespace(
+                delivery_gateway=SimpleNamespace(
+                    deps=SimpleNamespace(response_hooks=response_hooks),
+                ),
+            ),
+            _log_post_response_effects_failure=MagicMock(),
+            _emit_pipeline_timing_summary=MagicMock(),
+            _response_outcome=MagicMock(return_value=None),
+        )
+        lifecycle = ResponseLifecycle(
+            runner=runner,
+            response_kind="ai",
+            request=MagicMock(),
+            response_envelope=response_envelope,
+            correlation_id="corr-final-transform-noop",
+        )
+        finalized = await lifecycle.finalize(
+            DeliveryOutcome(final_delivery_outcome=outcome),
+            build_post_response_outcome=lambda delivered: ResponseOutcome(final_delivery_outcome=delivered),
+            post_response_deps=PostResponseEffectsDeps(logger=MagicMock()),
+        )
+
+        assert finalized.delivery_kind == "sent"
+        assert finalized.response_text == "chunk"
+        response_hooks.emit_after_response.assert_awaited_once()
+        after_kwargs = response_hooks.emit_after_response.await_args.kwargs
+        assert after_kwargs["response_text"] == "chunk"
+        assert after_kwargs["delivery_kind"] == "sent"
         response_hooks.emit_cancelled_response.assert_not_awaited()
 
 

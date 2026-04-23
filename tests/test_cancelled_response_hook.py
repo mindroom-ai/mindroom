@@ -358,9 +358,35 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
         ),
     )
 
+    runner = SimpleNamespace(
+        deps=SimpleNamespace(
+            delivery_gateway=SimpleNamespace(
+                deps=SimpleNamespace(response_hooks=response_hooks),
+            ),
+        ),
+        _log_post_response_effects_failure=MagicMock(),
+        _emit_pipeline_timing_summary=MagicMock(),
+        _response_outcome=MagicMock(return_value=None),
+    )
+    lifecycle = ResponseLifecycle(
+        runner=runner,
+        response_kind="ai",
+        request=MagicMock(),
+        response_envelope=_envelope(),
+        correlation_id="corr-suppressed-final",
+    )
+    finalized = await lifecycle.finalize(
+        DeliveryOutcome(final_delivery_outcome=result),
+        build_post_response_outcome=lambda outcome: ResponseOutcome(final_delivery_outcome=outcome),
+        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+    )
+
+    assert finalized.suppressed is True
     assert result.suppressed is True
     assert after_seen == []
-    assert cancelled_seen == []
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].failure_reason == "suppressed_by_hook"
+    assert cancelled_seen[0].visible_response_event_id is None
 
 
 @pytest.mark.asyncio
@@ -499,10 +525,36 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
             ),
         )
 
+    runner = SimpleNamespace(
+        deps=SimpleNamespace(
+            delivery_gateway=SimpleNamespace(
+                deps=SimpleNamespace(response_hooks=response_hooks),
+            ),
+        ),
+        _log_post_response_effects_failure=MagicMock(),
+        _emit_pipeline_timing_summary=MagicMock(),
+        _response_outcome=MagicMock(return_value=None),
+    )
+    lifecycle = ResponseLifecycle(
+        runner=runner,
+        response_kind="ai",
+        request=MagicMock(),
+        response_envelope=_envelope(),
+        correlation_id="corr-delivery-failure",
+    )
+    finalized = await lifecycle.finalize(
+        DeliveryOutcome(final_delivery_outcome=outcome),
+        build_post_response_outcome=lambda delivered: ResponseOutcome(final_delivery_outcome=delivered),
+        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+    )
+
+    assert finalized.terminal_status == "error"
     assert outcome.terminal_status == "error"
     assert outcome.retryable is True
     assert outcome.visible_response_event_id == expected_visible_event_id
-    assert cancelled_seen == []
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].failure_reason == "delivery_failed"
+    assert cancelled_seen[0].visible_response_event_id == expected_visible_event_id
 
 
 @pytest.mark.asyncio

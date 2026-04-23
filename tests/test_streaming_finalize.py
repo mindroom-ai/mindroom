@@ -19,6 +19,8 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
+from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+from mindroom.response_lifecycle import DeliveryOutcome, ResponseLifecycle
 from mindroom.streaming import (
     StreamingResponse,
     send_streaming_response,
@@ -422,7 +424,35 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
     response_hooks.apply_before_response.assert_not_awaited()
     response_hooks.apply_final_response_transform.assert_awaited_once()
     gateway.edit_text.assert_awaited_once()
-    response_hooks.emit_after_response.assert_not_awaited()
+    runner = SimpleNamespace(
+        deps=SimpleNamespace(
+            delivery_gateway=SimpleNamespace(
+                deps=SimpleNamespace(response_hooks=response_hooks),
+            ),
+        ),
+        _log_post_response_effects_failure=Mock(),
+        _emit_pipeline_timing_summary=Mock(),
+        _response_outcome=Mock(return_value=None),
+    )
+    lifecycle = ResponseLifecycle(
+        runner=runner,
+        response_kind="ai",
+        request=Mock(),
+        response_envelope=envelope,
+        correlation_id="corr-final-transform-failure",
+    )
+    finalized = await lifecycle.finalize(
+        DeliveryOutcome(final_delivery_outcome=outcome),
+        build_post_response_outcome=lambda delivered: ResponseOutcome(final_delivery_outcome=delivered),
+        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+    )
+
+    assert finalized.response_text == "chunk"
+    assert finalized.delivery_kind == "sent"
+    response_hooks.emit_after_response.assert_awaited_once()
+    after_kwargs = response_hooks.emit_after_response.await_args.kwargs
+    assert after_kwargs["response_text"] == "chunk"
+    assert after_kwargs["delivery_kind"] == "sent"
     response_hooks.emit_cancelled_response.assert_not_awaited()
 
 
