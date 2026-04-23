@@ -281,6 +281,11 @@ class StreamingResponse:
         self.chars_since_last_update += len(new_chunk)
         self.last_delta_at = time.time()
 
+    def _mark_nonadditive_text_mutation(self) -> None:
+        """Record a visible in-place text change that did not append characters."""
+        self.chars_since_last_update = max(1, self.chars_since_last_update)
+        self.last_delta_at = time.time()
+
     def _ensure_hidden_tool_gap(self) -> None:
         """Insert a single placeholder gap for hidden tool calls."""
         if not self.accumulated_text.endswith("\n\n"):

@@ -216,12 +216,17 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                         _queue_delivery_request(delivery_queue, progress_hint=True)
                         continue
                     _, tool_index = pending_tools.pop(match_pos)
+                    prior_delta_at = streaming.last_delta_at
+                    previous_text = streaming.accumulated_text
                     streaming.accumulated_text, trace_entry = complete_pending_tool_block(
                         streaming.accumulated_text,
                         tool_name,
                         result,
                         tool_index=tool_index,
                     )
+                    text_changed = streaming.accumulated_text != previous_text
+                    if text_changed:
+                        streaming._mark_nonadditive_text_mutation()
                     if 0 < tool_index <= len(streaming.tool_trace):
                         existing_entry = streaming.tool_trace[tool_index - 1]
                         existing_entry.type = "tool_call_completed"
@@ -237,7 +242,10 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 else:
                     _queue_delivery_request(delivery_queue, progress_hint=True)
                     continue
-                _queue_delivery_request(delivery_queue)
+                _queue_delivery_request(
+                    delivery_queue,
+                    prior_delta_at=prior_delta_at if text_changed else None,
+                )
                 continue
             text_chunk = ""
         else:

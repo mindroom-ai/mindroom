@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 from agno.models.response import ToolExecution
-from agno.run.agent import ToolCallStartedEvent
+from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 from pydantic import ValidationError
 
 from mindroom.bot import AgentBot
@@ -752,6 +752,51 @@ class TestStreamingBehavior:
         assert bodies[0].startswith("x" * 40)
         assert "search_web" in bodies[0]
         assert "search_web" in bodies[1]
+
+    @pytest.mark.asyncio
+    async def test_idle_flush_fires_on_tool_completion_after_pause(self) -> None:
+        """A paused tool completion should emit before finalization via the idle trigger."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$stream_tool_complete_1"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10_000,
+            min_update_char_threshold=10_000,
+            min_char_update_interval=0.0,
+            max_idle=0.25,
+            show_tool_calls=True,
+        )
+        streaming.last_update = 100.0
+        streaming.stream_started_at = 100.0
+
+        tool = ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}, result="ok")
+
+        async def response_stream() -> AsyncIterator[object]:
+            yield ToolCallStartedEvent(tool=tool)
+            yield ToolCallCompletedEvent(tool=tool, content="ok")
+
+        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.5, 100.5, 100.5]):
+            await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
+
+        assert mock_client.room_send.call_count == 2
+        bodies = [
+            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
+            for call in mock_client.room_send.call_args_list
+        ]
+        assert "⏳" in bodies[0]
+        assert "⏳" not in bodies[1]
 
     @pytest.mark.asyncio
     async def test_idle_flush_fires_on_text_after_pause(self) -> None:
