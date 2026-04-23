@@ -72,6 +72,15 @@ def _merge_tool_trace(existing: list[ToolTraceEntry], incoming: list[ToolTraceEn
     return existing.copy()
 
 
+def _merge_prior_delta_at(existing: float | None, incoming: float | None) -> float | None:
+    """Keep the oldest unsent delta timestamp across merged delivery requests."""
+    if existing is None:
+        return incoming
+    if incoming is None:
+        return existing
+    return min(existing, incoming)
+
+
 @dataclass(frozen=True, slots=True)
 class _DeliveryRequest:
     """One non-terminal stream delivery request for the single delivery owner."""
@@ -342,10 +351,9 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
                 force_refresh=merged_request.force_refresh or next_request.force_refresh,
                 phase_boundary_flush=merged_request.phase_boundary_flush or next_request.phase_boundary_flush,
                 allow_empty_progress=merged_request.allow_empty_progress or next_request.allow_empty_progress,
-                prior_delta_at=(
-                    next_request.prior_delta_at
-                    if next_request.prior_delta_at is not None
-                    else merged_request.prior_delta_at
+                prior_delta_at=_merge_prior_delta_at(
+                    merged_request.prior_delta_at,
+                    next_request.prior_delta_at,
                 ),
             )
 

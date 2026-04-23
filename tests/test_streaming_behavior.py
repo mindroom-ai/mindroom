@@ -2410,8 +2410,8 @@ class TestStreamingBehavior:
         await delivery_task
 
     @pytest.mark.asyncio
-    async def test_drive_stream_delivery_uses_latest_prior_delta_at_when_merging_requests(self) -> None:
-        """Merged requests must keep the newest prior_delta_at for idle-flush decisions."""
+    async def test_drive_stream_delivery_preserves_oldest_prior_delta_at_for_idle_flush(self) -> None:
+        """Merged requests must retain the oldest unsent delta so idle flush still fires."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -2420,31 +2420,33 @@ class TestStreamingBehavior:
             sender_domain="localhost",
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10_000,
+            min_update_char_threshold=10_000,
+            min_char_update_interval=0.0,
+            max_idle=0.25,
         )
-        seen_prior_delta_at: list[float | None] = []
-
-        async def record_throttled_send(
-            _client: object,
-            *,
-            progress_hint: bool = False,
-            prior_delta_at: float | None = None,
-        ) -> None:
-            assert progress_hint is False
-            seen_prior_delta_at.append(prior_delta_at)
-
-        streaming._throttled_send = AsyncMock(side_effect=record_throttled_send)
+        streaming.event_id = "$existing_event"
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+        streaming.last_delta_at = 105.0
+        streaming.accumulated_text = "first second"
+        streaming.chars_since_last_update = len(streaming.accumulated_text)
+        streaming._send_or_edit_message = AsyncMock(return_value=True)
 
         delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
         delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
-        delivery_queue.put_nowait(_DeliveryRequest(prior_delta_at=None))
         delivery_queue.put_nowait(_DeliveryRequest(prior_delta_at=100.0))
-        delivery_queue.put_nowait(_DeliveryRequest(prior_delta_at=100.1))
+        delivery_queue.put_nowait(_DeliveryRequest(prior_delta_at=105.0))
 
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        with patch("mindroom.streaming.time.time", return_value=105.02):
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
-        assert streaming._throttled_send.await_count == 1
-        assert seen_prior_delta_at == [100.1]
+        assert streaming._send_or_edit_message.await_count == 1
+        assert streaming.chars_since_last_update == 0
 
     @pytest.mark.asyncio
     async def test_send_streaming_response_skips_terminal_finalize_when_delivery_shutdown_times_out(self) -> None:
