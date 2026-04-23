@@ -524,7 +524,7 @@ class DeliveryGateway:
         )
         return False
 
-    async def _deliver_final_outcome(  # noqa: C901, PLR0911, PLR0912
+    async def deliver_final(  # noqa: C901, PLR0911, PLR0912
         self,
         request: FinalDeliveryRequest,
     ) -> FinalDeliveryOutcome:
@@ -777,14 +777,7 @@ class DeliveryGateway:
             else None,
         )
 
-    async def deliver_final(
-        self,
-        request: FinalDeliveryRequest,
-    ) -> FinalDeliveryOutcome:
-        """Apply before_response hooks and perform the final send or edit."""
-        return await self._deliver_final_outcome(request)
-
-    async def _deliver_cancelled_visible_note_outcome(
+    async def deliver_cancelled_visible_note(
         self,
         request: CancelledVisibleNoteRequest,
     ) -> FinalDeliveryOutcome:
@@ -849,13 +842,6 @@ class DeliveryGateway:
             retryable=True,
             extra_content=extra_content,
         )
-
-    async def deliver_cancelled_visible_note(
-        self,
-        request: CancelledVisibleNoteRequest,
-    ) -> FinalDeliveryOutcome:
-        """Edit the in-flight visible response into a terminal cancellation note."""
-        return await self._deliver_cancelled_visible_note_outcome(request)
 
     async def send_compaction_notice(self, request: CompactionNoticeRequest) -> str | None:
         """Send one compaction notice without mention parsing side effects."""
@@ -973,7 +959,7 @@ class DeliveryGateway:
             else None,
         )
 
-    async def _finalize_streamed_response_outcome(  # noqa: C901, PLR0911, PLR0912
+    async def finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
@@ -1001,7 +987,7 @@ class DeliveryGateway:
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-            return await self._resolve_late_stream_finalize_failure_outcome(
+            return await self.resolve_late_stream_finalize_failure(
                 LateStreamFinalizeFailureRequest(
                     target=request.target,
                     stream_transport_outcome=stream_outcome,
@@ -1034,7 +1020,7 @@ class DeliveryGateway:
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-            return await self._resolve_late_stream_finalize_failure_outcome(
+            return await self.resolve_late_stream_finalize_failure(
                 LateStreamFinalizeFailureRequest(
                     target=request.target,
                     stream_transport_outcome=stream_outcome,
@@ -1231,14 +1217,7 @@ class DeliveryGateway:
             ),
         )
 
-    async def finalize_streamed_response(
-        self,
-        request: FinalizeStreamedResponseRequest,
-    ) -> FinalDeliveryOutcome:
-        """Apply hooks and any final edit needed after streamed delivery completes."""
-        return await self._finalize_streamed_response_outcome(request)
-
-    async def _resolve_late_stream_finalize_failure_outcome(
+    async def resolve_late_stream_finalize_failure(
         self,
         request: LateStreamFinalizeFailureRequest,
     ) -> FinalDeliveryOutcome:
@@ -1305,10 +1284,3 @@ class DeliveryGateway:
             tool_trace=tuple(request.tool_trace or ()),
             extra_content=request.extra_content,
         )
-
-    async def resolve_late_stream_finalize_failure(
-        self,
-        request: LateStreamFinalizeFailureRequest,
-    ) -> FinalDeliveryOutcome:
-        """Resolve one raw cancellation/error raised after streaming already completed."""
-        return await self._resolve_late_stream_finalize_failure_outcome(request)
