@@ -3132,6 +3132,110 @@ class TestThreadingBehavior:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("timing_enabled_for_test", [False, True], ids=["timing_disabled", "timing_enabled"])
+    async def test_live_threaded_event_uses_per_thread_barrier_with_and_without_timing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        timing_enabled_for_test: bool,
+    ) -> None:
+        """Live threaded appends should bypass sibling-thread barriers in both timing modes."""
+        if timing_enabled_for_test:
+            monkeypatch.setenv("MINDROOM_TIMING", "1")
+        else:
+            monkeypatch.delenv("MINDROOM_TIMING", raising=False)
+
+        room_id = "!test:localhost"
+        thread_a_id = "$thread-a:localhost"
+        thread_b_id = "$thread-b:localhost"
+        coordinator = _runtime_write_coordinator()
+        event_cache = _runtime_event_cache()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+        sibling_update_started = asyncio.Event()
+        append_started = asyncio.Event()
+        append_task: asyncio.Task[None] | None = None
+
+        async def blocking_sibling_thread_update() -> None:
+            sibling_update_started.set()
+            await asyncio.sleep(0.2)
+
+        async def mark_thread_stale(
+            marked_room_id: str,
+            marked_thread_id: str,
+            *,
+            reason: str,
+        ) -> None:
+            assert marked_room_id == room_id
+            assert marked_thread_id == thread_a_id
+            assert reason == "live_thread_mutation"
+            append_started.set()
+
+        access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(
+            return_value=MutationThreadImpact.threaded(thread_a_id),
+        )
+        event_cache.mark_thread_stale = AsyncMock(side_effect=mark_thread_stale)
+        event_cache.append_event = AsyncMock(return_value=True)
+        sibling_task = coordinator.queue_thread_update(
+            room_id,
+            thread_b_id,
+            blocking_sibling_thread_update,
+            name="matrix_cache_blocking_other_thread_update",
+        )
+        try:
+            await asyncio.wait_for(sibling_update_started.wait(), timeout=1.0)
+
+            event = _text_event(
+                event_id="$reply:localhost",
+                body="hello",
+                sender="@user:localhost",
+                server_timestamp=1234,
+                room_id=room_id,
+                thread_id=thread_a_id,
+            )
+            started = time.perf_counter()
+            append_task = asyncio.create_task(
+                access.append_live_event(
+                    room_id,
+                    event,
+                    event_info=EventInfo.from_event(event.source),
+                ),
+            )
+
+            await asyncio.wait_for(append_started.wait(), timeout=0.1)
+            await asyncio.wait_for(append_task, timeout=0.1)
+
+            assert (time.perf_counter() - started) * 1000.0 < 100.0
+            assert sibling_task.done() is False
+        finally:
+            pending_tasks = [sibling_task]
+            if append_task is not None:
+                pending_tasks.append(append_task)
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *pending_tasks,
+                    return_exceptions=True,
+                ),
+                timeout=1.0,
+            )
+            await coordinator.close()
+
+        event_cache.mark_thread_stale.assert_awaited_once_with(
+            room_id,
+            thread_a_id,
+            reason="live_thread_mutation",
+        )
+        event_cache.append_event.assert_awaited_once_with(
+            room_id,
+            thread_a_id,
+            event.source,
+        )
+
+    @pytest.mark.asyncio
     async def test_live_plain_reply_to_threaded_event_persists_event_thread_membership(
         self,
         bot: AgentBot,
