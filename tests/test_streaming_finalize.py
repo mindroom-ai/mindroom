@@ -250,6 +250,58 @@ async def test_transport_failed_terminal_update_preserves_committed_interactive_
 
 
 @pytest.mark.asyncio
+async def test_transport_failed_terminal_update_ignores_hidden_canonical_interactive_metadata(
+    tmp_path: Path,
+) -> None:
+    """Preserved visible streamed replies must not register interactive metadata from hidden canonical content."""
+    config = _config(tmp_path)
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=Mock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    outcome = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            stream_transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$visible",
+                terminal_operation="edit",
+                terminal_result="failed",
+                terminal_status="error",
+                rendered_body="visible plain text",
+                visible_body_state="visible_body",
+                canonical_final_body_candidate="yes\n\n- ✅ approve",
+                failure_reason="terminal_update_failed",
+            ),
+            initial_delivery_kind="sent",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-hidden-canonical-interactive",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert outcome.final_visible_body == "visible plain text"
+    assert dict(outcome.option_map or {}) == {}
+    assert list(outcome.options_list or ()) == []
+
+
+@pytest.mark.asyncio
 async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_path: Path) -> None:
     """Completed placeholder-backed runs with no visible text now preserve the committed placeholder."""
     config = _config(tmp_path)

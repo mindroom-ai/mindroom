@@ -969,7 +969,7 @@ class DeliveryGateway:
             visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
             if visible_stream_event_id is not None:
                 interactive_response = interactive.parse_and_format_interactive(
-                    final_body_candidate,
+                    streamed_text,
                     extract_mapping=True,
                 )
                 return FinalDeliveryOutcome(
@@ -1049,7 +1049,7 @@ class DeliveryGateway:
             visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
             if visible_stream_event_id is not None:
                 interactive_response = interactive.parse_and_format_interactive(
-                    final_body_candidate,
+                    streamed_text,
                     extract_mapping=True,
                 )
                 return FinalDeliveryOutcome(
@@ -1139,7 +1139,7 @@ class DeliveryGateway:
                 )
             if visible_stream_event_id is not None:
                 interactive_response = interactive.parse_and_format_interactive(
-                    final_body_candidate,
+                    streamed_text,
                     extract_mapping=True,
                 )
                 return FinalDeliveryOutcome(
@@ -1245,7 +1245,7 @@ class DeliveryGateway:
             )
 
         assert streamed_event_id is not None
-        interactive_response = interactive.parse_and_format_interactive(final_body_candidate, extract_mapping=True)
+        interactive_response = interactive.parse_and_format_interactive(streamed_text, extract_mapping=True)
         return FinalDeliveryOutcome(
             terminal_status="completed",
             event_id=streamed_event_id,

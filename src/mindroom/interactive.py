@@ -555,6 +555,20 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     first_match = _find_interactive_match(response_text)
 
     if not first_match:
+        if extract_mapping and _INSTRUCTION_TEXT in response_text:
+            option_map: dict[str, str] = {}
+            options: list[dict[str, str]] = []
+            for line in response_text.splitlines():
+                option_match = re.fullmatch(r"\s*(\d+)\.\s+(\S+)\s+(.+?)\s*", line)
+                if option_match is None:
+                    continue
+                index, emoji_char, label = option_match.groups()
+                value = label.lower()
+                option_map[emoji_char] = value
+                option_map[index] = value
+                options.append({"emoji": emoji_char, "label": label, "value": value})
+            if options:
+                return _InteractiveResponse(response_text, option_map, options)
         if _should_warn_unparsed_interactive(response_text):
             logger.warning(
                 "Interactive block not parsed",
