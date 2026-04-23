@@ -1771,6 +1771,14 @@ async def shutdown_approval_store(
 
     await manager.wait_for_pending_sends_in_rooms(manager.pending_send_room_ids(), timeout=None)
     await manager.shutdown(reason=reason)
+    with suppress(Exception):
+        await manager.recover_unconfirmed_deliveries()
+    for attempt in range(3):
+        with suppress(Exception):
+            await manager.sync_unsynced_resolved()
+        if not manager._has_unsynced_resolved():
+            break
+        await asyncio.sleep(2**attempt)
     await manager.cancel_unsynced_resolution_retry_task()
     _MANAGER = None
     _clear_script_cache()

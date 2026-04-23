@@ -1690,6 +1690,31 @@ async def test_shutdown_expires_pending_requests(tmp_path: Path) -> None:
     assert editor.await_args.args[2]["status"] == "expired"
 
 
+@pytest.mark.asyncio
+async def test_shutdown_reconciles_unsynced_approvals(tmp_path: Path) -> None:
+    """Shutdown should retry one resolved approval edit before tearing the manager down."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock(side_effect=[RuntimeError("boom"), True])
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    request_path = runtime_paths.storage_root / "approvals" / f"{pending.id}.json"
+
+    await store.deny(pending.id, reason="Use a safer command", resolved_by="@user:localhost")
+    decision = await task
+
+    assert decision.status == "denied"
+    assert pending.resolution_synced_at is None
+
+    with patch("mindroom.tool_approval.asyncio.sleep", new=AsyncMock()):
+        await shutdown_approval_store()
+
+    assert editor.await_count == 2
+    assert pending.resolution_synced_at is not None
+    assert request_path.exists() is False
+
+
 def test_initialize_approval_store_expires_persisted_pending_requests(tmp_path: Path) -> None:
     """Startup should expire persisted pending approvals from a prior process."""
     runtime_paths = test_runtime_paths(tmp_path)
