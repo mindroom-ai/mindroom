@@ -1705,7 +1705,34 @@ class TeamBot(AgentBot):
     ) -> FinalDeliveryOutcome:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
-            return FinalDeliveryOutcome.cancelled_for_empty_prompt()
+            resolved_target = target or self._conversation_resolver.build_message_target(
+                room_id=room_id,
+                thread_id=thread_id,
+                reply_to_event_id=reply_to_event_id,
+            )
+            return await self._generate_team_response_helper(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                target=resolved_target,
+                payload=DispatchPayload(
+                    prompt=prompt,
+                    model_prompt=model_prompt,
+                    media=media or MediaInputs(),
+                    attachment_ids=attachment_ids,
+                ),
+                team_agents=self.team_agents,
+                team_mode=self.team_mode,
+                thread_history=thread_history,
+                requester_user_id=user_id or "",
+                existing_event_id=existing_event_id,
+                existing_event_is_placeholder=existing_event_is_placeholder,
+                response_envelope=response_envelope,
+                correlation_id=correlation_id,
+                system_enrichment_items=system_enrichment_items,
+                matrix_run_metadata=matrix_run_metadata,
+                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+            )
 
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (

@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import nio
 
+from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
@@ -21,6 +23,7 @@ from mindroom.delivery_gateway import (
     ResponseHookService,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.handled_turns import HandledTurnRecord
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -37,9 +40,19 @@ from mindroom.hooks.execution import emit
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import DeliveryOutcome, ResponseLifecycle
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from mindroom.turn_store import LoadedTurnRecord
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+    wrap_extracted_collaborators,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -97,6 +110,31 @@ def _response_hook_service(tmp_path: Path, registry: HookRegistry) -> tuple[Conf
         hook_send_message=AsyncMock(),
     )
     return config, ResponseHookService(hook_context=hook_context)
+
+
+def _team_bot(tmp_path: Path) -> TeamBot:
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    team_user = AgentMatrixUser(
+        agent_name="team_bot",
+        user_id="@mindroom_team_bot:localhost",
+        display_name="Team Bot",
+        password=TEST_PASSWORD,
+    )
+    team_member = config.get_ids(runtime_paths)["code"]
+    bot = TeamBot(
+        team_user,
+        tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        team_agents=[team_member],
+        team_mode="coordinate",
+    )
+    wrap_extracted_collaborators(bot)
+    bot.client = make_matrix_client_mock(user_id=team_user.user_id)
+    install_runtime_cache_support(bot)
+    bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
+    return bot
 
 
 @pytest.mark.asyncio
@@ -305,6 +343,100 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
         correlation_id="corr-noop",
         envelope=_envelope(),
     )
+
+
+@pytest.mark.asyncio
+async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -> None:
+    """TeamBot empty prompts must finalize through lifecycle so message:cancelled fires exactly once."""
+    bot = _team_bot(tmp_path)
+
+    with (
+        patch.object(bot._delivery_gateway.deps.response_hooks, "emit_cancelled_response", new=AsyncMock()) as mock_emit,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        outcome = await bot._generate_response(
+            room_id="!room:localhost",
+            prompt="   ",
+            reply_to_event_id="$event",
+            thread_id=None,
+            thread_history=[],
+            user_id="@user:localhost",
+        )
+
+    assert outcome.terminal_status == "cancelled"
+    assert outcome.failure_reason == "empty_prompt"
+    mock_emit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -> None:
+    """Edited team prompts that become blank must still emit one canonical cancelled hook."""
+    bot = _team_bot(tmp_path)
+    turn_store = bot._edit_regenerator.deps.turn_store
+    turn_record = HandledTurnRecord(
+        anchor_event_id="$original",
+        source_event_ids=("$original",),
+        response_event_id="$response",
+        response_owner="team_bot",
+        conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
+    )
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_team_bot:localhost")
+    edit_event = MagicMock()
+    edit_event.event_id = "$edit"
+    edit_event.sender = "@user:localhost"
+    edit_event.source = {}
+    event_info = MagicMock(original_event_id="$original", thread_id=None, thread_id_from_edit=None)
+
+    with (
+        patch.object(bot._delivery_gateway.deps.response_hooks, "emit_cancelled_response", new=AsyncMock()) as mock_emit,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch(
+            "mindroom.edit_regenerator.extract_visible_edit_body",
+            new=AsyncMock(return_value=("   ", None)),
+        ),
+        patch.object(
+            bot._conversation_resolver,
+            "extract_message_context",
+            new=AsyncMock(
+                return_value=MagicMock(
+                    am_i_mentioned=False,
+                    is_thread=False,
+                    thread_id=None,
+                    thread_history=[],
+                    mentioned_agents=[],
+                    has_non_agent_mentions=False,
+                    requires_full_thread_history=False,
+                ),
+            ),
+        ),
+        patch.object(
+            bot._conversation_resolver,
+            "build_message_envelope",
+            return_value=_envelope(body="   "),
+        ),
+        patch.object(
+            turn_store,
+            "load_turn",
+            return_value=LoadedTurnRecord(
+                record=turn_record,
+                recorded_turn_context_available=True,
+                response_owner_missing=False,
+                requires_backfill=False,
+            ),
+        ),
+        patch.object(turn_store, "build_run_metadata", return_value={}),
+        patch.object(turn_store, "record_turn_record"),
+        patch.object(turn_store, "remove_stale_runs_for_edit"),
+        patch.object(bot._ingress_hook_runner, "emit_message_received_hooks", new=AsyncMock(return_value=False)),
+    ):
+        await bot._edit_regenerator.handle_message_edit(
+            room,
+            edit_event,
+            event_info,
+            requester_user_id="@user:localhost",
+        )
+
+    mock_emit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

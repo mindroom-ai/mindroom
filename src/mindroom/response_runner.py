@@ -1119,6 +1119,21 @@ class ResponseRunner:
             response_envelope=resolved_response_envelope,
             correlation_id=resolved_correlation_id,
         )
+        if not request.prompt.strip():
+            return await lifecycle.finalize(
+                DeliveryOutcome(
+                    final_delivery_outcome=FinalDeliveryOutcome.cancelled_for_empty_prompt(),
+                ),
+                build_post_response_outcome=lambda final_outcome: ResponseOutcome(
+                    final_delivery_outcome=final_outcome,
+                ),
+                post_response_deps=lambda: self.deps.post_response_effects.build_deps(
+                    room_id=request.room_id,
+                    reply_to_event_id=request.reply_to_event_id,
+                    thread_id=resolved_target.resolved_thread_id,
+                    interactive_agent_name=self.deps.agent_name,
+                ),
+            )
         delivery_target = (
             resolved_target
             if request.existing_event_id is None or request.existing_event_is_placeholder
