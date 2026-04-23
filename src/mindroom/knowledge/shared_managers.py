@@ -358,7 +358,7 @@ async def ensure_agent_knowledge_managers(
     start_watchers: bool = True,
     reindex_on_create: bool = False,
 ) -> dict[str, KnowledgeManager]:
-    """Ensure knowledge managers exist for one agent in one execution scope."""
+    """Ensure request-scoped knowledge managers exist for one agent in one execution scope."""
     agent_config = config.agents.get(agent_name)
     if agent_config is None:
         return {}
@@ -383,15 +383,6 @@ async def ensure_agent_knowledge_managers(
                 runtime_paths=runtime_paths,
                 reindex_on_create=reindex_on_create,
             )
-            continue
-
-        managers[base_id] = await _ensure_shared_knowledge_manager_for_target(
-            target=target,
-            config=config,
-            runtime_paths=runtime_paths,
-            reindex_on_create=reindex_on_create,
-            reconcile_existing_runtime=False,
-        )
     return managers
 
 
@@ -458,6 +449,20 @@ async def ensure_shared_knowledge_manager(
 def _get_shared_knowledge_manager(base_id: str) -> KnowledgeManager | None:
     """Return the current shared knowledge manager for a base ID, if one exists."""
     return _shared_knowledge_managers.get(base_id)
+
+
+def get_published_shared_knowledge_manager(
+    base_id: str,
+    *,
+    candidate_manager: KnowledgeManager | None = None,
+) -> KnowledgeManager | None:
+    """Return the currently published shared manager without acquiring init locks."""
+    manager = _shared_knowledge_managers.get(base_id)
+    if manager is not None:
+        return manager
+    if candidate_manager is not None and candidate_manager.base_id == base_id:
+        return candidate_manager
+    return None
 
 
 def get_shared_knowledge_manager_for_config(

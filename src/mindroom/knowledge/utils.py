@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from agno.knowledge.knowledge import Knowledge
 
 from mindroom.knowledge.shared_managers import (
     ensure_agent_knowledge_managers,
+    get_published_shared_knowledge_manager,
     get_shared_knowledge_manager_for_config,
 )
 from mindroom.logging_config import get_logger
@@ -27,6 +29,15 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+
+
+class KnowledgeAvailability(Enum):
+    """Availability state for one shared knowledge base on the request path."""
+
+    READY = "ready"
+    INITIALIZING = "initializing"
+    REFRESH_FAILED = "refresh_failed"
+    CONFIG_MISMATCH = "config_mismatch"
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -82,6 +93,7 @@ def _get_knowledge_for_base(
     runtime_paths: RuntimePaths,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
+    on_availability: Callable[[KnowledgeAvailability], None] | None = None,
 ) -> Knowledge | None:
     """Resolve one configured base ID to its current Knowledge instance."""
     request_manager = request_knowledge_managers.get(base_id) if request_knowledge_managers is not None else None
@@ -90,13 +102,25 @@ def _get_knowledge_for_base(
     if config.get_private_knowledge_base_agent(base_id):
         return None
 
+    candidate_manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None
+    published_manager = get_published_shared_knowledge_manager(
+        base_id,
+        candidate_manager=candidate_manager,
+    )
+    if published_manager is None:
+        if on_availability is not None:
+            on_availability(KnowledgeAvailability.INITIALIZING)
+        return None
+
     manager = get_shared_knowledge_manager_for_config(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
-        candidate_manager=shared_manager_lookup(base_id) if shared_manager_lookup is not None else None,
+        candidate_manager=published_manager,
     )
-    return manager.get_knowledge() if manager is not None else None
+    if manager is None and on_availability is not None:
+        on_availability(KnowledgeAvailability.CONFIG_MISMATCH)
+    return published_manager.get_knowledge()
 
 
 def get_agent_knowledge(
@@ -106,19 +130,39 @@ def get_agent_knowledge(
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
     on_missing_bases: Callable[[list[str]], None] | None = None,
+    on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
-    return resolve_agent_knowledge(
-        agent_name,
-        config,
-        lambda base_id: _get_knowledge_for_base(
+    resolved_knowledge: dict[str, tuple[Knowledge | None, KnowledgeAvailability]] = {}
+
+    def _resolve(base_id: str) -> tuple[Knowledge | None, KnowledgeAvailability]:
+        if base_id in resolved_knowledge:
+            return resolved_knowledge[base_id]
+
+        availability = KnowledgeAvailability.READY
+
+        def _set_availability(value: KnowledgeAvailability) -> None:
+            nonlocal availability
+            availability = value
+
+        knowledge = _get_knowledge_for_base(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             request_knowledge_managers=request_knowledge_managers,
             shared_manager_lookup=shared_manager_lookup,
-        ),
+            on_availability=_set_availability,
+        )
+        resolved_knowledge[base_id] = (knowledge, availability)
+        return resolved_knowledge[base_id]
+
+    return resolve_agent_knowledge(
+        agent_name,
+        config,
+        lambda base_id: _resolve(base_id)[0],
         on_missing_bases=on_missing_bases,
+        get_availability=lambda base_id: _resolve(base_id)[1],
+        on_unavailable_bases=on_unavailable_bases,
     )
 
 
@@ -277,6 +321,8 @@ def resolve_agent_knowledge(
     get_knowledge: Callable[[str], Knowledge | None],
     *,
     on_missing_bases: Callable[[list[str]], None] | None = None,
+    get_availability: Callable[[str], KnowledgeAvailability] | None = None,
+    on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for an agent into one Knowledge instance."""
     base_ids = config.get_agent_knowledge_base_ids(agent_name)
@@ -284,9 +330,14 @@ def resolve_agent_knowledge(
         return None
 
     missing_base_ids: list[str] = []
+    unavailable_base_ids: dict[str, KnowledgeAvailability] = {}
     knowledges: list[Knowledge] = []
     for base_id in base_ids:
         knowledge = get_knowledge(base_id)
+        if get_availability is not None:
+            availability = get_availability(base_id)
+            if availability is not KnowledgeAvailability.READY:
+                unavailable_base_ids[base_id] = availability
         if knowledge is None:
             missing_base_ids.append(base_id)
             continue
@@ -294,5 +345,7 @@ def resolve_agent_knowledge(
 
     if missing_base_ids and on_missing_bases is not None:
         on_missing_bases(missing_base_ids)
+    if unavailable_base_ids and on_unavailable_bases is not None:
+        on_unavailable_bases(unavailable_base_ids)
 
     return _merge_knowledge(agent_name, knowledges)

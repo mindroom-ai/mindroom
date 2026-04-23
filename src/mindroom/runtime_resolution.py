@@ -295,7 +295,7 @@ def resolve_knowledge_binding(
             knowledge_path=knowledge_path,
             request_scoped=False,
             start_background_watchers=start_watchers and refresh_enabled,
-            incremental_sync_on_access=refresh_enabled and not start_watchers,
+            incremental_sync_on_access=False,
         )
 
     agent_runtime = resolve_agent_runtime(
