@@ -43,6 +43,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import DeliveryOutcome, ResponseLifecycle
+from mindroom.response_runner import ResponseRequest
 from mindroom.turn_store import LoadedTurnRecord
 from tests.conftest import (
     TEST_PASSWORD,
@@ -356,13 +357,17 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
         ) as mock_emit,
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
-        outcome = await bot._generate_response(
-            room_id="!room:localhost",
-            prompt="   ",
-            reply_to_event_id="$event",
-            thread_id=None,
-            thread_history=[],
-            user_id="@user:localhost",
+        outcome = await bot._response_runner.generate_team_response_helper(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                prompt="   ",
+                user_id="@user:localhost",
+            ),
+            team_agents=list(bot.team_agents),
+            team_mode=bot.team_mode,
         )
 
     assert outcome is None

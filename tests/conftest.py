@@ -104,16 +104,11 @@ def _make_room_get_event_response(event_id: str) -> nio.RoomGetEventResponse:
 
 def _outcome(
     terminal_status: str,
-    final_visible_event_id: str | None = None,
-    visible_response_event_id: str | None = None,
-    response_identity_event_id: str | None = None,
-    turn_completion_event_id: str | None = None,
-    last_physical_stream_event_id: str | None = None,
+    event_id: str | None = None,
+    is_visible_response: bool = False,
     final_visible_body: str | None = None,
     delivery_kind: str | None = None,
     failure_reason: str | None = None,
-    mark_handled: bool = False,
-    retryable: bool = False,
     suppressed: bool = False,
     tool_trace: tuple[object, ...] = (),
     extra_content: Mapping[str, object] | None = None,
@@ -121,23 +116,7 @@ def _outcome(
     options_list: tuple[dict[str, str], ...] | None = None,
 ) -> FinalDeliveryOutcome:
     """Build one compact terminal outcome for tests."""
-    event_id = (
-        response_identity_event_id
-        or visible_response_event_id
-        or final_visible_event_id
-        or turn_completion_event_id
-        or last_physical_stream_event_id
-    )
-    resolved_suppressed = suppressed or (failure_reason == "suppressed_by_hook" and response_identity_event_id is None)
-    is_visible_response = any(
-        value is not None
-        for value in (
-            final_visible_event_id,
-            visible_response_event_id,
-            response_identity_event_id,
-            last_physical_stream_event_id,
-        )
-    )
+    resolved_suppressed = suppressed or (failure_reason == "suppressed_by_hook" and not is_visible_response)
     return FinalDeliveryOutcome(
         terminal_status=terminal_status,
         event_id=event_id,
@@ -750,27 +729,22 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
             if request.existing_event_id is not None:
                 return _outcome(
                     terminal_status="error",
-                    final_visible_event_id=request.existing_event_id,
-                    visible_response_event_id=request.existing_event_id,
+                    event_id=request.existing_event_id,
+                    is_visible_response=True,
                     final_visible_body=request.response_text,
                     failure_reason="test_mock_no_visible_response",
-                    retryable=True,
                     extra_content=request.extra_content,
                 )
             return _outcome(
                 terminal_status="error",
                 failure_reason="test_mock_no_visible_response",
-                retryable=True,
             )
         return _outcome(
             terminal_status="completed",
-            final_visible_event_id=event_id,
-            visible_response_event_id=event_id,
-            response_identity_event_id=event_id,
-            turn_completion_event_id=event_id,
+            event_id=event_id,
+            is_visible_response=True,
             final_visible_body=request.response_text,
             delivery_kind=delivery_kind,
-            mark_handled=True,
             extra_content=request.extra_content,
         )
 
