@@ -305,16 +305,10 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "expected_visible_event_id"),
-    [("final", None), ("streamed", None)],
-)
-async def test_suppressed_delivery_emits_cancelled_hook(
+async def test_suppressed_final_delivery_emits_cancelled_hook(
     tmp_path: Path,
-    mode: str,
-    expected_visible_event_id: str | None,
 ) -> None:
-    """Hook-suppressed turns should still emit message:cancelled cleanup."""
+    """Hook-suppressed final delivery should still emit message:cancelled cleanup."""
     after_seen: list[str] = []
     cancelled_seen: list[CancelledResponseInfo] = []
 
@@ -348,45 +342,24 @@ async def test_suppressed_delivery_emits_cancelled_hook(
         ),
     )
 
-    if mode == "final":
-        result = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=MessageTarget.resolve("!room:localhost", None, "$event"),
-                existing_event_id=None,
-                response_text="suppressed",
-                response_kind="ai",
-                response_envelope=_envelope(),
-                correlation_id="corr-suppressed-final",
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
-    else:
-        result = await gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=MessageTarget.resolve("!room:localhost", None, "$event"),
-                stream_transport_outcome=StreamTransportOutcome(
-                    last_physical_stream_event_id="$stream",
-                    terminal_operation="send",
-                    terminal_result="succeeded",
-                    terminal_status="completed",
-                    rendered_body="suppressed",
-                    visible_body_state="visible_body",
-                ),
-                initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=_envelope(),
-                correlation_id="corr-suppressed-streamed",
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
+    result = await gateway.deliver_final(
+        FinalDeliveryRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            existing_event_id=None,
+            response_text="suppressed",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-suppressed-final",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
 
     assert result.suppressed is True
     assert after_seen == []
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].envelope.agent_name == "code"
-    assert cancelled_seen[0].visible_response_event_id == expected_visible_event_id
+    assert cancelled_seen[0].visible_response_event_id is None
 
 
 @pytest.mark.asyncio

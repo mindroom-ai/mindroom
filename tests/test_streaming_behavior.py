@@ -8,6 +8,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -25,7 +26,8 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
 )
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalizeStreamedResponseRequest
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
@@ -2751,6 +2753,96 @@ class TestStreamingBehavior:
             content["formatted_body"]
             == "<p>Thinking...</p>\n<p>⚠️ Worker startup failed for <code>shell.run</code>: intentional example.</p>"
         )
+
+    @pytest.mark.asyncio
+    async def test_streamed_success_allows_one_final_response_transform(self) -> None:
+        """A clean streamed success may replace the final visible text exactly once."""
+        response_envelope = MessageEnvelope(
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="helper",
+            source_kind="message",
+        )
+        response_hooks = SimpleNamespace(
+            apply_before_response=AsyncMock(
+                return_value=SimpleNamespace(
+                    response_text="chunk",
+                    response_kind="ai",
+                    tool_trace=None,
+                    extra_content=None,
+                    envelope=response_envelope,
+                    suppress=False,
+                ),
+            ),
+            apply_final_response_transform=AsyncMock(
+                return_value=SimpleNamespace(
+                    response_text="updated text",
+                    response_kind="ai",
+                    envelope=response_envelope,
+                ),
+            ),
+            emit_after_response=AsyncMock(),
+            emit_cancelled_response=AsyncMock(),
+        )
+        gateway = DeliveryGateway(
+            DeliveryGatewayDeps(
+                runtime=SimpleNamespace(
+                    client=_make_matrix_client_mock(),
+                    orchestrator=None,
+                    config=self.config,
+                    runtime_started_at=0.0,
+                ),
+                runtime_paths=runtime_paths_for(self.config),
+                agent_name="helper",
+                logger=MagicMock(),
+                redact_message_event=AsyncMock(return_value=True),
+                sender_domain="localhost",
+                resolver=MagicMock(),
+                response_hooks=response_hooks,
+            ),
+        )
+        final_outcome = FinalDeliveryOutcome.final_visible_delivery(
+            final_visible_event_id="$streaming",
+            final_visible_body="updated text",
+            delivery_kind="edited",
+        )
+        mock_deliver_final = AsyncMock(return_value=final_outcome)
+        object.__setattr__(gateway, "deliver_final", mock_deliver_final)
+
+        outcome = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+                stream_transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$streaming",
+                    terminal_operation="send",
+                    terminal_result="succeeded",
+                    terminal_status="completed",
+                    rendered_body="chunk",
+                    visible_body_state="visible_body",
+                ),
+                initial_delivery_kind="sent",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-final-transform-success",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome is final_outcome
+        response_hooks.apply_final_response_transform.assert_awaited_once()
+        mock_deliver_final.assert_awaited_once()
+        delivered_request = mock_deliver_final.await_args.args[0]
+        assert delivered_request.existing_event_id == "$streaming"
+        assert delivered_request.response_text == "updated text"
+        response_hooks.emit_after_response.assert_awaited_once()
+        response_hooks.emit_cancelled_response.assert_not_awaited()
 
 
 class TestStreamingConfig:

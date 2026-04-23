@@ -13,7 +13,12 @@ from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompleted
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalizeStreamedResponseRequest
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.hooks import MessageEnvelope
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
     _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE,
     StreamingResponse,
@@ -64,6 +69,21 @@ def _streaming_response(config: Config) -> StreamingResponse:
         sender_domain="localhost",
         config=config,
         runtime_paths=runtime_paths_for(config),
+    )
+
+
+def _envelope() -> MessageEnvelope:
+    return MessageEnvelope(
+        source_event_id="$reply",
+        room_id="!room:localhost",
+        target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+        requester_id="@user:localhost",
+        sender_id="@user:localhost",
+        body="hello",
+        attachment_ids=(),
+        mentioned_agents=(),
+        agent_name="code",
+        source_kind="message",
     )
 
 
@@ -228,8 +248,8 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_transport_final_event_content_keeps_visible_tool_markers(tmp_path: Path) -> None:
-    """Final completion content must preserve visible order for text that appeared before a tool marker."""
+async def test_run_completed_content_does_not_rewrite_visible_stream_text(tmp_path: Path) -> None:
+    """Canonical completion content must not replace visible streamed text during streaming."""
     config = _config(tmp_path)
     client = _client()
     captured_edits: list[dict[str, Any]] = []
@@ -265,58 +285,83 @@ async def test_transport_final_event_content_keeps_visible_tool_markers(tmp_path
     assert outcome.rendered_body is not None
     assert outcome.rendered_body.startswith("Let me search...")
     assert "🔧 `run_shell_command` [1]" in outcome.rendered_body
-    assert outcome.rendered_body.endswith("Final answer")
+    assert "Final answer" not in outcome.rendered_body
     assert captured_edits[-1]["body"] == outcome.rendered_body
 
 
 @pytest.mark.asyncio
-async def test_transport_failed_terminal_edit_preserves_last_committed_visible_body(tmp_path: Path) -> None:
-    """A failed terminal rewrite must report the last body that actually reached Matrix."""
+async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_path: Path) -> None:
+    """A failed one-shot final transform edit must keep the visible streamed text and resolve cleanly."""
     config = _config(tmp_path)
-    client = _client()
-    sleep_mock = AsyncMock()
-    first_stream_edit_landed = asyncio.Event()
-
-    async def stream() -> AsyncIterator[object]:
-        yield RunContentEvent(content="hel")
-        await asyncio.wait_for(first_stream_edit_landed.wait(), timeout=1)
-        yield RunCompletedEvent(content="hello")
-
-    async def record_edit(
-        _client: object,
-        _room_id: str,
-        _event_id: str,
-        new_content: dict[str, Any],
-        _new_text: str,
-    ) -> DeliveredMatrixEvent | None:
-        if new_content["io.mindroom.stream_status"] == "streaming":
-            first_stream_edit_landed.set()
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
-        return None
-
-    with (
-        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)) as mock_edit,
-        patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
-    ):
-        outcome = await send_streaming_response(
-            client=client,
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            thread_id=None,
-            sender_domain="localhost",
-            config=config,
+    envelope = _envelope()
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(
+            return_value=SimpleNamespace(
+                response_text="chunk",
+                response_kind="ai",
+                tool_trace=None,
+                extra_content=None,
+                envelope=envelope,
+                suppress=False,
+            ),
+        ),
+        apply_final_response_transform=AsyncMock(
+            return_value=SimpleNamespace(
+                response_text="updated text",
+                response_kind="ai",
+                envelope=envelope,
+            ),
+        ),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
             runtime_paths=runtime_paths_for(config),
-            response_stream=stream(),
-            existing_event_id="$placeholder",
-            adopt_existing_placeholder=True,
-            room_mode=True,
-        )
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=Mock(),
+            response_hooks=response_hooks,
+        ),
+    )
+    mock_deliver_final = AsyncMock(
+        return_value=FinalDeliveryOutcome.kept_prior_visible_response_after_error(
+            final_visible_event_id="$streaming",
+            failure_reason="delivery_failed",
+        ),
+    )
+    object.__setattr__(gateway, "deliver_final", mock_deliver_final)
 
-    assert mock_edit.await_count == 7
-    assert sleep_mock.await_args_list == [call(2), call(4), call(8), call(16), call(32)]
-    assert outcome.terminal_result == "failed"
-    assert outcome.rendered_body == "hel"
-    assert outcome.visible_body_state == "visible_body"
+    outcome = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            stream_transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$streaming",
+                terminal_operation="send",
+                terminal_result="succeeded",
+                terminal_status="completed",
+                rendered_body="chunk",
+                visible_body_state="visible_body",
+            ),
+            initial_delivery_kind="sent",
+            response_kind="ai",
+            response_envelope=envelope,
+            correlation_id="corr-final-transform-failure",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert outcome.state == "final_visible_delivery"
+    assert outcome.final_visible_event_id == "$streaming"
+    assert outcome.final_visible_body == "chunk"
+    response_hooks.apply_final_response_transform.assert_awaited_once()
+    mock_deliver_final.assert_awaited_once()
+    response_hooks.emit_after_response.assert_awaited_once()
+    response_hooks.emit_cancelled_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio

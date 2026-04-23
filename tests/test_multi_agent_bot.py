@@ -2209,12 +2209,12 @@ class TestAgentBot:
             await asyncio.gather(running_task, other_room_task, return_exceptions=True)
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_streaming_applies_before_and_after_hooks_once(
+    async def test_process_and_respond_streaming_ignores_post_visible_before_response_mutation(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Streaming responses should fire hooks once after the stream settles."""
+        """Visible streamed success should not be rewritten or suppressed by message:before_response."""
         after_results: list[tuple[str, str, str, str]] = []
         before_calls = 0
 
@@ -2223,6 +2223,7 @@ class TestAgentBot:
             nonlocal before_calls
             before_calls += 1
             ctx.draft.response_text = f"{ctx.draft.response_text} [hooked]"
+            ctx.draft.suppress = True
 
         @hook(EVENT_MESSAGE_AFTER_RESPONSE)
         async def after_hook(ctx: AfterResponseContext) -> None:
@@ -2274,9 +2275,9 @@ class TestAgentBot:
                 )
 
         assert delivery.event_id == "$response"
-        assert before_calls == 1
-        assert mock_edit_message.await_args.args[4] == "chunk [hooked]"
-        assert after_results == [("$response", "chunk [hooked]", "edited", "ai")]
+        assert before_calls == 0
+        mock_edit_message.assert_not_awaited()
+        assert after_results == [("$response", "chunk", "sent", "ai")]
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_passes_active_response_event_ids(
@@ -2910,38 +2911,34 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
-    async def test_finalize_streamed_response_emits_cancelled_hook_when_terminal_rewrite_returns_visible_failure(
+    @pytest.mark.parametrize(("hook_action"), ["rewrite", "suppress"])
+    async def test_streamed_before_response_no_longer_mutates_post_visible_success(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        hook_action: str,
     ) -> None:
-        """Streamed terminal rewrite failures must still emit the coordinator-owned cancelled hook."""
+        """message:before_response must not mutate or suppress once streamed text is already visible."""
+
+        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
+        async def before_hook(ctx: BeforeResponseContext) -> None:
+            if hook_action == "rewrite":
+                ctx.draft.response_text = "updated text"
+            else:
+                ctx.draft.suppress = True
+
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
         response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        gateway = replace_delivery_gateway_deps(
-            bot,
-            response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
-                    return_value=SimpleNamespace(
-                        response_text="updated text",
-                        response_kind="ai",
-                        tool_trace=None,
-                        extra_content=None,
-                        envelope=response_envelope,
-                        suppress=False,
-                    ),
-                ),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
-            ),
-        )
+        redact_message_event = AsyncMock(return_value=True)
+        gateway = replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
         mock_deliver_final = AsyncMock(
-            return_value=FinalDeliveryOutcome.error_with_visible_response(
+            return_value=FinalDeliveryOutcome.final_visible_delivery(
                 final_visible_event_id="$streaming",
-                final_visible_body="",
-                failure_reason="delivery_failed",
+                final_visible_body="updated text",
+                delivery_kind="edited",
             ),
         )
         object.__setattr__(gateway, "deliver_final", mock_deliver_final)
@@ -2959,117 +2956,11 @@ class TestAgentBot:
             ),
         )
 
-        assert outcome.state == "error_with_visible_response"
-        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_finalize_streamed_response_failed_terminal_edit_preserves_visible_stream_as_completed_failure(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A failed post-stream rewrite must keep the visible streamed reply handled and non-retryable."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        gateway = replace_delivery_gateway_deps(
-            bot,
-            response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
-                    return_value=SimpleNamespace(
-                        response_text="updated text",
-                        response_kind="ai",
-                        tool_trace=None,
-                        extra_content=None,
-                        envelope=response_envelope,
-                        suppress=False,
-                    ),
-                ),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
-            ),
-        )
-        mock_deliver_final = AsyncMock(
-            return_value=FinalDeliveryOutcome.kept_prior_visible_response_after_error(
-                final_visible_event_id="$streaming",
-                failure_reason="delivery_failed",
-            ),
-        )
-        object.__setattr__(gateway, "deliver_final", mock_deliver_final)
-
-        outcome = await gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                stream_transport_outcome=_stream_outcome("$streaming", "chunk"),
-                initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-finalize-stream-completed-terminal-failure",
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
-
-        assert outcome.state == "kept_prior_visible_stream_after_completed_terminal_failure"
-        assert outcome.visible_response_event_id == "$streaming"
-        assert outcome.response_identity_event_id == "$streaming"
-        assert outcome.should_mark_handled is True
-        assert outcome.retryable is False
-        gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_finalize_streamed_response_successful_terminal_rewrite_emits_after_response(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A successful post-stream rewrite must still emit the final after_response hook once."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        gateway = replace_delivery_gateway_deps(
-            bot,
-            response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
-                    return_value=SimpleNamespace(
-                        response_text="updated text",
-                        response_kind="ai",
-                        tool_trace=None,
-                        extra_content=None,
-                        envelope=response_envelope,
-                        suppress=False,
-                    ),
-                ),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
-            ),
-        )
-        final_outcome = FinalDeliveryOutcome.final_visible_delivery(
-            final_visible_event_id="$streaming",
-            final_visible_body="updated text",
-            delivery_kind="edited",
-        )
-        mock_deliver_final = AsyncMock(return_value=final_outcome)
-        object.__setattr__(gateway, "deliver_final", mock_deliver_final)
-
-        outcome = await gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                stream_transport_outcome=_stream_outcome("$streaming", "chunk"),
-                initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-finalize-stream-successful-rewrite",
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
-
-        assert outcome is final_outcome
-        gateway.deps.response_hooks.emit_after_response.assert_awaited_once()
-        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
+        assert outcome.state == "final_visible_delivery"
+        assert outcome.final_visible_event_id == "$streaming"
+        assert outcome.final_visible_body == "chunk"
+        mock_deliver_final.assert_not_awaited()
+        redact_message_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_finalize_streamed_response_cancelled_placeholder_only_stream_cleans_up_placeholder(
@@ -3120,59 +3011,6 @@ class TestAgentBot:
             reason="Completed placeholder-only streamed response",
         )
         gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_finalize_streamed_response_detects_in_place_hook_metadata_mutation(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """In-place hook metadata mutation must still force the terminal rewrite."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            assert ctx.draft.tool_trace is not None
-            assert ctx.draft.extra_content is not None
-            ctx.draft.tool_trace[0].result_preview = "done"
-            ctx.draft.extra_content["gamma"] = "delta"
-
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
-        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        original_tool_trace = [ToolTraceEntry(type="tool_call_started", tool_name="shell")]
-        original_extra_content = {"alpha": "beta"}
-        gateway = replace_delivery_gateway_deps(bot)
-        mock_deliver_final = AsyncMock(
-            return_value=FinalDeliveryOutcome.final_visible_delivery(
-                final_visible_event_id="$streaming",
-                final_visible_body="chunk",
-                delivery_kind="edited",
-            ),
-        )
-        object.__setattr__(gateway, "deliver_final", mock_deliver_final)
-
-        await gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                stream_transport_outcome=_stream_outcome("$streaming", "chunk"),
-                initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-finalize-stream-metadata-mutation",
-                tool_trace=original_tool_trace,
-                extra_content=original_extra_content,
-            ),
-        )
-
-        assert original_tool_trace[0].result_preview is None
-        assert original_extra_content == {"alpha": "beta"}
-        mock_deliver_final.assert_awaited_once()
-        delivered_request = mock_deliver_final.await_args.args[0]
-        assert delivered_request.tool_trace is not None
-        assert delivered_request.tool_trace[0].result_preview == "done"
-        assert delivered_request.extra_content == {"alpha": "beta", "gamma": "delta"}
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_cancelled_visible_note_survives(
@@ -3243,55 +3081,43 @@ class TestAgentBot:
         tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_streaming_redacts_suppressed_provisional_response(
+    async def test_streamed_regeneration_against_an_existing_visible_reply_preserves_linkage_when_no_new_body_lands(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Suppressing after the first streamed send should remove the provisional event."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
+        """A no-op streamed regeneration should keep the prior visible reply linked."""
 
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
-            yield "chunk"
+            if False:
+                yield "chunk"
 
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        bot._knowledge_for_agent = MagicMock(return_value=None)
-        redact_message_event = AsyncMock(return_value=True)
-        replace_delivery_gateway_deps(
-            bot,
-            redact_message_event=redact_message_event,
-            response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
-                    return_value=SimpleNamespace(
-                        response_text="chunk",
-                        response_kind="ai",
-                        tool_trace=None,
-                        extra_content=None,
-                        envelope=_hook_envelope(body="Please reply in thread", source_event_id="$event456"),
-                        suppress=True,
-                    ),
-                ),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
-            ),
-        )
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        bot._handle_interactive_question = AsyncMock()
 
         with (
-            patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
-            patch("mindroom.response_runner.stream_agent_response") as mock_stream_agent_response,
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                stream_agent_response=MagicMock(return_value=mock_streaming_response()),
+            ),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
             ) as mock_send_streaming_response,
         ):
-            mock_stream_agent_response.return_value = mock_streaming_response()
-            mock_send_streaming_response.return_value = _stream_outcome("$streaming", "chunk")
+            mock_send_streaming_response.return_value = StreamTransportOutcome(
+                last_physical_stream_event_id=None,
+                terminal_operation="edit",
+                terminal_result="failed",
+                terminal_status="error",
+                rendered_body=None,
+                visible_body_state="none",
+                failure_reason="stream_completed_without_visible_body",
+            )
             delivery = await bot._response_runner.process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
@@ -3304,18 +3130,17 @@ class TestAgentBot:
                         body="Please reply in thread",
                         source_event_id="$event456",
                     ),
-                    correlation_id="corr-stream-suppress",
+                    correlation_id="corr-stream-regenerate-noop",
+                    existing_event_id="$existing",
+                    existing_event_is_placeholder=False,
                 ),
             )
 
-        assert delivery.suppressed is True
-        assert delivery.event_id is None
-        redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$streaming",
-            reason="Suppressed streamed response",
-        )
+        assert delivery.state == "kept_prior_visible_response_after_error"
+        assert delivery.visible_response_event_id == "$existing"
         assert delivery.response_identity_event_id is None
+        assert delivery.should_mark_handled is False
+        assert delivery.retryable is True
 
     def test_failed_placeholder_edit_does_not_preserve_response_identity(self) -> None:
         """A failed placeholder edit must not preserve a response identity."""
@@ -4803,12 +4628,12 @@ class TestAgentBot:
         mock_thread_summary.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_team_generate_response_redacts_suppressed_streaming_reply(
+    async def test_team_generate_response_keeps_streamed_visible_reply_when_before_response_suppresses(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """TeamBot should redact hook-suppressed streamed replies after the first send."""
+        """TeamBot must keep a visible streamed reply even if before_response tries to suppress it afterwards."""
 
         @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
         async def suppressing_hook(ctx: BeforeResponseContext) -> None:
@@ -4913,9 +4738,9 @@ class TestAgentBot:
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert resolution.state == "suppressed_redacted"
+        assert resolution.state == "final_visible_delivery"
         assert resolution.should_mark_handled is True
-        assert resolution.visible_response_event_id is None
+        assert resolution.visible_response_event_id == "$team-response"
         mock_thread_summary.assert_not_awaited()
         assert "thread_summary_!test:localhost_$thread" not in scheduled_names
 
@@ -5030,12 +4855,12 @@ class TestAgentBot:
         assert send_kwargs["adopt_existing_placeholder"] is True
 
     @pytest.mark.asyncio
-    async def test_generate_team_response_helper_redacts_suppressed_streamed_placeholder(
+    async def test_generate_team_response_helper_keeps_streamed_visible_reply_when_before_response_suppresses(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Streaming team suppression should not preserve the provisional placeholder id."""
+        """Streaming team helpers must keep the visible reply once real streamed text lands."""
 
         @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
         async def before_hook(ctx: BeforeResponseContext) -> None:
@@ -5105,14 +4930,10 @@ class TestAgentBot:
                 correlation_id="corr-team-stream-suppress",
             )
 
-        assert resolution.state == "suppressed_redacted"
+        assert resolution.state == "final_visible_delivery"
         assert resolution.should_mark_handled is True
-        assert resolution.visible_response_event_id is None
-        bot._redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$placeholder",
-            reason="Suppressed streamed response",
-        )
+        assert resolution.visible_response_event_id == "$placeholder"
+        bot._redact_message_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_returns_none_when_suppressed_placeholder_is_redacted(
