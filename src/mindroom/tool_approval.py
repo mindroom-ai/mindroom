@@ -350,6 +350,7 @@ class ApprovalManager:
         self._replay_in_progress: set[str] = set()
         self._runtime_loop: asyncio.AbstractEventLoop | None = None
         self._unsynced_resolution_retry_task: asyncio.Task[None] | Future[None] | None = None
+        self._room_drained_callback_tasks: set[asyncio.Task[None]] = set()
         self._allow_unsynced_resolution_retries = True
         self._load_existing()
 
@@ -672,14 +673,16 @@ class ApprovalManager:
 
             def _schedule_callback() -> None:
                 task = asyncio.create_task(cast("Coroutine[Any, Any, None]", on_room_drained(room_id)))
-                task.add_done_callback(lambda _task: None)
+                self._room_drained_callback_tasks.add(task)
+                task.add_done_callback(self._room_drained_callback_tasks.discard)
 
             runtime_loop.call_soon_threadsafe(
                 _schedule_callback,
             )
             return
         task = asyncio.create_task(cast("Coroutine[Any, Any, None]", on_room_drained(room_id)))
-        task.add_done_callback(lambda _task: None)
+        self._room_drained_callback_tasks.add(task)
+        task.add_done_callback(self._room_drained_callback_tasks.discard)
 
     async def cancel_unsynced_resolution_retry_task(self) -> None:
         """Stop the runtime retry loop for unsynced approval resolution edits."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib
 import json
 import os
@@ -2217,6 +2218,32 @@ async def test_runtime_retry_is_room_scoped(
         with suppress(asyncio.CancelledError):
             await blocked_task
         await shutdown_approval_store()
+
+
+@pytest.mark.asyncio
+async def test_room_drained_callback_task_is_kept_alive(tmp_path: Path) -> None:
+    """Room-drained callbacks should stay alive until completion."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    callback_invocations = 0
+
+    async def _on_room_drained(room_id: str) -> None:
+        nonlocal callback_invocations
+        assert room_id == "!room:localhost"
+        await asyncio.sleep(0.1)
+        callback_invocations += 1
+
+    store = initialize_approval_store(
+        runtime_paths,
+        on_room_drained=_on_room_drained,
+        runtime_loop=asyncio.get_running_loop(),
+    )
+
+    await store._check_and_notify_room_drained("!room:localhost")
+    await asyncio.sleep(0)
+    gc.collect()
+    await asyncio.sleep(0.2)
+
+    assert callback_invocations == 1
 
 
 @pytest.mark.asyncio
