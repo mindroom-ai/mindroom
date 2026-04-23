@@ -3149,7 +3149,12 @@ async def test_non_requester_click_emits_reconciliation_edit(tmp_path: Path) -> 
             rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
         ),
     )
-    bot = _agent_bot(tmp_path, config=config)
+    first_bot = _agent_bot(tmp_path, config=config, agent_name="code")
+    second_bot = _agent_bot(tmp_path, config=config, agent_name="general")
+    orchestrator = MagicMock()
+    orchestrator._approval_transport_bot = MagicMock(return_value=first_bot)
+    first_bot.orchestrator = orchestrator
+    second_bot.orchestrator = orchestrator
     sender = AsyncMock(return_value=_sent_approval_event())
     editor = AsyncMock(return_value=True)
     store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
@@ -3163,7 +3168,10 @@ async def test_non_requester_click_emits_reconciliation_edit(tmp_path: Path) -> 
     )
 
     with patch("mindroom.bot.is_authorized_sender", return_value=True):
-        await bot._on_unknown_event(room, event)
+        await asyncio.gather(
+            first_bot._on_unknown_event(room, event),
+            second_bot._on_unknown_event(room, event),
+        )
 
     assert task.done() is False
     assert store.list_pending() == [pending]
@@ -3187,7 +3195,12 @@ async def test_unauthorized_non_requester_click_emits_reconciliation_edit(tmp_pa
             rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
         ),
     )
-    bot = _agent_bot(tmp_path, config=config)
+    first_bot = _agent_bot(tmp_path, config=config, agent_name="code")
+    second_bot = _agent_bot(tmp_path, config=config, agent_name="general")
+    orchestrator = MagicMock()
+    orchestrator._approval_transport_bot = MagicMock(return_value=first_bot)
+    first_bot.orchestrator = orchestrator
+    second_bot.orchestrator = orchestrator
     sender = AsyncMock(return_value=_sent_approval_event())
     editor = AsyncMock(return_value=True)
     store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
@@ -3201,7 +3214,10 @@ async def test_unauthorized_non_requester_click_emits_reconciliation_edit(tmp_pa
     )
 
     with patch("mindroom.bot.is_authorized_sender", return_value=False):
-        await bot._on_unknown_event(room, event)
+        await asyncio.gather(
+            first_bot._on_unknown_event(room, event),
+            second_bot._on_unknown_event(room, event),
+        )
 
     assert task.done() is False
     assert store.list_pending() == [pending]

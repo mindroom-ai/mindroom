@@ -1425,6 +1425,7 @@ class AgentBot:
         )
         if pending is None:
             return
+        should_restate_pending = self._should_send_tool_approval_notice(room_id=room.room_id)
         if pending.status != "pending" and pending.resolution_synced_at is None:
             await approval_manager.replay_resolved_card_for_room(
                 approval_event_id=approval_event_id,
@@ -1441,7 +1442,7 @@ class AgentBot:
                     room_id=room.room_id,
                     resolved_by=event.sender,
                 )
-            elif pending_is_open:
+            elif pending_is_open and should_restate_pending:
                 await approval_manager.restate_pending_anchored_request(
                     approval_event_id=approval_event_id,
                     room_id=room.room_id,
@@ -1455,7 +1456,7 @@ class AgentBot:
             reason=reason,
             resolved_by=event.sender,
         )
-        if not result.handled and pending_is_open and not sender_is_requester:
+        if not result.handled and pending_is_open and not sender_is_requester and should_restate_pending:
             await approval_manager.restate_pending_anchored_request(
                 approval_event_id=approval_event_id,
                 room_id=room.room_id,
