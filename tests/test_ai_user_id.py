@@ -197,13 +197,11 @@ def _prepared_prompt_result(
 
 
 def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
-    """Metrics serialization should keep zero output usage and derived totals."""
+    """Metrics serialization should preserve only the provider payload Agno exposes."""
     payload = _serialize_metrics(Metrics(input_tokens=6, output_tokens=0, cache_read_tokens=46449))
 
     assert payload == {
         "input_tokens": 6,
-        "output_tokens": 0,
-        "total_tokens": 6,
         "cache_read_tokens": 46449,
     }
 

@@ -399,20 +399,7 @@ def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, An
         metrics_dict = metrics.to_dict()
         if not isinstance(metrics_dict, dict):
             return None
-        sanitized = _sanitize_metrics_payload(metrics_dict)
-        if sanitized is None:
-            return None
-        if "output_tokens" not in sanitized and isinstance(metrics.output_tokens, int):
-            sanitized["output_tokens"] = metrics.output_tokens
-        if "total_tokens" not in sanitized:
-            if isinstance(metrics.total_tokens, int) and metrics.total_tokens > 0:
-                sanitized["total_tokens"] = metrics.total_tokens
-            else:
-                input_tokens = sanitized.get("input_tokens")
-                output_tokens = sanitized.get("output_tokens")
-                if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-                    sanitized["total_tokens"] = input_tokens + output_tokens
-        return sanitized
+        return _sanitize_metrics_payload(metrics_dict)
     if isinstance(metrics, dict):
         return _sanitize_metrics_payload(metrics)
     return None
