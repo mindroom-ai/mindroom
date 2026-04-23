@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from mindroom import interactive
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -60,6 +61,7 @@ CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
 _INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
 INTERRUPTED_RESPONSE_NOTE = _INTERRUPTED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
+_NO_VISIBLE_TEXT_AFTER_THINKING_NOTE = "**[Model emitted no visible text content after thinking. Please retry.]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _StreamInputChunk = StreamInputChunk
 _TerminalStreamStatus = Literal["completed", "cancelled", "error", "interrupted"]
@@ -250,6 +252,8 @@ class StreamingResponse:
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
+    observed_reasoning_content: bool = False
+    observed_tool_calls: int = 0
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     _last_delivered_text: str = field(default="", init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
@@ -339,6 +343,44 @@ class StreamingResponse:
         self._update(new_chunk)
         await self._throttled_send(client)
 
+    def _prepare_terminal_text_and_status(
+        self,
+        *,
+        error: Exception | None,
+        resolved_cancel_source: CancelSource | None,
+    ) -> _TerminalStreamStatus:
+        """Apply terminal text adjustments and return the terminal stream status."""
+        ai_run_payload = self.extra_content.get(AI_RUN_METADATA_KEY) if self.extra_content is not None else None
+        no_visible_text_error = (
+            error is None
+            and resolved_cancel_source is None
+            and not self.accumulated_text.strip()
+            and self.observed_reasoning_content
+            and self.observed_tool_calls == 0
+        )
+        if no_visible_text_error:
+            self.accumulated_text = _NO_VISIBLE_TEXT_AFTER_THINKING_NOTE
+            if self.extra_content is not None:
+                self.extra_content[STREAM_STATUS_KEY] = STREAM_STATUS_ERROR
+                if isinstance(ai_run_payload, dict):
+                    ai_run_payload["status"] = STREAM_STATUS_ERROR
+            return STREAM_STATUS_ERROR
+
+        if error is not None:
+            stripped_text = self.accumulated_text.rstrip()
+            error_note = _format_stream_error_note(error)
+            self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
+            return STREAM_STATUS_ERROR
+
+        if resolved_cancel_source is not None:
+            self.accumulated_text, stream_status = build_cancelled_response_update(
+                self.accumulated_text,
+                cancel_source=resolved_cancel_source,
+            )
+            return stream_status
+
+        return STREAM_STATUS_COMPLETED
+
     async def finalize(
         self,
         client: nio.AsyncClient,
@@ -350,24 +392,16 @@ class StreamingResponse:
     ) -> None:
         """Send final message update."""
         self._warmup_state.clear_for_terminal_transition()
-        if error is not None:
-            stripped_text = self.accumulated_text.rstrip()
-            error_note = _format_stream_error_note(error)
-            self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
-            final_stream_status = STREAM_STATUS_ERROR
-        else:
-            resolved_cancel_source = cancel_source
-            if resolved_cancel_source is None:
-                if restart_interrupted:
-                    resolved_cancel_source = "sync_restart"
-                elif cancelled:
-                    resolved_cancel_source = "user_stop"
-            final_stream_status = STREAM_STATUS_COMPLETED
-            if resolved_cancel_source is not None:
-                self.accumulated_text, final_stream_status = build_cancelled_response_update(
-                    self.accumulated_text,
-                    cancel_source=resolved_cancel_source,
-                )
+        resolved_cancel_source = cancel_source
+        if resolved_cancel_source is None:
+            if restart_interrupted:
+                resolved_cancel_source = "sync_restart"
+            elif cancelled:
+                resolved_cancel_source = "user_stop"
+        final_stream_status = self._prepare_terminal_text_and_status(
+            error=error,
+            resolved_cancel_source=resolved_cancel_source,
+        )
 
         # When a placeholder message exists but no real text arrived,
         # still edit the message to finalize the stream status.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
@@ -644,6 +645,14 @@ class DeliveryGateway:
         request: FinalizeStreamedResponseRequest,
     ) -> DeliveryResult:
         """Apply hooks and any final edit needed after streamed delivery completes."""
+        terminal_stream_status_snapshot = (
+            request.extra_content.get(constants.STREAM_STATUS_KEY) if request.extra_content is not None else None
+        )
+        terminal_ai_run_snapshot = (
+            copy.deepcopy(request.extra_content.get(constants.AI_RUN_METADATA_KEY))
+            if request.extra_content is not None
+            else None
+        )
         draft = await self.deps.response_hooks.apply_before_response(
             correlation_id=request.correlation_id,
             envelope=request.response_envelope,
@@ -686,6 +695,14 @@ class DeliveryGateway:
             or draft.extra_content != request.extra_content
         )
         if needs_final_edit:
+            terminal_extra_content = dict(draft.extra_content or {})
+            terminal_extra_content[constants.STREAM_STATUS_KEY] = (
+                terminal_stream_status_snapshot
+                if terminal_stream_status_snapshot is not None
+                else constants.STREAM_STATUS_COMPLETED
+            )
+            if terminal_ai_run_snapshot is not None:
+                terminal_extra_content[constants.AI_RUN_METADATA_KEY] = terminal_ai_run_snapshot
             return await self.deliver_final(
                 FinalDeliveryRequest(
                     target=request.target,
@@ -695,7 +712,7 @@ class DeliveryGateway:
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id,
                     tool_trace=draft.tool_trace,
-                    extra_content=draft.extra_content,
+                    extra_content=terminal_extra_content,
                     apply_before_hooks=False,
                 ),
             )

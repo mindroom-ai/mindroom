@@ -226,6 +226,7 @@ class _StreamingAttemptState:
     full_response: str = ""
     tool_count: int = 0
     observed_tool_calls: int = 0
+    observed_reasoning_content: bool = False
     pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     latest_model_id: str | None = None
@@ -1210,7 +1211,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
 
 
 @timed("model_request_to_completion")
-async def _process_stream_events(  # noqa: C901, PLR0912
+async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     stream_generator: AsyncIterator[object],
     *,
     state: _StreamingAttemptState,
@@ -1226,7 +1227,13 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     del timing_scope
     try:
         async for event in stream_generator:
-            if isinstance(event, RunContentEvent) and event.content:
+            if isinstance(event, RunContentEvent):
+                if event.reasoning_content:
+                    state.observed_reasoning_content = True
+                if not event.content:
+                    if event.reasoning_content:
+                        yield event
+                    continue
                 if not state.first_token_logged:
                     state.first_token_logged = True
                     if pipeline_timing is not None:
@@ -1268,6 +1275,9 @@ async def _process_stream_events(  # noqa: C901, PLR0912
 
             if isinstance(event, RunCompletedEvent):
                 state.completed_run_event = event
+                if event.reasoning_content:
+                    state.observed_reasoning_content = True
+                    yield event
                 continue
 
             if isinstance(event, RunCancelledEvent):
