@@ -11,6 +11,11 @@
 #   dependency rules.
 # - Use grouped `paths = [...]` only when every grouped module intentionally
 #   shares the exact same policy.
+# - `depends_on` lists runtime imports only. Tach in this repo is configured
+#   to ignore TYPE_CHECKING-only imports, so listing a dep that is imported
+#   solely under `if TYPE_CHECKING:` adds no enforcement and is treated as
+#   noise. When a TYPE_CHECKING-only import becomes a runtime import (or
+#   vice versa), update `depends_on` accordingly in the same PR.
 #
 # Docs:
 # - https://docs.gauge.sh/usage/configuration/
@@ -178,17 +183,86 @@ depends_on = [
 # Keep split Matrix client consumers on explicit per-module rules so Tach can
 # enforce both dependency edges and module visibility for each importer.
 [[modules]]
+path = "mindroom.api"
+depends_on = []
+
+[[modules]]
+path = "mindroom.api.config_lifecycle"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.file_watcher",
+    "mindroom.logging_config",
+]
+
+# NOTE (arch-b-7): mindroom.api.main edge here (and on
+# mindroom.api.{homeassistant_integration, integrations}) is honest because
+# verify_user and _reload_api_runtime_config are defined in api.main and
+# imported via lazy function-local imports to break the import-time cycle.
+# This codifies a real bidirectional cycle between mindroom.api.main and
+# these routers; ARCH-B-9 will lift those helpers into a leaf module
+# (likely a new api.auth) and remove the back-edges.
+[[modules]]
+path = "mindroom.api.google_integration"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.credentials",
+    "mindroom.api.main",
+    "mindroom.constants",
+    "mindroom.credentials",
+    "mindroom.tool_system.dependencies",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.google_tools_helper"
+depends_on = []
+
+[[modules]]
+path = "mindroom.api.homeassistant_integration"
+depends_on = [
+    "mindroom.api.credentials",
+    "mindroom.api.integrations",
+    "mindroom.api.main",
+]
+
+[[modules]]
+path = "mindroom.api.integrations"
+depends_on = [
+    "mindroom.api.credentials",
+    "mindroom.api.main",
+    "mindroom.tool_system.dependencies",
+]
+
+[[modules]]
+path = "mindroom.api.knowledge"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.constants",
+    "mindroom.knowledge",
+]
+
+[[modules]]
 path = "mindroom.api.matrix_operations"
-depends_on = ["mindroom.constants", "mindroom.matrix.client_room_admin", "mindroom.matrix.rooms", "mindroom.matrix.users"]
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.users",
+]
 
 [[modules]]
 path = "mindroom.api.openai_compat"
 depends_on = [
     "mindroom.ai",
+    "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.execution_preparation",
     "mindroom.history.runtime",
     "mindroom.knowledge",
+    "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.routing",
     "mindroom.teams",
@@ -200,10 +274,18 @@ depends_on = [
 path = "mindroom.api.main"
 depends_on = [
     "mindroom.agent_policy",
+    "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
+    "mindroom.api.google_integration",
+    "mindroom.api.homeassistant_integration",
+    "mindroom.api.integrations",
+    "mindroom.api.knowledge",
     "mindroom.api.matrix_operations",
     "mindroom.api.openai_compat",
+    "mindroom.api.schedules",
+    "mindroom.api.skills",
     "mindroom.api.tools",
+    "mindroom.api.workers",
     "mindroom.constants",
     "mindroom.credentials_sync",
     "mindroom.frontend_assets",
@@ -221,7 +303,6 @@ path = "mindroom.api.credentials"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.api.config_lifecycle",
-    "mindroom.constants",
     "mindroom.credentials",
     "mindroom.tool_system.worker_routing",
 ]
@@ -230,11 +311,88 @@ depends_on = [
 path = "mindroom.api.tools"
 depends_on = [
     "mindroom.agent_policy",
+    "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
+    "mindroom.api.google_tools_helper",
     "mindroom.config.main",
     "mindroom.credentials",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.sandbox_exec"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.sandbox_protocol"
+depends_on = []
+
+# NOTE (arch-b-7): sandbox modules currently depend on the concrete
+# workers.backends.local backend. Honest definition-site encoding for
+# now; ARCH-B-9 will lift the shared sandbox-relevant types into a
+# workers facade and redirect these deps.
+[[modules]]
+path = "mindroom.api.sandbox_runner"
+depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.api.sandbox_protocol",
+    "mindroom.api.sandbox_worker_prep",
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.credentials",
+    "mindroom.logging_config",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.plugin_imports",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workers.backends.local",
+]
+
+[[modules]]
+path = "mindroom.api.sandbox_runner_app"
+depends_on = ["mindroom.api.sandbox_runner"]
+
+[[modules]]
+path = "mindroom.api.sandbox_worker_prep"
+depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.logging_config",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workers.backend",
+    "mindroom.workers.backends.local",
+    "mindroom.workers.models",
+]
+
+[[modules]]
+path = "mindroom.api.schedules"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.users",
+    "mindroom.scheduling",
+]
+
+[[modules]]
+path = "mindroom.api.skills"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.tool_system.skills",
+]
+
+[[modules]]
+path = "mindroom.api.workers"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.workers.runtime",
 ]
 
 [[modules]]
@@ -830,6 +988,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.api.openai_compat",
+    "mindroom.commands.handler",
     "mindroom.custom_tools.matrix_message",
     "mindroom.custom_tools.matrix_room",
     "mindroom.edit_regenerator",
@@ -949,6 +1108,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.bot_runtime_view",
     "mindroom.bot_room_lifecycle",
+    "mindroom.commands.config_confirmation",
     "mindroom.constants",
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
@@ -977,13 +1137,99 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.cli"
+depends_on = []
+
+[[modules]]
+path = "mindroom.cli.banner"
+depends_on = []
+
+[[modules]]
+path = "mindroom.cli.config"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.credentials_sync",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workspaces",
+]
+
+[[modules]]
+path = "mindroom.cli.connect"
+depends_on = ["mindroom.constants"]
+
+[[modules]]
+path = "mindroom.cli.doctor"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.embeddings",
+    "mindroom.matrix.health",
+]
+
+[[modules]]
+path = "mindroom.cli.local_stack"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.matrix.health",
+]
+
+[[modules]]
+path = "mindroom.cli.main"
+depends_on = [
+    "mindroom",
+    "mindroom.avatar_generation",
+    "mindroom.cli.banner",
+    "mindroom.cli.config",
+    "mindroom.cli.connect",
+    "mindroom.cli.doctor",
+    "mindroom.cli.local_stack",
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.error_handling",
+    "mindroom.frontend_assets",
+    "mindroom.orchestrator",
+]
+
+[[modules]]
+path = "mindroom.commands"
+depends_on = []
+
+[[modules]]
+path = "mindroom.commands.config_commands"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.config.main",
+    "mindroom.logging_config",
+]
+
+[[modules]]
+path = "mindroom.commands.config_confirmation"
+depends_on = [
+    "mindroom.commands.config_commands",
+    "mindroom.logging_config",
+]
+
+[[modules]]
+path = "mindroom.commands.parsing"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+]
+
+[[modules]]
 path = "mindroom.commands.handler"
 depends_on = [
-    "mindroom.agents",
+    "mindroom.commands.config_commands",
+    "mindroom.commands.config_confirmation",
+    "mindroom.commands.parsing",
     "mindroom.constants",
+    "mindroom.handled_turns",
+    "mindroom.logging_config",
     "mindroom.matrix.event_info",
-    "mindroom.runtime_resolution",
-    "mindroom.scheduling", "mindroom.tool_system.metadata", "mindroom.tool_system.skills", "mindroom.tool_system.worker_routing", "mindroom.tool_system.runtime_context",
+    "mindroom.scheduling",
+    "mindroom.thread_utils",
 ]
 
 [[modules]]
@@ -1194,6 +1440,7 @@ depends_on = [
 path = "mindroom.turn_controller"
 depends_on = [
     "mindroom.commands.handler",
+    "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.final_delivery",

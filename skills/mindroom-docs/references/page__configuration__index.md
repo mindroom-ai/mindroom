@@ -229,6 +229,7 @@ defaults:
     update_interval: 5.0           # Default: 5.0 (steady-state seconds between streamed edits)
     min_update_interval: 0.5       # Default: 0.5 (fast-start seconds between early edits)
     interval_ramp_seconds: 15.0    # Default: 15.0 (set 0 to disable interval ramping)
+    max_idle: 2.0                  # Default: 2.0 (event-driven idle ceiling before the next edit)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
@@ -250,6 +251,7 @@ defaults:
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
+  thread_summary_temperature: 0.2  # Default: 0.2 (set null to omit temperature and use provider defaults)
   thread_summary_first_threshold: 1  # Default: 1 (first automatic thread summary after first message)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
 
@@ -257,6 +259,10 @@ defaults:
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
+
+MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
+Set it to `null` to omit the field and use provider defaults.
+MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
 Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.

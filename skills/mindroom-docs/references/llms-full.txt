@@ -966,6 +966,7 @@ defaults:
     update_interval: 5.0           # Default: 5.0 (steady-state seconds between streamed edits)
     min_update_interval: 0.5       # Default: 0.5 (fast-start seconds between early edits)
     interval_ramp_seconds: 15.0    # Default: 15.0 (set 0 to disable interval ramping)
+    max_idle: 2.0                  # Default: 2.0 (event-driven idle ceiling before the next edit)
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
@@ -987,6 +988,7 @@ defaults:
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
+  thread_summary_temperature: 0.2  # Default: 0.2 (set null to omit temperature and use provider defaults)
   thread_summary_first_threshold: 1  # Default: 1 (first automatic thread summary after first message)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
 
@@ -994,6 +996,10 @@ defaults:
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
+
+MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
+Set it to `null` to omit the field and use provider defaults.
+MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
 Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
@@ -1703,6 +1709,7 @@ defaults:
     update_interval: 5.0                # Steady-state seconds between streamed edits
     min_update_interval: 0.5            # Fast-start seconds between early edits
     interval_ramp_seconds: 15.0         # Set 0 to disable interval ramping
+    max_idle: 2.0                       # Event-driven idle ceiling before the next edit
   compress_tool_results: false          # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
   # Auto-compaction is disabled until you author this block.
   # compaction:
@@ -9847,6 +9854,7 @@ defaults:
     update_interval: 5.0         # Default: 5.0 steady-state seconds between edits
     min_update_interval: 0.5     # Default: 0.5 fast-start seconds between early edits
     interval_ramp_seconds: 15.0  # Default: 15.0; set 0 to disable ramping
+    max_idle: 2.0                # Default: 2.0 event-driven idle ceiling before the next edit
 ```
 
 These timing settings are global-only. Agents inherit them from `defaults` and cannot override them individually.
@@ -9884,7 +9892,9 @@ MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
 - **Character-based**: An edit is also triggered when enough new characters have accumulated. The character threshold ramps from 48 characters (fast start) to 240 characters (steady-state) over the ramp-up period.
 - **Ramp-up**: `defaults.streaming.min_update_interval` and `defaults.streaming.interval_ramp_seconds` control how quickly the time-based interval ramps from a fast start to the steady-state value. By default it ramps from 0.5s to 5s over 15 seconds. Setting `interval_ramp_seconds: 0` disables the ramp and uses the steady-state interval immediately.
 - **Shared ramp window**: The same ramp window also controls the built-in character threshold ramp from 48 characters (fast start) to 240 characters (steady-state).
-- **Minimum interval**: A hard floor (0.35s) prevents edit spam even when character thresholds are met.
+- **Minimum interval**: A hard floor (0.35s) applies to character-triggered and idle-triggered throttled edits. Time-triggered edits still follow the current ramped interval.
+- **Idle flush**: `defaults.streaming.max_idle` triggers an edit on the next streaming event after 2.0s without a new delta, but only once `min_char_update_interval` has also elapsed. This is event-driven and does not run on a background timer.
+- **Tool-start boundary refresh**: Visible tool-start markers request an immediate refresh so the marker can surface without waiting for later text. Rapid back-to-back tool starts are coalesced by the single delivery owner instead of forcing one Matrix edit per tool.
 
 ## Tool Calls During Streaming
 

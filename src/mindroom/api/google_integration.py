@@ -19,6 +19,8 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom import constants
+from mindroom.api.config_lifecycle import api_runtime_paths
+from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
     consume_pending_oauth_request,
@@ -196,8 +198,6 @@ def _refresh_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
 
 def _require_request_snapshot(request: Request) -> ApiSnapshot:
     """Return the auth-bound API snapshot for one protected dashboard request."""
-    from mindroom.api.main import request_api_snapshot  # noqa: PLC0415
-
     snapshot = request_api_snapshot(request)
     if snapshot is None:
         msg = "Authenticated request is missing its bound API snapshot"
@@ -436,8 +436,6 @@ async def disconnect(request: Request, agent_name: str | None = None) -> dict[st
 @router.post("/configure")
 async def configure(request: Request, credentials: dict[str, str]) -> dict[str, Any]:
     """Configure Google OAuth credentials manually."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
     client_id = credentials.get("client_id")
     client_secret = credentials.get("client_secret")
     project_id = credentials.get("project_id", "mindroom-integration")
@@ -473,8 +471,6 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
 @router.post("/reset")
 async def reset(request: Request) -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
     try:
         from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
 
