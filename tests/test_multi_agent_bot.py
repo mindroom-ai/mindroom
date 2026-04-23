@@ -13178,6 +13178,76 @@ class TestMultiAgentOrchestrator:
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
+    async def test_clean_resolution_fires_room_drained_for_deferred_room(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Deferred room leaves should wake up when a pending approval resolves cleanly."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+
+        router_bot = MagicMock()
+        router_bot.agent_name = "router"
+        router_bot.running = True
+        router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        router_bot._room_lifecycle.rooms_to_actually_leave = AsyncMock(return_value=["!R:server"])
+        leave_retried = asyncio.Event()
+
+        async def _leave_rooms(*, room_ids: list[str]) -> None:
+            assert room_ids == ["!R:server"]
+            leave_retried.set()
+
+        router_bot._room_lifecycle.leave_unconfigured_rooms = AsyncMock(side_effect=_leave_rooms)
+        orchestrator.agent_bots = {"router": router_bot}
+
+        store = initialize_approval_store(
+            runtime_paths,
+            sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+            editor=AsyncMock(return_value=True),
+            on_room_drained=orchestrator._on_approval_room_drained,
+            runtime_loop=asyncio.get_running_loop(),
+        )
+        task = asyncio.create_task(
+            store.request_approval(
+                tool_name="run_shell_command",
+                arguments={"command": "echo hi"},
+                agent_name="code",
+                room_id="!R:server",
+                thread_id="$thread",
+                requester_id="@user:localhost",
+                approver_user_id="@user:localhost",
+                matched_rule="run_shell_*",
+                script_path=None,
+                timeout_seconds=60,
+            ),
+        )
+
+        try:
+            async with asyncio.timeout(1):
+                while True:
+                    pending = store.list_pending()
+                    if pending and pending[0].event_id is not None:
+                        break
+                    await asyncio.sleep(0)
+
+            approval_id = pending[0].id
+            orchestrator._pending_room_leaves.add("!R:server")
+
+            await store.approve(approval_id, resolved_by="@user:localhost")
+            decision = await task
+            await asyncio.wait_for(leave_retried.wait(), timeout=1)
+
+            assert decision.status == "approved"
+            router_bot._room_lifecycle.leave_unconfigured_rooms.assert_awaited_once_with(room_ids=["!R:server"])
+            assert "!R:server" not in orchestrator._pending_room_leaves
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
     async def test_deferred_leave_retries_after_runtime_retry_succeeds(
         self,
         tmp_path: Path,

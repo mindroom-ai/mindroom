@@ -13,7 +13,7 @@ import inspect
 import json
 import tempfile
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -543,6 +543,13 @@ class ApprovalManager:
             pending = [approval for approval in self._pending_by_id.values() if approval.status == "pending"]
         return sorted(pending, key=lambda approval: approval.requested_at)
 
+    def _has_pending_in_room(self, room_id: str) -> bool:
+        with self._state_lock:
+            return any(
+                approval.room_id == room_id and approval.status == "pending"
+                for approval in self._pending_by_id.values()
+            )
+
     def list_unsynced_resolved(self) -> list[PendingApproval]:
         """Return resolved approvals whose Matrix cards still need one edit."""
         with self._state_lock:
@@ -645,9 +652,8 @@ class ApprovalManager:
                     max_attempts=1,
                     backoff="fixed",
                 )
-                await self._notify_drained_rooms(
-                    room_ids_before_retry - self._room_ids_with_unsynced_resolution_work(),
-                )
+                for room_id in room_ids_before_retry - self._room_ids_with_unsynced_resolution_work():
+                    await self._check_and_notify_room_drained(room_id)
         finally:
             with self._state_lock:
                 if self._unsynced_resolution_retry_task is current_task:
@@ -655,13 +661,25 @@ class ApprovalManager:
             if self._has_unsynced_resolution_work():
                 self._ensure_unsynced_resolution_retry_task()
 
-    async def _notify_drained_rooms(self, room_ids: set[str]) -> None:
+    async def _check_and_notify_room_drained(self, room_id: str) -> None:
         on_room_drained = self._on_room_drained
-        if not room_ids or on_room_drained is None:
+        if on_room_drained is None:
             return
-        for room_id in room_ids:
-            with suppress(Exception):
-                await on_room_drained(room_id)
+        if self._has_pending_in_room(room_id) or self._has_unsynced_resolution_work_in_rooms({room_id}):
+            return
+        runtime_loop = self._runtime_loop
+        if runtime_loop is not None and runtime_loop.is_running():
+
+            def _schedule_callback() -> None:
+                task = asyncio.create_task(cast("Coroutine[Any, Any, None]", on_room_drained(room_id)))
+                task.add_done_callback(lambda _task: None)
+
+            runtime_loop.call_soon_threadsafe(
+                _schedule_callback,
+            )
+            return
+        task = asyncio.create_task(cast("Coroutine[Any, Any, None]", on_room_drained(room_id)))
+        task.add_done_callback(lambda _task: None)
 
     async def cancel_unsynced_resolution_retry_task(self) -> None:
         """Stop the runtime retry loop for unsynced approval resolution edits."""
@@ -1327,6 +1345,8 @@ class ApprovalManager:
         pending.resolution_synced_at = _utcnow()
         self._persist_request(pending)
         self._discard(pending.id)
+        if schedule_retry and pending.room_id is not None:
+            await self._check_and_notify_room_drained(pending.room_id)
 
     async def _await_approval_decision(self, pending: PendingApproval) -> ApprovalDecision:
         """Wait for one approval result using the already-advertised absolute expiry."""
