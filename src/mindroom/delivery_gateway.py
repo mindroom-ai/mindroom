@@ -352,10 +352,8 @@ class DeliveryGateway:
             if cleanup_failure is not None:
                 return FinalDeliveryOutcome(
                     terminal_status="error",
-                    final_visible_event_id=streamed_event_id,
-                    visible_response_event_id=streamed_event_id,
-                    turn_completion_event_id=streamed_event_id,
-                    last_physical_stream_event_id=streamed_event_id,
+                    event_id=streamed_event_id,
+                    is_visible_response=True,
                     failure_reason=cleanup_failure,
                     mark_handled=True,
                     tool_trace=tuple(tool_trace or ()),
@@ -363,7 +361,7 @@ class DeliveryGateway:
                 )
         return FinalDeliveryOutcome(
             terminal_status="error",
-            final_visible_event_id=None,
+            event_id=None,
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace or ()),
             extra_content=extra_content,
@@ -553,10 +551,8 @@ class DeliveryGateway:
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="error",
-                        final_visible_event_id=request.existing_event_id,
-                        visible_response_event_id=request.existing_event_id,
-                        turn_completion_event_id=request.existing_event_id,
-                        last_physical_stream_event_id=request.existing_event_id,
+                        event_id=request.existing_event_id,
+                        is_visible_response=True,
                         failure_reason=cleanup_failure,
                         mark_handled=True,
                         tool_trace=tuple(request.tool_trace or ()),
@@ -578,10 +574,8 @@ class DeliveryGateway:
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="error",
-                        final_visible_event_id=request.existing_event_id,
-                        visible_response_event_id=request.existing_event_id,
-                        turn_completion_event_id=request.existing_event_id,
-                        last_physical_stream_event_id=request.existing_event_id,
+                        event_id=request.existing_event_id,
+                        is_visible_response=True,
                         failure_reason=cleanup_failure,
                         mark_handled=True,
                         tool_trace=tuple(request.tool_trace or ()),
@@ -590,8 +584,8 @@ class DeliveryGateway:
             if request.existing_event_id is not None and not request.existing_event_is_placeholder:
                 return FinalDeliveryOutcome(
                     terminal_status="error",
-                    final_visible_event_id=request.existing_event_id,
-                    visible_response_event_id=request.existing_event_id,
+                    event_id=request.existing_event_id,
+                    is_visible_response=True,
                     failure_reason=failure_reason,
                     retryable=True,
                     tool_trace=tuple(request.tool_trace or ()),
@@ -599,7 +593,7 @@ class DeliveryGateway:
                 )
             return FinalDeliveryOutcome(
                 terminal_status="error",
-                final_visible_event_id=None,
+                event_id=None,
                 failure_reason=failure_reason,
                 retryable=True,
                 tool_trace=tuple(request.tool_trace or ()),
@@ -625,10 +619,8 @@ class DeliveryGateway:
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="error",
-                        final_visible_event_id=request.existing_event_id,
-                        visible_response_event_id=request.existing_event_id,
-                        turn_completion_event_id=request.existing_event_id,
-                        last_physical_stream_event_id=request.existing_event_id,
+                        event_id=request.existing_event_id,
+                        is_visible_response=True,
                         failure_reason=cleanup_failure,
                         mark_handled=True,
                         suppressed=True,
@@ -637,7 +629,7 @@ class DeliveryGateway:
                     )
                 return FinalDeliveryOutcome(
                     terminal_status="cancelled",
-                    final_visible_event_id=None,
+                    event_id=None,
                     failure_reason="suppressed_by_hook",
                     mark_handled=True,
                     suppressed=True,
@@ -647,8 +639,8 @@ class DeliveryGateway:
             if request.existing_event_id is not None:
                 return FinalDeliveryOutcome(
                     terminal_status="cancelled",
-                    final_visible_event_id=request.existing_event_id,
-                    visible_response_event_id=request.existing_event_id,
+                    event_id=request.existing_event_id,
+                    is_visible_response=True,
                     failure_reason="suppressed_by_hook",
                     retryable=True,
                     suppressed=True,
@@ -657,7 +649,7 @@ class DeliveryGateway:
                 )
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
-                final_visible_event_id=None,
+                event_id=None,
                 failure_reason="suppressed_by_hook",
                 mark_handled=True,
                 suppressed=True,
@@ -681,13 +673,8 @@ class DeliveryGateway:
             if edited:
                 return FinalDeliveryOutcome(
                     terminal_status="completed",
-                    final_visible_event_id=request.existing_event_id,
-                    visible_response_event_id=request.existing_event_id,
-                    response_identity_event_id=request.existing_event_id,
-                    turn_completion_event_id=request.existing_event_id,
-                    last_physical_stream_event_id=(
-                        request.existing_event_id if request.existing_event_is_placeholder else None
-                    ),
+                    event_id=request.existing_event_id,
+                    is_visible_response=True,
                     final_visible_body=display_text,
                     canonical_final_body_candidate=draft.response_text,
                     delivery_kind="edited",
@@ -715,10 +702,8 @@ class DeliveryGateway:
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="error",
-                        final_visible_event_id=request.existing_event_id,
-                        visible_response_event_id=request.existing_event_id,
-                        turn_completion_event_id=request.existing_event_id,
-                        last_physical_stream_event_id=request.existing_event_id,
+                        event_id=request.existing_event_id,
+                        is_visible_response=True,
                         failure_reason=cleanup_failure,
                         mark_handled=True,
                         tool_trace=tuple(draft.tool_trace or ()),
@@ -726,7 +711,7 @@ class DeliveryGateway:
                     )
                 return FinalDeliveryOutcome(
                     terminal_status="error",
-                    final_visible_event_id=None,
+                    event_id=None,
                     failure_reason="delivery_failed",
                     retryable=True,
                     tool_trace=tuple(draft.tool_trace or ()),
@@ -734,8 +719,8 @@ class DeliveryGateway:
                 )
             return FinalDeliveryOutcome(
                 terminal_status="error",
-                final_visible_event_id=request.existing_event_id,
-                visible_response_event_id=request.existing_event_id,
+                event_id=request.existing_event_id,
+                is_visible_response=True,
                 failure_reason="delivery_failed",
                 retryable=True,
                 tool_trace=tuple(draft.tool_trace or ()),
@@ -753,7 +738,7 @@ class DeliveryGateway:
         if event_id is None:
             return FinalDeliveryOutcome(
                 terminal_status="error",
-                final_visible_event_id=None,
+                event_id=None,
                 failure_reason="delivery_failed",
                 retryable=True,
                 tool_trace=tuple(draft.tool_trace or ()),
@@ -761,10 +746,8 @@ class DeliveryGateway:
             )
         return FinalDeliveryOutcome(
             terminal_status="completed",
-            final_visible_event_id=event_id,
-            visible_response_event_id=event_id,
-            response_identity_event_id=event_id,
-            turn_completion_event_id=event_id,
+            event_id=event_id,
+            is_visible_response=True,
             final_visible_body=display_text,
             canonical_final_body_candidate=draft.response_text,
             delivery_kind="sent",
@@ -794,10 +777,8 @@ class DeliveryGateway:
         if edited:
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
-                final_visible_event_id=request.event_id,
-                visible_response_event_id=request.event_id,
-                turn_completion_event_id=request.event_id,
-                last_physical_stream_event_id=request.event_id if request.existing_event_is_placeholder else None,
+                event_id=request.event_id,
+                is_visible_response=True,
                 final_visible_body=cancelled_text,
                 delivery_kind="edited",
                 failure_reason=failure_reason,
@@ -807,9 +788,8 @@ class DeliveryGateway:
         if not request.existing_event_is_placeholder:
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
-                final_visible_event_id=request.event_id,
-                visible_response_event_id=request.event_id,
-                turn_completion_event_id=request.event_id,
+                event_id=request.event_id,
+                is_visible_response=True,
                 final_visible_body=cancelled_text,
                 failure_reason=failure_reason,
                 retryable=True,
@@ -827,17 +807,15 @@ class DeliveryGateway:
         if cleanup_failure is not None:
             return FinalDeliveryOutcome(
                 terminal_status="error",
-                final_visible_event_id=request.event_id,
-                visible_response_event_id=request.event_id,
-                turn_completion_event_id=request.event_id,
-                last_physical_stream_event_id=request.event_id,
+                event_id=request.event_id,
+                is_visible_response=True,
                 failure_reason=cleanup_failure,
                 mark_handled=True,
                 extra_content=extra_content,
             )
         return FinalDeliveryOutcome(
             terminal_status="cancelled",
-            final_visible_event_id=None,
+            event_id=None,
             failure_reason=failure_reason,
             retryable=True,
             extra_content=extra_content,
@@ -942,11 +920,8 @@ class DeliveryGateway:
             return None
         return FinalDeliveryOutcome(
             terminal_status="completed",
-            final_visible_event_id=event_id,
-            visible_response_event_id=event_id,
-            response_identity_event_id=event_id,
-            turn_completion_event_id=event_id,
-            last_physical_stream_event_id=event_id,
+            event_id=event_id,
+            is_visible_response=True,
             final_visible_body=interactive_response.formatted_text,
             canonical_final_body_candidate=canonical_final_body_candidate,
             delivery_kind=delivery_kind,
@@ -979,9 +954,8 @@ class DeliveryGateway:
                 if existing_visible_event_id is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="cancelled",
-                        final_visible_event_id=existing_visible_event_id,
-                        visible_response_event_id=existing_visible_event_id,
-                        turn_completion_event_id=existing_visible_event_id,
+                        event_id=existing_visible_event_id,
+                        is_visible_response=True,
                         failure_reason=stream_outcome.failure_reason or "stream_finalize_cancelled",
                         retryable=True,
                         tool_trace=tuple(request.tool_trace or ()),
@@ -1013,8 +987,8 @@ class DeliveryGateway:
                 if existing_visible_event_id is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="error",
-                        final_visible_event_id=existing_visible_event_id,
-                        visible_response_event_id=existing_visible_event_id,
+                        event_id=existing_visible_event_id,
+                        is_visible_response=True,
                         failure_reason=stream_outcome.failure_reason or "stream_finalize_error",
                         retryable=True,
                         tool_trace=tuple(request.tool_trace or ()),
@@ -1080,8 +1054,8 @@ class DeliveryGateway:
             ):
                 return FinalDeliveryOutcome(
                     terminal_status="error",
-                    final_visible_event_id=streamed_event_id,
-                    visible_response_event_id=streamed_event_id,
+                    event_id=streamed_event_id,
+                    is_visible_response=True,
                     failure_reason=failure_reason,
                     retryable=True,
                     tool_trace=tuple(request.tool_trace or ()),
@@ -1090,11 +1064,8 @@ class DeliveryGateway:
             if visible_stream_event_id is not None:
                 return FinalDeliveryOutcome(
                     terminal_status="error",
-                    final_visible_event_id=visible_stream_event_id,
-                    visible_response_event_id=visible_stream_event_id,
-                    response_identity_event_id=visible_stream_event_id,
-                    turn_completion_event_id=visible_stream_event_id,
-                    last_physical_stream_event_id=visible_stream_event_id,
+                    event_id=visible_stream_event_id,
+                    is_visible_response=True,
                     final_visible_body=streamed_text or None,
                     canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
                     failure_reason=failure_reason,
@@ -1106,7 +1077,7 @@ class DeliveryGateway:
                 )
             return FinalDeliveryOutcome(
                 terminal_status="error",
-                final_visible_event_id=None,
+                event_id=None,
                 failure_reason=failure_reason,
                 retryable=True,
                 tool_trace=tuple(request.tool_trace or ()),
@@ -1135,8 +1106,8 @@ class DeliveryGateway:
                 if existing_visible_event_id is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="error",
-                        final_visible_event_id=existing_visible_event_id,
-                        visible_response_event_id=existing_visible_event_id,
+                        event_id=existing_visible_event_id,
+                        is_visible_response=True,
                         failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
                         retryable=True,
                         tool_trace=tuple(request.tool_trace or ()),
@@ -1144,7 +1115,7 @@ class DeliveryGateway:
                     )
             return FinalDeliveryOutcome(
                 terminal_status="error",
-                final_visible_event_id=None,
+                event_id=None,
                 failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
                 retryable=True,
                 tool_trace=tuple(request.tool_trace or ()),
@@ -1196,11 +1167,8 @@ class DeliveryGateway:
         interactive_response = interactive.parse_and_format_interactive(streamed_text, extract_mapping=True)
         return FinalDeliveryOutcome(
             terminal_status="completed",
-            final_visible_event_id=streamed_event_id,
-            visible_response_event_id=streamed_event_id,
-            response_identity_event_id=streamed_event_id,
-            turn_completion_event_id=streamed_event_id,
-            last_physical_stream_event_id=streamed_event_id,
+            event_id=streamed_event_id,
+            is_visible_response=True,
             final_visible_body=interactive_response.formatted_text,
             canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
             delivery_kind=request.initial_delivery_kind,
@@ -1234,10 +1202,10 @@ class DeliveryGateway:
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
             )
-            if cleanup_outcome.visible_response_event_id is None:
+            if cleanup_outcome.event_id is None or not cleanup_outcome.is_visible_response:
                 return FinalDeliveryOutcome(
                     terminal_status="cancelled" if request.cancelled else "error",
-                    final_visible_event_id=None,
+                    event_id=None,
                     failure_reason=request.failure_reason,
                     retryable=True,
                     tool_trace=tuple(request.tool_trace or ()),
@@ -1250,11 +1218,8 @@ class DeliveryGateway:
         if visible_stream_event_id is not None:
             return FinalDeliveryOutcome(
                 terminal_status="cancelled" if request.cancelled else "error",
-                final_visible_event_id=visible_stream_event_id,
-                visible_response_event_id=visible_stream_event_id,
-                response_identity_event_id=None if request.cancelled else visible_stream_event_id,
-                turn_completion_event_id=visible_stream_event_id,
-                last_physical_stream_event_id=visible_stream_event_id,
+                event_id=visible_stream_event_id,
+                is_visible_response=True,
                 final_visible_body=streamed_text or None,
                 canonical_final_body_candidate=stream_outcome.canonical_final_body_candidate,
                 failure_reason=request.failure_reason,
@@ -1268,9 +1233,8 @@ class DeliveryGateway:
         if request.existing_event_id is not None and not request.existing_event_is_placeholder:
             return FinalDeliveryOutcome(
                 terminal_status="cancelled" if request.cancelled else "error",
-                final_visible_event_id=request.existing_event_id,
-                visible_response_event_id=request.existing_event_id,
-                turn_completion_event_id=request.existing_event_id if request.cancelled else None,
+                event_id=request.existing_event_id,
+                is_visible_response=True,
                 failure_reason=request.failure_reason,
                 retryable=True,
                 tool_trace=tuple(request.tool_trace or ()),
@@ -1278,7 +1242,7 @@ class DeliveryGateway:
             )
         return FinalDeliveryOutcome(
             terminal_status="cancelled" if request.cancelled else "error",
-            final_visible_event_id=None,
+            event_id=None,
             failure_reason=request.failure_reason,
             retryable=True,
             tool_trace=tuple(request.tool_trace or ()),

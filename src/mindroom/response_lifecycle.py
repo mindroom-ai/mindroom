@@ -118,7 +118,8 @@ class ResponseLifecycle:
         try:
             if final_delivery_outcome.terminal_status == "completed":
                 if (
-                    final_delivery_outcome.final_visible_event_id is not None
+                    final_delivery_outcome.event_id is not None
+                    and final_delivery_outcome.is_visible_response
                     and final_delivery_outcome.final_visible_body is not None
                     and final_delivery_outcome.delivery_kind is not None
                 ):
@@ -126,7 +127,7 @@ class ResponseLifecycle:
                         correlation_id=self.correlation_id,
                         envelope=self.response_envelope,
                         response_text=final_delivery_outcome.final_visible_body,
-                        response_event_id=final_delivery_outcome.final_visible_event_id,
+                        response_event_id=final_delivery_outcome.event_id,
                         delivery_kind=final_delivery_outcome.delivery_kind,
                         response_kind=self.response_kind,
                         continue_on_cancelled=True,
@@ -135,28 +136,30 @@ class ResponseLifecycle:
                 await self.runner.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response(
                     correlation_id=self.correlation_id,
                     envelope=self.response_envelope,
-                    visible_response_event_id=final_delivery_outcome.visible_response_event_id,
+                    visible_response_event_id=(
+                        final_delivery_outcome.event_id if final_delivery_outcome.is_visible_response else None
+                    ),
                     response_kind=self.response_kind,
                     failure_reason=final_delivery_outcome.failure_reason,
                 )
         except asyncio.CancelledError as error:
-            if final_delivery_outcome.turn_completion_event_id is None:
+            if final_delivery_outcome.event_id is None:
                 raise
             self.runner._log_post_response_effects_failure(
                 response_kind=self.response_kind,
-                response_event_id=final_delivery_outcome.turn_completion_event_id,
+                response_event_id=final_delivery_outcome.event_id,
                 error=error,
             )
         except Exception as error:
-            if final_delivery_outcome.turn_completion_event_id is None:
+            if final_delivery_outcome.event_id is None:
                 raise
             self.runner._log_post_response_effects_failure(
                 response_kind=self.response_kind,
-                response_event_id=final_delivery_outcome.turn_completion_event_id,
+                response_event_id=final_delivery_outcome.event_id,
                 error=error,
             )
         await self.apply_effects_safely(
-            response_event_id=final_delivery_outcome.turn_completion_event_id,
+            response_event_id=final_delivery_outcome.event_id,
             post_response_outcome=lambda: build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )

@@ -942,7 +942,7 @@ class ResponseRunner:
             return "error"
         if final_delivery_outcome is not None and final_delivery_outcome.delivery_kind is not None:
             return final_delivery_outcome.delivery_kind
-        if final_delivery_outcome is not None and final_delivery_outcome.visible_response_event_id is not None:
+        if final_delivery_outcome is not None and final_delivery_outcome.event_id is not None and final_delivery_outcome.is_visible_response:
             return "visible_response_preserved"
         return "no_visible_response"
 
@@ -1433,7 +1433,7 @@ class ResponseRunner:
                         )
                         final_delivery_outcome = FinalDeliveryOutcome(
                             terminal_status="cancelled",
-                            final_visible_event_id=None,
+                            event_id=None,
                             failure_reason=failure_reason,
                             retryable=True,
                         )
@@ -2112,7 +2112,7 @@ class ResponseRunner:
                 raise
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
-                final_visible_event_id=None,
+                event_id=None,
                 failure_reason=failure_reason,
                 retryable=True,
             )

@@ -186,19 +186,35 @@ def _outcome(
     suppressed: bool = False,
     extra_content: dict[str, object] | None = None,
 ) -> FinalDeliveryOutcome:
+    event_id = (
+        response_identity_event_id
+        or visible_response_event_id
+        or final_visible_event_id
+        or turn_completion_event_id
+        or last_physical_stream_event_id
+    )
+    resolved_suppressed = suppressed or (
+        failure_reason == "suppressed_by_hook" and response_identity_event_id is None
+    )
+    is_visible_response = any(
+        value is not None
+        for value in (
+            final_visible_event_id,
+            visible_response_event_id,
+            response_identity_event_id,
+            last_physical_stream_event_id,
+        )
+    )
     return FinalDeliveryOutcome(
         terminal_status=terminal_status,
-        final_visible_event_id=final_visible_event_id,
-        visible_response_event_id=visible_response_event_id,
-        response_identity_event_id=response_identity_event_id,
-        turn_completion_event_id=turn_completion_event_id,
-        last_physical_stream_event_id=last_physical_stream_event_id,
+        event_id=event_id,
+        is_visible_response=is_visible_response,
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
         failure_reason=failure_reason,
         mark_handled=mark_handled,
         retryable=retryable,
-        suppressed=suppressed,
+        suppressed=resolved_suppressed,
         extra_content=extra_content,
     )
 
@@ -2969,10 +2985,8 @@ class TestAgentBot:
         mock_deliver_final = AsyncMock(
             return_value=FinalDeliveryOutcome(
                 terminal_status="completed",
-                final_visible_event_id="$streaming",
-                visible_response_event_id="$streaming",
-                response_identity_event_id="$streaming",
-                turn_completion_event_id="$streaming",
+                event_id="$streaming",
+                is_visible_response=True,
                 final_visible_body="updated text",
                 delivery_kind="edited",
                 mark_handled=True,
@@ -3655,10 +3669,8 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
                         terminal_status="completed",
-                        final_visible_event_id="$response",
-                        visible_response_event_id="$response",
-                        response_identity_event_id="$response",
-                        turn_completion_event_id="$response",
+                        event_id="$response",
+                        is_visible_response=True,
                         final_visible_body="ok",
                         mark_handled=True,
                     ),
@@ -3772,10 +3784,8 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
                         terminal_status="completed",
-                        final_visible_event_id="$response",
-                        visible_response_event_id="$response",
-                        response_identity_event_id="$response",
-                        turn_completion_event_id="$response",
+                        event_id="$response",
+                        is_visible_response=True,
                         final_visible_body="ok",
                         mark_handled=True,
                     ),
@@ -3868,10 +3878,8 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
                         terminal_status="completed",
-                        final_visible_event_id="$thinking",
-                        visible_response_event_id="$thinking",
-                        response_identity_event_id="$thinking",
-                        turn_completion_event_id="$thinking",
+                        event_id="$thinking",
+                        is_visible_response=True,
                         final_visible_body="",
                         delivery_kind="edited",
                         mark_handled=True,
@@ -3963,10 +3971,8 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
                         terminal_status="completed",
-                        final_visible_event_id="$response",
-                        visible_response_event_id="$response",
-                        response_identity_event_id="$response",
-                        turn_completion_event_id="$response",
+                        event_id="$response",
+                        is_visible_response=True,
                         final_visible_body="ok",
                         mark_handled=True,
                     ),
@@ -4062,10 +4068,8 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
                         terminal_status="completed",
-                        final_visible_event_id="$thinking",
-                        visible_response_event_id="$thinking",
-                        response_identity_event_id="$thinking",
-                        turn_completion_event_id="$thinking",
+                        event_id="$thinking",
+                        is_visible_response=True,
                         final_visible_body="ok",
                         delivery_kind="edited",
                         mark_handled=True,
@@ -4335,10 +4339,8 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
                         terminal_status="completed",
-                        final_visible_event_id="$response",
-                        visible_response_event_id="$response",
-                        response_identity_event_id="$response",
-                        turn_completion_event_id="$response",
+                        event_id="$response",
+                        is_visible_response=True,
                         final_visible_body="ok",
                         mark_handled=True,
                     ),
@@ -7911,10 +7913,8 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
                         terminal_status="completed",
-                        final_visible_event_id="$response",
-                        visible_response_event_id="$response",
-                        response_identity_event_id="$response",
-                        turn_completion_event_id="$response",
+                        event_id="$response",
+                        is_visible_response=True,
                         final_visible_body="ok",
                         mark_handled=True,
                     ),

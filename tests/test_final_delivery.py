@@ -11,9 +11,10 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 
 @dataclass(frozen=True)
 class _Expectation:
+    event_id: str | None
+    is_visible_response: bool
     visible_response_event_id: str | None
     response_identity_event_id: str | None
-    turn_completion_event_id: str | None
     mark_handled: bool
     retryable: bool
 
@@ -24,111 +25,104 @@ class _Expectation:
         pytest.param(
             FinalDeliveryOutcome(
                 terminal_status="completed",
-                final_visible_event_id="$final",
-                visible_response_event_id="$final",
-                response_identity_event_id="$final",
-                turn_completion_event_id="$final",
+                event_id="$final",
+                is_visible_response=True,
                 final_visible_body="hello",
                 delivery_kind="sent",
                 mark_handled=True,
             ),
-            _Expectation("$final", "$final", "$final", True, False),
+            _Expectation("$final", True, "$final", "$final", True, False),
             id="completed-visible-delivery",
         ),
         pytest.param(
             FinalDeliveryOutcome(
                 terminal_status="completed",
-                final_visible_event_id="$stream",
-                visible_response_event_id="$stream",
-                response_identity_event_id="$stream",
-                turn_completion_event_id="$stream",
+                event_id="$stream",
+                is_visible_response=True,
                 final_visible_body="partial",
                 mark_handled=True,
             ),
-            _Expectation("$stream", "$stream", "$stream", True, False),
+            _Expectation("$stream", True, "$stream", "$stream", True, False),
             id="completed-preserved-visible-stream",
         ),
         pytest.param(
             FinalDeliveryOutcome(
                 terminal_status="cancelled",
-                final_visible_event_id="$stream",
-                visible_response_event_id="$stream",
-                turn_completion_event_id="$stream",
+                event_id="$stream",
+                is_visible_response=True,
                 final_visible_body="partial",
                 failure_reason="cancelled_by_user",
                 retryable=True,
             ),
-            _Expectation("$stream", None, "$stream", False, True),
+            _Expectation("$stream", True, "$stream", None, False, True),
             id="cancelled-visible-stream",
         ),
         pytest.param(
             FinalDeliveryOutcome(
                 terminal_status="error",
-                final_visible_event_id="$stream",
-                visible_response_event_id="$stream",
-                response_identity_event_id="$stream",
-                turn_completion_event_id="$stream",
+                event_id="$stream",
+                is_visible_response=True,
                 final_visible_body="partial",
                 failure_reason="terminal_update_failed",
                 mark_handled=True,
             ),
-            _Expectation("$stream", "$stream", "$stream", True, False),
+            _Expectation("$stream", True, "$stream", "$stream", True, False),
             id="error-visible-stream",
         ),
         pytest.param(
             FinalDeliveryOutcome(
                 terminal_status="completed",
-                final_visible_event_id=None,
+                event_id=None,
                 failure_reason="suppressed_by_hook",
                 mark_handled=True,
                 suppressed=True,
             ),
-            _Expectation(None, None, None, True, False),
+            _Expectation(None, False, None, None, True, False),
             id="suppressed-without-visible-response",
         ),
         pytest.param(
             FinalDeliveryOutcome(
                 terminal_status="error",
-                final_visible_event_id="$placeholder",
-                visible_response_event_id="$placeholder",
-                turn_completion_event_id="$placeholder",
+                event_id="$placeholder",
+                is_visible_response=True,
                 failure_reason="suppressed_by_hook",
                 mark_handled=True,
             ),
-            _Expectation("$placeholder", None, "$placeholder", True, False),
+            _Expectation("$placeholder", True, "$placeholder", "$placeholder", True, False),
             id="suppression-cleanup-failed",
         ),
         pytest.param(
             FinalDeliveryOutcome(
                 terminal_status="error",
-                final_visible_event_id=None,
+                event_id=None,
                 failure_reason="delivery_failed",
                 retryable=True,
             ),
-            _Expectation(None, None, None, False, True),
+            _Expectation(None, False, None, None, False, True),
             id="error-without-visible-response",
         ),
     ],
 )
-def test_final_delivery_outcomes_use_explicit_fields(
+def test_final_delivery_outcomes_use_canonical_event_fields(
     outcome: FinalDeliveryOutcome,
     expected: _Expectation,
 ) -> None:
-    """Call sites should rely on explicit fields, not a state-policy projection."""
+    """Call sites should rely on the canonical event id plus visible-response flag."""
+    assert outcome.event_id == expected.event_id
+    assert outcome.is_visible_response is expected.is_visible_response
     assert outcome.visible_response_event_id == expected.visible_response_event_id
     assert outcome.response_identity_event_id == expected.response_identity_event_id
-    assert outcome.turn_completion_event_id == expected.turn_completion_event_id
     assert outcome.mark_handled is expected.mark_handled
     assert outcome.retryable is expected.retryable
 
 
-def test_final_delivery_outcome_requires_visible_response_before_identity() -> None:
-    """Response identity must remain anchored to a visible response event."""
-    with pytest.raises(ValueError, match="response_identity_event_id requires visible_response_event_id"):
+def test_final_delivery_outcome_requires_event_id_for_visible_response() -> None:
+    """Visible-response outcomes must carry the canonical event id."""
+    with pytest.raises(ValueError, match="is_visible_response requires event_id"):
         FinalDeliveryOutcome(
             terminal_status="completed",
-            final_visible_event_id="$final",
-            response_identity_event_id="$final",
+            event_id=None,
+            is_visible_response=True,
         )
 
 

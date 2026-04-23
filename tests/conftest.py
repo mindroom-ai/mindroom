@@ -121,19 +121,35 @@ def _outcome(
     options_list: tuple[dict[str, str], ...] | None = None,
 ) -> FinalDeliveryOutcome:
     """Build one compact terminal outcome for tests."""
+    event_id = (
+        response_identity_event_id
+        or visible_response_event_id
+        or final_visible_event_id
+        or turn_completion_event_id
+        or last_physical_stream_event_id
+    )
+    resolved_suppressed = suppressed or (
+        failure_reason == "suppressed_by_hook" and response_identity_event_id is None
+    )
+    is_visible_response = any(
+        value is not None
+        for value in (
+            final_visible_event_id,
+            visible_response_event_id,
+            response_identity_event_id,
+            last_physical_stream_event_id,
+        )
+    )
     return FinalDeliveryOutcome(
         terminal_status=terminal_status,
-        final_visible_event_id=final_visible_event_id,
-        visible_response_event_id=visible_response_event_id,
-        response_identity_event_id=response_identity_event_id,
-        turn_completion_event_id=turn_completion_event_id,
-        last_physical_stream_event_id=last_physical_stream_event_id,
+        event_id=event_id,
+        is_visible_response=is_visible_response,
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
         failure_reason=failure_reason,
         mark_handled=mark_handled,
         retryable=retryable,
-        suppressed=suppressed,
+        suppressed=resolved_suppressed,
         tool_trace=tool_trace,
         extra_content=dict(extra_content or {}),
         option_map=option_map,

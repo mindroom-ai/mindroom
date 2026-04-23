@@ -304,8 +304,18 @@ class EditRegenerator:
             self._record_turn_record(
                 replace(
                     regeneration_turn_record,
-                    response_event_id=regenerated_resolution.response_identity_event_id,
-                    visible_echo_event_id=regenerated_resolution.visible_response_event_id,
+                    response_event_id=(
+                        regenerated_resolution.event_id
+                        if (
+                            regenerated_resolution.mark_handled
+                            and regenerated_resolution.is_visible_response
+                            and not regenerated_resolution.suppressed
+                        )
+                        else None
+                    ),
+                    visible_echo_event_id=(
+                        regenerated_resolution.event_id if regenerated_resolution.is_visible_response else None
+                    ),
                 ),
             )
             self._logger().info("Successfully regenerated response for edited message")

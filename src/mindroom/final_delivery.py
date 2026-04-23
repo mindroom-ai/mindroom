@@ -61,11 +61,8 @@ class StreamTransportOutcome:  # noqa: D101
 @dataclass(frozen=True)
 class FinalDeliveryOutcome:  # noqa: D101
     terminal_status: TerminalStatus
-    final_visible_event_id: str | None
-    visible_response_event_id: str | None = None
-    response_identity_event_id: str | None = None
-    turn_completion_event_id: str | None = None
-    last_physical_stream_event_id: str | None = None
+    event_id: str | None
+    is_visible_response: bool = False
     final_visible_body: str | None = None
     canonical_final_body_candidate: str | None = None
     delivery_kind: VisibleDeliveryKind | None = None
@@ -83,14 +80,24 @@ class FinalDeliveryOutcome:  # noqa: D101
         object.__setattr__(self, "extra_content", dict(self.extra_content or {}))
         object.__setattr__(self, "option_map", _copy_dict(self.option_map))
         object.__setattr__(self, "options_list", _copy_options(self.options_list))
-        if self.delivery_kind is not None and self.final_visible_event_id is None:
-            raise ValueError("delivery_kind requires final_visible_event_id")  # noqa: EM101, TRY003
-        if self.response_identity_event_id is not None and self.visible_response_event_id is None:
-            raise ValueError("response_identity_event_id requires visible_response_event_id")  # noqa: EM101, TRY003
+        if self.is_visible_response and self.event_id is None:
+            raise ValueError("is_visible_response requires event_id")  # noqa: EM101, TRY003
+        if self.delivery_kind is not None and not self.is_visible_response:
+            raise ValueError("delivery_kind requires a visible response event")  # noqa: EM101, TRY003
 
     @property
-    def event_id(self) -> str | None:  # noqa: D102
-        return self.visible_response_event_id
+    def final_visible_event_id(self) -> str | None:  # noqa: D102
+        return self.event_id if self.is_visible_response else None
+
+    @property
+    def visible_response_event_id(self) -> str | None:  # noqa: D102
+        return self.final_visible_event_id
+
+    @property
+    def response_identity_event_id(self) -> str | None:  # noqa: D102
+        if self.mark_handled and self.is_visible_response and not self.suppressed:
+            return self.event_id
+        return None
 
     @property
     def response_text(self) -> str:  # noqa: D102
@@ -101,7 +108,7 @@ class FinalDeliveryOutcome:  # noqa: D101
         """Return the canonical empty-prompt terminal outcome."""
         return cls(
             terminal_status="cancelled",
-            final_visible_event_id=None,
+            event_id=None,
             failure_reason="empty_prompt",
             retryable=True,
         )

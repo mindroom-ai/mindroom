@@ -423,10 +423,8 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
             DeliveryOutcome(
                 final_delivery_outcome=FinalDeliveryOutcome(
                     terminal_status="completed",
-                    final_visible_event_id=event_id,
-                    visible_response_event_id=tracked_event_id or event_id,
-                    response_identity_event_id=tracked_event_id or event_id,
-                    turn_completion_event_id=event_id,
+                    event_id=tracked_event_id or event_id,
+                    is_visible_response=True,
                     final_visible_body="visible response",
                     delivery_kind=expected_delivery_kind,
                 ),

@@ -250,8 +250,13 @@ async def apply_post_response_effects(
     """Apply the shared side effects that happen after response delivery is known."""
     final_outcome = outcome.final_delivery_outcome
     response_identity_event_id = (
-        final_outcome.response_identity_event_id
-        if final_outcome.mark_handled and final_outcome.response_identity_event_id is not None
+        final_outcome.event_id
+        if (
+            final_outcome.mark_handled
+            and final_outcome.is_visible_response
+            and not final_outcome.suppressed
+            and final_outcome.event_id is not None
+        )
         else None
     )
     interactive_event_id = (
@@ -261,7 +266,7 @@ async def apply_post_response_effects(
     )
     compaction_event_id = response_identity_event_id
     if compaction_event_id is None and outcome.dispatch_compaction_when_suppressed:
-        compaction_event_id = final_outcome.visible_response_event_id
+        compaction_event_id = final_outcome.event_id if final_outcome.is_visible_response else None
 
     if (
         interactive_event_id is not None

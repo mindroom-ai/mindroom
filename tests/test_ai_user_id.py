@@ -640,9 +640,8 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
         )
         expected_outcome = FinalDeliveryOutcome(
             terminal_status="cancelled",
-            final_visible_event_id="$streaming",
-            visible_response_event_id="$streaming",
-            turn_completion_event_id="$streaming",
+            event_id="$streaming",
+            is_visible_response=True,
             final_visible_body="partial answer\n\n**[Response cancelled by user]**",
             failure_reason="cancelled_by_user",
             retryable=True,
@@ -2759,8 +2758,7 @@ async def test_generate_team_response_helper_routes_placeholder_only_late_failur
             AsyncMock(
                 return_value=FinalDeliveryOutcome(
                     terminal_status="error",
-                    final_visible_event_id=None,
-                    last_physical_stream_event_id=None,
+                    event_id=None,
                     failure_reason="stream boom",
                     retryable=True,
                 ),
@@ -3246,8 +3244,7 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
             AsyncMock(
                 return_value=FinalDeliveryOutcome(
                     terminal_status="error",
-                    final_visible_event_id=None,
-                    last_physical_stream_event_id=None,
+                    event_id=None,
                     failure_reason="stream failure",
                     retryable=True,
                 ),

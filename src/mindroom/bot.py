@@ -1776,8 +1776,8 @@ class TeamBot(AgentBot):
                 )
                 return FinalDeliveryOutcome(
                     terminal_status="error",
-                    final_visible_event_id=existing_event_id,
-                    visible_response_event_id=existing_event_id,
+                    event_id=existing_event_id,
+                    is_visible_response=existing_event_id is not None,
                     failure_reason="delivery_failed",
                     retryable=True,
                 )
@@ -1792,11 +1792,8 @@ class TeamBot(AgentBot):
             )
             return FinalDeliveryOutcome(
                 terminal_status="completed",
-                final_visible_event_id=response_event_id,
-                visible_response_event_id=response_event_id,
-                response_identity_event_id=response_event_id,
-                turn_completion_event_id=response_event_id,
-                last_physical_stream_event_id=response_event_id if existing_event_is_placeholder else None,
+                event_id=response_event_id,
+                is_visible_response=True,
                 final_visible_body=team_resolution.reason,
                 delivery_kind="edited" if existing_event_id is not None else "sent",
                 mark_handled=True,
