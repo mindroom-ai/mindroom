@@ -1896,6 +1896,57 @@ class TestStreamingBehavior:
         assert finalize_calls == []
 
     @pytest.mark.asyncio
+    async def test_send_streaming_response_timeout_cleanup_shuts_down_delivery_once(self) -> None:
+        """Timeout cleanup should not retry shutdown again from the final cleanup block."""
+        mock_client = _make_matrix_client_mock()
+        shutdown_call_count = 0
+
+        async def fail_stream_supervision(
+            response_stream: AsyncIterator[object],
+            streaming: StreamingResponse,
+            progress_task: asyncio.Task[None] | None,
+            delivery_task: asyncio.Task[None] | None,
+            delivery_queue: asyncio.Queue[object | None],
+        ) -> None:
+            del response_stream, streaming, progress_task, delivery_task, delivery_queue
+            msg = "stream blew up"
+            raise RuntimeError(msg)
+
+        async def timeout_shutdown(
+            delivery_queue: asyncio.Queue[object | None],
+            delivery_task: asyncio.Task[None] | None,
+        ) -> Exception | None:
+            nonlocal shutdown_call_count
+            shutdown_call_count += 1
+            del delivery_queue
+            if delivery_task is not None:
+                delivery_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await delivery_task
+            return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
+
+        with (
+            patch("mindroom.streaming._consume_stream_with_progress_supervision", new=fail_stream_supervision),
+            patch("mindroom.streaming._shutdown_stream_delivery", new=timeout_shutdown),
+            pytest.raises(
+                StreamingDeliveryError,
+                match="Timed out shutting down stream delivery controller",
+            ),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=_aiter(),
+            )
+
+        assert shutdown_call_count == 1
+
+    @pytest.mark.asyncio
     async def test_worker_progress_and_content_updates_do_not_overlap_edits(self) -> None:
         """Warmup refreshes and content refreshes should not edit the same event concurrently."""
         mock_client = _make_matrix_client_mock()
