@@ -1,5 +1,6 @@
 """Integration tests for large message handling with streaming and regular messages."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -818,7 +819,9 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
 
     async def stream() -> AsyncIterator[_StreamInputChunk]:
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="first_tool", tool_args={}))
+        await asyncio.sleep(0)
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="second_tool", tool_args={}))
+        await asyncio.sleep(0)
         yield "Done"
 
     event_id, accumulated = await send_streaming_response(
@@ -835,3 +838,5 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
 
     assert event_id is not None
     assert accumulated == "\n\nDone"
+    bodies = [content.get("m.new_content", content)["body"] for _, _, content in client.messages_sent]
+    assert bodies == ["Thinking...", "\n\nDone"]

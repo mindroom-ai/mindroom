@@ -170,6 +170,11 @@ class _CommittedDeliveryState:
     placeholder_progress_sent: bool
 
 
+def _normalize_stream_accumulated_text(text: str) -> str:
+    """Normalize whitespace-only placeholder buffers to the committed empty state."""
+    return text if text.strip() else ""
+
+
 def build_cancelled_response_update(
     text: str,
     *,
@@ -341,7 +346,8 @@ class StreamingResponse:
         if self.stream_started_at is None:
             self.stream_started_at = now
         delivery_matches_live_state = (
-            self.accumulated_text == committed_state.accumulated_text and self.tool_trace == committed_state.tool_trace
+            _normalize_stream_accumulated_text(self.accumulated_text) == committed_state.accumulated_text
+            and self.tool_trace == committed_state.tool_trace
         )
         if delivery_matches_live_state:
             self.last_update = now
@@ -361,7 +367,8 @@ class StreamingResponse:
         if self._inflight_nonterminal_capture is None or self._inflight_nonterminal_capture_state is None:
             return None
         if (
-            self.accumulated_text == self._inflight_nonterminal_capture_state.accumulated_text
+            _normalize_stream_accumulated_text(self.accumulated_text)
+            == self._inflight_nonterminal_capture_state.accumulated_text
             and self.tool_trace == self._inflight_nonterminal_capture_state.tool_trace
         ):
             return self._inflight_nonterminal_capture
@@ -591,7 +598,7 @@ class StreamingResponse:
             content=content,
             display_text=display_text,
             committed_state=_CommittedDeliveryState(
-                accumulated_text=self.accumulated_text if self.accumulated_text.strip() else "",
+                accumulated_text=_normalize_stream_accumulated_text(self.accumulated_text),
                 tool_trace=deepcopy(self.tool_trace),
                 placeholder_progress_sent=not self.accumulated_text.strip(),
             ),

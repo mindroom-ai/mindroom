@@ -1112,7 +1112,7 @@ class TestStreamingBehavior:
 
     @pytest.mark.asyncio
     async def test_visible_tool_start_after_unsent_text_refreshes_immediately(self) -> None:
-        """A second visible tool start should bypass the refresh gate after an unsent text delta."""
+        """A same-tick visible tool start should still bypass the boundary refresh gate."""
         mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
         mock_response.__class__ = nio.RoomSendResponse
@@ -1149,13 +1149,13 @@ class TestStreamingBehavior:
             _DeliveryRequest(
                 boundary_refresh=True,
                 prior_delta_at=100.0,
-                boundary_refresh_prior_delta_at=100.1,
+                boundary_refresh_prior_delta_at=100.0,
             ),
         )
 
         with (
-            patch("mindroom.streaming.time.time", return_value=100.2),
-            patch("mindroom.streaming_delivery.time.time", return_value=100.2),
+            patch("mindroom.streaming.time.time", return_value=100.0),
+            patch("mindroom.streaming_delivery.time.time", return_value=100.0),
         ):
             shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
@@ -1692,6 +1692,37 @@ class TestStreamingBehavior:
         sent_content = mock_client.room_send.call_args[1]["content"]
         assert sent_content["body"].startswith(PROGRESS_PLACEHOLDER)
         assert IN_PROGRESS_MARKER not in sent_content["body"]
+
+    @pytest.mark.asyncio
+    async def test_placeholder_progress_hint_does_not_resend_after_commit(self) -> None:
+        """Whitespace-only placeholder sends should advance throttle state after committing."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$placeholder_progress_1"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=5.0,
+            progress_update_interval=0.2,
+            show_tool_calls=False,
+        )
+        streaming.accumulated_text = "\n\n"
+        streaming.stream_started_at = 100.0
+        streaming.last_update = 100.0
+
+        with patch("mindroom.streaming.time.time", return_value=100.25):
+            await streaming._throttled_send(mock_client, progress_hint=True)
+        with patch("mindroom.streaming.time.time", return_value=100.26):
+            await streaming._throttled_send(mock_client, progress_hint=True)
+
+        assert mock_client.room_send.call_count == 1
 
     @pytest.mark.asyncio
     async def test_finalize_strips_marker_from_placeholder_only_stream(self) -> None:

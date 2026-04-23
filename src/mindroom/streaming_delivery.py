@@ -443,7 +443,7 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
                 visible_delta_since_last_boundary_refresh = (
                     merged_request.boundary_refresh_prior_delta_at is not None
                     and streaming.last_boundary_refresh_at is not None
-                    and merged_request.boundary_refresh_prior_delta_at > streaming.last_boundary_refresh_at
+                    and merged_request.boundary_refresh_prior_delta_at >= streaming.last_boundary_refresh_at
                 )
                 should_send_boundary_refresh = (
                     streaming.event_id is None
