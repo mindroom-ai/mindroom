@@ -5531,6 +5531,110 @@ class TestThreadingBehavior:
             )
 
     @pytest.mark.asyncio
+    async def test_run_thread_update_preserves_same_thread_order_across_ignored_cancelled_room_fence(
+        self,
+    ) -> None:
+        """Ignoring a cancelled room fence must not let a later same-thread update jump the queue."""
+        blocker_started = asyncio.Event()
+        release_blocker = asyncio.Event()
+        first_target_started = asyncio.Event()
+        release_first_target = asyncio.Event()
+        second_target_started = asyncio.Event()
+        release_second_target = asyncio.Event()
+        coordinator = _runtime_write_coordinator()
+        run_order: list[str] = []
+
+        async def blocking_other_thread() -> None:
+            blocker_started.set()
+            await release_blocker.wait()
+
+        async def first_target_update() -> str:
+            run_order.append("first")
+            first_target_started.set()
+            await release_first_target.wait()
+            return "first"
+
+        async def second_target_update() -> str:
+            run_order.append("second")
+            second_target_started.set()
+            await release_second_target.wait()
+            return "second"
+
+        async def cancelled_room_update() -> None:
+            msg = "Cancelled room cache update should not start"
+            raise AssertionError(msg)
+
+        blocker_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$other-thread:localhost",
+            blocking_other_thread,
+            name="matrix_cache_blocking_other_thread_update",
+        )
+        await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
+
+        cancelled_room_task = coordinator.queue_room_update(
+            "!test:localhost",
+            cancelled_room_update,
+            name="matrix_cache_cancelled_room_update",
+        )
+        first_target_task = asyncio.create_task(
+            coordinator.run_thread_update(
+                "!test:localhost",
+                "$target-thread:localhost",
+                first_target_update,
+                name="matrix_cache_first_target_thread_update",
+            ),
+        )
+        second_target_task = asyncio.create_task(
+            coordinator.run_thread_update(
+                "!test:localhost",
+                "$target-thread:localhost",
+                second_target_update,
+                name="matrix_cache_second_target_thread_update",
+                ignore_cancelled_room_fences=True,
+            ),
+        )
+
+        try:
+            cancelled_room_task.cancel()
+            await asyncio.gather(cancelled_room_task, return_exceptions=True)
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(second_target_started.wait(), timeout=0.1)
+            assert first_target_started.is_set() is False
+
+            release_blocker.set()
+            await asyncio.wait_for(first_target_started.wait(), timeout=1.0)
+            assert run_order == ["first"]
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(second_target_started.wait(), timeout=0.1)
+
+            release_first_target.set()
+            await asyncio.wait_for(second_target_started.wait(), timeout=1.0)
+            release_second_target.set()
+            assert await asyncio.wait_for(first_target_task, timeout=1.0) == "first"
+            assert await asyncio.wait_for(second_target_task, timeout=1.0) == "second"
+            assert run_order == ["first", "second"]
+        finally:
+            release_blocker.set()
+            release_first_target.set()
+            release_second_target.set()
+            if not cancelled_room_task.done():
+                cancelled_room_task.cancel()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    blocker_task,
+                    first_target_task,
+                    second_target_task,
+                    cancelled_room_task,
+                    return_exceptions=True,
+                ),
+                timeout=1.0,
+            )
+            await coordinator.wait_for_room_idle("!test:localhost")
+
+    @pytest.mark.asyncio
     async def test_get_thread_history_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:
         """Public thread-history reads should bypass cancelled room fences without waiting for other threads."""
         first_thread_started = asyncio.Event()

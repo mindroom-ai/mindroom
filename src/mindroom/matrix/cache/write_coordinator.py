@@ -250,6 +250,7 @@ class _EventCacheWriteCoordinator:
         *,
         room_barrier_pending: bool,
         cancelled_room_fence_pending: bool,
+        same_thread_predecessor_pending: bool,
     ) -> tuple[bool, bool]:
         if isinstance(entry, _QueuedRoomFence):
             return room_barrier_pending, True
@@ -264,7 +265,12 @@ class _EventCacheWriteCoordinator:
 
         assert entry.thread_id is not None
         cancelled_room_fence_blocks_entry = cancelled_room_fence_pending and not entry.ignore_cancelled_room_fences
-        if room_barrier_pending or cancelled_room_fence_blocks_entry or state.active_room is not None:
+        if (
+            room_barrier_pending
+            or cancelled_room_fence_blocks_entry
+            or same_thread_predecessor_pending
+            or state.active_room is not None
+        ):
             return room_barrier_pending, cancelled_room_fence_pending
         if entry.thread_id in state.active_threads:
             return room_barrier_pending, cancelled_room_fence_pending
@@ -281,14 +287,29 @@ class _EventCacheWriteCoordinator:
 
         room_barrier_pending = False
         cancelled_room_fence_pending = False
+        queued_thread_predecessors: set[str] = set()
         for entry in state.entries:
+            same_thread_predecessor_pending = (
+                isinstance(entry, _QueuedUpdate)
+                and entry.kind == "thread"
+                and entry.thread_id is not None
+                and entry.thread_id in queued_thread_predecessors
+            )
             room_barrier_pending, cancelled_room_fence_pending = self._reevaluate_entry(
                 room_id,
                 state,
                 entry,
                 room_barrier_pending=room_barrier_pending,
                 cancelled_room_fence_pending=cancelled_room_fence_pending,
+                same_thread_predecessor_pending=same_thread_predecessor_pending,
             )
+            if (
+                isinstance(entry, _QueuedUpdate)
+                and entry.kind == "thread"
+                and entry.thread_id is not None
+                and not entry.task.done()
+            ):
+                queued_thread_predecessors.add(entry.thread_id)
 
         self._cleanup_room_state(room_id)
 
