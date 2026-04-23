@@ -579,6 +579,111 @@ class ResponseRunner:
         )
         return True
 
+    async def _finalize_streamed_with_recovery(
+        self,
+        *,
+        finalize_request: FinalizeStreamedResponseRequest,
+        accumulated_text: str,
+        tool_trace: Sequence[Any],
+        recorder: TurnRecorder,
+        session_scope: HistoryScope,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+        run_id: str | None,
+        is_team: bool,
+        response_event_id: str | None,
+        first_pass_exception_log_message: str | None,
+        retry_cancelled_log_message: str,
+        retry_error_log_message: str,
+    ) -> tuple[FinalDeliveryOutcome, bool]:
+        """Finalize one streamed response with one shared retry-and-fallback path."""
+        try:
+            return await self.deps.delivery_gateway.finalize_streamed_response(finalize_request), True
+        except asyncio.CancelledError:
+            late_failure_request = replace(
+                finalize_request,
+                stream_transport_outcome=replace(
+                    finalize_request.stream_transport_outcome,
+                    terminal_status="cancelled",
+                    failure_reason="stream_finalize_cancelled",
+                ),
+            )
+        except Exception as error:
+            if first_pass_exception_log_message is not None:
+                self.deps.logger.exception(first_pass_exception_log_message, error=str(error))
+            late_failure_request = replace(
+                finalize_request,
+                stream_transport_outcome=replace(
+                    finalize_request.stream_transport_outcome,
+                    terminal_status="error",
+                    failure_reason=str(error),
+                ),
+            )
+
+        self._record_stream_delivery_error(
+            recorder=recorder,
+            accumulated_text=accumulated_text,
+            tool_trace=tool_trace,
+        )
+        self._persist_interrupted_recorder(
+            recorder=recorder,
+            session_scope=session_scope,
+            session_id=session_id,
+            execution_identity=execution_identity,
+            run_id=run_id,
+            is_team=is_team,
+            response_event_id=response_event_id,
+        )
+
+        try:
+            return await self.deps.delivery_gateway.finalize_streamed_response(late_failure_request), False
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            retry_log_message = (
+                retry_cancelled_log_message
+                if late_failure_request.stream_transport_outcome.terminal_status == "cancelled"
+                else retry_error_log_message
+            )
+            self.deps.logger.exception(retry_log_message, error=str(error))
+
+        fallback_stream_outcome = late_failure_request.stream_transport_outcome
+        preserved_visible_stream = (
+            fallback_stream_outcome.has_rendered_visible_body
+            and fallback_stream_outcome.last_physical_stream_event_id is not None
+        )
+        visible_event_id = (
+            fallback_stream_outcome.last_physical_stream_event_id
+            if preserved_visible_stream
+            else (
+                late_failure_request.existing_event_id
+                if late_failure_request.existing_event_id is not None
+                and not late_failure_request.existing_event_is_placeholder
+                else None
+            )
+        )
+        failure_reason = (
+            fallback_stream_outcome.failure_reason
+            or (
+                "stream_finalize_cancelled"
+                if fallback_stream_outcome.terminal_status == "cancelled"
+                else "stream_finalize_error"
+            )
+        )
+        return (
+            FinalDeliveryOutcome(
+                terminal_status=fallback_stream_outcome.terminal_status,
+                event_id=visible_event_id,
+                is_visible_response=visible_event_id is not None,
+                final_visible_body=fallback_stream_outcome.rendered_body if preserved_visible_stream else None,
+                canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
+                failure_reason=failure_reason,
+                tool_trace=tuple(finalize_request.tool_trace or ()),
+                extra_content=finalize_request.extra_content,
+            ),
+            False,
+        )
+
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
         thread_key = (target.room_id, target.resolved_thread_id)
@@ -1305,114 +1410,21 @@ class ResponseRunner:
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 )
-                finalized_cleanly = True
-                late_failure_request: FinalizeStreamedResponseRequest | None = None
-                retry_error_log_message: str | None = None
-                try:
-                    final_delivery_outcome = await self.deps.delivery_gateway.finalize_streamed_response(
-                        finalize_request,
-                    )
-                except asyncio.CancelledError:
-                    self._record_stream_delivery_error(
-                        recorder=team_turn_recorder,
-                        accumulated_text=accumulated,
-                        tool_trace=[],
-                    )
-                    self._persist_interrupted_recorder(
-                        recorder=team_turn_recorder,
-                        session_scope=session_scope,
-                        session_id=session_id,
-                        execution_identity=tool_dispatch.execution_identity,
-                        run_id=response_run_id,
-                        is_team=True,
-                        response_event_id=event_id or tracked_event_id,
-                    )
-                    late_failure_request = replace(
-                        finalize_request,
-                        stream_transport_outcome=replace(
-                            finalize_request.stream_transport_outcome,
-                            terminal_status="cancelled",
-                            failure_reason="stream_finalize_cancelled",
-                        ),
-                    )
-                    retry_error_log_message = "Error finalizing cancelled team streamed response"
-                except Exception as error:
-                    self._record_stream_delivery_error(
-                        recorder=team_turn_recorder,
-                        accumulated_text=accumulated,
-                        tool_trace=[],
-                    )
-                    self._persist_interrupted_recorder(
-                        recorder=team_turn_recorder,
-                        session_scope=session_scope,
-                        session_id=session_id,
-                        execution_identity=tool_dispatch.execution_identity,
-                        run_id=response_run_id,
-                        is_team=True,
-                        response_event_id=event_id or tracked_event_id,
-                    )
-                    late_failure_request = replace(
-                        finalize_request,
-                        stream_transport_outcome=replace(
-                            finalize_request.stream_transport_outcome,
-                            terminal_status="error",
-                            failure_reason=str(error),
-                        ),
-                    )
-                    retry_error_log_message = "Error finalizing errored team streamed response"
-                if late_failure_request is not None:
-                    finalized_cleanly = False
-                    retry_failed = False
-                    try:
-                        final_delivery_outcome = await self.deps.delivery_gateway.finalize_streamed_response(
-                            late_failure_request,
-                        )
-                    except asyncio.CancelledError:
-                        retry_failed = True
-                    except Exception as error:
-                        retry_failed = True
-                        assert retry_error_log_message is not None
-                        self.deps.logger.exception(retry_error_log_message, error=str(error))
-                    if retry_failed:
-                        fallback_stream_outcome = late_failure_request.stream_transport_outcome
-                        preserved_visible_stream = (
-                            fallback_stream_outcome.has_rendered_visible_body
-                            and fallback_stream_outcome.last_physical_stream_event_id is not None
-                        )
-                        visible_event_id = (
-                            fallback_stream_outcome.last_physical_stream_event_id
-                            if preserved_visible_stream
-                            else (
-                                late_failure_request.existing_event_id
-                                if late_failure_request.existing_event_id is not None
-                                and not late_failure_request.existing_event_is_placeholder
-                                else None
-                            )
-                        )
-                        if fallback_stream_outcome.terminal_status == "cancelled":
-                            final_delivery_outcome = FinalDeliveryOutcome(
-                                terminal_status="cancelled",
-                                event_id=visible_event_id,
-                                is_visible_response=visible_event_id is not None,
-                                final_visible_body=(
-                                    fallback_stream_outcome.rendered_body if preserved_visible_stream else None
-                                ),
-                                canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
-                                failure_reason=fallback_stream_outcome.failure_reason or "stream_finalize_cancelled",
-                                tool_trace=(),
-                            )
-                        else:
-                            final_delivery_outcome = FinalDeliveryOutcome(
-                                terminal_status="error",
-                                event_id=visible_event_id,
-                                is_visible_response=visible_event_id is not None,
-                                final_visible_body=(
-                                    fallback_stream_outcome.rendered_body if preserved_visible_stream else None
-                                ),
-                                canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
-                                failure_reason=fallback_stream_outcome.failure_reason or "stream_finalize_error",
-                                tool_trace=(),
-                            )
+                final_delivery_outcome, finalized_cleanly = await self._finalize_streamed_with_recovery(
+                    finalize_request=finalize_request,
+                    accumulated_text=accumulated,
+                    tool_trace=(),
+                    recorder=team_turn_recorder,
+                    session_scope=session_scope,
+                    session_id=session_id,
+                    execution_identity=tool_dispatch.execution_identity,
+                    run_id=response_run_id,
+                    is_team=True,
+                    response_event_id=event_id or tracked_event_id,
+                    first_pass_exception_log_message=None,
+                    retry_cancelled_log_message="Error finalizing cancelled team streamed response",
+                    retry_error_log_message="Error finalizing errored team streamed response",
+                )
                 if finalized_cleanly and request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply("final")
                     request.pipeline_timing.mark("response_complete")
@@ -2388,109 +2400,21 @@ class ResponseRunner:
             existing_event_id=request.existing_event_id,
             existing_event_is_placeholder=request.existing_event_is_placeholder,
         )
-        finalized_cleanly = True
-        late_failure_request: FinalizeStreamedResponseRequest | None = None
-        retry_error_log_message: str | None = None
-        try:
-            delivery = await self.deps.delivery_gateway.finalize_streamed_response(finalize_request)
-        except asyncio.CancelledError:
-            self._record_stream_delivery_error(
-                recorder=turn_recorder,
-                accumulated_text=transport_outcome.rendered_body or "",
-                tool_trace=tool_trace,
-            )
-            self._persist_interrupted_recorder(
-                recorder=turn_recorder,
-                session_scope=session_scope,
-                session_id=runtime.session_id,
-                execution_identity=runtime.tool_dispatch.execution_identity,
-                run_id=run_id,
-                is_team=False,
-                response_event_id=transport_outcome.last_physical_stream_event_id,
-            )
-            late_failure_request = replace(
-                finalize_request,
-                stream_transport_outcome=replace(
-                    finalize_request.stream_transport_outcome,
-                    terminal_status="cancelled",
-                    failure_reason="stream_finalize_cancelled",
-                ),
-            )
-            retry_error_log_message = "Error finalizing cancelled streamed response"
-        except Exception as error:
-            self.deps.logger.exception("Error in late streaming finalization", error=str(error))
-            self._record_stream_delivery_error(
-                recorder=turn_recorder,
-                accumulated_text=transport_outcome.rendered_body or "",
-                tool_trace=tool_trace,
-            )
-            self._persist_interrupted_recorder(
-                recorder=turn_recorder,
-                session_scope=session_scope,
-                session_id=runtime.session_id,
-                execution_identity=runtime.tool_dispatch.execution_identity,
-                run_id=run_id,
-                is_team=False,
-                response_event_id=transport_outcome.last_physical_stream_event_id,
-            )
-            late_failure_request = replace(
-                finalize_request,
-                stream_transport_outcome=replace(
-                    finalize_request.stream_transport_outcome,
-                    terminal_status="error",
-                    failure_reason=str(error),
-                ),
-            )
-            retry_error_log_message = "Error finalizing errored streamed response"
-        if late_failure_request is not None:
-            finalized_cleanly = False
-            retry_failed = False
-            try:
-                delivery = await self.deps.delivery_gateway.finalize_streamed_response(late_failure_request)
-            except asyncio.CancelledError:
-                retry_failed = True
-            except Exception as error:
-                retry_failed = True
-                assert retry_error_log_message is not None
-                self.deps.logger.exception(retry_error_log_message, error=str(error))
-            if retry_failed:
-                fallback_stream_outcome = late_failure_request.stream_transport_outcome
-                preserved_visible_stream = (
-                    fallback_stream_outcome.has_rendered_visible_body
-                    and fallback_stream_outcome.last_physical_stream_event_id is not None
-                )
-                visible_event_id = (
-                    fallback_stream_outcome.last_physical_stream_event_id
-                    if preserved_visible_stream
-                    else (
-                        late_failure_request.existing_event_id
-                        if late_failure_request.existing_event_id is not None
-                        and not late_failure_request.existing_event_is_placeholder
-                        else None
-                    )
-                )
-                if fallback_stream_outcome.terminal_status == "cancelled":
-                    delivery = FinalDeliveryOutcome(
-                        terminal_status="cancelled",
-                        event_id=visible_event_id,
-                        is_visible_response=visible_event_id is not None,
-                        final_visible_body=fallback_stream_outcome.rendered_body if preserved_visible_stream else None,
-                        canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
-                        failure_reason=fallback_stream_outcome.failure_reason or "stream_finalize_cancelled",
-                        tool_trace=tuple(tool_trace),
-                        extra_content=response_extra_content,
-                    )
-                else:
-                    delivery = FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=visible_event_id,
-                        is_visible_response=visible_event_id is not None,
-                        final_visible_body=fallback_stream_outcome.rendered_body if preserved_visible_stream else None,
-                        canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
-                        failure_reason=fallback_stream_outcome.failure_reason or "stream_finalize_error",
-                        tool_trace=tuple(tool_trace),
-                        extra_content=response_extra_content,
-                    )
+        delivery, finalized_cleanly = await self._finalize_streamed_with_recovery(
+            finalize_request=finalize_request,
+            accumulated_text=transport_outcome.rendered_body or "",
+            tool_trace=tool_trace,
+            recorder=turn_recorder,
+            session_scope=session_scope,
+            session_id=runtime.session_id,
+            execution_identity=runtime.tool_dispatch.execution_identity,
+            run_id=run_id,
+            is_team=False,
+            response_event_id=transport_outcome.last_physical_stream_event_id,
+            first_pass_exception_log_message="Error in late streaming finalization",
+            retry_cancelled_log_message="Error finalizing cancelled streamed response",
+            retry_error_log_message="Error finalizing errored streamed response",
+        )
         if finalized_cleanly and request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
