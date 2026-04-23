@@ -1706,11 +1706,32 @@ class TeamBot(AgentBot):
     ) -> TurnDeliveryResolution:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
-            return TurnDeliveryResolution.from_outcome(
-                FinalDeliveryOutcome.error_without_visible_response(
+            resolved_target = target or self._conversation_resolver.build_message_target(
+                room_id=room_id,
+                thread_id=thread_id,
+                reply_to_event_id=reply_to_event_id,
+            )
+            fallback_envelope = response_envelope or MessageEnvelope(
+                source_event_id=reply_to_event_id or "",
+                room_id=room_id,
+                target=resolved_target,
+                requester_id=user_id or "",
+                sender_id=user_id or "",
+                body=prompt,
+                attachment_ids=tuple(attachment_ids or ()),
+                mentioned_agents=(),
+                agent_name=self.agent_name,
+                source_kind="message",
+            )
+            final_outcome = await self._delivery_gateway.emit_terminal_outcome_hooks(
+                outcome=FinalDeliveryOutcome.error_without_visible_response(
                     failure_reason="empty_team_prompt",
                 ),
+                correlation_id=correlation_id or reply_to_event_id or room_id,
+                envelope=fallback_envelope,
+                response_kind="team",
             )
+            return TurnDeliveryResolution.from_outcome(final_outcome)
 
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (

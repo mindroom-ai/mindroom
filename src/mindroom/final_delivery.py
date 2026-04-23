@@ -79,6 +79,7 @@ class StreamTransportOutcome:
     terminal_status: TerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
+    canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     option_map: Mapping[str, str] | None = None
     options_list: tuple[Mapping[str, str], ...] | None = None

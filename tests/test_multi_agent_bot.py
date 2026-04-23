@@ -3110,7 +3110,7 @@ class TestAgentBot:
             ) as mock_send_streaming_response,
         ):
             mock_send_streaming_response.return_value = StreamTransportOutcome(
-                last_physical_stream_event_id=None,
+                last_physical_stream_event_id="$existing",
                 terminal_operation="edit",
                 terminal_result="failed",
                 terminal_status="error",
@@ -4741,8 +4741,8 @@ class TestAgentBot:
         assert resolution.state == "final_visible_delivery"
         assert resolution.should_mark_handled is True
         assert resolution.visible_response_event_id == "$team-response"
-        mock_thread_summary.assert_not_awaited()
-        assert "thread_summary_!test:localhost_$thread" not in scheduled_names
+        mock_thread_summary.assert_awaited_once()
+        assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
     def test_thread_summary_message_count_hint_excludes_existing_summaries(self) -> None:
         """Thread-summary hints should count the post-response non-summary total."""

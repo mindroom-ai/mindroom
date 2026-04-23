@@ -358,6 +358,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
     assert outcome.state == "final_visible_delivery"
     assert outcome.final_visible_event_id == "$streaming"
     assert outcome.final_visible_body == "chunk"
+    response_hooks.apply_before_response.assert_not_awaited()
     response_hooks.apply_final_response_transform.assert_awaited_once()
     mock_deliver_final.assert_awaited_once()
     response_hooks.emit_after_response.assert_awaited_once()

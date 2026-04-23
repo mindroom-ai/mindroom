@@ -365,14 +365,24 @@ def _build_response_runner(  # noqa: C901, PLR0915
             final_visible_body="",
         )
 
-    async def _default_finalize_streamed_response(  # noqa: PLR0911
+    async def _default_finalize_streamed_response(  # noqa: C901, PLR0911
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
         transport_outcome = request.stream_transport_outcome
         event_id = transport_outcome.last_physical_stream_event_id or "$response_id"
         body = transport_outcome.rendered_body or ""
         has_visible_body = transport_outcome.visible_body_state == "visible_body"
+        preserved_existing_visible_reply = (
+            request.initial_delivery_kind == "edited"
+            and transport_outcome.visible_body_state == "none"
+            and transport_outcome.last_physical_stream_event_id is not None
+        )
         if transport_outcome.terminal_status == "cancelled" or transport_outcome.terminal_result == "cancelled":
+            if preserved_existing_visible_reply:
+                return FinalDeliveryOutcome.cancelled_with_visible_response(
+                    final_visible_event_id=transport_outcome.last_physical_stream_event_id,
+                    failure_reason=transport_outcome.failure_reason,
+                )
             if transport_outcome.last_physical_stream_event_id is not None and has_visible_body:
                 return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
                     last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
@@ -385,6 +395,11 @@ def _build_response_runner(  # noqa: C901, PLR0915
                 failure_reason=transport_outcome.failure_reason,
             )
         if transport_outcome.terminal_status == "error":
+            if preserved_existing_visible_reply:
+                return FinalDeliveryOutcome.kept_prior_visible_response_after_error(
+                    final_visible_event_id=transport_outcome.last_physical_stream_event_id,
+                    failure_reason=transport_outcome.failure_reason,
+                )
             if transport_outcome.last_physical_stream_event_id is not None and has_visible_body:
                 return FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
                     last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
@@ -397,6 +412,11 @@ def _build_response_runner(  # noqa: C901, PLR0915
                 failure_reason=transport_outcome.failure_reason,
             )
         if transport_outcome.terminal_result == "failed":
+            if preserved_existing_visible_reply:
+                return FinalDeliveryOutcome.kept_prior_visible_response_after_error(
+                    final_visible_event_id=transport_outcome.last_physical_stream_event_id,
+                    failure_reason=transport_outcome.failure_reason,
+                )
             if transport_outcome.last_physical_stream_event_id is not None and has_visible_body:
                 return FinalDeliveryOutcome.keep_prior_visible_stream_after_completed_terminal_failure(
                     last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
@@ -407,6 +427,11 @@ def _build_response_runner(  # noqa: C901, PLR0915
                 )
             return FinalDeliveryOutcome.error_without_visible_response(
                 failure_reason=transport_outcome.failure_reason,
+            )
+        if preserved_existing_visible_reply:
+            return FinalDeliveryOutcome.kept_prior_visible_response_after_error(
+                final_visible_event_id=transport_outcome.last_physical_stream_event_id,
+                failure_reason=transport_outcome.failure_reason or "stream_completed_without_visible_body",
             )
         return FinalDeliveryOutcome.final_visible_delivery(
             final_visible_event_id=event_id,

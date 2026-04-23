@@ -646,6 +646,8 @@ class ResponseRunner:
                 extra_content=request_extra_content,
                 failure_reason=failure_reason or "late_stream_delivery_failure",
                 cancelled=self._is_cancelled_stream_failure_reason(failure_reason),
+                existing_event_id=existing_event_id,
+                existing_event_is_placeholder=existing_event_is_placeholder,
             ),
         )
 
@@ -1207,6 +1209,32 @@ class ResponseRunner:
             has_visible_output=bool(turn_completion_event_id) or resolution.has_visible_output,
         )
 
+    async def _emit_empty_prompt_outcome(
+        self,
+        request: ResponseRequest,
+        *,
+        response_kind: str,
+        failure_reason: str = "empty_response_prompt",
+    ) -> FinalDeliveryOutcome:
+        """Emit the canonical no-visible terminal outcome for one blank prompt request."""
+        resolved_target = request.target or self.deps.resolver.build_message_target(
+            room_id=request.room_id,
+            thread_id=request.thread_id,
+            reply_to_event_id=request.reply_to_event_id,
+        )
+        response_envelope = self._response_envelope_for_request(
+            request,
+            resolved_target=resolved_target,
+        )
+        return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
+            outcome=FinalDeliveryOutcome.error_without_visible_response(
+                failure_reason=failure_reason,
+            ),
+            correlation_id=self._correlation_id_for_request(request),
+            envelope=response_envelope,
+            response_kind=response_kind,
+        )
+
     async def _ensure_request_knowledge_managers(
         self,
         agent_names: list[str],
@@ -1489,6 +1517,8 @@ class ResponseRunner:
                             correlation_id=resolved_correlation_id,
                             tool_trace=None,
                             extra_content=None,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
                         ),
                     )
                 except asyncio.CancelledError:
@@ -1517,6 +1547,8 @@ class ResponseRunner:
                             extra_content=None,
                             failure_reason="stream_finalize_cancelled",
                             cancelled=True,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
                         ),
                     )
                     return
@@ -1546,6 +1578,8 @@ class ResponseRunner:
                             extra_content=None,
                             failure_reason=str(error),
                             cancelled=False,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
                         ),
                     )
                     return
@@ -1736,6 +1770,8 @@ class ResponseRunner:
                     correlation_id=resolved_correlation_id,
                     tool_trace=error.tool_trace if show_tool_calls else None,
                     extra_content=None,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
         except Exception as error:
@@ -2181,8 +2217,9 @@ class ResponseRunner:
     ) -> FinalDeliveryOutcome:
         """Process a message and send a response without streaming."""
         if not request.prompt.strip():
-            return FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason="empty_response_prompt",
+            return await self._emit_empty_prompt_outcome(
+                request,
+                response_kind=response_kind,
             )
 
         if request.pipeline_timing is not None:
@@ -2326,8 +2363,9 @@ class ResponseRunner:
     ) -> FinalDeliveryOutcome:
         """Process a message and send a streamed response."""
         if not request.prompt.strip():
-            return FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason="empty_response_prompt",
+            return await self._emit_empty_prompt_outcome(
+                request,
+                response_kind=response_kind,
             )
         local_stream_state = stream_state or StreamDeliveryState()
 
@@ -2439,6 +2477,8 @@ class ResponseRunner:
                     correlation_id=correlation_id,
                     tool_trace=error.tool_trace if self._show_tool_calls() else None,
                     extra_content=response_extra_content,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
         except asyncio.CancelledError as exc:
@@ -2495,6 +2535,8 @@ class ResponseRunner:
                     correlation_id=correlation_id,
                     tool_trace=tool_trace if self._show_tool_calls() else None,
                     extra_content=response_extra_content,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
         except asyncio.CancelledError:
@@ -2523,6 +2565,8 @@ class ResponseRunner:
                     extra_content=response_extra_content,
                     failure_reason="stream_finalize_cancelled",
                     cancelled=True,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
         except Exception as error:
@@ -2552,6 +2596,8 @@ class ResponseRunner:
                     extra_content=response_extra_content,
                     failure_reason=str(error),
                     cancelled=False,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
         if request.pipeline_timing is not None:

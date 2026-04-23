@@ -290,6 +290,7 @@ class StreamingResponse:
     visible_event_id_callback: Callable[[str], None] | None = None
     observed_reasoning_content: bool = False
     observed_tool_calls: int = 0
+    canonical_final_body_candidate: str | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     _last_delivered_text: str = field(default="", init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
@@ -472,6 +473,7 @@ class StreamingResponse:
                 terminal_status=final_stream_status,
                 rendered_body=None,
                 visible_body_state=attempted_visible_body_state,
+                canonical_final_body_candidate=self.canonical_final_body_candidate,
                 option_map=None,
                 options_list=None,
             )
@@ -480,12 +482,13 @@ class StreamingResponse:
         )
         options_list = tuple(response.options_list) if response.options_list is not None else None
         try:
+            retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED
             send_succeeded = await self._send_or_edit_message(
                 client,
                 is_final=True,
                 allow_empty_progress=has_placeholder,
                 stream_status=final_stream_status,
-                retry_on_failure=not restart_interrupted,
+                retry_on_failure=retry_terminal_update,
             )
         except asyncio.CancelledError:
             logger.warning(
@@ -508,6 +511,7 @@ class StreamingResponse:
                 terminal_status=final_stream_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
+                canonical_final_body_candidate=self.canonical_final_body_candidate,
                 failure_reason="terminal_update_cancelled",
                 option_map=committed_option_map,
                 options_list=committed_options_list,
@@ -534,6 +538,7 @@ class StreamingResponse:
                 terminal_status=final_stream_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
+                canonical_final_body_candidate=self.canonical_final_body_candidate,
                 failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
                 option_map=committed_option_map,
                 options_list=committed_options_list,
@@ -558,6 +563,7 @@ class StreamingResponse:
                 terminal_status=final_stream_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
+                canonical_final_body_candidate=self.canonical_final_body_candidate,
                 failure_reason="terminal_update_failed",
                 option_map=committed_option_map,
                 options_list=committed_options_list,
@@ -569,6 +575,7 @@ class StreamingResponse:
             terminal_status=final_stream_status,
             rendered_body=attempted_rendered_body,
             visible_body_state=attempted_visible_body_state,
+            canonical_final_body_candidate=self.canonical_final_body_candidate,
             failure_reason=None,
             option_map=response.option_map,
             options_list=options_list,

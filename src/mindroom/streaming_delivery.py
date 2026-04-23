@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -36,7 +35,6 @@ StreamInputChunk = (
 )
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 _STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS = 5.0
-_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 
 
 class _NonTerminalDeliveryError(Exception):
@@ -75,29 +73,6 @@ def _merge_tool_trace(existing: list[ToolTraceEntry], incoming: list[ToolTraceEn
     if len(incoming) >= len(existing):
         return incoming.copy()
     return existing.copy()
-
-
-def _merge_final_completion_content(accumulated_text: str, final_text: str) -> str:
-    """Preserve visible tool markers when a provider emits canonical final content."""
-    accumulated_lines = accumulated_text.splitlines()
-    tool_marker_lines = [line for line in accumulated_lines if _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)]
-    if not tool_marker_lines:
-        return final_text
-    first_tool_marker_index = next(
-        index for index, line in enumerate(accumulated_lines) if _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)
-    )
-    visible_prefix = "\n".join(accumulated_lines[:first_tool_marker_index]).strip()
-    tool_marker_block = "\n\n".join(tool_marker_lines)
-    if not visible_prefix:
-        return f"{tool_marker_block}\n\n{final_text}" if final_text else tool_marker_block
-    if final_text.startswith(visible_prefix):
-        suffix = final_text[len(visible_prefix) :].lstrip("\n")
-        if suffix:
-            return f"{visible_prefix}\n\n{tool_marker_block}\n\n{suffix}"
-        return f"{visible_prefix}\n\n{tool_marker_block}"
-    if final_text:
-        return f"{visible_prefix}\n\n{tool_marker_block}\n\n{final_text}"
-    return f"{visible_prefix}\n\n{tool_marker_block}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,10 +133,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             if chunk.reasoning_content:
                 streaming.observed_reasoning_content = True
             if chunk.content is not None:
-                streaming.accumulated_text = _merge_final_completion_content(
-                    streaming.accumulated_text,
-                    str(chunk.content),
-                )
+                streaming.canonical_final_body_candidate = str(chunk.content)
             continue
         elif isinstance(chunk, ToolCallStartedEvent):
             if chunk.tool is not None:
