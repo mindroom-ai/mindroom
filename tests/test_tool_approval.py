@@ -7,6 +7,7 @@ import importlib
 import json
 import os
 import threading
+import time
 from typing import TYPE_CHECKING, Literal, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1899,6 +1900,44 @@ async def test_sync_unsynced_approval_event_resolutions_retry_when_editor_sends_
     assert synced_requests == []
     payload = json.loads((runtime_paths.storage_root / "approvals" / f"{request_id}.json").read_text(encoding="utf-8"))
     assert payload["resolution_synced_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_failed_resolved_edit_is_retried_at_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime retries should replay a resolved approval card after one transient edit failure."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr(tool_approval_module, "_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS", 0.01)
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock(side_effect=[RuntimeError("boom"), True])
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    def _wait_for_resolution_sync() -> bool:
+        deadline = time.monotonic() + 1
+        while pending is not None and pending.resolution_synced_at is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return pending is not None and pending.resolution_synced_at is not None
+
+    try:
+        assert pending is not None
+        await store.deny(pending.id, reason="Use a safer command", resolved_by="@user:localhost")
+        decision = await task
+
+        assert decision.status == "denied"
+        assert await asyncio.to_thread(_wait_for_resolution_sync)
+        assert editor.await_count == 2
+        assert pending.resolution_synced_at is not None
+        assert (
+            store.anchored_request_for_event(
+                approval_event_id="$approval",
+                room_id="!room:localhost",
+            )
+            is None
+        )
+    finally:
+        await shutdown_approval_store()
 
 
 @pytest.mark.asyncio

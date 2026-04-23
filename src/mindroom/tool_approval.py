@@ -15,6 +15,7 @@ import tempfile
 import threading
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future, InvalidStateError
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
@@ -59,6 +60,7 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
 )
 _APPROVE_REACTION_KEYS = frozenset({"✅"})
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
+_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS = 30.0
 _MANAGER: ApprovalManager | None = None
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
 _SCRIPT_CACHE_LOCK = threading.Lock()
@@ -343,6 +345,8 @@ class ApprovalManager:
         self._pending_send_completion: dict[str, asyncio.Event] = {}
         self._pending_send_room_index: dict[str, set[str]] = {}
         self._replay_in_progress: set[str] = set()
+        self._unsynced_resolution_retry_task: asyncio.Task[None] | None = None
+        self._allow_unsynced_resolution_retries = True
         self._load_existing()
 
     @property
@@ -537,6 +541,72 @@ class ApprovalManager:
                 )
             ]
         return sorted(requests, key=lambda approval: approval.resolved_at or approval.requested_at)
+
+    def _has_unsynced_resolved(self) -> bool:
+        with self._state_lock:
+            return any(
+                approval.status != "pending"
+                and approval.room_id is not None
+                and approval.event_id is not None
+                and approval.resolution_synced_at is None
+                for approval in self._requests_by_id.values()
+            )
+
+    def _ensure_unsynced_resolution_retry_task(self) -> None:
+        if not self._has_unsynced_resolved():
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        with self._state_lock:
+            if not self._allow_unsynced_resolution_retries:
+                return
+            existing_task = self._unsynced_resolution_retry_task
+            if existing_task is not None and not existing_task.done():
+                return
+            self._unsynced_resolution_retry_task = running_loop.create_task(
+                self._run_unsynced_resolution_retry_loop(),
+            )
+
+    async def _run_unsynced_resolution_retry_loop(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            while self._has_unsynced_resolved():
+                await asyncio.sleep(_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS)
+                if not self._has_unsynced_resolved():
+                    return
+                await self.sync_unsynced_resolved()
+        finally:
+            with self._state_lock:
+                if self._unsynced_resolution_retry_task is current_task:
+                    self._unsynced_resolution_retry_task = None
+            if self._has_unsynced_resolved():
+                self._ensure_unsynced_resolution_retry_task()
+
+    async def cancel_unsynced_resolution_retry_task(self) -> None:
+        """Stop the runtime retry loop for unsynced approval resolution edits."""
+        with self._state_lock:
+            self._allow_unsynced_resolution_retries = False
+            retry_task = self._unsynced_resolution_retry_task
+            self._unsynced_resolution_retry_task = None
+        if retry_task is None:
+            return
+        if retry_task.done():
+            with suppress(asyncio.CancelledError):
+                await retry_task
+            return
+        retry_task_loop = retry_task.get_loop()
+        if retry_task_loop.is_closed():
+            return
+        current_loop = asyncio.get_running_loop()
+        if retry_task_loop is not current_loop:
+            retry_task_loop.call_soon_threadsafe(retry_task.cancel)
+            return
+        retry_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await retry_task
 
     def list_unconfirmed_deliveries(self) -> list[PendingApproval]:
         """Return resolved approvals that still need their original event ids recovered."""
@@ -1114,9 +1184,13 @@ class ApprovalManager:
         pending: PendingApproval,
         *,
         edit_event: MatrixEventEditor | None = None,
+        schedule_retry: bool = True,
     ) -> None:
         event_editor = edit_event or self._edit_event
+        should_retry = pending.status != "pending" and pending.room_id is not None and pending.event_id is not None
         if event_editor is None or pending.room_id is None or pending.event_id is None:
+            if schedule_retry and should_retry:
+                self._ensure_unsynced_resolution_retry_task()
             return
         try:
             delivered = await event_editor(
@@ -1132,8 +1206,12 @@ class ApprovalManager:
                 event_id=pending.event_id,
                 exc_info=True,
             )
+            if schedule_retry:
+                self._ensure_unsynced_resolution_retry_task()
             return
         if not delivered:
+            if schedule_retry:
+                self._ensure_unsynced_resolution_retry_task()
             return
         pending.resolution_synced_at = _utcnow()
         self._persist_request(pending)
@@ -1214,7 +1292,7 @@ class ApprovalManager:
                 continue
             try:
                 previous_synced_at = claimed_pending.resolution_synced_at
-                await self._edit_resolved_event(claimed_pending)
+                await self._edit_resolved_event(claimed_pending, schedule_retry=False)
                 if claimed_pending.resolution_synced_at != previous_synced_at:
                     synced_requests.append(claimed_pending)
             finally:
@@ -1553,12 +1631,14 @@ def initialize_approval_store(
     storage_dir = runtime_paths.storage_root / _APPROVALS_DIRNAME
     if _MANAGER is not None and _MANAGER.storage_dir == storage_dir:
         _MANAGER.configure_transport(sender=sender, editor=editor, recoverer=recoverer)
+        _MANAGER._ensure_unsynced_resolution_retry_task()
         return _MANAGER
 
     if _MANAGER is not None:
         _MANAGER.abort_pending(reason=_DEFAULT_REINITIALIZE_REASON)
 
     _MANAGER = ApprovalManager(runtime_paths, sender=sender, editor=editor, recoverer=recoverer)
+    _MANAGER._ensure_unsynced_resolution_retry_task()
     return _MANAGER
 
 
@@ -1575,5 +1655,6 @@ async def shutdown_approval_store(
 
     await manager.wait_for_pending_sends_in_rooms(manager.pending_send_room_ids(), timeout=None)
     await manager.shutdown(reason=reason)
+    await manager.cancel_unsynced_resolution_retry_task()
     _MANAGER = None
     _clear_script_cache()
