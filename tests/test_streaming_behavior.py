@@ -863,6 +863,72 @@ class TestStreamingBehavior:
         assert "save_file" in streaming.accumulated_text
 
     @pytest.mark.asyncio
+    async def test_visible_tool_start_arriving_during_inflight_refresh_gets_sent_before_finalize(self) -> None:
+        """A later visible tool start must not wait for finalization when the earlier refresh is still in flight."""
+        mock_client = _make_matrix_client_mock()
+        first_send_started = asyncio.Event()
+        allow_first_send_to_finish = asyncio.Event()
+        send_count = 0
+
+        async def slow_room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
+            nonlocal send_count
+            _ = (args, kwargs)
+            send_count += 1
+            if send_count == 1:
+                first_send_started.set()
+                await allow_first_send_to_finish.wait()
+            mock_response = MagicMock()
+            mock_response.__class__ = nio.RoomSendResponse
+            mock_response.event_id = f"$tool_start_inflight_{send_count}"
+            return mock_response
+
+        mock_client.room_send.side_effect = slow_room_send
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10_000,
+            min_update_char_threshold=10_000,
+            min_char_update_interval=10.0,
+            progress_update_interval=10.0,
+            max_idle=0.25,
+            show_tool_calls=True,
+        )
+        streaming.last_update = 100.0
+        streaming.stream_started_at = 100.0
+
+        async def response_stream() -> AsyncIterator[object]:
+            yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
+            await first_send_started.wait()
+            yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
+
+        await first_send_started.wait()
+        await asyncio.sleep(0)
+        allow_first_send_to_finish.set()
+        await consume_task
+        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        assert shutdown_error is None
+
+        assert mock_client.room_send.call_count == 2
+        bodies = [
+            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
+            for call in mock_client.room_send.call_args_list
+        ]
+        assert "search_web" in bodies[0]
+        assert "save_file" in bodies[1]
+
+    @pytest.mark.asyncio
     async def test_visible_tool_start_after_intervening_edit_refreshes_immediately(self) -> None:
         """A later visible tool start should refresh immediately once another edit has already landed."""
         mock_client = _make_matrix_client_mock()
@@ -1040,17 +1106,17 @@ class TestStreamingBehavior:
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
         streaming.last_update = 100.0
-        streaming._send_or_edit_message = AsyncMock(return_value=True)
+        streaming._send_content = AsyncMock(return_value=True)
 
         with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0]):
             await streaming.update_content("first", mock_client)
 
-        assert streaming._send_or_edit_message.await_count == 0
+        assert streaming._send_content.await_count == 0
 
         with patch("mindroom.streaming.time.time", side_effect=[105.0, 105.0, 105.0]):
             await streaming.update_content(" second", mock_client)
 
-        assert streaming._send_or_edit_message.await_count == 1
+        assert streaming._send_content.await_count == 1
         assert streaming.last_delta_at == 105.0
         assert streaming.chars_since_last_update == 0
 
@@ -1119,6 +1185,10 @@ class TestStreamingBehavior:
     async def test_boundary_refresh_initializes_stream_started_at(self) -> None:
         """Boundary-refresh sends should anchor the ramp window before later throttled edits."""
         mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$boundary_refresh_start"
+        mock_client.room_send.return_value = mock_response
         streaming = StreamingResponse(
             room_id="!test:localhost",
             reply_to_event_id="$original_123",
@@ -1129,7 +1199,6 @@ class TestStreamingBehavior:
         )
         streaming.accumulated_text = "hello"
         streaming.chars_since_last_update = len(streaming.accumulated_text)
-        streaming._send_or_edit_message = AsyncMock(return_value=True)
 
         delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
         delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
@@ -1169,7 +1238,7 @@ class TestStreamingBehavior:
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
         streaming.last_update = 100.0
-        streaming._send_or_edit_message = AsyncMock(return_value=True)
+        streaming._send_content = AsyncMock(return_value=True)
 
         with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0]):
             await streaming.update_content("partial", mock_client)
@@ -1177,12 +1246,12 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.time.time", return_value=100.3):
             await streaming._throttled_send(mock_client)
 
-        assert streaming._send_or_edit_message.await_count == 1
+        assert streaming._send_content.await_count == 1
 
         with patch("mindroom.streaming.time.time", side_effect=[100.35, 100.35, 100.35]):
             await streaming.update_content("!", mock_client)
 
-        assert streaming._send_or_edit_message.await_count == 1
+        assert streaming._send_content.await_count == 1
 
     @pytest.mark.asyncio
     async def test_idle_flush_does_not_fire_during_steady_streaming(self) -> None:
@@ -1206,14 +1275,14 @@ class TestStreamingBehavior:
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
         streaming.last_update = 100.0
-        streaming._send_or_edit_message = AsyncMock(return_value=True)
+        streaming._send_content = AsyncMock(return_value=True)
 
         clock = iter(100.0 + 0.03 * step for step in range(1, 80))
         with patch("mindroom.streaming.time.time", side_effect=lambda: next(clock)):
             for _ in range(20):
                 await streaming.update_content("a", mock_client)
 
-        assert streaming._send_or_edit_message.await_count == 2
+        assert streaming._send_content.await_count == 2
 
     @pytest.mark.asyncio
     async def test_idle_flush_triggers_after_delta_gap(self) -> None:
@@ -1237,18 +1306,18 @@ class TestStreamingBehavior:
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
         streaming.last_update = 100.0
-        streaming._send_or_edit_message = AsyncMock(return_value=True)
+        streaming._send_content = AsyncMock(return_value=True)
 
         with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.05]):
             await streaming.update_content("partial", mock_client)
 
-        assert streaming._send_or_edit_message.await_count == 0
+        assert streaming._send_content.await_count == 0
         assert streaming.last_delta_at == 100.0
 
         with patch("mindroom.streaming.time.time", return_value=100.3):
             await streaming._throttled_send(mock_client)
 
-        assert streaming._send_or_edit_message.await_count == 1
+        assert streaming._send_content.await_count == 1
         assert streaming.chars_since_last_update == 0
 
     @pytest.mark.asyncio
@@ -1320,7 +1389,7 @@ class TestStreamingBehavior:
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
         streaming.last_update = 100.0
-        streaming._send_or_edit_message = AsyncMock(return_value=True)
+        streaming._send_content = AsyncMock(return_value=True)
 
         with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0]):
             await streaming.update_content("first", mock_client)
@@ -1328,7 +1397,7 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.time.time", side_effect=[100.3, 100.3, 100.3]):
             await streaming.update_content(" second", mock_client)
 
-        assert streaming._send_or_edit_message.await_count == 0
+        assert streaming._send_content.await_count == 0
 
     @pytest.mark.asyncio
     async def test_progress_hint_uses_shorter_interval(self) -> None:
@@ -2706,7 +2775,7 @@ class TestStreamingBehavior:
         streaming.last_delta_at = 105.0
         streaming.accumulated_text = "first second"
         streaming.chars_since_last_update = len(streaming.accumulated_text)
-        streaming._send_or_edit_message = AsyncMock(return_value=True)
+        streaming._send_content = AsyncMock(return_value=True)
 
         delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
         delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
@@ -2717,7 +2786,7 @@ class TestStreamingBehavior:
             shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
-        assert streaming._send_or_edit_message.await_count == 1
+        assert streaming._send_content.await_count == 1
         assert streaming.chars_since_last_update == 0
 
     @pytest.mark.asyncio

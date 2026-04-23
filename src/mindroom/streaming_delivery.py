@@ -334,7 +334,7 @@ async def _shutdown_worker_progress_drain(
     return None
 
 
-async def _drive_stream_delivery(  # noqa: C901, PLR0912, PLR0915
+async def _drive_stream_delivery(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     streaming: StreamingResponse,
     delivery_queue: asyncio.Queue[_DeliveryRequest | None],
@@ -388,20 +388,16 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912, PLR0915
                 if not capture_completion.done():
                     capture_completion.set_result(None)
             if prepared_phase_boundary_flush is not None:
-                sent = await streaming._send_prepared_delivery(
+                await streaming._send_prepared_delivery(
                     client,
                     prepared_delivery=prepared_phase_boundary_flush,
                     is_final=False,
                 )
-                if sent:
-                    streaming._mark_nonterminal_delivery()
             if merged_request.force_refresh:
-                sent = await streaming._send_or_edit_message(
+                await streaming._send_or_edit_message(
                     client,
                     allow_empty_progress=merged_request.allow_empty_progress,
                 )
-                if sent:
-                    streaming._mark_nonterminal_delivery()
             elif merged_request.boundary_refresh:
                 current_time = time.time()
                 should_send_boundary_refresh = (
@@ -410,12 +406,11 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912, PLR0915
                     or (current_time - streaming.last_boundary_refresh_at) >= streaming.progress_update_interval
                 )
                 if should_send_boundary_refresh:
-                    sent = await streaming._send_or_edit_message(
+                    await streaming._send_or_edit_message(
                         client,
                         allow_empty_progress=merged_request.allow_empty_progress,
+                        boundary_refresh=True,
                     )
-                    if sent:
-                        streaming._mark_nonterminal_delivery(boundary_refresh=True)
                 else:
                     await streaming._throttled_send(
                         client,

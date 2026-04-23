@@ -339,23 +339,37 @@ class StreamingResponse:
         )
         if prepared_delivery is None:
             return
-        sent = await self._send_prepared_delivery(
+        await self._send_prepared_delivery(
             client,
             prepared_delivery=prepared_delivery,
             is_final=False,
         )
-        if sent:
-            self._mark_nonterminal_delivery()
 
-    def _mark_nonterminal_delivery(self, *, boundary_refresh: bool = False) -> None:
-        """Reset throttle state after a non-terminal send or edit reached Matrix."""
+    def _mark_nonterminal_delivery(
+        self,
+        committed_state: _CommittedDeliveryState,
+        *,
+        boundary_refresh: bool = False,
+    ) -> None:
+        """Advance throttle state after one non-terminal send or edit reached Matrix."""
         now = time.time()
         if self.stream_started_at is None:
             self.stream_started_at = now
         self.last_update = now
-        self.last_delta_at = now
-        self.last_boundary_refresh_at = now if boundary_refresh else None
-        self.chars_since_last_update = 0
+        delivery_matches_live_state = (
+            self.accumulated_text == committed_state.accumulated_text and self.tool_trace == committed_state.tool_trace
+        )
+        if delivery_matches_live_state:
+            self.last_delta_at = now
+            self.last_boundary_refresh_at = now if boundary_refresh else None
+            self.chars_since_last_update = 0
+            return
+
+        # The outbound payload was captured before newer live state arrived.
+        # Keep pending-delta bookkeeping and boundary-refresh eligibility intact
+        # so the next request can surface the newer content immediately.
+        self.last_boundary_refresh_at = None
+        self.chars_since_last_update = max(1, self.chars_since_last_update)
 
     async def _throttled_send(
         self,
@@ -388,9 +402,7 @@ class StreamingResponse:
         should_send = time_triggered or char_triggered or idle_triggered
         allow_empty_progress = progress_hint and not self.accumulated_text.strip()
         if should_send and (self.accumulated_text.strip() or allow_empty_progress):
-            sent = await self._send_or_edit_message(client, allow_empty_progress=allow_empty_progress)
-            if sent:
-                self._mark_nonterminal_delivery()
+            await self._send_or_edit_message(client, allow_empty_progress=allow_empty_progress)
 
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
@@ -455,6 +467,7 @@ class StreamingResponse:
         *,
         allow_empty_progress: bool = False,
         stream_status: str | None = None,
+        boundary_refresh: bool = False,
     ) -> bool:
         """Send new message or edit existing one."""
         prepared_delivery = self._prepare_delivery(
@@ -469,6 +482,7 @@ class StreamingResponse:
             client,
             prepared_delivery=prepared_delivery,
             is_final=is_final,
+            boundary_refresh=boundary_refresh,
         )
 
     async def _send_prepared_delivery(
@@ -477,6 +491,7 @@ class StreamingResponse:
         *,
         prepared_delivery: _PreparedStreamingDelivery,
         is_final: bool,
+        boundary_refresh: bool = False,
     ) -> bool:
         """Send one already-prepared non-terminal or terminal payload."""
         is_initial_send = self.event_id is None
@@ -498,6 +513,10 @@ class StreamingResponse:
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
             )
             self._mark_delivery_committed(prepared_delivery.committed_state)
+            self._mark_nonterminal_delivery(
+                prepared_delivery.committed_state,
+                boundary_refresh=boundary_refresh,
+            )
         else:
             self.placeholder_progress_sent = False
         return True
