@@ -190,6 +190,13 @@ depends_on = [
     "mindroom.logging_config",
 ]
 
+# NOTE (arch-b-7): mindroom.api.main edge here (and on
+# mindroom.api.{homeassistant_integration, integrations}) is honest because
+# verify_user and _reload_api_runtime_config are defined in api.main and
+# imported via lazy function-local imports to break the import-time cycle.
+# This codifies a real bidirectional cycle between mindroom.api.main and
+# these routers; ARCH-B-9 will lift those helpers into a leaf module
+# (likely a new api.auth) and remove the back-edges.
 [[modules]]
 path = "mindroom.api.google_integration"
 depends_on = [
@@ -249,7 +256,6 @@ path = "mindroom.api.openai_compat"
 depends_on = [
     "mindroom.ai",
     "mindroom.api.config_lifecycle",
-    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.execution_preparation",
     "mindroom.history.runtime",
@@ -278,7 +284,6 @@ depends_on = [
     "mindroom.api.skills",
     "mindroom.api.tools",
     "mindroom.api.workers",
-    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.credentials_sync",
     "mindroom.frontend_assets",
@@ -296,7 +301,6 @@ path = "mindroom.api.credentials"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.api.config_lifecycle",
-    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.tool_system.worker_routing",
