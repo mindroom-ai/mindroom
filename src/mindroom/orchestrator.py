@@ -451,8 +451,6 @@ class MultiAgentOrchestrator:
         room_id: str,
         event_id: str,
         new_content: dict[str, Any],
-        *,
-        known_joined_room_ids: set[str] | None = None,
     ) -> bool:
         """Edit one previously sent approval event."""
         return await self._run_on_runtime_loop(
@@ -460,7 +458,6 @@ class MultiAgentOrchestrator:
                 room_id,
                 event_id,
                 new_content,
-                known_joined_room_ids=known_joined_room_ids,
             ),
         )
 
@@ -468,31 +465,21 @@ class MultiAgentOrchestrator:
     def _bot_has_approval_room(
         bot: AgentBot | TeamBot,
         room_id: str,
-        *,
-        allow_known_joined_room: bool = False,
     ) -> bool:
         """Return whether one bot can safely post into an approval room."""
         if bot.client is None:
             return False
-        if room_id in tuple(bot.client.rooms):
-            return True
-        return allow_known_joined_room
+        return room_id in tuple(bot.client.rooms)
 
     def _approval_transport_bot(
         self,
         room_id: str,
-        *,
-        allow_known_joined_room: bool = False,
     ) -> AgentBot | TeamBot | None:
         """Return the live router bot that owns approval transport for one room."""
         bot = self.agent_bots.get("router")
         if bot is None or not bot.running or bot.client is None:
             return None
-        if not self._bot_has_approval_room(
-            bot,
-            room_id,
-            allow_known_joined_room=allow_known_joined_room,
-        ):
+        if not self._bot_has_approval_room(bot, room_id):
             return None
         return bot
 
@@ -501,14 +488,9 @@ class MultiAgentOrchestrator:
         room_id: str,
         event_id: str,
         new_content: dict[str, Any],
-        *,
-        known_joined_room_ids: set[str] | None = None,
     ) -> bool:
         """Edit one previously sent approval event on the current loop."""
-        bot = self._approval_transport_bot(
-            room_id,
-            allow_known_joined_room=known_joined_room_ids is not None and room_id in known_joined_room_ids,
-        )
+        bot = self._approval_transport_bot(room_id)
         if bot is None or bot.client is None:
             return False
 
@@ -552,7 +534,7 @@ class MultiAgentOrchestrator:
         thread_id: str | None,
         reason: str,
     ) -> bool:
-        """Send one threaded approval notice through the router transport bot."""
+        """Send one approval notice through the router transport bot."""
         bot = self._approval_transport_bot(room_id)
         if bot is None or bot.client is None:
             logger.warning(
@@ -562,17 +544,12 @@ class MultiAgentOrchestrator:
             )
             return False
 
-        content: dict[str, Any] = {
-            "msgtype": "m.notice",
-            "body": reason,
-        }
-        if isinstance(thread_id, str) and thread_id:
-            content["m.relates_to"] = {
-                "rel_type": "m.thread",
-                "event_id": thread_id,
-                "is_falling_back": True,
-                "m.in_reply_to": {"event_id": approval_event_id},
-            }
+        content = build_message_content(
+            reason,
+            thread_event_id=thread_id,
+            reply_to_event_id=approval_event_id if isinstance(thread_id, str) and thread_id else None,
+            extra_content={"msgtype": "m.notice"},
+        )
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="m.room.message",

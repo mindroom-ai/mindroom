@@ -816,8 +816,43 @@ async def test_request_approval_sanitizes_arguments_in_matrix_event_and_persiste
     assert len(json.dumps(event_payload["arguments"], sort_keys=True)) <= 1200
     assert event_payload["arguments_truncated"] is True
 
-    await store.approve(pending.id, resolved_by="@user:localhost")
+    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
     await task
+
+
+@pytest.mark.asyncio
+async def test_request_approval_direct_approve_denies_truncated_preview(tmp_path: Path) -> None:
+    """Direct approval by id should still fail closed when the approval preview is truncated."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        arguments={"command": "echo hi", "prompt": "x" * 5000},
+    )
+
+    assert pending is not None
+
+    resolved = await store.approve(pending.id, resolved_by="@user:localhost")
+    decision = await task
+
+    assert resolved.status == "denied"
+    assert resolved.resolution_reason == (
+        "Cannot approve: the displayed arguments are truncated. "
+        "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    )
+    assert decision.status == "denied"
+    assert decision.reason == (
+        "Cannot approve: the displayed arguments are truncated. "
+        "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    )
+    assert editor.await_args.args[2]["status"] == "denied"
+    assert editor.await_args.args[2]["resolution_reason"] == (
+        "Cannot approve: the displayed arguments are truncated. "
+        "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    )
 
 
 @pytest.mark.asyncio
@@ -1399,6 +1434,42 @@ async def test_handle_approval_resolution_updates_future_and_card(tmp_path: Path
         resolved_by="@user:localhost",
     )
     assert handled_again is False
+
+
+@pytest.mark.asyncio
+async def test_handle_approval_resolution_denies_truncated_preview_on_approve(tmp_path: Path) -> None:
+    """Approval-by-id should deny truncated approval previews instead of bypassing the guard."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        arguments={"command": "echo hi", "prompt": "x" * 5000},
+    )
+
+    assert pending is not None
+
+    handled = await store.handle_approval_resolution(
+        approval_id=pending.id,
+        status="approved",
+        reason=None,
+        resolved_by="@user:localhost",
+    )
+    decision = await task
+
+    assert handled is True
+    assert decision.status == "denied"
+    assert decision.reason == (
+        "Cannot approve: the displayed arguments are truncated. "
+        "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    )
+    assert editor.await_args.args[2]["status"] == "denied"
+    assert editor.await_args.args[2]["resolution_reason"] == (
+        "Cannot approve: the displayed arguments are truncated. "
+        "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    )
 
 
 @pytest.mark.asyncio
@@ -2947,6 +3018,13 @@ async def test_truncated_approval_notice_is_sent_once_by_router_bot(tmp_path: Pa
     assert store.list_pending() == [pending]
     router_bot.client.room_send.assert_awaited_once()
     general_bot.client.room_send.assert_not_awaited()
+    notice_content = router_bot.client.room_send.await_args.kwargs["content"]
+    assert notice_content["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$thread",
+        "is_falling_back": False,
+        "m.in_reply_to": {"event_id": "$approval"},
+    }
 
     await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
     decision = await task

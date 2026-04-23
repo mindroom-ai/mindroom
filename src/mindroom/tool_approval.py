@@ -659,11 +659,16 @@ class ApprovalManager:
         pending = self._pending_request(approval_id)
         if pending is None or pending.approver_user_id != resolved_by:
             return False
+        resolved_status, resolved_reason = self._normalized_resolution_request(
+            pending,
+            status=status,
+            reason=reason,
+        )
         return (
             await self._resolve_pending(
                 approval_id,
-                status=status,
-                reason=reason,
+                status=resolved_status,
+                reason=resolved_reason,
                 resolved_by=resolved_by,
             )
             is not None
@@ -693,13 +698,14 @@ class ApprovalManager:
             )
         if pending.approver_user_id != resolved_by:
             return AnchoredApprovalActionResult(handled=False)
-        if status == "approved" and pending.event_arguments_truncated:
+        truncated_reason = self._truncated_approval_reason(pending, status=status)
+        if truncated_reason is not None:
             if resolve_truncated_approval:
                 if (
                     await self._resolve_pending(
                         pending.id,
                         status="denied",
-                        reason=_DEFAULT_TRUNCATED_APPROVAL_REASON,
+                        reason=truncated_reason,
                         resolved_by=resolved_by,
                     )
                     is not None
@@ -716,7 +722,7 @@ class ApprovalManager:
                 )
             return AnchoredApprovalActionResult(
                 handled=handled_on_truncated_approval,
-                error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON,
+                error_reason=truncated_reason,
                 thread_id=pending.thread_id,
             )
 
@@ -884,10 +890,15 @@ class ApprovalManager:
             if resolved_by != pending.approver_user_id:
                 msg = f"Approval request '{approval_id}' can only be resolved by the original requester."
                 raise PermissionError(msg)
-        await self._resolve_pending(
-            approval_id,
+        resolved_status, resolved_reason = self._normalized_resolution_request(
+            pending,
             status=status,
             reason=reason,
+        )
+        await self._resolve_pending(
+            approval_id,
+            status=resolved_status,
+            reason=resolved_reason,
             resolved_by=resolved_by,
         )
         return pending
@@ -1050,40 +1061,30 @@ class ApprovalManager:
                 self._finish_unsynced_resolved_replay(pending.id)
         return synced_requests
 
-    async def sync_unsynced_request(
-        self,
-        approval_id: str,
+    @staticmethod
+    def _truncated_approval_reason(
+        pending: PendingApproval,
         *,
-        edit_event: MatrixEventEditor | None = None,
-    ) -> PendingApproval | None:
-        """Replay one resolved approval card that still needs one Matrix edit."""
-        with self._state_lock:
-            pending = self._requests_by_id.get(approval_id)
-            if pending is None or pending.status == "pending" or pending.resolution_synced_at is not None:
-                return None
+        status: ApprovalStatus,
+    ) -> str | None:
+        """Return the fail-closed reason when an approval would bypass a truncated preview."""
+        if status == "approved" and pending.event_arguments_truncated:
+            return _DEFAULT_TRUNCATED_APPROVAL_REASON
+        return None
 
-        claimed_pending = self._claim_unsynced_resolved_replay(approval_id)
-        if claimed_pending is None:
-            return None
-        try:
-            previous_synced_at = claimed_pending.resolution_synced_at
-            await self._edit_resolved_event(claimed_pending, edit_event=edit_event)
-            if claimed_pending.resolution_synced_at != previous_synced_at:
-                return claimed_pending
-            return None
-        finally:
-            self._finish_unsynced_resolved_replay(approval_id)
-
-    def acknowledge_unsynced_request(self, approval_id: str) -> PendingApproval | None:
-        """Mark one resolved approval as handled when no Matrix edit can be sent."""
-        with self._state_lock:
-            pending = self._requests_by_id.get(approval_id)
-            if pending is None or pending.status == "pending" or pending.resolution_synced_at is not None:
-                return None
-            pending.resolution_synced_at = _utcnow()
-        self._persist_request(pending)
-        self._discard(approval_id)
-        return pending
+    @classmethod
+    def _normalized_resolution_request(
+        cls,
+        pending: PendingApproval,
+        *,
+        status: ApprovalStatus,
+        reason: str | None,
+    ) -> tuple[ApprovalStatus, str | None]:
+        """Normalize one requested resolution against approval safety invariants."""
+        truncated_reason = cls._truncated_approval_reason(pending, status=status)
+        if truncated_reason is not None:
+            return "denied", truncated_reason
+        return status, reason
 
     @staticmethod
     def _new_decision(
