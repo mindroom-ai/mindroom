@@ -894,6 +894,30 @@ class DeliveryGateway:
             else None,
         )
 
+    def _interactive_response_for_visible_body(
+        self,
+        *,
+        visible_body: str,
+        raw_body_candidate: str | None,
+    ):
+        """Resolve interactive metadata for the exact text that remained visible."""
+        visible_interactive_response = interactive.parse_and_format_interactive(
+            visible_body,
+            extract_mapping=True,
+        )
+        if raw_body_candidate is None or raw_body_candidate == visible_body:
+            return visible_interactive_response
+        raw_interactive_response = interactive.parse_and_format_interactive(
+            raw_body_candidate,
+            extract_mapping=True,
+        )
+        if (
+            raw_interactive_response.option_map
+            and raw_interactive_response.formatted_text == visible_body
+        ):
+            return raw_interactive_response
+        return visible_interactive_response
+
     async def finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912
         self,
         request: FinalizeStreamedResponseRequest,
@@ -1184,7 +1208,10 @@ class DeliveryGateway:
             )
 
         assert streamed_event_id is not None
-        interactive_response = interactive.parse_and_format_interactive(streamed_text, extract_mapping=True)
+        interactive_response = self._interactive_response_for_visible_body(
+            visible_body=streamed_text,
+            raw_body_candidate=final_body_candidate,
+        )
         return FinalDeliveryOutcome(
             terminal_status="completed",
             event_id=streamed_event_id,

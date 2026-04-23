@@ -18,6 +18,7 @@ from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 from pydantic import ValidationError
 
+from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.config.agent import AgentConfig
@@ -4052,6 +4053,88 @@ class TestStreamingBehavior:
         after_kwargs = response_hooks.emit_after_response.await_args.kwargs
         assert after_kwargs["response_text"] == "chunk"
         assert after_kwargs["delivery_kind"] == "sent"
+        response_hooks.emit_cancelled_response.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_streamed_success_noop_final_transform_keeps_matching_interactive_options(self) -> None:
+        """Preserved streamed interactive text should keep the matching raw option metadata."""
+        response_envelope = MessageEnvelope(
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="helper",
+            source_kind="message",
+        )
+        raw_interactive = (
+            "```interactive\n"
+            '{"question":"Approve?","options":[{"emoji":"✅","label":"Approve","value":"approve"}]}\n'
+            "```"
+        )
+        formatted_interactive = interactive.parse_and_format_interactive(
+            raw_interactive,
+            extract_mapping=True,
+        )
+        response_hooks = SimpleNamespace(
+            apply_before_response=AsyncMock(),
+            apply_final_response_transform=AsyncMock(
+                return_value=SimpleNamespace(
+                    response_text=raw_interactive,
+                    response_kind="ai",
+                    envelope=response_envelope,
+                ),
+            ),
+            emit_after_response=AsyncMock(),
+            emit_cancelled_response=AsyncMock(),
+        )
+        gateway = DeliveryGateway(
+            DeliveryGatewayDeps(
+                runtime=SimpleNamespace(
+                    client=_make_matrix_client_mock(),
+                    orchestrator=None,
+                    config=self.config,
+                    runtime_started_at=0.0,
+                ),
+                runtime_paths=runtime_paths_for(self.config),
+                agent_name="helper",
+                logger=MagicMock(),
+                redact_message_event=AsyncMock(return_value=True),
+                sender_domain="localhost",
+                resolver=MagicMock(),
+                response_hooks=response_hooks,
+            ),
+        )
+
+        outcome = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+                stream_transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$streaming",
+                    terminal_operation="send",
+                    terminal_result="succeeded",
+                    terminal_status="completed",
+                    rendered_body=formatted_interactive.formatted_text,
+                    visible_body_state="visible_body",
+                    canonical_final_body_candidate=raw_interactive,
+                ),
+                initial_delivery_kind="sent",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-final-transform-interactive",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome.final_visible_event_id == "$streaming"
+        assert outcome.final_visible_body == formatted_interactive.formatted_text
+        assert outcome.option_map == formatted_interactive.option_map
+        assert outcome.options_list == tuple(formatted_interactive.options_list or ())
+        response_hooks.apply_final_response_transform.assert_awaited_once()
         response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
