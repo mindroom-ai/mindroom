@@ -40,12 +40,10 @@ def _room_send_response(event_id: str) -> MagicMock:
     return response
 
 
-def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
-    return (
-        outcome.event_id
-        if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed
-        else None
-    )
+def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
+    if isinstance(outcome, str) or outcome is None:
+        return outcome
+    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
 @pytest.mark.asyncio

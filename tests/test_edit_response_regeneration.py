@@ -235,56 +235,32 @@ def _outcome(
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
         failure_reason=failure_reason,
-        mark_handled=state != "error_without_visible_response" and visible_event_id is not None,
     )
 
 
-def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
+    if isinstance(outcome, str) or outcome is None:
+        return outcome
     return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
 def _generate_response_with_locked_callback(
     response_event_id: str | None,
-) -> Callable[..., Awaitable[FinalDeliveryOutcome]]:
+) -> Callable[..., Awaitable[str | None]]:
     """Execute locked edit cleanup in mocked response generation paths."""
 
-    async def _generate_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+    async def _generate_response(*_args: object, **kwargs: object) -> str | None:
         locked_callback = kwargs.get("on_lifecycle_lock_acquired")
         if locked_callback is not None:
             locked_callback()
-        if response_event_id is None:
-            return _outcome(
-                "error_without_visible_response",
-                terminal_status="error",
-                failure_reason="test_mock_no_visible_response",
-            )
-        delivery_kind = "edited" if kwargs.get("existing_event_id") is not None else "sent"
-        return _outcome(
-            "final_visible_delivery",
-            terminal_status="completed",
-            final_visible_event_id=response_event_id,
-            final_visible_body="",
-            delivery_kind=delivery_kind,
-        )
+        return response_event_id
 
     return _generate_response
 
 
-def _delivery_resolution(response_event_id: str | None) -> FinalDeliveryOutcome:
-    """Build one terminal outcome for test-side response mocks."""
-    if response_event_id is None:
-        return _outcome(
-            "error_without_visible_response",
-            terminal_status="error",
-            failure_reason="test_mock_no_visible_response",
-        )
-    return _outcome(
-        "final_visible_delivery",
-        terminal_status="completed",
-        final_visible_event_id=response_event_id,
-        final_visible_body="",
-        delivery_kind="sent",
-    )
+def _delivery_resolution(response_event_id: str | None) -> str | None:
+    """Build one test-side response result for coordinator consumers."""
+    return response_event_id
 
 
 @pytest.mark.asyncio
@@ -1609,7 +1585,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
 async def test_handle_message_edit_does_not_mark_regeneration_success_when_existing_edit_fails(
     tmp_path: Path,
 ) -> None:
-    """Failed in-place regeneration edits must leave the prior response linkage untouched."""
+    """Preserved in-place regeneration edits must leave the prior response linkage untouched."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -1684,16 +1660,11 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         "sender": "@user:example.com",
     }
 
-    async def fail_visible_update(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+    async def fail_visible_update(*_args: object, **kwargs: object) -> str | None:
         locked_callback = kwargs.get("on_lifecycle_lock_acquired")
         if locked_callback is not None:
             locked_callback()
-        return _outcome(
-            "kept_prior_visible_response_after_error",
-            terminal_status="error",
-            final_visible_event_id="$response:example.com",
-            failure_reason="delivery_failed",
-        )
+        return "$response:example.com"
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
@@ -1729,7 +1700,6 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         assert turn_store.record_turn.call_count == 0
         assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
-        bot.logger.warning.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2636,13 +2606,7 @@ async def test_edit_regenerator_backfill_preserves_interactive_selection_anchor_
             ),
         ],
     )
-    generate_response = AsyncMock(
-        return_value=_outcome(
-            "error_without_visible_response",
-            terminal_status="error",
-            failure_reason="test_mock_no_visible_response",
-        ),
-    )
+    generate_response = AsyncMock(return_value=None)
     replace_edit_regenerator_deps(bot, generate_response=generate_response)
 
     with (
