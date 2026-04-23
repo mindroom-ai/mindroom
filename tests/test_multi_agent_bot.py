@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import sys
+import threading
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -12050,16 +12051,18 @@ class TestMultiAgentOrchestrator:
         mock_schedule_retry.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_stop_expires_pending_approvals_before_marking_bots_stopped(
+    async def test_shutdown_drains_in_flight_approval_sends(
         self,
         tmp_path: Path,
     ) -> None:
-        """Shutdown should send one final router-owned approval edit before the transport stops."""
+        """Shutdown should wait for in-flight approval sends before expiring and editing them."""
         runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
         orchestrator._capture_runtime_loop()
 
         edit_running_states: list[bool] = []
+        send_started = asyncio.Event()
+        allow_send_to_finish = asyncio.Event()
 
         async def _room_send(
             room_id: str,
@@ -12071,6 +12074,8 @@ class TestMultiAgentOrchestrator:
             if "m.new_content" in content:
                 edit_running_states.append(router_bot.running)
                 return nio.RoomSendResponse(event_id="$approval-edit", room_id=room_id)
+            send_started.set()
+            await allow_send_to_finish.wait()
             return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 
         router_client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
@@ -12109,12 +12114,7 @@ class TestMultiAgentOrchestrator:
             ),
         )
 
-        async with asyncio.timeout(1):
-            while True:
-                pending = store.list_pending()
-                if pending and pending[0].event_id is not None:
-                    break
-                await asyncio.sleep(0)
+        await send_started.wait()
 
         try:
             with (
@@ -12126,7 +12126,12 @@ class TestMultiAgentOrchestrator:
                 patch("mindroom.orchestrator.shutdown_shared_knowledge_managers", new=AsyncMock()),
                 patch.object(orchestrator, "_close_runtime_support_services", new=AsyncMock()),
             ):
-                await orchestrator.stop()
+                stop_task = asyncio.create_task(orchestrator.stop())
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(stop_task), timeout=0.05)
+                assert edit_running_states == []
+                allow_send_to_finish.set()
+                await stop_task
 
             decision = await task
             assert decision.status == "expired"
@@ -12134,6 +12139,7 @@ class TestMultiAgentOrchestrator:
             assert router_bot.running is False
             router_bot.stop.assert_awaited_once_with(reason="shutdown")
         finally:
+            allow_send_to_finish.set()
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
@@ -12847,11 +12853,11 @@ class TestMultiAgentOrchestrator:
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
-    async def test_router_waits_for_in_flight_approval_send_before_leaving_room(  # noqa: PLR0915
+    async def test_router_does_not_leave_under_slow_room_send(  # noqa: PLR0915
         self,
         tmp_path: Path,
     ) -> None:
-        """Router leave should wait for an in-flight approval send so the follow-up edit can still land."""
+        """Router leave should wait even when the underlying room_send takes longer than five seconds."""
         runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
         orchestrator._capture_runtime_loop()
@@ -12880,8 +12886,6 @@ class TestMultiAgentOrchestrator:
         router_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest-thread")
         router_bot.running = True
 
-        send_started = asyncio.Event()
-        allow_send_to_finish = asyncio.Event()
         event_order: list[str] = []
 
         async def _router_room_send(
@@ -12895,10 +12899,8 @@ class TestMultiAgentOrchestrator:
             if "m.new_content" in content:
                 event_order.append("edit")
                 return nio.RoomSendResponse(event_id="$approval-edit", room_id=room_id)
-            event_order.append("send-start")
-            send_started.set()
-            await allow_send_to_finish.wait()
-            event_order.append("send-finish")
+            event_order.append("send")
+            await asyncio.sleep(8)
             return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 
         router_bot.client.room_send = AsyncMock(side_effect=_router_room_send)
@@ -12924,8 +12926,12 @@ class TestMultiAgentOrchestrator:
             ),
         )
 
-        await send_started.wait()
-        pending = store.list_pending()
+        async with asyncio.timeout(1):
+            while True:
+                pending = store.list_pending()
+                if pending:
+                    break
+                await asyncio.sleep(0)
         assert len(pending) == 1
         assert pending[0].event_id is None
 
@@ -12948,19 +12954,20 @@ class TestMultiAgentOrchestrator:
         leave_task = asyncio.create_task(_leave_router())
 
         try:
+            leave_started_at = asyncio.get_running_loop().time()
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(leave_task), timeout=0.05)
 
             assert leave_non_dm_rooms.await_count == 0
-            assert event_order == ["send-start"]
-
-            allow_send_to_finish.set()
+            assert event_order == ["send"]
 
             await leave_task
             decision = await task
+            elapsed = asyncio.get_running_loop().time() - leave_started_at
 
             assert decision.status == "expired"
-            assert event_order == ["send-start", "send-finish", "edit", "leave"]
+            assert elapsed >= 7.5
+            assert event_order == ["send", "edit", "leave"]
             assert store.list_unsynced_resolved() == []
             edit_call = router_bot.client.room_send.await_args_list[1]
             assert edit_call.kwargs["content"]["m.relates_to"] == {
@@ -12968,7 +12975,6 @@ class TestMultiAgentOrchestrator:
                 "event_id": "$approval",
             }
         finally:
-            allow_send_to_finish.set()
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
@@ -13676,3 +13682,146 @@ class TestMultiAgentOrchestrator:
             for bot in orchestrator.agent_bots.values():
                 if hasattr(bot, "enable_streaming"):
                     assert bot.enable_streaming is False
+
+    @pytest.mark.asyncio
+    async def test_router_does_not_leave_until_event_id_is_persisted(  # noqa: PLR0915
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router leave must wait for the post-send registration window before expiring the approval."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+
+        config = _runtime_bound_config(
+            Config(models={"default": {"provider": "test", "id": "test-model"}}),
+            tmp_path,
+        )
+        router_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password=TEST_PASSWORD,
+        )
+        router_bot = AgentBot(
+            router_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!R:server"],
+        )
+        router_bot.orchestrator = orchestrator
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
+        router_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!R:server"])
+        router_bot.client.rooms["!R:server"].add_member(router_user.user_id, router_user.display_name, None)
+        router_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest-thread")
+        router_bot.running = True
+
+        event_order: list[str] = []
+
+        async def _router_room_send(
+            *,
+            room_id: str,
+            message_type: str,
+            content: dict[str, object],
+        ) -> nio.RoomSendResponse:
+            assert room_id == "!R:server"
+            assert message_type == "io.mindroom.tool_approval"
+            if "m.new_content" in content:
+                event_order.append("edit")
+                return nio.RoomSendResponse(event_id="$approval-edit", room_id=room_id)
+            event_order.append("send")
+            return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
+
+        router_bot.client.room_send = AsyncMock(side_effect=_router_room_send)
+        orchestrator.agent_bots = {"router": router_bot}
+
+        store = initialize_approval_store(
+            runtime_paths,
+            sender=orchestrator._send_approval_event,
+            editor=orchestrator._edit_approval_event,
+        )
+        original_set_event_delivery = store._set_event_delivery
+        set_event_delivery_started = threading.Event()
+        allow_event_delivery = threading.Event()
+
+        def delayed_set_event_delivery(approval_id: str, event_id: str) -> None:
+            set_event_delivery_started.set()
+            allow_event_delivery.wait(timeout=1)
+            original_set_event_delivery(approval_id, event_id)
+
+        store._set_event_delivery = delayed_set_event_delivery
+        result: object | None = None
+        error: BaseException | None = None
+
+        def worker() -> None:
+            nonlocal result, error
+            try:
+                result = asyncio.run(
+                    store.request_approval(
+                        tool_name="run_shell_command",
+                        arguments={"command": "echo hi"},
+                        agent_name="code",
+                        room_id="!R:server",
+                        thread_id="$thread",
+                        requester_id="@user:localhost",
+                        approver_user_id="@user:localhost",
+                        matched_rule="run_shell_*",
+                        script_path=None,
+                        timeout_seconds=60,
+                    ),
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                error = exc
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+
+        try:
+            assert await asyncio.to_thread(set_event_delivery_started.wait, 1)
+
+            pending = store.list_pending()
+            assert len(pending) == 1
+            assert pending[0].event_id is None
+
+            router_bot.rooms = []
+
+            async def _leave_rooms(_client: object, room_ids: list[str]) -> None:
+                event_order.append("leave")
+                assert room_ids == ["!R:server"]
+                del router_bot.client.rooms["!R:server"]
+
+            leave_non_dm_rooms = AsyncMock(side_effect=_leave_rooms)
+
+            async def _leave_router() -> None:
+                with (
+                    patch("mindroom.bot_room_lifecycle.is_dm_room", new=AsyncMock(return_value=False)),
+                    patch("mindroom.bot_room_lifecycle.leave_non_dm_rooms", new=leave_non_dm_rooms),
+                ):
+                    await router_bot.leave_unconfigured_rooms()
+
+            leave_task = asyncio.create_task(_leave_router())
+
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(leave_task), timeout=0.05)
+
+            assert leave_non_dm_rooms.await_count == 0
+            assert event_order == ["send"]
+
+            allow_event_delivery.set()
+
+            await leave_task
+            await asyncio.to_thread(thread.join, 1)
+
+            assert error is None
+            assert not thread.is_alive()
+            assert result is not None
+            decision = cast("Any", result)
+            assert decision.status == "expired"
+            assert event_order == ["send", "edit", "leave"]
+            assert store.list_unsynced_resolved() == []
+        finally:
+            allow_event_delivery.set()
+            if thread.is_alive():
+                await asyncio.to_thread(thread.join, 1)
+            await shutdown_approval_store()

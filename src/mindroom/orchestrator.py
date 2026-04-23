@@ -647,11 +647,7 @@ class MultiAgentOrchestrator:
         if approval_store is None:
             return
 
-        if not await approval_store.wait_for_in_flight_sends_in_rooms(room_ids, timeout_seconds=5.0):
-            logger.warning(
-                "Timed out waiting for in-flight approval sends before router leave",
-                room_ids=sorted(room_ids),
-            )
+        await approval_store.wait_for_pending_sends_in_rooms(room_ids, timeout=None)
 
         for pending in approval_store.list_pending():
             if pending.room_id not in room_ids:

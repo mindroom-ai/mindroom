@@ -340,7 +340,8 @@ class ApprovalManager:
         self._requests_by_id: dict[str, PendingApproval] = {}
         self._pending_by_id: dict[str, PendingApproval] = {}
         self._approval_id_by_event_id: dict[str, str] = {}
-        self._in_flight_send_room_ids: dict[str, str] = {}
+        self._pending_send_completion: dict[str, asyncio.Event] = {}
+        self._pending_send_room_index: dict[str, set[str]] = {}
         self._replay_in_progress: set[str] = set()
         self._load_existing()
 
@@ -436,19 +437,38 @@ class ApprovalManager:
         with self._state_lock:
             return list(self._pending_by_id.values())
 
-    def _start_in_flight_send(self, approval_id: str, room_id: str) -> None:
+    def _start_pending_send(self, approval_id: str, room_id: str) -> None:
         with self._state_lock:
-            self._in_flight_send_room_ids[approval_id] = room_id
+            self._pending_send_completion[approval_id] = asyncio.Event()
+            self._pending_send_room_index.setdefault(room_id, set()).add(approval_id)
 
-    def _finish_in_flight_send(self, approval_id: str) -> None:
+    def _complete_pending_send(self, approval_id: str) -> None:
+        completion_event: asyncio.Event | None = None
         with self._state_lock:
-            self._in_flight_send_room_ids.pop(approval_id, None)
+            completion_event = self._pending_send_completion.pop(approval_id, None)
+            for room_id in tuple(self._pending_send_room_index):
+                approval_ids = self._pending_send_room_index[room_id]
+                approval_ids.discard(approval_id)
+                if not approval_ids:
+                    self._pending_send_room_index.pop(room_id, None)
+        if completion_event is not None:
+            completion_event.set()
 
-    def _in_flight_send_ids_for_rooms(self, room_ids: set[str]) -> tuple[str, ...]:
+    def _pending_send_events_for_rooms(self, room_ids: set[str]) -> tuple[asyncio.Event, ...]:
         with self._state_lock:
+            pending_send_ids: set[str] = set()
+            for room_id in room_ids:
+                pending_send_ids.update(self._pending_send_room_index.get(room_id, set()))
             return tuple(
-                approval_id for approval_id, room_id in self._in_flight_send_room_ids.items() if room_id in room_ids
+                completion_event
+                for approval_id, completion_event in self._pending_send_completion.items()
+                if approval_id in pending_send_ids
             )
+
+    def pending_send_room_ids(self) -> set[str]:
+        """Return rooms that still have approval sends completing their delivery lifecycle."""
+        with self._state_lock:
+            return set(self._pending_send_room_index)
 
     def _set_event_delivery(self, approval_id: str, event_id: str) -> None:
         with self._state_lock:
@@ -617,7 +637,7 @@ class ApprovalManager:
         )
         self._store_request(pending)
         self._persist_request(pending)
-        self._start_in_flight_send(pending.id, room_id)
+        self._start_pending_send(pending.id, room_id)
 
         sent_event: SentApprovalEvent | None = None
         send_failure_reason = _DEFAULT_SEND_FAILURE_REASON
@@ -638,9 +658,8 @@ class ApprovalManager:
                 if applied_decision is not None:
                     self._persist_request(applied_decision[0])
                 self._discard(pending.id)
+                self._complete_pending_send(pending.id)
                 raise
-            finally:
-                self._finish_in_flight_send(pending.id)
         except Exception as exc:
             if isinstance(exc, ToolApprovalTransportError):
                 send_failure_reason = exc.reason
@@ -676,12 +695,14 @@ class ApprovalManager:
                 resolved_by=None,
             )
             self._discard(pending.id)
+            self._complete_pending_send(pending.id)
             return decision or self._decision_from_pending(pending)
 
         self._set_event_delivery(pending.id, sent_event.event_id)
         self._persist_request(pending)
         if pending.status != "pending" and pending.resolution_synced_at is None:
             await self._edit_resolved_event(pending)
+        self._complete_pending_send(pending.id)
 
         try:
             return await self._await_approval_decision(pending)
@@ -1132,7 +1153,6 @@ class ApprovalManager:
     def _discard(self, approval_id: str) -> None:
         delete_request_file = False
         with self._state_lock:
-            self._in_flight_send_room_ids.pop(approval_id, None)
             pending = self._pending_by_id.pop(approval_id, None)
             if pending is None:
                 pending = self._requests_by_id.get(approval_id)
@@ -1178,16 +1198,27 @@ class ApprovalManager:
                 self._finish_unsynced_resolved_replay(pending.id)
         return synced_requests
 
-    async def wait_for_in_flight_sends_in_rooms(
+    async def wait_for_pending_sends_in_rooms(
         self,
         room_ids: set[str],
-        timeout_seconds: float,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109
     ) -> bool:
-        """Wait for approval event sends already in flight for the given rooms to complete."""
+        """Wait for approval sends in the given rooms to finish delivery registration."""
         if not room_ids:
             return True
-        deadline = asyncio.get_running_loop().time() + max(timeout_seconds, 0.0)
-        while self._in_flight_send_ids_for_rooms(room_ids):
+
+        deadline: float | None = None
+        if timeout is not None:
+            deadline = asyncio.get_running_loop().time() + max(timeout, 0.0)
+
+        while True:
+            pending_events = self._pending_send_events_for_rooms(room_ids)
+            if not pending_events or all(event.is_set() for event in pending_events):
+                return True
+            if deadline is None:
+                await asyncio.sleep(0.05)
+                continue
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return False
@@ -1519,6 +1550,7 @@ async def shutdown_approval_store(
         _clear_script_cache()
         return
 
+    await manager.wait_for_pending_sends_in_rooms(manager.pending_send_room_ids(), timeout=None)
     await manager.shutdown(reason=reason)
     _MANAGER = None
     _clear_script_cache()
