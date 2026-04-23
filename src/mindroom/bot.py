@@ -1435,6 +1435,11 @@ class AgentBot:
                     room_id=room.room_id,
                     resolved_by=event.sender,
                 )
+            elif pending_is_open:
+                await approval_manager.restate_pending_anchored_request(
+                    approval_event_id=approval_event_id,
+                    room_id=room.room_id,
+                )
             return
 
         result = await approval_manager.handle_custom_response(
@@ -1456,9 +1461,7 @@ class AgentBot:
                 thread_id=result.thread_id,
                 reason=result.error_reason,
             )
-        if result.handled:
-            return
-        if pending_is_open and not sender_is_requester:
+        if not result.handled and pending_is_open and not sender_is_requester:
             await approval_manager.restate_pending_anchored_request(
                 approval_event_id=approval_event_id,
                 room_id=room.room_id,

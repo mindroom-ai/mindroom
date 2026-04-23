@@ -3139,6 +3139,44 @@ async def test_non_requester_click_emits_reconciliation_edit(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_unauthorized_non_requester_click_emits_reconciliation_edit(tmp_path: Path) -> None:
+    """Unauthorized non-requester clicks should still restate the pending card for Cinny reconciliation."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    bot = _agent_bot(tmp_path, config=config)
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock(return_value=True)
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    event = _custom_response_event(
+        approval_event_id="$approval",
+        status="approved",
+        sender="@other:localhost",
+    )
+
+    with patch("mindroom.bot.is_authorized_sender", return_value=False):
+        await bot._on_unknown_event(room, event)
+
+    assert task.done() is False
+    assert store.list_pending() == [pending]
+    assert editor.await_count == 1
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+    assert editor.await_args.args[2]["status"] == "pending"
+
+    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
+    decision = await task
+    assert decision.status == "denied"
+    assert decision.reason == "cleanup"
+
+
+@pytest.mark.asyncio
 async def test_bot_custom_approval_response_event_denies_truncated_approval_and_edits_card(
     tmp_path: Path,
 ) -> None:
