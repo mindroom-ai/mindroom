@@ -12,7 +12,7 @@ import sys
 import threading
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
@@ -115,6 +115,7 @@ from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_approval import (
+    PendingApproval,
     SentApprovalEvent,
     initialize_approval_store,
     shutdown_approval_store,
@@ -13071,6 +13072,108 @@ class TestMultiAgentOrchestrator:
             leave_non_dm_rooms.assert_awaited_once()
             assert editor.await_count == 2
             assert request_path.exists() is False
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_drain_catches_pending_approvals_created_during_drain(self, tmp_path: Path) -> None:
+        """Router leave should stay deferred when fresh pending approvals appear during the drain."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+        config = _runtime_bound_config(
+            Config(models={"default": {"provider": "test", "id": "test-model"}}),
+            tmp_path,
+        )
+        router_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password=TEST_PASSWORD,
+        )
+        router_bot = AgentBot(
+            router_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!R:server"],
+        )
+        router_bot.orchestrator = orchestrator
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
+        router_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!R:server"])
+        router_bot.client.rooms["!R:server"].add_member(router_user.user_id, router_user.display_name, None)
+        router_bot.running = True
+        router_bot.rooms = []
+        orchestrator.agent_bots = {"router": router_bot}
+
+        editor = AsyncMock(return_value=True)
+        store = initialize_approval_store(
+            runtime_paths,
+            editor=editor,
+            runtime_loop=asyncio.get_running_loop(),
+        )
+        requested_at = datetime.now(ZoneInfo("UTC"))
+
+        def _store_pending_request(approval_id: str, event_id: str) -> None:
+            pending = PendingApproval(
+                id=approval_id,
+                tool_name="run_shell_command",
+                arguments={},
+                arguments_preview={"command": "echo hi"},
+                arguments_preview_truncated=False,
+                event_arguments_payload={"command": "echo hi"},
+                event_arguments_truncated=False,
+                agent_name="code",
+                room_id="!R:server",
+                thread_id="$thread",
+                requester_id="@user:localhost",
+                approver_user_id="@user:localhost",
+                matched_rule="run_shell_*",
+                script_path=None,
+                requested_at=requested_at,
+                expires_at=requested_at + timedelta(minutes=5),
+                status="pending",
+                event_id=event_id,
+            )
+            store._store_request(pending)
+            store._persist_request(pending)
+
+        _store_pending_request("pending-initial", "$approval-initial")
+        injected_attempts = 0
+
+        async def _reconcile_unsynced_approvals(
+            *,
+            room_ids: set[str] | None = None,
+            max_attempts: int = 3,
+            backoff: str = "exponential",
+        ) -> bool:
+            del max_attempts, backoff
+            nonlocal injected_attempts
+            assert room_ids == {"!R:server"}
+            injected_attempts += 1
+            _store_pending_request(
+                f"pending-injected-{injected_attempts}",
+                f"$approval-injected-{injected_attempts}",
+            )
+            return True
+
+        reconcile_mock = AsyncMock(side_effect=_reconcile_unsynced_approvals)
+        leave_non_dm_rooms = AsyncMock()
+
+        try:
+            with (
+                patch.object(store, "reconcile_unsynced_approvals", new=reconcile_mock),
+                patch("mindroom.bot_room_lifecycle.is_dm_room", new=AsyncMock(return_value=False)),
+                patch("mindroom.bot_room_lifecycle.leave_non_dm_rooms", new=leave_non_dm_rooms),
+            ):
+                await router_bot.leave_unconfigured_rooms()
+
+            assert reconcile_mock.await_count == 3
+            assert injected_attempts == 3
+            assert editor.await_count == 3
+            leave_non_dm_rooms.assert_not_awaited()
+            assert [pending.id for pending in store.list_pending()] == ["pending-injected-3"]
+            assert orchestrator._pending_room_leaves == {"!R:server"}
         finally:
             await shutdown_approval_store()
 

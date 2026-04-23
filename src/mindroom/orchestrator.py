@@ -683,26 +683,31 @@ class MultiAgentOrchestrator:
         approval_store: ApprovalManager,
     ) -> set[str]:
         """Wait until approvals in the given rooms are either synced or deferred to a later pass."""
-        await approval_store.wait_for_pending_sends_in_rooms(room_ids, timeout=None)
+        for _ in range(3):
+            await approval_store.wait_for_pending_sends_in_rooms(room_ids, timeout=None)
 
-        for pending in approval_store.list_pending():
-            if pending.room_id not in room_ids:
-                continue
-            with suppress(LookupError, ValueError):
-                await approval_store.expire(
-                    pending.id,
-                    reason=_REMOVED_APPROVAL_ROOM_REASON,
-                )
-        fully_reconciled = await approval_store.reconcile_unsynced_approvals(
-            room_ids=room_ids,
-            max_attempts=3,
-            backoff="exponential",
-        )
-        if fully_reconciled:
-            self._pending_room_leaves.difference_update(room_ids)
-            return set(room_ids)
+            for pending in approval_store.list_pending():
+                if pending.room_id not in room_ids:
+                    continue
+                with suppress(LookupError, ValueError):
+                    await approval_store.expire(
+                        pending.id,
+                        reason=_REMOVED_APPROVAL_ROOM_REASON,
+                    )
+            fully_reconciled = await approval_store.reconcile_unsynced_approvals(
+                room_ids=room_ids,
+                max_attempts=3,
+                backoff="exponential",
+            )
+            pending_after = [pending for pending in approval_store.list_pending() if pending.room_id in room_ids]
+            if fully_reconciled and not pending_after:
+                self._pending_room_leaves.difference_update(room_ids)
+                return set(room_ids)
 
         blocked_room_ids = approval_store._room_ids_with_unsynced_resolution_work() & room_ids
+        blocked_room_ids.update(
+            pending.room_id for pending in approval_store.list_pending() if pending.room_id in room_ids
+        )
         finalized_room_ids = set(room_ids) - blocked_room_ids
         self._pending_room_leaves.difference_update(finalized_room_ids)
         self._pending_room_leaves.update(blocked_room_ids)
