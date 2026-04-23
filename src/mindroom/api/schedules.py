@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
+from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases
@@ -317,8 +318,6 @@ async def cancel_schedule(
     room_id: CancelRoomId,
 ) -> CancelScheduleResponse:
     """Cancel a scheduled task by ID."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
     runtime_paths = api_runtime_paths(request)
     resolved_room_id = _resolve_room_id(room_id, runtime_paths=runtime_paths)
 
