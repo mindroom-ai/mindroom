@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 from agno.models.message import Message
+from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
 
@@ -401,6 +402,43 @@ def test_vertex_prompt_cache_marks_prior_user_when_tail_is_tool() -> None:
         if isinstance(block, dict) and "cache_control" in block
     )
     assert count == 1
+
+
+def test_vertexai_prompt_cache_hook_preserves_tool_payloads_with_disabled_compression() -> None:
+    """The hooked Vertex Claude invoke path must cache the prior user block without rewriting tool results."""
+    model = _vertex_claude_model()
+    captured_requests: list[list[dict[str, object]]] = []
+
+    class _FakeMessagesAPI:
+        def create(self, *, messages: list[dict[str, object]], **_kwargs: object) -> object:
+            captured_requests.append(messages)
+            return object()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.messages = _FakeMessagesAPI()
+
+    vars(model)["get_client"] = lambda: _FakeClient()
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
+    vars(model)["_has_beta_features"] = lambda **_kwargs: False
+    vars(model)["_parse_provider_response"] = lambda *_args, **_kwargs: ModelResponse(content="ok")
+    install_vertex_claude_prompt_cache_hook(model)
+
+    messages = _tool_turn_messages("ok")
+    tool_before = messages[-1].to_dict()
+
+    response = model.response(messages=messages, compression_manager=None)
+
+    assert response.content == "ok"
+    assert messages[3].to_dict() == tool_before
+    assert messages[-1].role == "assistant"
+    assert len(captured_requests) == 1
+    assert captured_requests[0][0]["content"] == [
+        {"type": "text", "text": "Use the tool", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+    ]
+    assert captured_requests[0][-1]["content"] == [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+    ]
 
 
 @pytest.mark.asyncio

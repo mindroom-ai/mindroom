@@ -2021,9 +2021,13 @@ class TestStreamingBehavior:
 
         await streaming._send_or_edit_message(mock_client, allow_empty_progress=True)
 
-        first_body = mock_client.room_send.call_args.kwargs["content"]["body"]
-        assert "Preparing isolated worker" in first_body
-        assert "shell.run" in first_body
+        content = mock_client.room_send.call_args.kwargs["content"]
+        first_body = content["body"]
+        assert first_body == "Thinking...\n\n⏳ Preparing isolated worker for `shell.run`..."
+        assert (
+            content["formatted_body"]
+            == "<p>Thinking...</p>\n<p>⏳ Preparing isolated worker for <code>shell.run</code>...</p>"
+        )
         assert streaming.accumulated_text == ""
 
         streaming.accumulated_text = "hello"
@@ -2178,11 +2182,12 @@ class TestStreamingBehavior:
         await streaming._send_or_edit_message(mock_client)
 
         content = mock_client.room_send.call_args.kwargs["content"]
-        warmup_text = "⏳ Preparing isolated worker for shell.run..."
+        warmup_text = "⏳ Preparing isolated worker for `shell.run`..."
         assert content["body"].endswith(f"\n\n{warmup_text}")
         assert "<pre><code" in content["formatted_body"]
-        assert content["formatted_body"].endswith(f"<p>{warmup_text}</p>")
-        assert content["formatted_body"].rfind(f"<p>{warmup_text}</p>") > content["formatted_body"].rfind("</pre>")
+        expected_html = "<p>⏳ Preparing isolated worker for <code>shell.run</code>...</p>"
+        assert content["formatted_body"].endswith(expected_html)
+        assert content["formatted_body"].rfind(expected_html) > content["formatted_body"].rfind("</pre>")
 
     @pytest.mark.asyncio
     async def test_worker_warmup_visible_body_uses_canonical_matrix_body(self) -> None:
@@ -2468,10 +2473,13 @@ class TestStreamingBehavior:
 
         await streaming._send_or_edit_message(mock_client, allow_empty_progress=True)
 
-        body = mock_client.room_send.call_args.kwargs["content"]["body"]
-        assert body.count("Preparing isolated worker") == 1
-        assert "shell.run" in body
-        assert "python.execute" in body
+        content = mock_client.room_send.call_args.kwargs["content"]
+        body = content["body"]
+        assert body == "Thinking...\n\n⏳ Preparing isolated worker for `shell.run`, `python.execute`... 10s elapsed."
+        assert (
+            content["formatted_body"]
+            == "<p>Thinking...</p>\n<p>⏳ Preparing isolated worker for <code>shell.run</code>, <code>python.execute</code>... 10s elapsed.</p>"
+        )
 
     @pytest.mark.asyncio
     async def test_worker_warmup_renders_multiple_lines_for_distinct_workers(self) -> None:
@@ -2557,6 +2565,46 @@ class TestStreamingBehavior:
         body = mock_client.room_send.call_args.kwargs["content"]["body"]
         assert "Preparing isolated worker" in body
         assert "Worker startup failed" not in body
+
+    @pytest.mark.asyncio
+    async def test_worker_warmup_failed_status_renders_exact_visible_copy(self) -> None:
+        """Visible failed warmups should pin exact plain-text and HTML formatting."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$warmup_failed_visible"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+        )
+        streaming.apply_worker_progress_event(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="failed",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=1.0,
+                    error="intentional example",
+                ),
+            ),
+        )
+
+        await streaming._send_or_edit_message(mock_client, allow_empty_progress=True)
+
+        content = mock_client.room_send.call_args.kwargs["content"]
+        assert content["body"] == "Thinking...\n\n⚠️ Worker startup failed for `shell.run`: intentional example."
+        assert (
+            content["formatted_body"]
+            == "<p>Thinking...</p>\n<p>⚠️ Worker startup failed for <code>shell.run</code>: intentional example.</p>"
+        )
 
 
 class TestStreamingConfig:

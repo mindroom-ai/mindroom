@@ -107,7 +107,7 @@ class SelfConfigTools(Toolkit):
             thread_mode: Conversation threading mode ("thread" or "room")
             num_history_runs: Number of prior runs to include as history
             num_history_messages: Max messages from history
-            compress_tool_results: Compress tool results in history
+            compress_tool_results: Compress tool results in history (disabled by default because it can invalidate Anthropic/Vertex Claude prompt caches)
             max_tool_calls_from_history: Max tool call messages replayed from history
             context_files: Workspace-relative file paths loaded into each freshly built agent instance
 

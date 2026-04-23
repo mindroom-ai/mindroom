@@ -233,6 +233,25 @@ describe("AgentEditor", () => {
     expect(screen.getByLabelText("worker scheduler")).toBeInTheDocument();
   });
 
+  it("shows compress tool results helper with inherited off default when omitted", () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockConfig,
+        defaults: {},
+      },
+      agents: [{ ...mockAgent, compress_tool_results: undefined }],
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByText(
+        "Compress tool results in history to save context (global default: off). On Anthropic/Vertex Claude, enabling this can invalidate prompt-cache prefixes.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("fails closed when agent policy preview is unavailable", () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,

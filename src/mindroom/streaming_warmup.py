@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from html import escape
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -28,26 +29,52 @@ class _ActiveWarmup:
     last_event: WorkerReadyProgress
 
 
-def _render_worker_status_line(warmup: _ActiveWarmup, *, show_tool_calls: bool) -> str:
+@dataclass(frozen=True)
+class RenderedWarmupLine:
+    """One warmup line rendered for plain-text and HTML Matrix bodies."""
+
+    text: str
+    html: str
+
+
+def _render_tool_labels(tool_labels: list[str]) -> tuple[str, str]:
+    """Render tool labels for plain-text and HTML output."""
+    plain = ", ".join(f"`{label}`" for label in tool_labels)
+    html = ", ".join(f"<code>{escape(label)}</code>" for label in tool_labels)
+    return plain, html
+
+
+def _render_worker_status_line(warmup: _ActiveWarmup, *, show_tool_calls: bool) -> RenderedWarmupLine:
     """Render one worker warmup line without leaking hidden tool metadata."""
-    labels = ", ".join(warmup.tool_labels)
-    if show_tool_calls and labels:
-        waiting_copy = f"Preparing isolated worker for {labels}..."
-        failure_copy = f"Worker startup failed for {labels}"
+    if show_tool_calls and warmup.tool_labels:
+        labels_text, labels_html = _render_tool_labels(warmup.tool_labels)
+        waiting_copy_text = f"Preparing isolated worker for {labels_text}..."
+        waiting_copy_html = f"Preparing isolated worker for {labels_html}..."
+        failure_copy_text = f"Worker startup failed for {labels_text}"
+        failure_copy_html = f"Worker startup failed for {labels_html}"
     else:
-        waiting_copy = "Preparing isolated worker..."
-        failure_copy = "Worker startup failed"
+        waiting_copy_text = waiting_copy_html = "Preparing isolated worker..."
+        failure_copy_text = failure_copy_html = "Worker startup failed"
 
     phase = warmup.last_event.phase
     if phase == "failed":
         error = _shorten_warmup_error(warmup.last_event.error)
         suffix = "" if error.endswith((".", "!", "?")) else "."
-        return f"⚠️ {failure_copy}: {error}{suffix}"
+        return RenderedWarmupLine(
+            text=f"⚠️ {failure_copy_text}: {error}{suffix}",
+            html=f"⚠️ {failure_copy_html}: {escape(error)}{suffix}",
+        )
     if phase == "cold_start":
-        return f"⏳ {waiting_copy}"
+        return RenderedWarmupLine(
+            text=f"⏳ {waiting_copy_text}",
+            html=f"⏳ {waiting_copy_html}",
+        )
 
     elapsed_seconds = max(1, int(warmup.last_event.elapsed_seconds))
-    return f"⏳ {waiting_copy} {elapsed_seconds}s elapsed."
+    return RenderedWarmupLine(
+        text=f"⏳ {waiting_copy_text} {elapsed_seconds}s elapsed.",
+        html=f"⏳ {waiting_copy_html} {elapsed_seconds}s elapsed.",
+    )
 
 
 @dataclass
@@ -94,7 +121,7 @@ class WorkerWarmupState:
         for stale_worker_key in stale_failed_worker_keys:
             self.active_warmups.pop(stale_worker_key, None)
 
-    def render_lines(self, *, show_tool_calls: bool) -> list[str]:
+    def render_lines(self, *, show_tool_calls: bool) -> list[RenderedWarmupLine]:
         """Render all active worker warmup notices as side-band suffix lines."""
         if not self.active_warmups:
             return []

@@ -480,6 +480,56 @@ async def test_threads_happy_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_threads_precompute_trusted_sender_ids_once_for_previews() -> None:
+    """Thread listings should resolve the trust set once and pass it through every preview."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    trusted_sender_ids = frozenset({"@mindroom_general:localhost"})
+    events = [
+        _thread_event("$thread1", body="Thread root message", reply_count=5),
+        _thread_event("$thread2", body="Another thread", reply_count=2),
+    ]
+
+    async def _preview(
+        event: nio.Event,
+        *,
+        client: nio.AsyncClient,
+        config: Config,
+        runtime_paths: object,
+        trusted_sender_ids: frozenset[str],
+    ) -> str:
+        assert client is ctx.client
+        assert config is ctx.config
+        assert runtime_paths == ctx.runtime_paths
+        assert trusted_sender_ids is trusted_sender_ids_for_assertion
+        return event.body
+
+    trusted_sender_ids_for_assertion = trusted_sender_ids
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, return_value=(events, None)),
+        patch(
+            "mindroom.custom_tools.matrix_room.trusted_visible_sender_ids",
+            return_value=trusted_sender_ids,
+        ) as mock_trusted_sender_ids,
+        patch(
+            "mindroom.custom_tools.matrix_room.thread_root_body_preview",
+            new=AsyncMock(side_effect=_preview),
+        ) as mock_preview,
+    ):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert [thread["body_preview"] for thread in payload["threads"]] == [
+        "Thread root message",
+        "Another thread",
+    ]
+    mock_trusted_sender_ids.assert_called_once_with(ctx.config, ctx.runtime_paths)
+    assert mock_preview.await_count == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("bundle_key", [None, "event", "latest_event"])
 async def test_threads_preview_prefers_bundled_replacement_body(
     bundle_key: str | None,

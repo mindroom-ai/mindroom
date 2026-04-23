@@ -322,8 +322,11 @@ class DefaultsConfig(BaseModel):
         description="Default max messages from history (mutually exclusive with num_history_runs)",
     )
     compress_tool_results: bool = Field(
-        default=True,
-        description="Compress tool results in history to save context",
+        default=False,
+        description=(
+            "Compress tool results in history to save context. Disabled by default because on Anthropic/Vertex "
+            "Claude this can mutate replayed tool messages and invalidate prompt-cache prefixes."
+        ),
     )
     max_tool_calls_from_history: int | None = Field(
         default=None,
