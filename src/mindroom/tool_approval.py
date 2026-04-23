@@ -1067,10 +1067,16 @@ class ApprovalManager:
         if delete_request_file:
             self._delete_request_file(approval_id)
 
-    async def sync_unsynced_resolved(self) -> list[PendingApproval]:
+    async def sync_unsynced_resolved(
+        self,
+        *,
+        room_ids: set[str] | None = None,
+    ) -> list[PendingApproval]:
         """Replay any resolved approval cards that were never edited in Matrix."""
         synced_requests: list[PendingApproval] = []
         for pending in self.list_unsynced_resolved():
+            if room_ids is not None and pending.room_id not in room_ids:
+                continue
             claimed_pending = self._claim_unsynced_resolved_replay(pending.id)
             if claimed_pending is None:
                 continue

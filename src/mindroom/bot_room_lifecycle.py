@@ -118,10 +118,13 @@ class BotRoomLifecycle:
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
 
-    async def leave_unconfigured_rooms(self) -> None:
+    async def leave_unconfigured_rooms(self, room_ids: list[str] | None = None) -> None:
         """Leave any rooms this bot is no longer configured for."""
         client = self._client()
-        await leave_non_dm_rooms(client, await self.rooms_to_actually_leave())
+        await leave_non_dm_rooms(
+            client,
+            room_ids if room_ids is not None else await self.rooms_to_actually_leave(),
+        )
 
     async def rooms_to_leave(self) -> list[str]:
         """Return joined rooms this bot should now leave before DM filtering."""

@@ -12736,6 +12736,112 @@ class TestMultiAgentOrchestrator:
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
+    async def test_router_finalizes_pending_approvals_before_leaving_room(self, tmp_path: Path) -> None:
+        """Router-owned approval cards should be resolved before the router leaves their room."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+
+        config = _runtime_bound_config(
+            Config(models={"default": {"provider": "test", "id": "test-model"}}),
+            tmp_path,
+        )
+        router_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password=TEST_PASSWORD,
+        )
+        router_bot = AgentBot(
+            router_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!R:server"],
+        )
+        router_bot.orchestrator = orchestrator
+        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
+        router_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!R:server"])
+        router_bot.client.rooms["!R:server"].add_member(router_user.user_id, router_user.display_name, None)
+        router_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest-thread")
+        router_bot.running = True
+
+        event_order: list[str] = []
+
+        async def _router_room_send(
+            *,
+            room_id: str,
+            message_type: str,
+            content: dict[str, object],
+        ) -> nio.RoomSendResponse:
+            assert room_id == "!R:server"
+            assert message_type == "io.mindroom.tool_approval"
+            if "m.new_content" in content:
+                event_order.append("edit")
+                return nio.RoomSendResponse(event_id="$approval-edit", room_id=room_id)
+            event_order.append("send")
+            return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
+
+        router_bot.client.room_send = AsyncMock(side_effect=_router_room_send)
+        orchestrator.agent_bots = {"router": router_bot}
+
+        store = initialize_approval_store(
+            runtime_paths,
+            sender=orchestrator._send_approval_event,
+            editor=orchestrator._edit_approval_event,
+        )
+        task = asyncio.create_task(
+            store.request_approval(
+                tool_name="run_shell_command",
+                arguments={"command": "echo hi"},
+                agent_name="code",
+                room_id="!R:server",
+                thread_id="$thread",
+                requester_id="@user:localhost",
+                approver_user_id="@user:localhost",
+                matched_rule="run_shell_*",
+                script_path=None,
+                timeout_seconds=60,
+            ),
+        )
+
+        async with asyncio.timeout(1):
+            while True:
+                pending = store.list_pending()
+                if pending and pending[0].event_id is not None:
+                    break
+                await asyncio.sleep(0)
+
+        router_bot.rooms = []
+
+        async def _leave_rooms(_client: object, room_ids: list[str]) -> None:
+            event_order.append("leave")
+            assert room_ids == ["!R:server"]
+            del router_bot.client.rooms["!R:server"]
+
+        try:
+            with (
+                patch("mindroom.bot_room_lifecycle.is_dm_room", new=AsyncMock(return_value=False)),
+                patch("mindroom.bot_room_lifecycle.leave_non_dm_rooms", new=AsyncMock(side_effect=_leave_rooms)),
+            ):
+                await router_bot.leave_unconfigured_rooms()
+
+            decision = await task
+
+            assert decision.status == "expired"
+            assert event_order == ["send", "edit", "leave"]
+            assert "!R:server" not in tuple(router_bot.client.rooms)
+            assert store.list_unsynced_resolved() == []
+            router_bot.client.room_send.assert_awaited()
+            edit_call = router_bot.client.room_send.await_args_list[1]
+            assert edit_call.kwargs["content"]["m.relates_to"] == {
+                "rel_type": "m.replace",
+                "event_id": "$approval",
+            }
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
     async def test_update_config_uses_custom_config_path(self, tmp_path: Path) -> None:
         """Hot reload should keep reading the orchestrator's custom config path."""
         config_path = tmp_path / "custom-config.yaml"

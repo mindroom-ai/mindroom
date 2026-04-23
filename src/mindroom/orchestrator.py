@@ -61,6 +61,7 @@ from mindroom.tool_approval import (
     PendingApproval,
     SentApprovalEvent,
     ToolApprovalTransportError,
+    get_approval_store,
     initialize_approval_store,
     recover_unconfirmed_approval_event_deliveries,
     shutdown_approval_store,
@@ -123,6 +124,7 @@ if TYPE_CHECKING:
 
     from .constants import RuntimePaths
 logger = get_logger(__name__)
+_REMOVED_APPROVAL_ROOM_REASON = "Router left the room before approval completed."
 
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
@@ -630,6 +632,28 @@ class MultiAgentOrchestrator:
             response=str(response),
         )
         return False
+
+    async def _force_finalize_pending_approvals_for_rooms(
+        self,
+        room_ids: set[str],
+    ) -> None:
+        """Finalize approvals before the router leaves their anchor rooms."""
+        if not room_ids:
+            return
+        approval_store = get_approval_store()
+        if approval_store is None:
+            return
+
+        for pending in approval_store.list_pending():
+            if pending.room_id not in room_ids:
+                continue
+            with suppress(LookupError, ValueError):
+                await approval_store.expire(
+                    pending.id,
+                    reason=_REMOVED_APPROVAL_ROOM_REASON,
+                )
+
+        await approval_store.sync_unsynced_resolved(room_ids=room_ids)
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
