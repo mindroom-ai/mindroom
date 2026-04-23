@@ -244,7 +244,7 @@ class StreamingResponse:
     min_update_char_threshold: int = 48
     min_char_update_interval: float = 0.35
     progress_update_interval: float = 1.0
-    max_idle: float = 0.25
+    max_idle: float = 2.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     room_mode: bool = False  # When True, skip all thread relations (for bridges/mobile)
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata

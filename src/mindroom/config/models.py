@@ -39,7 +39,7 @@ class StreamingConfig(BaseModel):
         description="Seconds to ramp from min to steady-state interval (0 disables ramp)",
     )
     max_idle: float = Field(
-        default=0.25,
+        default=2.0,
         gt=0,
         description=(
             "Flush buffered streaming text on the next streaming event when no new "

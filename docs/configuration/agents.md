@@ -575,7 +575,7 @@ defaults:
     update_interval: 5.0                # Steady-state seconds between streamed edits
     min_update_interval: 0.5            # Fast-start seconds between early edits
     interval_ramp_seconds: 15.0         # Set 0 to disable interval ramping
-    max_idle: 0.25                      # Event-driven idle ceiling before the next edit
+    max_idle: 2.0                       # Event-driven idle ceiling before the next edit
   compress_tool_results: false          # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
   # Auto-compaction is disabled until you author this block.
   # compaction:

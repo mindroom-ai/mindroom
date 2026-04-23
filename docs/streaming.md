@@ -54,7 +54,7 @@ defaults:
     update_interval: 5.0         # Default: 5.0 steady-state seconds between edits
     min_update_interval: 0.5     # Default: 0.5 fast-start seconds between early edits
     interval_ramp_seconds: 15.0  # Default: 15.0; set 0 to disable ramping
-    max_idle: 0.25               # Default: 0.25 event-driven idle ceiling before the next edit
+    max_idle: 2.0                # Default: 2.0 event-driven idle ceiling before the next edit
 ```
 
 These timing settings are global-only. Agents inherit them from `defaults` and cannot override them individually.
@@ -99,7 +99,7 @@ MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
 - **Shared ramp window**: The same ramp window also controls the built-in character threshold ramp from 48 characters (fast start) to 240 characters (steady-state).
 - **Minimum interval**: A hard floor (0.35s) applies to character-triggered and idle-triggered throttled edits.
   Time-triggered edits still follow the current ramped interval.
-- **Idle flush**: `defaults.streaming.max_idle` triggers an edit on the next streaming event after 0.25s without a new delta, but only once `min_char_update_interval` has also elapsed.
+- **Idle flush**: `defaults.streaming.max_idle` triggers an edit on the next streaming event after 2.0s without a new delta, but only once `min_char_update_interval` has also elapsed.
   This is event-driven and does not run on a background timer.
 - **Tool-start boundary refresh**: Visible tool-start markers request an immediate refresh so the marker can surface without waiting for later text.
   Rapid back-to-back tool starts are coalesced by the single delivery owner instead of forcing one Matrix edit per tool.

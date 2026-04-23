@@ -4048,7 +4048,7 @@ class TestStreamingConfig:
         assert sc.update_interval == 2.0
         assert sc.min_update_interval == 0.5
         assert sc.interval_ramp_seconds == 15.0
-        assert sc.max_idle == 0.25
+        assert sc.max_idle == 2.0
 
     def test_streaming_config_validation(self) -> None:
         """Reject invalid values: update_interval <= 0, min_update_interval <= 0, interval_ramp_seconds < 0."""
