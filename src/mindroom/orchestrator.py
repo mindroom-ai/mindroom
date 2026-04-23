@@ -1396,10 +1396,9 @@ class MultiAgentOrchestrator:
         try:
             router_bot = self._router_bot()
             if router_bot is not None and router_bot.client is not None:
-                with suppress(TypeError):
-                    joined_rooms = await get_joined_rooms(router_bot.client)
-                    if joined_rooms is not None:
-                        self._approval_known_joined_room_ids = set(joined_rooms)
+                joined_rooms = await get_joined_rooms(router_bot.client)
+                if joined_rooms is not None:
+                    self._approval_known_joined_room_ids = set(joined_rooms)
             await recover_unconfirmed_approval_event_deliveries()
             await sync_unsynced_approval_event_resolutions()
         except Exception as exc:

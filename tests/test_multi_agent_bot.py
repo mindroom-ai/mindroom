@@ -11652,7 +11652,8 @@ class TestMultiAgentOrchestrator:
         bot = MagicMock()
         bot.agent_name = "router"
         bot.running = False
-        bot.client = MagicMock(user_id="@mindroom_router:localhost")
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
 
         async def _start_bot() -> bool:
             bot.running = True
@@ -11726,7 +11727,8 @@ class TestMultiAgentOrchestrator:
         bot = MagicMock()
         bot.agent_name = "code"
         bot.running = False
-        bot.client = MagicMock(user_id="@mindroom_code:localhost")
+        bot.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
+        bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
 
         async def _start_bot() -> bool:
             bot.running = True
@@ -12432,6 +12434,8 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = old_config
         orchestrator.running = True
         router_bot = _mock_managed_bot(old_config)
+        router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        router_bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
         router_bot.running = True
         general_bot = _mock_managed_bot(old_config)
         general_bot.running = True
@@ -12440,7 +12444,8 @@ class TestMultiAgentOrchestrator:
         restarted_bot = MagicMock()
         restarted_bot.agent_name = "general"
         restarted_bot.running = False
-        restarted_bot.client = MagicMock(user_id="@mindroom_general:localhost")
+        restarted_bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
+        restarted_bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
 
         async def _start_bot() -> bool:
             restarted_bot.running = True
