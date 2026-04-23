@@ -1416,14 +1416,10 @@ async def test_hook_dispatch_command_reply_preserves_original_envelope_metadata(
     bot._delivery_gateway.deliver_final = AsyncMock(
         return_value=FinalDeliveryOutcome(
             terminal_status="completed",
-            final_visible_event_id="$reply",
-            visible_response_event_id="$reply",
-            response_identity_event_id="$reply",
-            turn_completion_event_id="$reply",
-            last_physical_stream_event_id=None,
+            event_id="$reply",
+            is_visible_response=True,
             final_visible_body="help",
             delivery_kind="sent",
-            mark_handled=True,
         ),
     )
     replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)

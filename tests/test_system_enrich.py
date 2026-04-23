@@ -541,14 +541,10 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
             new=AsyncMock(
                 return_value=FinalDeliveryOutcome(
                     terminal_status="completed",
-                    final_visible_event_id="$response",
-                    visible_response_event_id="$response",
-                    response_identity_event_id="$response",
-                    turn_completion_event_id="$response",
-                    last_physical_stream_event_id=None,
+                    event_id="$response",
+                    is_visible_response=True,
                     final_visible_body="handled",
                     delivery_kind="sent",
-                    mark_handled=True,
                 ),
             ),
         ),

@@ -218,7 +218,7 @@ def _team_test_config(tmp_path: Path) -> Config:
 
 
 def _outcome(
-    state: str,
+    _state: str,
     *,
     terminal_status: str,
     final_visible_event_id: str | None = None,
@@ -2877,7 +2877,7 @@ async def test_handle_message_edit_uses_fallback_cleanup_when_turn_context_was_r
     }
     cleanup_called = False
 
-    async def generate_response_with_locked_cleanup(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+    async def generate_response_with_locked_cleanup(*_args: object, **kwargs: object) -> str | None:
         nonlocal cleanup_called
         locked_cleanup = kwargs["on_lifecycle_lock_acquired"]
         assert locked_cleanup is not None
