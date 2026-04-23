@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
@@ -49,7 +48,7 @@ class _GenerateResponse(Protocol):
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> FinalDeliveryOutcome:
+    ) -> str | None:
         """Generate or regenerate a response for one handled turn."""
 
 
@@ -275,7 +274,7 @@ class EditRegenerator:
             self._record_turn_record(regeneration_turn_record)
             return
 
-        regenerated_resolution = await self.deps.generate_response(
+        regenerated_event_id = await self.deps.generate_response(
             room_id=room.room_id,
             prompt=regeneration_prompt,
             reply_to_event_id=regeneration_turn_record.anchor_event_id,
@@ -300,37 +299,19 @@ class EditRegenerator:
             ),
         )
 
-        if regenerated_resolution.mark_handled:
+        if regenerated_event_id is not None:
             self._record_turn_record(
                 replace(
                     regeneration_turn_record,
-                    response_event_id=(
-                        regenerated_resolution.event_id
-                        if (
-                            regenerated_resolution.mark_handled
-                            and regenerated_resolution.is_visible_response
-                            and not regenerated_resolution.suppressed
-                        )
-                        else None
-                    ),
-                    visible_echo_event_id=(
-                        regenerated_resolution.event_id if regenerated_resolution.is_visible_response else None
-                    ),
+                    response_event_id=regenerated_event_id,
                 ),
             )
             self._logger().info("Successfully regenerated response for edited message")
         else:
             if needs_turn_record_backfill:
                 self._record_turn_record(regeneration_turn_record)
-            if regenerated_resolution.retryable and not regenerated_resolution.suppressed:
-                self._logger().warning(
-                    "Regeneration failed; keeping existing visible response",
-                    original_event_id=original_event_id,
-                    response_event_id=response_event_id,
-                )
-            else:
-                self._logger().info(
-                    "Suppressed regeneration left existing response unchanged",
-                    original_event_id=original_event_id,
-                    response_event_id=response_event_id,
-                )
+            self._logger().info(
+                "Suppressed regeneration left existing response unchanged",
+                original_event_id=original_event_id,
+                response_event_id=response_event_id,
+            )

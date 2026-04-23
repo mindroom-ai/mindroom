@@ -495,7 +495,12 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
     )
     finalized = await lifecycle.finalize(
         DeliveryOutcome(final_delivery_outcome=outcome),
-        build_post_response_outcome=lambda delivered: ResponseOutcome(final_delivery_outcome=delivered),
+        build_post_response_outcome=lambda delivered: ResponseOutcome(
+            resolved_event_id=delivered.final_visible_event_id,
+            interactive_event_id=delivered.final_visible_event_id,
+            compaction_event_id=delivered.final_visible_event_id,
+            suppressed=delivered.suppressed,
+        ),
         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
@@ -554,7 +559,7 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
     )
 
     assert outcome.terminal_status == "cancelled"
-    assert outcome.retryable is True
-    assert outcome.mark_handled is False
+    assert outcome.final_visible_event_id == "$streaming"
+    assert outcome.mark_handled is True
     response_hooks.emit_after_response.assert_not_awaited()
     response_hooks.emit_cancelled_response.assert_not_awaited()

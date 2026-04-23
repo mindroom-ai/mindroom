@@ -128,9 +128,7 @@ def _outcome(
         or turn_completion_event_id
         or last_physical_stream_event_id
     )
-    resolved_suppressed = suppressed or (
-        failure_reason == "suppressed_by_hook" and response_identity_event_id is None
-    )
+    resolved_suppressed = suppressed or (failure_reason == "suppressed_by_hook" and response_identity_event_id is None)
     is_visible_response = any(
         value is not None
         for value in (
@@ -147,8 +145,6 @@ def _outcome(
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
         failure_reason=failure_reason,
-        mark_handled=mark_handled,
-        retryable=retryable,
         suppressed=resolved_suppressed,
         tool_trace=tool_trace,
         extra_content=dict(extra_content or {}),
@@ -787,31 +783,14 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
     """Route response execution through one legacy-style generate-response mock."""
     wrap_extracted_collaborators(bot, "_response_runner")
 
-    def _outcome_from_test_result(
+    def _resolved_event_id_from_test_result(
         result: FinalDeliveryOutcome | str | None,
-        *,
-        existing_event_id: str | None,
-    ) -> FinalDeliveryOutcome:
+    ) -> str | None:
         if isinstance(result, FinalDeliveryOutcome):
-            return result
-        if result is None:
-            return _outcome(
-                terminal_status="error",
-                failure_reason="test_mock_no_visible_response",
-                retryable=True,
-            )
-        return _outcome(
-            terminal_status="completed",
-            final_visible_event_id=result,
-            visible_response_event_id=result,
-            response_identity_event_id=result,
-            turn_completion_event_id=result,
-            final_visible_body="",
-            delivery_kind="edited" if existing_event_id is not None else "sent",
-            mark_handled=True,
-        )
+            return result.final_visible_event_id
+        return result
 
-    async def _generate(request: ResponseRequest) -> FinalDeliveryOutcome:
+    async def _generate(request: ResponseRequest) -> str | None:
         if request.prepare_after_lock is not None:
             try:
                 request = await request.prepare_after_lock(request)
@@ -836,7 +815,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             target=request.target,
             matrix_run_metadata=request.matrix_run_metadata,
         )
-        return _outcome_from_test_result(result, existing_event_id=request.existing_event_id)
+        return _resolved_event_id_from_test_result(result)
 
     bot._response_runner.generate_response = AsyncMock(side_effect=_generate)
     replace_turn_controller_deps(bot, response_runner=bot._response_runner)

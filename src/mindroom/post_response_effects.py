@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -36,7 +35,12 @@ if TYPE_CHECKING:
 class ResponseOutcome:
     """Terminal response facts needed for post-delivery side effects."""
 
-    final_delivery_outcome: FinalDeliveryOutcome
+    resolved_event_id: str | None
+    interactive_event_id: str | None = None
+    compaction_event_id: str | None = None
+    suppressed: bool = False
+    option_map: dict[str, str] | None = None
+    options_list: tuple[dict[str, str], ...] | None = None
     response_run_id: str | None = None
     session_id: str | None = None
     session_type: SessionType | None = None
@@ -248,43 +252,27 @@ async def apply_post_response_effects(
     deps: PostResponseEffectsDeps,
 ) -> None:
     """Apply the shared side effects that happen after response delivery is known."""
-    final_outcome = outcome.final_delivery_outcome
-    response_identity_event_id = (
-        final_outcome.event_id
-        if (
-            final_outcome.mark_handled
-            and final_outcome.is_visible_response
-            and not final_outcome.suppressed
-            and final_outcome.event_id is not None
-        )
-        else None
-    )
-    interactive_event_id = (
-        response_identity_event_id
-        if final_outcome.terminal_status == "completed" and final_outcome.final_visible_body is not None
-        else None
-    )
-    compaction_event_id = response_identity_event_id
-    if compaction_event_id is None and outcome.dispatch_compaction_when_suppressed:
-        compaction_event_id = final_outcome.event_id if final_outcome.is_visible_response else None
-
     if (
-        interactive_event_id is not None
+        outcome.interactive_event_id is not None
         and deps.register_interactive is not None
-        and final_outcome.option_map
-        and final_outcome.options_list
+        and outcome.option_map
+        and outcome.options_list
         and outcome.interactive_target is not None
     ):
         await deps.register_interactive(
-            interactive_event_id,
+            outcome.interactive_event_id,
             outcome.interactive_target,
-            dict(final_outcome.option_map),
-            [dict(item) for item in final_outcome.options_list],
+            dict(outcome.option_map),
+            [dict(item) for item in outcome.options_list],
         )
 
-    if compaction_event_id is not None and deps.dispatch_compaction_notices is not None and outcome.compaction_outcomes:
+    if (
+        outcome.compaction_event_id is not None
+        and deps.dispatch_compaction_notices is not None
+        and outcome.compaction_outcomes
+    ):
         await deps.dispatch_compaction_notices(
-            compaction_event_id,
+            outcome.compaction_event_id,
             outcome.compaction_outcomes,
         )
 
@@ -303,23 +291,22 @@ async def apply_post_response_effects(
 
     if (
         outcome.response_run_id is not None
-        and response_identity_event_id is not None
+        and outcome.resolved_event_id is not None
         and deps.persist_response_event_id is not None
     ):
         try:
-            deps.persist_response_event_id(outcome.response_run_id, response_identity_event_id)
+            deps.persist_response_event_id(outcome.response_run_id, outcome.resolved_event_id)
         except Exception:
             deps.logger.exception(
                 "Failed to persist response event linkage in run metadata",
                 session_id=outcome.session_id,
                 run_id=outcome.response_run_id,
-                response_event_id=response_identity_event_id,
+                response_event_id=outcome.resolved_event_id,
             )
 
     if (
-        final_outcome.terminal_status == "completed"
-        and final_outcome.final_visible_body is not None
-        and response_identity_event_id is not None
+        outcome.resolved_event_id is not None
+        and not outcome.suppressed
         and outcome.thread_summary_room_id is not None
         and outcome.thread_summary_thread_id is not None
         and (

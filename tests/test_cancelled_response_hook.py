@@ -8,8 +8,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 import nio
+import pytest
 
 from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig
@@ -39,8 +39,8 @@ from mindroom.hooks.context import CancelledResponseInfo, HookContextSupport
 from mindroom.hooks.execution import emit
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
-from mindroom.message_target import MessageTarget
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import DeliveryOutcome, ResponseLifecycle
 from mindroom.turn_store import LoadedTurnRecord
@@ -351,7 +351,9 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
     bot = _team_bot(tmp_path)
 
     with (
-        patch.object(bot._delivery_gateway.deps.response_hooks, "emit_cancelled_response", new=AsyncMock()) as mock_emit,
+        patch.object(
+            bot._delivery_gateway.deps.response_hooks, "emit_cancelled_response", new=AsyncMock()
+        ) as mock_emit,
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         outcome = await bot._generate_response(
@@ -363,8 +365,7 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
             user_id="@user:localhost",
         )
 
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.failure_reason == "empty_prompt"
+    assert outcome is None
     mock_emit.assert_awaited_once()
 
 
@@ -388,7 +389,9 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
     event_info = MagicMock(original_event_id="$original", thread_id=None, thread_id_from_edit=None)
 
     with (
-        patch.object(bot._delivery_gateway.deps.response_hooks, "emit_cancelled_response", new=AsyncMock()) as mock_emit,
+        patch.object(
+            bot._delivery_gateway.deps.response_hooks, "emit_cancelled_response", new=AsyncMock()
+        ) as mock_emit,
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
         patch(
             "mindroom.edit_regenerator.extract_visible_edit_body",
@@ -509,7 +512,11 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
     )
     finalized = await lifecycle.finalize(
         DeliveryOutcome(final_delivery_outcome=result),
-        build_post_response_outcome=lambda outcome: ResponseOutcome(final_delivery_outcome=outcome),
+        build_post_response_outcome=lambda outcome: ResponseOutcome(
+            resolved_event_id=outcome.final_visible_event_id,
+            compaction_event_id=outcome.final_visible_event_id,
+            suppressed=outcome.suppressed,
+        ),
         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
@@ -587,7 +594,12 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
                     delivery_kind=expected_delivery_kind,
                 ),
             ),
-            build_post_response_outcome=lambda outcome: ResponseOutcome(final_delivery_outcome=outcome),
+            build_post_response_outcome=lambda outcome: ResponseOutcome(
+                resolved_event_id=outcome.final_visible_event_id,
+                interactive_event_id=outcome.final_visible_event_id,
+                compaction_event_id=outcome.final_visible_event_id,
+                suppressed=outcome.suppressed,
+            ),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
@@ -676,13 +688,15 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
     )
     finalized = await lifecycle.finalize(
         DeliveryOutcome(final_delivery_outcome=outcome),
-        build_post_response_outcome=lambda delivered: ResponseOutcome(final_delivery_outcome=delivered),
+        build_post_response_outcome=lambda delivered: ResponseOutcome(
+            resolved_event_id=delivered.final_visible_event_id,
+            suppressed=delivered.suppressed,
+        ),
         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
     assert finalized.terminal_status == "error"
     assert outcome.terminal_status == "error"
-    assert outcome.retryable is True
     assert outcome.final_visible_event_id == expected_visible_event_id
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].failure_reason == "delivery_failed"
@@ -770,7 +784,12 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
 
     finalized = await lifecycle.finalize(
         DeliveryOutcome(final_delivery_outcome=outcome),
-        build_post_response_outcome=lambda delivered: ResponseOutcome(final_delivery_outcome=delivered),
+        build_post_response_outcome=lambda delivered: ResponseOutcome(
+            resolved_event_id=delivered.final_visible_event_id,
+            interactive_event_id=delivered.final_visible_event_id,
+            compaction_event_id=delivered.final_visible_event_id,
+            suppressed=delivered.suppressed,
+        ),
         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 

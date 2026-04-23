@@ -16,7 +16,6 @@ class _Expectation:
     final_visible_event_id: str | None
     handled_response_event_id: str | None
     mark_handled: bool
-    retryable: bool
 
 
 def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
@@ -33,9 +32,8 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
                 is_visible_response=True,
                 final_visible_body="hello",
                 delivery_kind="sent",
-                mark_handled=True,
             ),
-            _Expectation("$final", True, "$final", "$final", True, False),
+            _Expectation("$final", True, "$final", "$final", True),
             id="completed-visible-delivery",
         ),
         pytest.param(
@@ -44,9 +42,8 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
                 event_id="$stream",
                 is_visible_response=True,
                 final_visible_body="partial",
-                mark_handled=True,
             ),
-            _Expectation("$stream", True, "$stream", "$stream", True, False),
+            _Expectation("$stream", True, "$stream", "$stream", True),
             id="completed-preserved-visible-stream",
         ),
         pytest.param(
@@ -56,9 +53,8 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
                 is_visible_response=True,
                 final_visible_body="partial",
                 failure_reason="cancelled_by_user",
-                retryable=True,
             ),
-            _Expectation("$stream", True, "$stream", None, False, True),
+            _Expectation("$stream", True, "$stream", "$stream", True),
             id="cancelled-visible-stream",
         ),
         pytest.param(
@@ -68,9 +64,8 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
                 is_visible_response=True,
                 final_visible_body="partial",
                 failure_reason="terminal_update_failed",
-                mark_handled=True,
             ),
-            _Expectation("$stream", True, "$stream", "$stream", True, False),
+            _Expectation("$stream", True, "$stream", "$stream", True),
             id="error-visible-stream",
         ),
         pytest.param(
@@ -79,10 +74,9 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
                 event_id="$placeholder",
                 is_visible_response=True,
                 failure_reason="suppressed_by_hook",
-                mark_handled=True,
                 suppressed=True,
             ),
-            _Expectation("$placeholder", True, "$placeholder", None, True, False),
+            _Expectation("$placeholder", True, "$placeholder", None, False),
             id="suppression-cleanup-failed",
         ),
         pytest.param(
@@ -90,9 +84,8 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
                 terminal_status="error",
                 event_id=None,
                 failure_reason="delivery_failed",
-                retryable=True,
             ),
-            _Expectation(None, False, None, None, False, True),
+            _Expectation(None, False, None, None, False),
             id="error-without-visible-response",
         ),
     ],
@@ -107,7 +100,6 @@ def test_final_delivery_outcomes_use_canonical_event_fields(
     assert outcome.final_visible_event_id == expected.final_visible_event_id
     assert _handled_response_event_id(outcome) == expected.handled_response_event_id
     assert outcome.mark_handled is expected.mark_handled
-    assert outcome.retryable is expected.retryable
 
 
 def test_final_delivery_outcome_cancelled_for_empty_prompt_is_not_retryable() -> None:
@@ -115,7 +107,7 @@ def test_final_delivery_outcome_cancelled_for_empty_prompt_is_not_retryable() ->
 
     assert outcome.terminal_status == "cancelled"
     assert outcome.failure_reason == "empty_prompt"
-    assert outcome.retryable is False
+    assert outcome.mark_handled is False
 
 
 def test_stream_transport_outcome_accepts_placeholder_only_visible_state() -> None:

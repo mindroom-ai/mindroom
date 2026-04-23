@@ -181,8 +181,6 @@ def _outcome(
     final_visible_body: str | None = None,
     delivery_kind: str | None = None,
     failure_reason: str | None = None,
-    mark_handled: bool = False,
-    retryable: bool = False,
     suppressed: bool = False,
     extra_content: dict[str, object] | None = None,
 ) -> FinalDeliveryOutcome:
@@ -193,9 +191,7 @@ def _outcome(
         or turn_completion_event_id
         or last_physical_stream_event_id
     )
-    resolved_suppressed = suppressed or (
-        failure_reason == "suppressed_by_hook" and response_identity_event_id is None
-    )
+    resolved_suppressed = suppressed or (failure_reason == "suppressed_by_hook" and response_identity_event_id is None)
     is_visible_response = any(
         value is not None
         for value in (
@@ -212,18 +208,20 @@ def _outcome(
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
         failure_reason=failure_reason,
-        mark_handled=mark_handled,
-        retryable=retryable,
         suppressed=resolved_suppressed,
         extra_content=extra_content,
     )
 
 
-def _visible_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+def _visible_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
+    if isinstance(outcome, str) or outcome is None:
+        return outcome
     return outcome.final_visible_event_id
 
 
-def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
+    if isinstance(outcome, str) or outcome is None:
+        return outcome
     return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
@@ -2793,8 +2791,7 @@ class TestAgentBot:
         )
         bot._delivery_gateway.deps.response_hooks.emit_after_response.assert_awaited_once()
         bot._delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
-        assert delivery_resolution.terminal_status == "completed"
-        assert _handled_response_event_id(delivery_resolution) == "$existing"
+        assert delivery_resolution == "$existing"
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_redacts_suppressed_placeholder(
@@ -2963,8 +2960,7 @@ class TestAgentBot:
         assert outcome.terminal_status == "error"
         assert _visible_response_event_id(outcome) == "$placeholder"
         assert _handled_response_event_id(outcome) is None
-        assert outcome.mark_handled is True
-        assert outcome.retryable is False
+        assert outcome.mark_handled is False
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
         redact_message_event.assert_awaited_once_with(
@@ -3004,7 +3000,6 @@ class TestAgentBot:
                 is_visible_response=True,
                 final_visible_body="updated text",
                 delivery_kind="edited",
-                mark_handled=True,
             ),
         )
         object.__setattr__(gateway, "deliver_final", mock_deliver_final)
@@ -3122,17 +3117,7 @@ class TestAgentBot:
             patch.object(
                 bot._response_runner,
                 "generate_response",
-                new=AsyncMock(
-                    return_value=_outcome(
-                        terminal_status="cancelled",
-                        final_visible_event_id="$cancelled",
-                        visible_response_event_id="$cancelled",
-                        turn_completion_event_id="$cancelled",
-                        final_visible_body="**[Response cancelled by user]**",
-                        failure_reason="cancelled_by_user",
-                        retryable=True,
-                    ),
-                ),
+                new=AsyncMock(return_value="$cancelled"),
             ),
             patch.object(bot._turn_controller, "_log_dispatch_latency", create=True),
         ):
@@ -3146,7 +3131,11 @@ class TestAgentBot:
                 dispatch_started_at=0.0,
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
-        tracker.record_handled_turn.assert_not_called()
+        tracker.record_handled_turn.assert_called_once_with(
+            HandledTurnState.from_source_event_id(event.event_id)
+            .with_response_event_id("$cancelled")
+            .with_visible_echo_event_id("$cancelled"),
+        )
 
     @pytest.mark.asyncio
     async def test_streamed_regeneration_against_an_existing_visible_reply_preserves_linkage_when_no_new_body_lands(
@@ -3206,9 +3195,8 @@ class TestAgentBot:
 
         assert delivery.terminal_status == "error"
         assert _visible_response_event_id(delivery) == "$existing"
-        assert _handled_response_event_id(delivery) is None
-        assert delivery.mark_handled is False
-        assert delivery.retryable is True
+        assert _handled_response_event_id(delivery) == "$existing"
+        assert delivery.mark_handled is True
 
     def test_response_outcome_prefers_terminal_status_over_delivery_kind(self) -> None:
         """Pipeline outcome summaries must not report cancelled or error states as plain send/edit success."""
@@ -3221,7 +3209,6 @@ class TestAgentBot:
                     turn_completion_event_id="$cancelled",
                     final_visible_body="Cancelled.",
                     delivery_kind="edited",
-                    retryable=True,
                 ),
             )
             == "cancelled"
@@ -3233,7 +3220,6 @@ class TestAgentBot:
                     final_visible_event_id="$error",
                     visible_response_event_id="$error",
                     final_visible_body="boom",
-                    retryable=True,
                 ),
             )
             == "error"
@@ -3687,7 +3673,6 @@ class TestAgentBot:
                         event_id="$response",
                         is_visible_response=True,
                         final_visible_body="ok",
-                        mark_handled=True,
                     ),
                 ),
             ) as mock_process,
@@ -3802,7 +3787,6 @@ class TestAgentBot:
                         event_id="$response",
                         is_visible_response=True,
                         final_visible_body="ok",
-                        mark_handled=True,
                     ),
                 ),
             ) as mock_process,
@@ -3897,7 +3881,6 @@ class TestAgentBot:
                         is_visible_response=True,
                         final_visible_body="",
                         delivery_kind="edited",
-                        mark_handled=True,
                     ),
                 ),
             ) as mock_process,
@@ -3989,7 +3972,6 @@ class TestAgentBot:
                         event_id="$response",
                         is_visible_response=True,
                         final_visible_body="ok",
-                        mark_handled=True,
                     ),
                 ),
             ) as mock_process,
@@ -4087,7 +4069,6 @@ class TestAgentBot:
                         is_visible_response=True,
                         final_visible_body="ok",
                         delivery_kind="edited",
-                        mark_handled=True,
                     ),
                 ),
             ),
@@ -4357,7 +4338,6 @@ class TestAgentBot:
                         event_id="$response",
                         is_visible_response=True,
                         final_visible_body="ok",
-                        mark_handled=True,
                     ),
                 ),
             ),
@@ -4692,9 +4672,7 @@ class TestAgentBot:
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert resolution.terminal_status == "completed"
-        assert resolution.mark_handled is True
-        assert _visible_response_event_id(resolution) == "$team-response"
+        assert resolution == "$team-response"
         mock_thread_summary.assert_awaited_once()
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
@@ -4884,9 +4862,7 @@ class TestAgentBot:
                 correlation_id="corr-team-stream-suppress",
             )
 
-        assert resolution.terminal_status == "completed"
-        assert resolution.mark_handled is True
-        assert _visible_response_event_id(resolution) == "$placeholder"
+        assert resolution == "$placeholder"
         bot._redact_message_event.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -4934,10 +4910,7 @@ class TestAgentBot:
                 correlation_id="corr-team-suppress",
             )
 
-        assert resolution.terminal_status == "cancelled"
-        assert resolution.suppressed is True
-        assert resolution.mark_handled is True
-        assert _visible_response_event_id(resolution) is None
+        assert resolution is None
         bot._redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
             event_id="$placeholder",
@@ -7931,7 +7904,6 @@ class TestAgentBot:
                         event_id="$response",
                         is_visible_response=True,
                         final_visible_body="ok",
-                        mark_handled=True,
                     ),
                 ),
             ) as mock_process,
@@ -8500,16 +8472,7 @@ class TestAgentBot:
 
         mock_send_response = AsyncMock()
         mock_generate_team_response = AsyncMock(
-            return_value=_outcome(
-                terminal_status="completed",
-                final_visible_event_id="$team-response",
-                visible_response_event_id="$team-response",
-                response_identity_event_id="$team-response",
-                turn_completion_event_id="$team-response",
-                final_visible_body="",
-                delivery_kind="sent",
-                mark_handled=True,
-            ),
+            return_value="$team-response",
         )
         install_send_response_mock(bot, mock_send_response)
         bot._response_runner.generate_team_response_helper = mock_generate_team_response
@@ -9069,15 +9032,7 @@ class TestAgentBot:
                 bot._response_runner,
                 "generate_response",
                 new=AsyncMock(
-                    return_value=_outcome(
-                        terminal_status="error",
-                        final_visible_event_id="$thinking",
-                        visible_response_event_id="$thinking",
-                        turn_completion_event_id="$thinking",
-                        last_physical_stream_event_id="$thinking",
-                        failure_reason="suppressed_by_hook",
-                        mark_handled=True,
-                    ),
+                    return_value="$thinking",
                 ),
             ),
             patch.object(bot._turn_controller, "_log_dispatch_latency", create=True),
@@ -9096,7 +9051,7 @@ class TestAgentBot:
         tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(
                 "$event",
-                response_event_id=None,
+                response_event_id="$thinking",
                 visible_echo_event_id="$thinking",
             ),
         )
@@ -9196,8 +9151,8 @@ class TestAgentBot:
 
         assert outcome.terminal_status == "error"
         assert _visible_response_event_id(outcome) == "$existing"
-        assert _handled_response_event_id(outcome) is None
-        assert outcome.mark_handled is False
+        assert _handled_response_event_id(outcome) == "$existing"
+        assert outcome.mark_handled is True
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -9331,11 +9286,7 @@ class TestAgentBot:
                 bot._response_runner,
                 "generate_response",
                 new=AsyncMock(
-                    return_value=_outcome(
-                        terminal_status="error",
-                        failure_reason="delivery_failed",
-                        retryable=True,
-                    ),
+                    return_value=None,
                 ),
             ),
             patch.object(bot._turn_controller, "_log_dispatch_latency", create=True),

@@ -104,11 +104,7 @@ def _mock_event_with_team_mention(team_user_id: str, body: str = "@team please h
 
 
 def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
-    return (
-        outcome.event_id
-        if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed
-        else None
-    )
+    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
 @pytest.mark.asyncio
@@ -351,9 +347,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
             user_id="@user:localhost",
         )
 
-    assert resolution.state == "final_visible_delivery"
-    assert resolution.final_visible_event_id == "$existing_response"
-    assert _handled_response_event_id(resolution) == "$existing_response"
+    assert resolution == "$existing_response"
     assert mock_edit.await_args.args[2] == "$existing_response"
     assert (
         mock_edit.await_args.args[4] == "Team 't1' includes agent 'a2' that could not be materialized for this request."

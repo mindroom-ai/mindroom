@@ -260,12 +260,8 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
 
     await apply_post_response_effects(
         ResponseOutcome(
-            final_delivery_outcome=FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id=None,
-                failure_reason="suppressed_by_hook",
-                suppressed=True,
-            ),
+            resolved_event_id=None,
+            suppressed=True,
             interactive_target=MessageTarget.resolve(
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -296,16 +292,11 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
 
     await apply_post_response_effects(
         ResponseOutcome(
-            final_delivery_outcome=FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id="$stream",
-                is_visible_response=True,
-                final_visible_body="Choose one",
-                option_map={"1": "yes"},
-                options_list=[{"emoji": "1", "label": "Yes", "value": "yes"}],
-                delivery_kind="sent",
-                mark_handled=True,
-            ),
+            resolved_event_id="$stream",
+            interactive_event_id="$stream",
+            compaction_event_id="$stream",
+            option_map={"1": "yes"},
+            options_list=({"emoji": "1", "label": "Yes", "value": "yes"},),
             interactive_target=target,
         ),
         PostResponseEffectsDeps(
@@ -334,14 +325,10 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
 
     await apply_post_response_effects(
         ResponseOutcome(
-            final_delivery_outcome=FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id="$stream",
-                is_visible_response=True,
-                final_visible_body="Choose one\n\n**[Response interrupted]**",
-                option_map={"1": "yes"},
-                options_list=[{"emoji": "1", "label": "Yes", "value": "yes"}],
-            ),
+            resolved_event_id="$stream",
+            compaction_event_id="$stream",
+            option_map={"1": "yes"},
+            options_list=({"emoji": "1", "label": "Yes", "value": "yes"},),
             interactive_target=target,
         ),
         PostResponseEffectsDeps(
@@ -413,14 +400,9 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     ):
         await apply_post_response_effects(
             ResponseOutcome(
-                final_delivery_outcome=FinalDeliveryOutcome(
-                    terminal_status="completed",
-                    event_id="$response",
-                    is_visible_response=True,
-                    final_visible_body="visible",
-                    delivery_kind="sent",
-                    mark_handled=True,
-                ),
+                resolved_event_id="$response",
+                interactive_event_id="$response",
+                compaction_event_id="$response",
                 thread_summary_room_id="!room:localhost",
                 thread_summary_thread_id="$thread",
                 thread_summary_message_count_hint=4,
@@ -611,7 +593,6 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                         is_visible_response=True,
                         final_visible_body="ok",
                         delivery_kind="sent",
-                        mark_handled=True,
                     ),
                 ),
             ),
@@ -641,9 +622,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             lifecycle_lock.release()
             await asyncio.wait_for(lifecycle_started.wait(), timeout=0.2)
             resolution = await task
-            assert resolution.event_id == "$response"
-            assert resolution.is_visible_response is True
-            assert resolution.mark_handled is True
+            assert resolution == "$response"
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()

@@ -53,8 +53,6 @@ class FinalDeliveryOutcome:  # noqa: D101
     canonical_final_body_candidate: str | None = None
     delivery_kind: VisibleDeliveryKind | None = None
     failure_reason: str | None = None
-    mark_handled: bool = False
-    retryable: bool = False
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     extra_content: dict[str, Any] | None = None
@@ -70,6 +68,10 @@ class FinalDeliveryOutcome:  # noqa: D101
     @property
     def final_visible_event_id(self) -> str | None:  # noqa: D102
         return self.event_id if self.is_visible_response else None
+
+    @property
+    def mark_handled(self) -> bool:  # noqa: D102
+        return self.event_id is not None and self.is_visible_response and not self.suppressed
 
     @property
     def response_text(self) -> str:  # noqa: D102

@@ -1148,13 +1148,13 @@ class TestStreamingBehavior:
                     room_id="!test:localhost",
                     reply_to_event_id="$original_123",
                     thread_id=None,
-                sender_domain="localhost",
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=cancelling_stream(),
-                existing_event_id="$thinking_123",
-                room_mode=True,
-            )
+                    sender_domain="localhost",
+                    config=self.config,
+                    runtime_paths=runtime_paths_for(self.config),
+                    response_stream=cancelling_stream(),
+                    existing_event_id="$thinking_123",
+                    room_mode=True,
+                )
 
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER not in edited_texts[0]
@@ -2857,7 +2857,12 @@ class TestStreamingBehavior:
         )
         finalized = await lifecycle.finalize(
             DeliveryOutcome(final_delivery_outcome=outcome),
-            build_post_response_outcome=lambda delivered: ResponseOutcome(final_delivery_outcome=delivered),
+            build_post_response_outcome=lambda delivered: ResponseOutcome(
+                resolved_event_id=delivered.final_visible_event_id,
+                interactive_event_id=delivered.final_visible_event_id,
+                compaction_event_id=delivered.final_visible_event_id,
+                suppressed=delivered.suppressed,
+            ),
             post_response_deps=PostResponseEffectsDeps(logger=MagicMock()),
         )
 
@@ -2957,7 +2962,12 @@ class TestStreamingBehavior:
         )
         finalized = await lifecycle.finalize(
             DeliveryOutcome(final_delivery_outcome=outcome),
-            build_post_response_outcome=lambda delivered: ResponseOutcome(final_delivery_outcome=delivered),
+            build_post_response_outcome=lambda delivered: ResponseOutcome(
+                resolved_event_id=delivered.final_visible_event_id,
+                interactive_event_id=delivered.final_visible_event_id,
+                compaction_event_id=delivered.final_visible_event_id,
+                suppressed=delivered.suppressed,
+            ),
             post_response_deps=PostResponseEffectsDeps(logger=MagicMock()),
         )
 

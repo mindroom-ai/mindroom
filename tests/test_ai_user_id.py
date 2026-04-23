@@ -137,11 +137,15 @@ def _stream_outcome(
     )
 
 
-def _visible_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+def _visible_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
+    if isinstance(outcome, str) or outcome is None:
+        return outcome
     return outcome.final_visible_event_id
 
 
-def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
+    if isinstance(outcome, str) or outcome is None:
+        return outcome
     return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
@@ -571,11 +575,11 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
         )
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
 
-        outcome = await coordinator.generate_response(
+        response_event_id = await coordinator.generate_response(
             _response_request(prompt="   ", user_id="@alice:localhost"),
         )
 
-    assert outcome.terminal_status == "cancelled"
+    assert response_event_id is None
     coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
     assert (
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
@@ -652,7 +656,6 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
             is_visible_response=True,
             final_visible_body="partial answer\n\n**[Response cancelled by user]**",
             failure_reason="cancelled_by_user",
-            retryable=True,
         )
         coordinator.generate_streaming_ai_response = AsyncMock(
             side_effect=StreamingDeliveryError(
@@ -1575,9 +1578,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-    assert resolution.terminal_status == "cancelled"
-    assert _visible_response_event_id(resolution) == "$thinking"
-    assert _handled_response_event_id(resolution) is None
+    assert resolution == "$thinking"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1649,9 +1650,7 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-    assert resolution.terminal_status == "cancelled"
-    assert _visible_response_event_id(resolution) == "$thinking"
-    assert _handled_response_event_id(resolution) is None
+    assert resolution == "$thinking"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1714,8 +1713,7 @@ async def test_generate_response_locked_persists_interrupted_history_when_final_
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
 
-    assert resolution.terminal_status == "cancelled"
-    assert _handled_response_event_id(resolution) is None
+    assert resolution is None
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1787,8 +1785,7 @@ async def test_generate_response_locked_delivery_cancel_with_visible_tools_repla
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-    assert resolution.terminal_status == "cancelled"
-    assert _handled_response_event_id(resolution) is None
+    assert resolution is None
     persisted_session = cast("AgentSession", history_storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1877,8 +1874,7 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
 
-    assert resolution.terminal_status == "cancelled"
-    assert _handled_response_event_id(resolution) is None
+    assert resolution == "$stream-msg"
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -1967,8 +1963,7 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
 
-    assert resolution.terminal_status == "error"
-    assert _handled_response_event_id(resolution) == "$stream-msg"
+    assert resolution == "$stream-msg"
 
 
 @pytest.mark.asyncio
@@ -2155,7 +2150,7 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-    assert resolution.terminal_status == "error"
+    assert resolution is None
     coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
     assert (
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
@@ -2263,8 +2258,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "error"
-    assert _handled_response_event_id(resolution) == "$team-terminal"
+    assert resolution == "$team-terminal"
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -2333,8 +2327,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "error"
-    assert _handled_response_event_id(resolution) == "$team-terminal"
+    assert resolution == "$team-terminal"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2420,8 +2413,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "error"
-    assert _handled_response_event_id(resolution) == "$team-terminal"
+    assert resolution == "$team-terminal"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2504,8 +2496,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "cancelled"
-    assert _visible_response_event_id(resolution) == "$thinking"
+    assert resolution == "$thinking"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2567,7 +2558,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "cancelled"
+    assert resolution is None
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2637,8 +2628,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "cancelled"
-    assert _handled_response_event_id(resolution) is None
+    assert resolution == "$team-msg"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2704,8 +2694,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "cancelled"
-    assert _visible_response_event_id(resolution) == "$team-msg"
+    assert resolution == "$team-msg"
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None
@@ -2774,8 +2763,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "error"
-    assert _handled_response_event_id(resolution) == "$team-msg"
+    assert resolution == "$team-msg"
 
 
 @pytest.mark.asyncio
@@ -2814,7 +2802,6 @@ async def test_generate_team_response_helper_routes_placeholder_only_late_failur
                     terminal_status="error",
                     event_id=None,
                     failure_reason="stream boom",
-                    retryable=True,
                 ),
             ),
         )
@@ -2825,7 +2812,7 @@ async def test_generate_team_response_helper_routes_placeholder_only_late_failur
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "error"
+    assert resolution is None
     coordinator.deps.delivery_gateway.finalize_streamed_response.assert_awaited_once()
     coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
@@ -2945,8 +2932,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "cancelled"
-    assert _visible_response_event_id(resolution) == "$thinking"
+    assert resolution == "$thinking"
     assert model_prompts
     assert model_prompts[0] != "Hello"
     assert 'Current message:\n<msg from="@alice:localhost">' in model_prompts[0]
@@ -3043,8 +3029,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "cancelled"
-    assert _visible_response_event_id(resolution) == "$thinking"
+    assert resolution == "$thinking"
     assert sequence == [
         "team",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
@@ -3143,7 +3128,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "cancelled"
+    assert resolution is None
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -3300,7 +3285,6 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
                     terminal_status="error",
                     event_id=None,
                     failure_reason="stream failure",
-                    retryable=True,
                 ),
             ),
         )
@@ -3327,9 +3311,7 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
             team_mode="coordinate",
         )
 
-    assert resolution.terminal_status == "error"
-    assert resolution.retryable is True
-    assert _visible_response_event_id(resolution) is None
+    assert resolution is None
 
 
 class TestUserIdPassthrough:

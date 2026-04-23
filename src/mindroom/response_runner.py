@@ -51,6 +51,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
+from mindroom.orchestration.runtime import classify_cancel_source
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,
     ResponseOutcome,
@@ -74,7 +75,6 @@ from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
-from mindroom.orchestration.runtime import classify_cancel_source
 
 from .delivery_gateway import (
     CancelledVisibleNoteRequest,
@@ -675,8 +675,8 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        locked_operation: Callable[[MessageTarget], Awaitable[FinalDeliveryOutcome]],
-    ) -> FinalDeliveryOutcome:
+        locked_operation: Callable[[MessageTarget], Awaitable[str | None]],
+    ) -> str | None:
         """Run one locked response operation with shared queued-message bookkeeping."""
         resolved_target = self._resolve_request_target(request)
         lifecycle_lock = self._response_lifecycle_lock(resolved_target)
@@ -942,7 +942,11 @@ class ResponseRunner:
             return "error"
         if final_delivery_outcome is not None and final_delivery_outcome.delivery_kind is not None:
             return final_delivery_outcome.delivery_kind
-        if final_delivery_outcome is not None and final_delivery_outcome.event_id is not None and final_delivery_outcome.is_visible_response:
+        if (
+            final_delivery_outcome is not None
+            and final_delivery_outcome.event_id is not None
+            and final_delivery_outcome.is_visible_response
+        ):
             return "visible_response_preserved"
         return "no_visible_response"
 
@@ -1029,7 +1033,7 @@ class ResponseRunner:
         team_agents: list[MatrixID],
         team_mode: str,
         reason_prefix: str = "Team request",
-    ) -> FinalDeliveryOutcome:
+    ) -> str | None:
         """Generate a team response with lifecycle locking and queued-message state."""
         team_request = TeamResponseRequest(
             request=request,
@@ -1050,7 +1054,7 @@ class ResponseRunner:
         team_request: TeamResponseRequest,
         *,
         resolved_target: MessageTarget,
-    ) -> FinalDeliveryOutcome:
+    ) -> str | None:
         """Generate a team response once the per-thread lifecycle lock is held."""
         request = team_request.request
         if request.on_lifecycle_lock_acquired is not None:
@@ -1121,12 +1125,13 @@ class ResponseRunner:
             correlation_id=resolved_correlation_id,
         )
         if not request.prompt.strip():
-            return await lifecycle.finalize(
+            final_outcome = await lifecycle.finalize(
                 DeliveryOutcome(
                     final_delivery_outcome=FinalDeliveryOutcome.cancelled_for_empty_prompt(),
                 ),
                 build_post_response_outcome=lambda final_outcome: ResponseOutcome(
-                    final_delivery_outcome=final_outcome,
+                    resolved_event_id=final_outcome.final_visible_event_id,
+                    suppressed=final_outcome.suppressed,
                 ),
                 post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                     room_id=request.room_id,
@@ -1135,6 +1140,7 @@ class ResponseRunner:
                     interactive_agent_name=self.deps.agent_name,
                 ),
             )
+            return final_outcome.final_visible_event_id
         delivery_target = (
             resolved_target
             if request.existing_event_id is None or request.existing_event_is_placeholder
@@ -1393,7 +1399,6 @@ class ResponseRunner:
                                 ),
                                 canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
                                 failure_reason=fallback_stream_outcome.failure_reason or "stream_finalize_cancelled",
-                                retryable=True,
                                 tool_trace=tuple(),
                             )
                         else:
@@ -1406,8 +1411,6 @@ class ResponseRunner:
                                 ),
                                 canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
                                 failure_reason=fallback_stream_outcome.failure_reason or "stream_finalize_error",
-                                mark_handled=preserved_visible_stream,
-                                retryable=not preserved_visible_stream,
                                 tool_trace=tuple(),
                             )
                 if finalized_cleanly and request.pipeline_timing is not None:
@@ -1496,7 +1499,6 @@ class ResponseRunner:
                             terminal_status="cancelled",
                             event_id=None,
                             failure_reason=failure_reason,
-                            retryable=True,
                         )
                     if self._should_reraise_user_stop(exc):
                         raise
@@ -1650,12 +1652,25 @@ class ResponseRunner:
                 ),
             )
         assert final_delivery_outcome is not None
-        return await lifecycle.finalize(
+        final_outcome = await lifecycle.finalize(
             DeliveryOutcome(
                 final_delivery_outcome=final_delivery_outcome,
             ),
             build_post_response_outcome=lambda final_outcome: ResponseOutcome(
-                final_delivery_outcome=final_outcome,
+                resolved_event_id=final_outcome.final_visible_event_id,
+                interactive_event_id=(
+                    final_outcome.final_visible_event_id
+                    if final_outcome.terminal_status == "completed"
+                    and final_outcome.final_visible_body is not None
+                    and not final_outcome.suppressed
+                    else None
+                ),
+                compaction_event_id=(
+                    final_outcome.final_visible_event_id if final_outcome.final_visible_event_id is not None else None
+                ),
+                suppressed=final_outcome.suppressed,
+                option_map=final_outcome.option_map,
+                options_list=final_outcome.options_list,
                 response_run_id=response_run_id,
                 session_id=session_id,
                 session_type=SessionType.TEAM,
@@ -1675,6 +1690,7 @@ class ResponseRunner:
                 persist_response_event_id=persist_response_event_id,
             ),
         )
+        return final_outcome.final_visible_event_id
 
     async def run_cancellable_response(
         self,
@@ -2146,7 +2162,6 @@ class ResponseRunner:
                 terminal_status="cancelled",
                 event_id=None,
                 failure_reason=failure_reason,
-                retryable=True,
             )
         except Exception as error:
             self.deps.logger.exception("Error in non-streaming response", error=str(error))
@@ -2462,7 +2477,6 @@ class ResponseRunner:
                         final_visible_body=fallback_stream_outcome.rendered_body if preserved_visible_stream else None,
                         canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
                         failure_reason=fallback_stream_outcome.failure_reason or "stream_finalize_cancelled",
-                        retryable=True,
                         tool_trace=tuple(tool_trace),
                         extra_content=response_extra_content,
                     )
@@ -2474,8 +2488,6 @@ class ResponseRunner:
                         final_visible_body=fallback_stream_outcome.rendered_body if preserved_visible_stream else None,
                         canonical_final_body_candidate=fallback_stream_outcome.canonical_final_body_candidate,
                         failure_reason=fallback_stream_outcome.failure_reason or "stream_finalize_error",
-                        mark_handled=preserved_visible_stream,
-                        retryable=not preserved_visible_stream,
                         tool_trace=tuple(tool_trace),
                         extra_content=response_extra_content,
                     )
@@ -2487,7 +2499,7 @@ class ResponseRunner:
             compaction_outcomes_collector.extend(compaction_outcomes)
         return delivery
 
-    async def generate_response(self, request: ResponseRequest) -> FinalDeliveryOutcome:
+    async def generate_response(self, request: ResponseRequest) -> str | None:
         """Generate and send/edit an agent response with lifecycle locking."""
         return await self._run_locked_response_lifecycle(
             request,
@@ -2502,7 +2514,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
-    ) -> FinalDeliveryOutcome:
+    ) -> str | None:
         """Generate one agent response after acquiring the per-thread lock."""
         delivery_thread_id = resolved_target.resolved_thread_id
         resolved_target = resolved_target.with_thread_root(delivery_thread_id)
@@ -2698,12 +2710,23 @@ class ResponseRunner:
                 ),
             )
         assert final_delivery_outcome is not None
-        return await lifecycle.finalize(
+        final_outcome = await lifecycle.finalize(
             DeliveryOutcome(
                 final_delivery_outcome=final_delivery_outcome,
             ),
             build_post_response_outcome=lambda canonical_outcome: ResponseOutcome(
-                final_delivery_outcome=canonical_outcome,
+                resolved_event_id=canonical_outcome.final_visible_event_id,
+                interactive_event_id=(
+                    canonical_outcome.final_visible_event_id
+                    if canonical_outcome.terminal_status == "completed"
+                    and canonical_outcome.final_visible_body is not None
+                    and not canonical_outcome.suppressed
+                    else None
+                ),
+                compaction_event_id=canonical_outcome.final_visible_event_id,
+                suppressed=canonical_outcome.suppressed,
+                option_map=canonical_outcome.option_map,
+                options_list=canonical_outcome.options_list,
                 response_run_id=response_run_id,
                 session_id=session_id,
                 session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
@@ -2725,3 +2748,4 @@ class ResponseRunner:
                 persist_response_event_id=persist_response_event_id,
             ),
         )
+        return final_outcome.final_visible_event_id

@@ -13,7 +13,6 @@ from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wai
 
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import (
     AgentLifecycleContext,
     EnrichmentItem,
@@ -1406,7 +1405,7 @@ class AgentBot:
         reason_prefix: str = "Team request",
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> FinalDeliveryOutcome:
+    ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot)."""
         return await self._response_runner.generate_team_response_helper(
             ResponseRequest(
@@ -1452,7 +1451,7 @@ class AgentBot:
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> FinalDeliveryOutcome:
+    ) -> str | None:
         """Generate and send/edit a response using AI.
 
         Args:
@@ -1480,9 +1479,34 @@ class AgentBot:
                 lifecycle lock is acquired and before response generation starts.
 
         Returns:
-            Typed terminal delivery resolution for the completed response lifecycle.
+            Event ID of the visible response, or None if no visible response landed.
 
         """
+        if not prompt.strip():
+            resolved_target = target or self._conversation_resolver.build_message_target(
+                room_id=room_id,
+                thread_id=thread_id,
+                reply_to_event_id=reply_to_event_id,
+            )
+            await self._delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                correlation_id=correlation_id or reply_to_event_id or room_id,
+                envelope=response_envelope
+                or MessageEnvelope(
+                    source_event_id=reply_to_event_id,
+                    room_id=room_id,
+                    target=resolved_target,
+                    requester_id=user_id or self.matrix_id.full_id,
+                    sender_id=user_id or self.matrix_id.full_id,
+                    body=prompt,
+                    attachment_ids=tuple(attachment_ids or ()),
+                    mentioned_agents=(),
+                    agent_name=self.agent_name,
+                    source_kind="message",
+                ),
+                response_kind="ai",
+                failure_reason="empty_prompt",
+            )
+            return None
         return await self._response_runner.generate_response(
             ResponseRequest(
                 room_id=room_id,
@@ -1702,7 +1726,7 @@ class TeamBot(AgentBot):
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> FinalDeliveryOutcome:
+    ) -> str | None:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
             resolved_target = target or self._conversation_resolver.build_message_target(
@@ -1710,29 +1734,25 @@ class TeamBot(AgentBot):
                 thread_id=thread_id,
                 reply_to_event_id=reply_to_event_id,
             )
-            return await self._generate_team_response_helper(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
-                target=resolved_target,
-                payload=DispatchPayload(
-                    prompt=prompt,
-                    model_prompt=model_prompt,
-                    media=media or MediaInputs(),
-                    attachment_ids=attachment_ids,
+            await self._delivery_gateway.deps.response_hooks.emit_cancelled_response(
+                correlation_id=correlation_id or reply_to_event_id or room_id,
+                envelope=response_envelope
+                or MessageEnvelope(
+                    source_event_id=reply_to_event_id,
+                    room_id=room_id,
+                    target=resolved_target,
+                    requester_id=user_id or self.matrix_id.full_id,
+                    sender_id=user_id or self.matrix_id.full_id,
+                    body=prompt,
+                    attachment_ids=tuple(attachment_ids or ()),
+                    mentioned_agents=(),
+                    agent_name=self.agent_name,
+                    source_kind="message",
                 ),
-                team_agents=self.team_agents,
-                team_mode=self.team_mode,
-                thread_history=thread_history,
-                requester_user_id=user_id or "",
-                existing_event_id=existing_event_id,
-                existing_event_is_placeholder=existing_event_is_placeholder,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                system_enrichment_items=system_enrichment_items,
-                matrix_run_metadata=matrix_run_metadata,
-                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                response_kind="team",
+                failure_reason="empty_prompt",
             )
+            return None
 
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
@@ -1786,16 +1806,7 @@ class TeamBot(AgentBot):
                     response_kind="system",
                     continue_on_cancelled=True,
                 )
-            return FinalDeliveryOutcome(
-                terminal_status="completed" if response_event_id is not None else "error",
-                event_id=response_event_id,
-                is_visible_response=response_event_id is not None,
-                final_visible_body=team_resolution.reason if response_event_id is not None else None,
-                delivery_kind=delivery_kind,
-                failure_reason=None if response_event_id is not None else "delivery_failed",
-                mark_handled=response_event_id is not None,
-                retryable=response_event_id is None,
-            )
+            return response_event_id
         assert team_resolution.mode is not None
 
         resolved_target = target or self._conversation_resolver.build_message_target(

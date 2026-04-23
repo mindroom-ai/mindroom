@@ -733,7 +733,7 @@ class TurnController:
             ),
         )
 
-        final_outcome = await self.deps.response_runner.generate_response(
+        response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 room_id=room.room_id,
                 prompt=f"The user selected: {selection.selected_value}",
@@ -747,12 +747,7 @@ class TurnController:
                 matrix_run_metadata=selection_matrix_run_metadata,
             ),
         )
-        response_event_id = (
-            final_outcome.event_id
-            if final_outcome.mark_handled and final_outcome.is_visible_response and not final_outcome.suppressed
-            else None
-        )
-        if final_outcome.mark_handled and response_event_id is not None:
+        if response_event_id is not None:
             self._mark_source_events_responded(
                 HandledTurnState.from_source_event_id(
                     selection.question_event_id,
@@ -1106,7 +1101,7 @@ class TurnController:
             if action.kind == "team":
                 assert action.form_team is not None
                 assert action.form_team.mode is not None
-                final_outcome = await self.deps.response_runner.generate_team_response_helper(
+                response_event_id = await self.deps.response_runner.generate_team_response_helper(
                     ResponseRequest(
                         room_id=room.room_id,
                         reply_to_event_id=event.event_id,
@@ -1126,7 +1121,7 @@ class TurnController:
                     team_mode=action.form_team.mode.value,
                 )
             else:
-                final_outcome = await self.deps.response_runner.generate_response(
+                response_event_id = await self.deps.response_runner.generate_response(
                     ResponseRequest(
                         room_id=room.room_id,
                         reply_to_event_id=event.event_id,
@@ -1158,12 +1153,12 @@ class TurnController:
                     ),
                 )
             return
-        if final_outcome.mark_handled and final_outcome.event_id is not None and final_outcome.is_visible_response:
-            resolved_handled_turn = handled_turn
-            if not final_outcome.suppressed:
-                resolved_handled_turn = resolved_handled_turn.with_response_event_id(final_outcome.event_id)
-            resolved_handled_turn = resolved_handled_turn.with_visible_echo_event_id(final_outcome.event_id)
-            self._mark_source_events_responded(resolved_handled_turn)
+        if response_event_id is not None:
+            self._mark_source_events_responded(
+                handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
+                    response_event_id,
+                ),
+            )
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
