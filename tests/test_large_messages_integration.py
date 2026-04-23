@@ -774,6 +774,43 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
 
 
 @pytest.mark.asyncio
+async def test_replacement_streaming_preserves_visible_tool_marker_across_snapshots() -> None:
+    """Replacement snapshots should not wipe a pending visible tool marker before completion."""
+    client = MockClient()
+    config = MockConfig()
+
+    tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
+
+    async def stream() -> AsyncIterator[_StreamInputChunk]:
+        yield "hello"
+        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+        yield "hello world"
+        yield ToolCallCompletedEvent(tool=tool, content="ok")
+
+    event_id, accumulated = await send_streaming_response(
+        client=client,
+        room_id="!test:room",
+        reply_to_event_id=None,
+        thread_id=None,
+        sender_domain="example.com",
+        config=config,
+        runtime_paths=_runtime_paths(),
+        response_stream=stream(),
+        streaming_cls=ReplacementStreamingResponse,
+    )
+
+    assert event_id is not None
+    assert accumulated.startswith("hello world")
+    assert "save_file" in accumulated
+    assert "⏳" not in accumulated
+
+    target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
+    assert target_content["body"].startswith("hello world")
+    assert "save_file" in target_content["body"]
+    assert "⏳" not in target_content["body"]
+
+
+@pytest.mark.asyncio
 async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
     """Hidden tool calls should not stack repeated blank-line placeholders."""
     client = MockClient()

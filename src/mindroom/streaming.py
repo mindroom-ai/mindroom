@@ -257,6 +257,8 @@ class StreamingResponse:
     _last_delivered_text: str = field(default="", init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
     _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
+    _inflight_nonterminal_capture: asyncio.Future[None] | None = field(default=None, init=False, repr=False)
+    _inflight_nonterminal_capture_state: _CommittedDeliveryState | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize transitional target fields onto one canonical target."""
@@ -275,6 +277,10 @@ class StreamingResponse:
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
         self._append_incremental_text(new_chunk)
+
+    def uses_replacement_updates(self) -> bool:
+        """Return whether text chunks replace the current visible body."""
+        return False
 
     def _append_incremental_text(self, new_chunk: str) -> None:
         """Append additive streaming text regardless of snapshot replacement mode."""
@@ -350,12 +356,24 @@ class StreamingResponse:
         self.last_boundary_refresh_at = None
         self.chars_since_last_update = max(1, self.chars_since_last_update)
 
+    def matching_inflight_nonterminal_capture(self) -> asyncio.Future[None] | None:
+        """Return the current in-flight capture when it already froze the live state."""
+        if self._inflight_nonterminal_capture is None or self._inflight_nonterminal_capture_state is None:
+            return None
+        if (
+            self.accumulated_text == self._inflight_nonterminal_capture_state.accumulated_text
+            and self.tool_trace == self._inflight_nonterminal_capture_state.tool_trace
+        ):
+            return self._inflight_nonterminal_capture
+        return None
+
     async def _throttled_send(
         self,
         client: nio.AsyncClient,
         *,
         progress_hint: bool = False,
         prior_delta_at: float | None = None,
+        capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> None:
         """Send/edit when either time or character thresholds are met."""
         current_time = time.time()
@@ -381,7 +399,11 @@ class StreamingResponse:
         should_send = time_triggered or char_triggered or idle_triggered
         allow_empty_progress = progress_hint and not self.accumulated_text.strip()
         if should_send and (self.accumulated_text.strip() or allow_empty_progress):
-            await self._send_or_edit_message(client, allow_empty_progress=allow_empty_progress)
+            await self._send_or_edit_message(
+                client,
+                allow_empty_progress=allow_empty_progress,
+                capture_completions=capture_completions,
+            )
 
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
@@ -447,6 +469,7 @@ class StreamingResponse:
         allow_empty_progress: bool = False,
         stream_status: str | None = None,
         boundary_refresh: bool = False,
+        capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> bool:
         """Send new message or edit existing one."""
         prepared_delivery = self._prepare_delivery(
@@ -462,6 +485,7 @@ class StreamingResponse:
             prepared_delivery=prepared_delivery,
             is_final=is_final,
             boundary_refresh=boundary_refresh,
+            capture_completions=capture_completions,
         )
 
     async def _send_prepared_delivery(
@@ -471,15 +495,30 @@ class StreamingResponse:
         prepared_delivery: _PreparedStreamingDelivery,
         is_final: bool,
         boundary_refresh: bool = False,
+        capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> bool:
         """Send one already-prepared non-terminal or terminal payload."""
         is_initial_send = self.event_id is None
-        send_succeeded = await self._send_content(
-            client,
-            content=prepared_delivery.content,
-            display_text=prepared_delivery.display_text,
-            retry_on_failure=is_final,
-        )
+        capture = None
+        if not is_final:
+            capture = asyncio.get_running_loop().create_future()
+            self._inflight_nonterminal_capture = capture
+            self._inflight_nonterminal_capture_state = prepared_delivery.committed_state
+            capture.set_result(None)
+            for capture_completion in capture_completions:
+                if not capture_completion.done():
+                    capture_completion.set_result(None)
+        try:
+            send_succeeded = await self._send_content(
+                client,
+                content=prepared_delivery.content,
+                display_text=prepared_delivery.display_text,
+                retry_on_failure=is_final,
+            )
+        finally:
+            if self._inflight_nonterminal_capture is capture:
+                self._inflight_nonterminal_capture = None
+                self._inflight_nonterminal_capture_state = None
         if not send_succeeded:
             if not is_final:
                 action = "send initial" if is_initial_send else "edit"
@@ -687,6 +726,10 @@ class ReplacementStreamingResponse(StreamingResponse):
     on each tick and we want the message to reflect the latest full view,
     not incremental concatenation.
     """
+
+    def uses_replacement_updates(self) -> bool:
+        """Return whether each visible chunk replaces the current body."""
+        return True
 
     def _update(self, new_chunk: str) -> None:
         """Replace accumulated text with new chunk."""

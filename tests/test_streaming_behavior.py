@@ -978,8 +978,20 @@ class TestStreamingBehavior:
         assert "save_file" in bodies[2]
 
     @pytest.mark.asyncio
-    async def test_hidden_tool_start_does_not_block_subsequent_stream_events_on_matrix_send(self) -> None:
-        """Hidden tool-start preflush should not wait for Matrix I/O before pulling later events."""
+    @pytest.mark.parametrize(
+        ("show_tool_calls", "streaming_cls", "event_id"),
+        [
+            pytest.param(False, StreamingResponse, "$hidden_tool_start_backpressure", id="hidden"),
+            pytest.param(True, ReplacementStreamingResponse, "$visible_tool_start_backpressure", id="visible"),
+        ],
+    )
+    async def test_tool_start_does_not_block_subsequent_stream_events_on_matrix_send(
+        self,
+        show_tool_calls: bool,
+        streaming_cls: type[StreamingResponse],
+        event_id: str,
+    ) -> None:
+        """Tool-start capture waits should not block later stream events while Matrix I/O is in flight."""
         mock_client = _make_matrix_client_mock()
         first_send_started = asyncio.Event()
         allow_send_to_finish = asyncio.Event()
@@ -991,12 +1003,12 @@ class TestStreamingBehavior:
             await allow_send_to_finish.wait()
             mock_response = MagicMock()
             mock_response.__class__ = nio.RoomSendResponse
-            mock_response.event_id = "$hidden_tool_start_backpressure"
+            mock_response.event_id = event_id
             return mock_response
 
         mock_client.room_send.side_effect = slow_room_send
 
-        streaming = StreamingResponse(
+        streaming = streaming_cls(
             room_id="!test:localhost",
             reply_to_event_id="$original_123",
             thread_id=None,
@@ -1006,14 +1018,17 @@ class TestStreamingBehavior:
             update_interval=10.0,
             min_update_interval=10.0,
             interval_ramp_seconds=0.0,
-            max_idle=0.25,
-            show_tool_calls=False,
+            update_char_threshold=1,
+            min_update_char_threshold=1,
+            min_char_update_interval=0.0,
+            max_idle=10.0,
+            show_tool_calls=show_tool_calls,
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
 
         async def response_stream() -> AsyncIterator[object]:
-            yield "partial text"
+            yield "x"
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
             second_yield_started.set()
             yield "after"
@@ -1031,6 +1046,64 @@ class TestStreamingBehavior:
         await consume_task
         shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
         assert shutdown_error is None
+
+    @pytest.mark.asyncio
+    async def test_visible_tool_start_after_unsent_text_refreshes_immediately(self) -> None:
+        """A second visible tool start should bypass the refresh gate after an unsent text delta."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$tool_start_after_unsent_text"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10_000,
+            min_update_char_threshold=10_000,
+            min_char_update_interval=10.0,
+            progress_update_interval=10.0,
+            max_idle=10.0,
+            show_tool_calls=True,
+        )
+        streaming.event_id = "$existing_event"
+        streaming.last_update = 100.0
+        streaming.stream_started_at = 100.0
+        streaming.last_boundary_refresh_at = 100.0
+        streaming.accumulated_text = "\n\n🔧 `search_web` [1] ⏳\nx\n\n🔧 `save_file` [2] ⏳\n"
+        streaming.chars_since_last_update = len(streaming.accumulated_text)
+
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue.put_nowait(
+            _DeliveryRequest(
+                boundary_refresh=True,
+                prior_delta_at=100.0,
+                boundary_refresh_prior_delta_at=100.1,
+            ),
+        )
+
+        with (
+            patch("mindroom.streaming.time.time", return_value=100.2),
+            patch("mindroom.streaming_delivery.time.time", return_value=100.2),
+        ):
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+
+        assert shutdown_error is None
+        assert mock_client.room_send.call_count == 1
+        bodies = [
+            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
+            for call in mock_client.room_send.call_args_list
+        ]
+        assert "search_web" in bodies[-1]
+        assert "save_file" in bodies[-1]
 
     @pytest.mark.asyncio
     async def test_idle_flush_fires_on_tool_completion_after_pause(self) -> None:
