@@ -1765,6 +1765,11 @@ class ResponseRunner:
                 run_metadata_collector=run_metadata_content,
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 compaction_outcomes_collector=compaction_outcomes,
+                refresh_owner=(
+                    self.deps.runtime.orchestrator.knowledge_refresh_owner
+                    if self.deps.runtime.orchestrator is not None
+                    else None
+                ),
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
                 turn_recorder=turn_recorder,
@@ -1844,6 +1849,11 @@ class ResponseRunner:
             run_metadata_collector=run_metadata_content,
             execution_identity=runtime.tool_dispatch.execution_identity,
             compaction_outcomes_collector=compaction_outcomes,
+            refresh_owner=(
+                self.deps.runtime.orchestrator.knowledge_refresh_owner
+                if self.deps.runtime.orchestrator is not None
+                else None
+            ),
             matrix_run_metadata=matrix_run_metadata,
             system_enrichment_items=system_enrichment_items,
             turn_recorder=turn_recorder,

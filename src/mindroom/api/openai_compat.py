@@ -852,6 +852,7 @@ async def chat_completions(
                 req.user,
                 knowledge,
                 execution_identity=execution_identity,
+                refresh_owner=knowledge_refresh_owner,
             )
         else:
             with tool_execution_identity(execution_identity):
@@ -865,6 +866,7 @@ async def chat_completions(
                     req.user,
                     knowledge,
                     execution_identity=execution_identity,
+                    refresh_owner=knowledge_refresh_owner,
                 )
 
     return response
@@ -885,6 +887,7 @@ async def _non_stream_completion(
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
     response_text = await ai_response(
@@ -901,6 +904,7 @@ async def _non_stream_completion(
         include_openai_compat_guidance=True,
         active_event_ids=set(),
         execution_identity=execution_identity,
+        refresh_owner=refresh_owner,
     )
 
     # Detect error responses from ai_response()
@@ -1071,6 +1075,7 @@ async def _stream_completion(
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     stream = cast(
@@ -1091,6 +1096,7 @@ async def _stream_completion(
                 include_openai_compat_guidance=True,
                 active_event_ids=set(),
                 execution_identity=execution_identity,
+                refresh_owner=refresh_owner,
             ),
         ),
     )

@@ -1215,6 +1215,7 @@ def materialize_exact_team_members(
             knowledge=knowledge,
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
+            refresh_owner=refresh_owner,
         )
 
     team_members = materialize_exact_requested_team_members(
