@@ -92,7 +92,6 @@ class _DeliveryRequest:
     phase_boundary_flush: bool = False
     allow_empty_progress: bool = False
     prior_delta_at: float | None = None
-    completion: asyncio.Future[None] | None = None
     capture_completion: asyncio.Future[None] | None = None
 
 
@@ -110,14 +109,9 @@ def _queue_delivery_request(
     phase_boundary_flush: bool = False,
     allow_empty_progress: bool = False,
     prior_delta_at: float | None = None,
-    wait_for_delivery: bool = False,
     wait_for_capture: bool = False,
 ) -> asyncio.Future[None] | None:
     """Queue one non-terminal delivery request for the single delivery owner."""
-    if wait_for_delivery and wait_for_capture:
-        msg = "delivery requests can wait for capture or delivery, not both"
-        raise ValueError(msg)
-    completion = asyncio.get_running_loop().create_future() if wait_for_delivery else None
     capture_completion = asyncio.get_running_loop().create_future() if wait_for_capture else None
     delivery_queue.put_nowait(
         _DeliveryRequest(
@@ -127,11 +121,10 @@ def _queue_delivery_request(
             phase_boundary_flush=phase_boundary_flush,
             allow_empty_progress=allow_empty_progress,
             prior_delta_at=prior_delta_at,
-            completion=completion,
             capture_completion=capture_completion,
         ),
     )
-    return completion or capture_completion
+    return capture_completion
 
 
 async def _flush_phase_boundary_if_needed(
@@ -158,7 +151,6 @@ async def _apply_visible_text_chunk(
     apply_chunk: Callable[[str], None],
     force_refresh: bool = False,
     boundary_refresh: bool = False,
-    wait_for_delivery: bool = False,
 ) -> None:
     """Apply one visible text-like chunk and queue the matching delivery request."""
     if not text_chunk:
@@ -167,15 +159,12 @@ async def _apply_visible_text_chunk(
     streaming._warmup_state.clear_terminal_failures()
     prior_delta_at = streaming.last_delta_at
     apply_chunk(text_chunk)
-    completion = _queue_delivery_request(
+    _queue_delivery_request(
         delivery_queue,
         force_refresh=force_refresh,
         boundary_refresh=boundary_refresh,
         prior_delta_at=None if force_refresh else prior_delta_at,
-        wait_for_delivery=wait_for_delivery,
     )
-    if completion is not None:
-        await completion
 
 
 async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
@@ -348,7 +337,6 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
             return
 
         merged_request = request
-        completions = [request.completion] if request.completion is not None else []
         capture_completions = [request.capture_completion] if request.capture_completion is not None else []
         while True:
             try:
@@ -358,8 +346,6 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
             if next_request is None:
                 stop_after_current = True
                 break
-            if next_request.completion is not None:
-                completions.append(next_request.completion)
             if next_request.capture_completion is not None:
                 capture_completions.append(next_request.capture_completion)
             merged_request = _DeliveryRequest(
@@ -424,17 +410,10 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
                     prior_delta_at=merged_request.prior_delta_at,
                 )
         except Exception as exc:
-            for completion in completions:
-                if not completion.done():
-                    completion.set_exception(exc)
             for capture_completion in capture_completions:
                 if not capture_completion.done():
                     capture_completion.set_exception(exc)
             raise
-        else:
-            for completion in completions:
-                if not completion.done():
-                    completion.set_result(None)
 
         if stop_after_current:
             return

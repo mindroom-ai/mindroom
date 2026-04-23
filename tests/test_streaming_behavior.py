@@ -60,6 +60,7 @@ from mindroom.streaming_delivery import (
 from mindroom.streaming_delivery import (
     _DeliveryRequest,
     _drive_stream_delivery,
+    _flush_phase_boundary_if_needed,
     _shutdown_stream_delivery,
     _StreamDeliveryShutdownTimeoutError,
 )
@@ -1121,8 +1122,8 @@ class TestStreamingBehavior:
         assert streaming.chars_since_last_update == 0
 
     @pytest.mark.asyncio
-    async def test_force_flush_ignores_whitespace_only_buffer(self) -> None:
-        """Whitespace-only buffered text should not consume the first visible send window."""
+    async def test_phase_boundary_flush_ignores_whitespace_only_buffer(self) -> None:
+        """Whitespace-only pre-tool flushes should not consume the first visible send window."""
         mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
         mock_response.__class__ = nio.RoomSendResponse
@@ -1149,9 +1150,17 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.time.time", return_value=100.0):
             streaming._update("\n")
 
-        with patch("mindroom.streaming.time.time", side_effect=[101.0, 101.0, 101.0]):
-            await streaming.force_flush(mock_client)
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        await _flush_phase_boundary_if_needed(streaming, delivery_queue)
 
+        with (
+            patch("mindroom.streaming.time.time", return_value=101.0),
+            patch("mindroom.streaming_delivery.time.time", return_value=101.0),
+        ):
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+
+        assert shutdown_error is None
         assert mock_client.room_send.call_count == 0
         assert streaming.last_update == float("-inf")
         assert streaming.chars_since_last_update == 1
@@ -1160,26 +1169,6 @@ class TestStreamingBehavior:
             await streaming.update_content("Hi", mock_client)
 
         assert mock_client.room_send.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_force_flush_initializes_stream_started_at(self) -> None:
-        """Direct force-flush sends should anchor the ramp window from that first visible send."""
-        mock_client = _make_matrix_client_mock()
-        streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
-            sender_domain="localhost",
-            config=self.config,
-            runtime_paths=runtime_paths_for(self.config),
-        )
-        streaming._send_content = AsyncMock(return_value=True)
-
-        with patch("mindroom.streaming.time.time", side_effect=[100.0, 101.0]):
-            streaming._update("hello")
-            await streaming.force_flush(mock_client)
-
-        assert streaming.stream_started_at == 101.0
 
     @pytest.mark.asyncio
     async def test_boundary_refresh_initializes_stream_started_at(self) -> None:

@@ -324,27 +324,6 @@ class StreamingResponse:
         threshold = fast_threshold + (self.update_char_threshold - fast_threshold) * progress
         return max(1, round(threshold))
 
-    async def force_flush(self, client: nio.AsyncClient) -> None:
-        """Unconditionally send buffered text and reset all throttle state.
-
-        Bypasses _throttled_send's OR but maintains the same post-send invariants.
-        Use at explicit phase boundaries where throttling is semantically wrong.
-        """
-        if self.chars_since_last_update == 0 or not self.accumulated_text.strip():
-            return
-        prepared_delivery = self._prepare_delivery(
-            is_final=False,
-            allow_empty_progress=False,
-            stream_status=None,
-        )
-        if prepared_delivery is None:
-            return
-        await self._send_prepared_delivery(
-            client,
-            prepared_delivery=prepared_delivery,
-            is_final=False,
-        )
-
     def _mark_nonterminal_delivery(
         self,
         committed_state: _CommittedDeliveryState,
