@@ -157,7 +157,7 @@ async def test_transport_restart_interrupted_terminal_update_does_not_sleep_behi
     assert mock_edit.await_count == 1
     sleep_mock.assert_not_awaited()
     assert outcome.terminal_result == "failed"
-    assert outcome.terminal_status == "error"
+    assert outcome.terminal_status == "cancelled"
 
 
 @pytest.mark.asyncio

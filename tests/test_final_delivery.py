@@ -71,17 +71,6 @@ class _Expectation:
         ),
         pytest.param(
             FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id=None,
-                failure_reason="suppressed_by_hook",
-                mark_handled=True,
-                suppressed=True,
-            ),
-            _Expectation(None, False, None, None, True, False),
-            id="suppressed-without-visible-response",
-        ),
-        pytest.param(
-            FinalDeliveryOutcome(
                 terminal_status="error",
                 event_id="$placeholder",
                 is_visible_response=True,
@@ -120,9 +109,53 @@ def test_final_delivery_outcome_requires_event_id_for_visible_response() -> None
     """Visible-response outcomes must carry the canonical event id."""
     with pytest.raises(ValueError, match="is_visible_response requires event_id"):
         FinalDeliveryOutcome(
-            terminal_status="completed",
+            terminal_status="error",
             event_id=None,
             is_visible_response=True,
+        )
+
+
+def test_final_delivery_outcome_completed_requires_visible_response_event() -> None:
+    """Completed outcomes must represent one visible response."""
+    with pytest.raises(ValueError, match="completed outcomes require a visible response event"):
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id=None,
+            final_visible_body="hello",
+        )
+
+
+def test_final_delivery_outcome_completed_requires_visible_body() -> None:
+    """Completed outcomes must carry the final visible body."""
+    with pytest.raises(ValueError, match="completed outcomes require final_visible_body"):
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$final",
+            is_visible_response=True,
+        )
+
+
+def test_final_delivery_outcome_completed_rejects_failure_reason() -> None:
+    """Completed outcomes cannot carry failure metadata."""
+    with pytest.raises(ValueError, match="completed outcomes cannot carry failure_reason"):
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$final",
+            is_visible_response=True,
+            final_visible_body="hello",
+            failure_reason="suppressed_by_hook",
+        )
+
+
+def test_final_delivery_outcome_completed_rejects_suppressed() -> None:
+    """Completed outcomes cannot also be suppressed."""
+    with pytest.raises(ValueError, match="completed outcomes cannot be suppressed"):
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$final",
+            is_visible_response=True,
+            final_visible_body="hello",
+            suppressed=True,
         )
 
 

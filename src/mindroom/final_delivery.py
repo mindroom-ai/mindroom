@@ -76,6 +76,15 @@ class FinalDeliveryOutcome:  # noqa: D101
         object.__setattr__(self, "extra_content", dict(self.extra_content or {}))
         object.__setattr__(self, "option_map", _copy_dict(self.option_map))
         object.__setattr__(self, "options_list", _copy_options(self.options_list))
+        if self.terminal_status == "completed":
+            if not self.is_visible_response or self.event_id is None:
+                raise ValueError("completed outcomes require a visible response event")  # noqa: EM101, TRY003
+            if self.final_visible_body is None:
+                raise ValueError("completed outcomes require final_visible_body")  # noqa: EM101, TRY003
+            if self.failure_reason is not None:
+                raise ValueError("completed outcomes cannot carry failure_reason")  # noqa: EM101, TRY003
+            if self.suppressed:
+                raise ValueError("completed outcomes cannot be suppressed")  # noqa: EM101, TRY003
         if self.is_visible_response and self.event_id is None:
             raise ValueError("is_visible_response requires event_id")  # noqa: EM101, TRY003
         if self.delivery_kind is not None and not self.is_visible_response:

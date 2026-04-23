@@ -408,11 +408,21 @@ class StreamingResponse:
         canonical_final_body_candidate = self.canonical_final_body_candidate
         if canonical_final_body_candidate is None and self.accumulated_text.strip():
             canonical_final_body_candidate = self.accumulated_text
+        resolved_cancel_source = cancel_source
+        if resolved_cancel_source is None:
+            if restart_interrupted:
+                resolved_cancel_source = "sync_restart"
+            elif cancelled:
+                resolved_cancel_source = "user_stop"
         final_stream_status = self._prepare_terminal_text_and_status(
             cancelled=cancelled,
             restart_interrupted=restart_interrupted,
             cancel_source=cancel_source,
             error=error,
+        )
+        terminal_status = "cancelled" if resolved_cancel_source is not None else final_stream_status
+        cancellation_failure_reason = (
+            cancel_failure_reason(resolved_cancel_source) if resolved_cancel_source is not None else None
         )
         # When a placeholder message exists but no real text arrived,
         # still edit the message to finalize the stream status.
@@ -433,11 +443,12 @@ class StreamingResponse:
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation="none",
                 terminal_result="not_attempted",
-                terminal_status=final_stream_status,
+                terminal_status=terminal_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
                 had_visible_body_before_terminal=False,
                 canonical_final_body_candidate=canonical_final_body_candidate,
+                failure_reason=cancellation_failure_reason,
             )
         if not text_to_send.strip() and final_stream_status == STREAM_STATUS_COMPLETED:
             text_to_send = canonical_final_body_candidate or ""
@@ -457,11 +468,12 @@ class StreamingResponse:
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
                 terminal_result="not_attempted",
-                terminal_status=final_stream_status,
+                terminal_status=terminal_status,
                 rendered_body=None,
                 visible_body_state=attempted_visible_body_state,
                 had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=canonical_final_body_candidate,
+                failure_reason=cancellation_failure_reason,
             )
         attempted_visible_body_state = (
             "placeholder_only" if attempted_rendered_body == _PROGRESS_PLACEHOLDER else "visible_body"
@@ -497,12 +509,12 @@ class StreamingResponse:
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
                 terminal_result="cancelled",
-                terminal_status=final_stream_status,
+                terminal_status=terminal_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
                 had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=canonical_final_body_candidate,
-                failure_reason="terminal_update_cancelled",
+                failure_reason=cancellation_failure_reason or "terminal_update_cancelled",
             )
         except Exception as exc:
             logger.warning(
@@ -521,12 +533,12 @@ class StreamingResponse:
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
                 terminal_result="failed",
-                terminal_status=final_stream_status,
+                terminal_status=terminal_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
                 had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=canonical_final_body_candidate,
-                failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
+                failure_reason=cancellation_failure_reason or f"terminal_update_exception:{exc.__class__.__name__}",
             )
         if not send_succeeded:
             logger.warning(
@@ -543,23 +555,23 @@ class StreamingResponse:
                 last_physical_stream_event_id=self.event_id,
                 terminal_operation=terminal_operation,
                 terminal_result="failed",
-                terminal_status=final_stream_status,
+                terminal_status=terminal_status,
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
                 had_visible_body_before_terminal=had_visible_body_before_terminal,
                 canonical_final_body_candidate=canonical_final_body_candidate,
-                failure_reason="terminal_update_failed",
+                failure_reason=cancellation_failure_reason or "terminal_update_failed",
             )
         return StreamTransportOutcome(
             last_physical_stream_event_id=self.event_id,
             terminal_operation=terminal_operation,
             terminal_result="succeeded",
-            terminal_status=final_stream_status,
+            terminal_status=terminal_status,
             rendered_body=attempted_rendered_body,
             visible_body_state=attempted_visible_body_state,
             had_visible_body_before_terminal=had_visible_body_before_terminal,
             canonical_final_body_candidate=canonical_final_body_candidate,
-            failure_reason=None,
+            failure_reason=cancellation_failure_reason,
         )
 
     async def _send_or_edit_message(

@@ -1210,7 +1210,7 @@ class DeliveryGateway:
                 response_text=final_body_candidate,
                 response_kind=request.response_kind,
             )
-            if final_transform_draft.response_text not in {final_body_candidate, streamed_text}:
+            if final_transform_draft.response_text != final_body_candidate:
                 try:
                     final_outcome = await self._finalize_visible_replacement_edit(
                         target=request.target,

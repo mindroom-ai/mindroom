@@ -1139,15 +1139,13 @@ class TestStreamingBehavior:
             yield "Partial answer"
             raise asyncio.CancelledError(USER_STOP_CANCEL_MSG)
 
-        with (
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(StreamingDeliveryError),
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+            with pytest.raises(StreamingDeliveryError) as exc_info:
+                await send_streaming_response(
+                    client=mock_client,
+                    room_id="!test:localhost",
+                    reply_to_event_id="$original_123",
+                    thread_id=None,
                 sender_domain="localhost",
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
@@ -1159,6 +1157,8 @@ class TestStreamingBehavior:
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER not in edited_texts[0]
         assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
+        assert exc_info.value.transport_outcome.terminal_status == "cancelled"
+        assert exc_info.value.transport_outcome.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_interrupted_stream_preserves_partial_text_with_suffix(self) -> None:
@@ -1289,27 +1289,27 @@ class TestStreamingBehavior:
             yield "Partial answer"
             raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
 
-        with (
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(StreamingDeliveryError),
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
-                sender_domain="localhost",
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=cancelling_stream(),
-                existing_event_id="$thinking_123",
-                room_mode=True,
-            )
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+            with pytest.raises(StreamingDeliveryError) as exc_info:
+                await send_streaming_response(
+                    client=mock_client,
+                    room_id="!test:localhost",
+                    reply_to_event_id="$original_123",
+                    thread_id=None,
+                    sender_domain="localhost",
+                    config=self.config,
+                    runtime_paths=runtime_paths_for(self.config),
+                    response_stream=cancelling_stream(),
+                    existing_event_id="$thinking_123",
+                    room_mode=True,
+                )
 
         assert len(edited_messages) == 2
         final_content, final_text = edited_messages[-1]
         assert final_text == build_restart_interrupted_body("Partial answer")
         assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+        assert exc_info.value.transport_outcome.terminal_status == "cancelled"
+        assert exc_info.value.transport_outcome.failure_reason == "sync_restart_cancelled"
 
     @pytest.mark.asyncio
     async def test_cancel_sources_reuse_compatible_terminal_stream_statuses(self) -> None:
