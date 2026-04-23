@@ -1212,6 +1212,84 @@ async def test_ambiguous_cancel_preserves_request_for_recovery(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_cancel_schedules_runtime_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambiguous send cancellation should schedule runtime recovery of the expired approval card."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr(tool_approval_module, "_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS", 0.01)
+    send_started = asyncio.Event()
+    send_blocker = asyncio.Event()
+    replayed = asyncio.Event()
+
+    async def _blocked_send(*_args: object) -> SentApprovalEvent:
+        send_started.set()
+        await send_blocker.wait()
+        return _sent_approval_event()
+
+    async def _edit_event(room_id: str, event_id: str, content: dict[str, object]) -> bool:
+        assert room_id == "!room:localhost"
+        assert event_id == "$approval"
+        assert content["status"] == "expired"
+        replayed.set()
+        return True
+
+    editor = AsyncMock(side_effect=_edit_event)
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=AsyncMock(side_effect=_blocked_send),
+        editor=editor,
+        runtime_loop=asyncio.get_running_loop(),
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="run_shell_command",
+            arguments={"command": "echo hi"},
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            matched_rule="run_shell_*",
+            script_path=None,
+            timeout_seconds=60,
+        ),
+    )
+
+    try:
+        await asyncio.wait_for(send_started.wait(), timeout=1)
+        pending = store.list_pending()[0]
+
+        async def _recover() -> list[PendingApproval]:
+            store._set_event_delivery(pending.id, "$approval")
+            store._persist_request(pending)
+            return [pending]
+
+        async def _recover_in_rooms(_room_ids: set[str]) -> list[PendingApproval]:
+            return await _recover()
+
+        recover_mock = AsyncMock(side_effect=_recover)
+        recover_in_rooms_mock = AsyncMock(side_effect=_recover_in_rooms)
+        store.recover_unconfirmed_deliveries = recover_mock
+        store.recover_unconfirmed_deliveries_in_rooms = recover_in_rooms_mock
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert store._unsynced_resolution_retry_task is not None
+        await asyncio.wait_for(replayed.wait(), timeout=1)
+        assert pending.resolution_synced_at is not None
+        recover_mock.assert_not_awaited()
+        recover_in_rooms_mock.assert_awaited_once()
+        editor.assert_awaited_once()
+    finally:
+        send_blocker.set()
+        await shutdown_approval_store()
+
+
+@pytest.mark.asyncio
 async def test_request_approval_requires_matrix_context(tmp_path: Path) -> None:
     """Requests without a Matrix room should fail closed."""
     runtime_paths = test_runtime_paths(tmp_path)

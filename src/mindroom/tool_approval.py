@@ -816,6 +816,7 @@ class ApprovalManager:
                     with self._state_lock:
                         self._pending_by_id.pop(pending.id, None)
                 self._complete_pending_send(pending.id)
+                self._ensure_unsynced_resolution_retry_task()
                 raise
         except Exception as exc:
             if isinstance(exc, ToolApprovalTransportError):
