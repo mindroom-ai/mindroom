@@ -22,6 +22,7 @@ from dotenv import dotenv_values
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
+MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS = 60.0
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
@@ -832,6 +833,7 @@ STREAM_STATUS_PENDING = "pending"
 STREAM_STATUS_STREAMING = "streaming"
 STREAM_STATUS_COMPLETED = "completed"
 STREAM_STATUS_CANCELLED = "cancelled"
+STREAM_STATUS_INTERRUPTED = "interrupted"
 STREAM_STATUS_ERROR = "error"
 
 # Placeholder used in starter config templates. `mindroom connect` can

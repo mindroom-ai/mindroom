@@ -24,6 +24,7 @@ from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
+from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -360,7 +361,7 @@ def _extract_interrupted_partial_text(
 
 def _raise_agent_run_cancelled(reason: str | None) -> NoReturn:
     """Raise the canonical agent cancellation error."""
-    raise asyncio.CancelledError(reason or "Run cancelled")
+    raise build_cancelled_error(reason)
 
 
 def _get_model_config(

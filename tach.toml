@@ -25,6 +25,7 @@ path = "mindroom.ai"
 depends_on = [
     "mindroom.agents",
     "mindroom.ai_runtime",
+    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.credentials_sync",
@@ -394,7 +395,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.orchestration.runtime"
-depends_on = ["mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
+depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
 
 [[modules]]
 path = "mindroom.orchestrator"
@@ -456,6 +457,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_runtime",
     "mindroom.authorization",
+    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.execution_preparation",
     "mindroom.history.interrupted_replay",
@@ -747,6 +749,10 @@ visibility = [
 
 [[modules]]
 path = "mindroom.constants"
+depends_on = []
+
+[[modules]]
+path = "mindroom.cancellation"
 depends_on = []
 
 [[modules]]

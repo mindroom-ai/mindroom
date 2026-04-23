@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from html import escape
 from typing import TYPE_CHECKING, TypeGuard, cast
 from uuid import uuid4
@@ -25,6 +27,8 @@ from agno.tools.function import Function
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
+from mindroom.cancellation import request_task_cancel
+from mindroom.constants import MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS
 from mindroom.history.storage import clear_force_compaction_state, update_scope_seen_event_ids, write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.hooks import CompactionHookContext, emit
@@ -41,6 +45,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
     from agno.models.base import Model
+    from agno.models.response import ModelResponse
     from agno.team import Team
 
     from mindroom.config.main import Config
@@ -52,6 +57,7 @@ logger = get_logger(__name__)
 _WRAPPER_OVERHEAD_TOKENS = 200
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
+_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 type _ToolDefinition = dict[str, object]
 _COMPACTION_SUMMARY_PROMPT = """\
 You are updating a durable conversation handoff summary for a future model call.
@@ -80,6 +86,65 @@ Write a plain-text summary in exactly this markdown structure:
 ## Next Steps
 ## Critical Context
 """
+
+
+class _CompactionProviderTimeoutError(Exception):
+    """Internal wrapper so provider TimeoutError does not look like our wait_for timeout."""
+
+    def __init__(self, original: TimeoutError) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
+def _consume_detached_compaction_request_result(
+    response_task: asyncio.Task[ModelResponse],
+    *,
+    log_message: str,
+) -> None:
+    """Consume a detached request result so late failures do not surface unhandled."""
+    try:
+        response_task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.warning(log_message, exc_info=True)
+
+
+def _warn_if_detached_compaction_request_still_running(
+    response_task: asyncio.Task[ModelResponse],
+    *,
+    reason: str,
+) -> None:
+    """Log when a detached provider request ignored cancellation past the grace window."""
+    if response_task.done():
+        return
+    logger.warning(
+        "Compaction request still running after cancellation grace period",
+        reason=reason,
+        timeout_seconds=_COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS,
+    )
+
+
+def _detach_cancelled_compaction_request(
+    response_task: asyncio.Task[ModelResponse],
+    *,
+    reason: str,
+) -> None:
+    """Detach one cancelled provider request without blocking the caller or leaking cleanup tasks."""
+    response_task.add_done_callback(
+        partial(
+            _consume_detached_compaction_request_result,
+            log_message="Detached compaction request raised after caller moved on",
+        ),
+    )
+    asyncio.get_running_loop().call_later(
+        _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS,
+        partial(
+            _warn_if_detached_compaction_request_still_running,
+            response_task,
+            reason=reason,
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -708,12 +773,48 @@ async def _generate_compaction_summary(
     timing_scope: str | None = None,
 ) -> SessionSummary:
     del timing_scope
-    response = await model.aresponse(
-        messages=[
-            Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
-            Message(role="user", content=summary_input),
-        ],
+
+    async def _request_summary() -> ModelResponse:
+        try:
+            return await model.aresponse(
+                messages=[
+                    Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
+                    Message(role="user", content=summary_input),
+                ],
+            )
+        except TimeoutError as exc:
+            raise _CompactionProviderTimeoutError(exc) from exc
+
+    response_task = asyncio.create_task(
+        _request_summary(),
+        name="compaction_summary_request",
     )
+    try:
+        done, _pending = await asyncio.wait(
+            {response_task},
+            timeout=MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        request_task_cancel(response_task)
+        _detach_cancelled_compaction_request(
+            response_task,
+            reason="outer_cancellation",
+        )
+        raise
+
+    if response_task not in done:
+        request_task_cancel(response_task)
+        _detach_cancelled_compaction_request(
+            response_task,
+            reason="timeout",
+        )
+        msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS}s"
+        raise RuntimeError(msg)
+
+    try:
+        response = response_task.result()
+    except _CompactionProviderTimeoutError as exc:
+        raise exc.original from exc
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
     if not normalized_text:
