@@ -5,7 +5,6 @@ to avoid circular imports. It does not import anything from the internal
 codebase.
 """
 
-import asyncio
 import fnmatch
 import hashlib
 import json
@@ -76,33 +75,6 @@ _SHELL_EXTRA_ENV_EXCLUDED_NAMES = frozenset({*_EXECUTION_RUNTIME_EXCLUDED_NAMES,
 # tokens (e.g. GITEA_TOKEN) while _API_KEY/_PASSWORD/_SECRET reliably identify
 # provider credentials that should never leak to shell commands.
 _SHELL_EXTRA_ENV_SECRET_SUFFIXES = ("_API_KEY", "_API_KEYS", "_PASSWORD", "_SECRET")
-_TASK_CANCEL_SOURCES: dict[asyncio.Task[object], str] = {}
-
-
-def _clear_task_cancel_source(task: asyncio.Task[object]) -> None:
-    """Drop recorded cancellation provenance once one task finishes."""
-    _TASK_CANCEL_SOURCES.pop(task, None)
-
-
-def request_task_cancel(task: asyncio.Task[object], *, cancel_msg: str | None = None) -> None:
-    """Cancel one task while preserving the first explicit cancellation source."""
-    if cancel_msg is not None and task not in _TASK_CANCEL_SOURCES:
-        _TASK_CANCEL_SOURCES[task] = cancel_msg
-        task.add_done_callback(_clear_task_cancel_source)
-    if cancel_msg is None:
-        task.cancel()
-    else:
-        task.cancel(msg=cancel_msg)
-
-
-def build_cancelled_error(reason: str | None) -> asyncio.CancelledError:
-    """Return one CancelledError that preserves the task's in-flight cancel source."""
-    task = asyncio.current_task()
-    if task is not None and task.cancelling() > 0:
-        cancel_msg = _TASK_CANCEL_SOURCES.get(task)
-        if cancel_msg is not None:
-            return asyncio.CancelledError(cancel_msg)
-    return asyncio.CancelledError(reason or "Run cancelled")
 
 
 @dataclass(frozen=True)

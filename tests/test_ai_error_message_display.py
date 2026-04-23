@@ -17,9 +17,10 @@ from agno.run.agent import RunCancelledEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 
 from mindroom.bot import AgentBot
+from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY, request_task_cancel
+from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.client import DeliveredMatrixEvent

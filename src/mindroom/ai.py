@@ -24,6 +24,7 @@ from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
+from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -32,7 +33,6 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     ROUTER_AGENT_NAME,
     RuntimePaths,
-    build_cancelled_error,
 )
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (

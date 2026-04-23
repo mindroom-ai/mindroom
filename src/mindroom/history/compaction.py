@@ -27,7 +27,8 @@ from agno.tools.function import Function
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.constants import MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS, request_task_cancel
+from mindroom.cancellation import request_task_cancel
+from mindroom.constants import MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS
 from mindroom.history.storage import clear_force_compaction_state, update_scope_seen_event_ids, write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.hooks import CompactionHookContext, emit

@@ -31,7 +31,8 @@ from mindroom import ai_runtime, model_loading
 from mindroom.agents import create_agent, get_team_session
 from mindroom.ai import build_matrix_run_metadata
 from mindroom.authorization import get_available_agents_in_room
-from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME, build_cancelled_error
+from mindroom.cancellation import build_cancelled_error
+from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,

@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Any, Literal
 import httpx
 
 from mindroom import constants
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, request_task_cancel, runtime_matrix_ssl_verify
+from mindroom.cancellation import request_task_cancel
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import (
