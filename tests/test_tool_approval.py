@@ -1829,6 +1829,45 @@ async def test_recover_unconfirmed_approval_event_deliveries_discards_missing_ca
 
 
 @pytest.mark.asyncio
+async def test_runtime_retry_recovers_unconfirmed_event_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime retries should recover missing approval event ids after one transient failure."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    request_id = _create_persisted_pending_request(
+        runtime_paths.storage_root / "approvals",
+        event_id=None,
+    )
+    monkeypatch.setattr(tool_approval_module, "_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS", 0.01)
+    recoverer = AsyncMock(side_effect=[RuntimeError("boom"), "$approval-event"])
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        runtime_paths,
+        editor=editor,
+        recoverer=recoverer,
+        runtime_loop=asyncio.get_running_loop(),
+    )
+
+    recovered_requests = await recover_unconfirmed_approval_event_deliveries()
+
+    assert recovered_requests == []
+    pending = store.list_unconfirmed_deliveries()[0]
+
+    def _wait_for_resolution_sync() -> bool:
+        deadline = time.monotonic() + 1
+        while pending.resolution_synced_at is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return pending.resolution_synced_at is not None
+
+    assert await asyncio.to_thread(_wait_for_resolution_sync)
+    assert recoverer.await_count == 2
+    editor.assert_awaited_once()
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval-event")
+    assert (runtime_paths.storage_root / "approvals" / f"{request_id}.json").exists() is False
+
+
+@pytest.mark.asyncio
 async def test_sync_unsynced_approval_event_resolutions_replays_persisted_expired_requests(tmp_path: Path) -> None:
     """Startup reconciliation should edit stale approval cards back to expired."""
     runtime_paths = test_runtime_paths(tmp_path)

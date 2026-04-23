@@ -607,6 +607,7 @@ class ApprovalManager:
                 await asyncio.sleep(_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS)
                 if not self._has_unsynced_resolution_work():
                     return
+                await self.recover_unconfirmed_deliveries()
                 await self.sync_unsynced_resolved()
         finally:
             with self._state_lock:
