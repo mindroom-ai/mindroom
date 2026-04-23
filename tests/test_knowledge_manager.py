@@ -46,7 +46,7 @@ from mindroom.tool_system.worker_routing import (
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 
 class _DummyVectorDb:
@@ -335,6 +335,18 @@ def _make_git_config(
 
 def _runtime_paths(config_path: Path, storage_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+
+
+@pytest.fixture(autouse=True)
+def reset_dummy_vector_db_state() -> Iterator[None]:
+    """Keep dummy vector DB globals isolated across knowledge-manager tests."""
+    _DummyChromaDb.metadatas = []
+    _DummyChromaDb.raise_on_count = False
+    _ShadowChromaDb.collections = {}
+    yield
+    _DummyChromaDb.metadatas = []
+    _DummyChromaDb.raise_on_count = False
+    _ShadowChromaDb.collections = {}
 
 
 @pytest.fixture
