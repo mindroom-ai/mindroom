@@ -179,7 +179,7 @@ agents:
 - **startup_thread_prewarm**: When enabled, this bot may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup
 - **num_history_runs**: Number of prior Agno runs to include as history context (per-agent override)
 - **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
-- **compress_tool_results**: Compress tool results in history to save context (per-agent override)
+- **compress_tool_results**: Compress tool results in history to save context (per-agent override, inherits a default of `false`, and can invalidate Anthropic/Vertex Claude prompt caches when enabled)
 - **compaction**: Optional per-agent auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, `notify`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed. Authoring `defaults.compaction` enables the optional destructive compaction phase for inheriting agents and teams. A non-empty agent block also enables that destructive phase for the agent, but a bare `agents.<name>.compaction: {}` is only a no-op override that inherits authored defaults. Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)
 - **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override). When disabled, routed tools may still show generic worker warmup copy, but it never includes tool identifiers or tool-trace metadata
@@ -346,7 +346,7 @@ defaults:
   show_stop_button: true
   learning: true
   learning_mode: "always"  # "always" or "agentic"
-  compress_tool_results: true
+  compress_tool_results: false
   # Auto-compaction is disabled until you author this block.
   # compaction:
   #   enabled: true

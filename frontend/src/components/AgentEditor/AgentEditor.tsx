@@ -64,7 +64,7 @@ export function AgentEditor() {
   const defaultShowToolCalls = config?.defaults.show_tool_calls ?? true;
   const defaultMarkdown = config?.defaults.markdown ?? true;
   const defaultCompressToolResults =
-    config?.defaults.compress_tool_results ?? true;
+    config?.defaults.compress_tool_results ?? false;
   const globalMemoryBackend = config?.memory?.backend ?? "mem0";
   const knowledgeBaseNames = useMemo(
     () => Object.keys(config?.knowledge_bases || {}).sort(),
@@ -1895,7 +1895,7 @@ export function AgentEditor() {
           defaultValue: defaultCompressToolResults,
           helperText: `Compress tool results in history to save context (global default: ${
             defaultCompressToolResults ? "on" : "off"
-          })`,
+          }). On Anthropic/Vertex Claude, enabling this can invalidate prompt-cache prefixes.`,
           onChange: (value) =>
             handleFieldChange("compress_tool_results", value),
         }}

@@ -276,7 +276,7 @@ mindroom_user:
 
 defaults:
   markdown: true
-  compress_tool_results: true        # Compress tool results in history to save context
+  compress_tool_results: false       # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
   # Auto-compaction is disabled until you author a compaction block.
   # compaction:
   #   enabled: true
@@ -292,6 +292,10 @@ defaults:
 Add the `thread_summary` tool to an agent when you want it to write or refresh the one-line summary shown for a Matrix thread.
 `set_thread_summary` uses the current resolved thread context by default.
 Outside a resolved thread context, pass `thread_id` explicitly.
+
+`compress_tool_results` now defaults to `false`.
+On Anthropic and Vertex Claude models, enabling it can mutate replayed tool messages and invalidate prompt-cache prefixes.
+Only re-enable it when the context savings matter more than prompt-cache reuse.
 
 ```yaml
 agents:
@@ -331,7 +335,7 @@ agents:
     accept_invites: true
     knowledge_bases: [engineering_docs]
     # Per-agent overrides for history/context (override defaults above):
-    # compress_tool_results: false
+    # compress_tool_results: true  # Re-enable only if you accept Anthropic/Vertex Claude prompt-cache invalidation
     # max_tool_calls_from_history: 5
     # num_history_runs: 10
     # compaction:
