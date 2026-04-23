@@ -1449,18 +1449,6 @@ class AgentBot:
             reason=reason,
             resolved_by=event.sender,
         )
-        orchestrator = self.orchestrator
-        if (
-            result.error_reason is not None
-            and orchestrator is not None
-            and self._should_send_tool_approval_notice(room_id=room.room_id)
-        ):
-            await orchestrator._send_approval_notice(
-                room_id=room.room_id,
-                approval_event_id=approval_event_id,
-                thread_id=result.thread_id,
-                reason=result.error_reason,
-            )
         if not result.handled and pending_is_open and not sender_is_requester:
             await approval_manager.restate_pending_anchored_request(
                 approval_event_id=approval_event_id,
