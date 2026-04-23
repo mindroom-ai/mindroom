@@ -383,7 +383,7 @@ class AgentBot:
             agent_name=self.agent_name,
             hook_registry_state=self._hook_registry_state,
             hook_send_message=self._hook_send_message,
-            latest_agent_message_snapshot_reader=self._hook_latest_agent_message_snapshot,
+            agent_message_snapshot_reader=self._hook_agent_message_snapshot,
         )
         self._knowledge_access_support = KnowledgeAccessSupport(
             runtime=self._runtime_view,
@@ -1567,7 +1567,7 @@ class AgentBot:
         self.logger.error("Failed to send hook message", room_id=room_id, source_hook=source_hook)
         return None
 
-    async def _hook_latest_agent_message_snapshot(
+    async def _hook_agent_message_snapshot(
         self,
         room_id: str,
         thread_id: str | None,
@@ -1579,7 +1579,7 @@ class AgentBot:
         event_cache = self._runtime_view.event_cache
         if event_cache is None:
             self.logger.warning(
-                "Latest-agent-message snapshot requested before event cache is ready",
+                "Agent-message snapshot requested before event cache is ready",
                 room_id=room_id,
                 thread_id=thread_id,
                 sender=sender,

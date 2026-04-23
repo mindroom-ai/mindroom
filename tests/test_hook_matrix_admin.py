@@ -56,9 +56,9 @@ def test_hook_context_declares_matrix_admin_field() -> None:
     assert "matrix_admin" in HookContext.__dataclass_fields__
 
 
-def test_hook_context_declares_latest_agent_message_snapshot_reader_field() -> None:
-    """HookContext should expose a bound latest-agent-message snapshot reader."""
-    assert "latest_agent_message_snapshot_reader" in HookContext.__dataclass_fields__
+def test_hook_context_declares_agent_message_snapshot_reader_field() -> None:
+    """HookContext should expose a bound agent-message snapshot reader."""
+    assert "agent_message_snapshot_reader" in HookContext.__dataclass_fields__
 
 
 @pytest.mark.asyncio
@@ -80,7 +80,7 @@ async def test_hook_context_delegates_latest_agent_message_snapshot_reads(tmp_pa
         logger=get_logger("tests.hook_matrix_admin"),
         correlation_id="corr-snapshot",
         runtime_started_at=1234.0,
-        latest_agent_message_snapshot_reader=reader,
+        agent_message_snapshot_reader=reader,
     )
 
     snapshot = await context.get_latest_agent_message_snapshot(

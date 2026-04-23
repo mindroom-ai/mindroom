@@ -22,7 +22,7 @@ class AgentMessageSnapshot:
     origin_server_ts: int
 
 
-class CacheUnavailable(RuntimeError):  # noqa: N818
+class AgentMessageSnapshotUnavailable(RuntimeError):  # noqa: N818
     """Raised when an existing Matrix event cache cannot be safely read."""
 
 
@@ -96,7 +96,7 @@ async def _thread_scope_has_no_snapshot(
         return True
     if rejection_reason is not None:
         msg = f"Thread cache snapshot is not usable: {rejection_reason}"
-        raise CacheUnavailable(msg)
+        raise AgentMessageSnapshotUnavailable(msg)
     return False
 
 
@@ -207,7 +207,7 @@ async def _load_scope_snapshot(
         await cursor.close()
 
 
-async def load_latest_agent_message_snapshot(
+async def load_agent_message_snapshot(
     db: aiosqlite.Connection,
     *,
     room_id: str,
@@ -235,7 +235,7 @@ async def load_latest_agent_message_snapshot(
         )
     except json.JSONDecodeError as exc:
         msg = "Cached Matrix event JSON is corrupt"
-        raise CacheUnavailable(msg) from exc
+        raise AgentMessageSnapshotUnavailable(msg) from exc
     except sqlite3.Error as exc:
         msg = "Failed to read Matrix event cache snapshot"
-        raise CacheUnavailable(msg) from exc
+        raise AgentMessageSnapshotUnavailable(msg) from exc

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.matrix.cache import AgentMessageSnapshot, CacheUnavailable
+from mindroom.matrix.cache import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
 from mindroom.matrix.cache.event_cache import _EventCache
 
 if TYPE_CHECKING:
@@ -473,7 +473,7 @@ async def test_accessor_rejects_stale_thread_cache_validated_too_long_ago(
     finally:
         await cache.close()
 
-    with pytest.raises(CacheUnavailable, match="cache_too_old"):
+    with pytest.raises(AgentMessageSnapshotUnavailable, match="cache_too_old"):
         await _read_snapshot(
             db_path,
             room_id="!room:localhost",
@@ -516,7 +516,7 @@ async def test_accessor_rejects_thread_cache_from_prior_bot_run(
     finally:
         await cache.close()
 
-    with pytest.raises(CacheUnavailable, match="validated_before_runtime_start"):
+    with pytest.raises(AgentMessageSnapshotUnavailable, match="validated_before_runtime_start"):
         await _read_snapshot(
             db_path,
             room_id="!room:localhost",
@@ -564,7 +564,7 @@ async def test_accessor_rejects_invalidated_thread_cache(
     finally:
         await cache.close()
 
-    with pytest.raises(CacheUnavailable, match="thread_invalidated_after_validation"):
+    with pytest.raises(AgentMessageSnapshotUnavailable, match="thread_invalidated_after_validation"):
         await _read_snapshot(
             db_path,
             room_id="!room:localhost",

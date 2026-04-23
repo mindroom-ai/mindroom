@@ -14,7 +14,7 @@ import aiosqlite
 from mindroom.logging_config import get_logger
 
 from . import event_cache_events, event_cache_threads
-from .agent_message_snapshot import AgentMessageSnapshot, load_latest_agent_message_snapshot
+from .agent_message_snapshot import AgentMessageSnapshot, load_agent_message_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -602,7 +602,7 @@ class _EventCache:
             room_id,
             operation="get_latest_agent_message_snapshot",
             disabled_result=None,
-            reader=lambda db: load_latest_agent_message_snapshot(
+            reader=lambda db: load_agent_message_snapshot(
                 db,
                 room_id=room_id,
                 thread_id=thread_id,

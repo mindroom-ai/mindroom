@@ -1400,7 +1400,7 @@ from = ["mindroom.runtime_protocols"]
 [[interfaces]]
 expose = [
     "AgentMessageSnapshot",
-    "CacheUnavailable",
+    "AgentMessageSnapshotUnavailable",
     "ConversationEventCache",
     "EventCacheWriteCoordinator",
     "THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC",

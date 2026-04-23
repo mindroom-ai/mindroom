@@ -29,7 +29,7 @@ class SerializedCachedEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class LoadedCachedEvent:
+class CachedEventRow:
     """One cached event payload plus the time its visible row was written."""
 
     event: dict[str, Any]
@@ -158,7 +158,7 @@ async def load_latest_edit_row(
     *,
     room_id: str,
     original_event_id: str,
-) -> LoadedCachedEvent | None:
+) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
     cursor = await db.execute(
         """
@@ -175,7 +175,7 @@ async def load_latest_edit_row(
     await cursor.close()
     if row is None:
         return None
-    return LoadedCachedEvent(
+    return CachedEventRow(
         event=json.loads(row[0]),
         cached_at=None if row[1] is None else float(row[1]),
     )

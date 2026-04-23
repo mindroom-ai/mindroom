@@ -50,8 +50,8 @@ if TYPE_CHECKING:
     from .sender import HookMessageSender
     from .types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
 
-    class HookLatestAgentMessageSnapshotReader(Protocol):
-        """Callable contract for hook-facing latest-agent-message snapshot reads."""
+    class HookAgentMessageSnapshotReader(Protocol):
+        """Callable contract for hook-facing agent-message snapshot reads."""
 
         def __call__(
             self,
@@ -150,7 +150,7 @@ class HookContextSupport:
     agent_name: str
     hook_registry_state: HookRegistryState
     hook_send_message: HookMessageSender
-    latest_agent_message_snapshot_reader: HookLatestAgentMessageSnapshotReader | None = None
+    agent_message_snapshot_reader: HookAgentMessageSnapshotReader | None = None
 
     @property
     def registry(self) -> HookRegistry:
@@ -211,7 +211,7 @@ class HookContextSupport:
             "correlation_id": correlation_id,
             "runtime_started_at": self.runtime.runtime_started_at,
             "message_sender": self.message_sender(),
-            "latest_agent_message_snapshot_reader": self.latest_agent_message_snapshot_reader,
+            "agent_message_snapshot_reader": self.agent_message_snapshot_reader,
             "matrix_admin": self.matrix_admin(),
             "room_state_querier": self.room_state_querier(),
             "room_state_putter": self.room_state_putter(),
@@ -272,7 +272,7 @@ class HookContext:
     correlation_id: str
     runtime_started_at: float | None = field(default=None, kw_only=True)
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
-    latest_agent_message_snapshot_reader: HookLatestAgentMessageSnapshotReader | None = field(
+    agent_message_snapshot_reader: HookAgentMessageSnapshotReader | None = field(
         default=None,
         kw_only=True,
     )
@@ -344,10 +344,10 @@ class HookContext:
         thread_id: str | None = None,
     ) -> AgentMessageSnapshot | None:
         """Return the latest visible cached sender message when a reader is available."""
-        if self.latest_agent_message_snapshot_reader is None:
-            self.logger.warning("No latest-agent-message snapshot reader available")
+        if self.agent_message_snapshot_reader is None:
+            self.logger.warning("No agent-message snapshot reader available")
             return None
-        return await self.latest_agent_message_snapshot_reader(
+        return await self.agent_message_snapshot_reader(
             room_id=room_id,
             thread_id=thread_id,
             sender=sender,

@@ -1160,8 +1160,8 @@ class MultiAgentOrchestrator:
             correlation_id=f"config-reload:{uuid4().hex}",
             runtime_started_at=(router_bot.runtime_started_at if isinstance(router_bot, AgentBot) else time.time()),
             message_sender=self._hook_message_sender(),
-            latest_agent_message_snapshot_reader=(
-                router_bot._hook_latest_agent_message_snapshot if isinstance(router_bot, AgentBot) else None
+            agent_message_snapshot_reader=(
+                router_bot._hook_agent_message_snapshot if isinstance(router_bot, AgentBot) else None
             ),
             matrix_admin=self._hook_matrix_admin(),
             room_state_querier=self._hook_room_state_querier(),
