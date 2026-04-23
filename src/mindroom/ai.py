@@ -226,6 +226,7 @@ class _StreamingAttemptState:
     full_response: str = ""
     tool_count: int = 0
     canonical_final_body_candidate: str | None = None
+    observed_tool_calls: int = 0
     pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     latest_model_id: str | None = None
@@ -234,7 +235,6 @@ class _StreamingAttemptState:
     cancelled_run_event: RunCancelledEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
     request_metric_totals: dict[str, int] = field(default_factory=_empty_request_metric_totals)
-    observed_request_metric_keys: set[str] = field(default_factory=set)
     first_token_latency: float | None = None
     first_token_logged: bool = False
     retry_requested: bool = False
@@ -318,7 +318,7 @@ def _find_matching_pending_stream_tool(
 
 def _stream_attempt_has_progress(state: _StreamingAttemptState) -> bool:
     """Return whether one streaming attempt already observed agent-visible work."""
-    return bool(state.assistant_text or state.completed_tools or state.pending_tools)
+    return bool(state.assistant_text or state.observed_tool_calls)
 
 
 def _is_run_cancelled_boilerplate(content: str) -> bool:
@@ -383,36 +383,6 @@ def _get_model_config(
     return model_name, config.models.get(model_name)
 
 
-def _finalize_usage_payload(
-    payload: dict[str, Any],
-    *,
-    output_tokens_hint: int | None = None,
-    total_tokens_hint: int | None = None,
-    derive_total_tokens: bool = False,
-) -> dict[str, Any] | None:
-    if isinstance(output_tokens_hint, int) and "output_tokens" not in payload:
-        payload["output_tokens"] = output_tokens_hint
-    existing_total_tokens = payload.get("total_tokens")
-    should_derive_total_tokens = (
-        derive_total_tokens
-        and isinstance(payload.get("input_tokens"), int)
-        and isinstance(payload.get("output_tokens"), int)
-        and (
-            "total_tokens" not in payload
-            or (existing_total_tokens == 0 and (payload["input_tokens"] > 0 or payload["output_tokens"] > 0))
-        )
-    )
-    if "total_tokens" not in payload or should_derive_total_tokens:
-        if isinstance(total_tokens_hint, int) and total_tokens_hint > 0:
-            payload["total_tokens"] = total_tokens_hint
-        elif derive_total_tokens:
-            input_tokens = payload.get("input_tokens")
-            output_tokens = payload.get("output_tokens")
-            if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-                payload["total_tokens"] = input_tokens + output_tokens
-    return payload or None
-
-
 def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
     def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         sanitized: dict[str, Any] = {}
@@ -432,12 +402,17 @@ def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, An
         sanitized = _sanitize_metrics_payload(metrics_dict)
         if sanitized is None:
             return None
-        return _finalize_usage_payload(
-            sanitized,
-            output_tokens_hint=metrics.output_tokens,
-            total_tokens_hint=metrics.total_tokens,
-            derive_total_tokens=True,
-        )
+        if "output_tokens" not in sanitized and isinstance(metrics.output_tokens, int):
+            sanitized["output_tokens"] = metrics.output_tokens
+        if "total_tokens" not in sanitized:
+            if isinstance(metrics.total_tokens, int) and metrics.total_tokens > 0:
+                sanitized["total_tokens"] = metrics.total_tokens
+            else:
+                input_tokens = sanitized.get("input_tokens")
+                output_tokens = sanitized.get("output_tokens")
+                if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+                    sanitized["total_tokens"] = input_tokens + output_tokens
+        return sanitized
     if isinstance(metrics, dict):
         return _sanitize_metrics_payload(metrics)
     return None
@@ -446,12 +421,16 @@ def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, An
 def _build_model_request_metrics_fallback(
     totals: dict[str, int],
     first_token_latency: float | None,
-    observed_metric_keys: set[str],
 ) -> dict[str, Any] | None:
-    payload = {key: value for key, value in totals.items() if value > 0 or key in observed_metric_keys}
+    payload = {key: value for key, value in totals.items() if value > 0}
+    if payload.get("total_tokens") is None:
+        input_tokens = payload.get("input_tokens")
+        output_tokens = payload.get("output_tokens")
+        if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+            payload["total_tokens"] = input_tokens + output_tokens
     if first_token_latency is not None:
         payload["time_to_first_token"] = format(first_token_latency, ".12g")
-    return _finalize_usage_payload(payload, derive_total_tokens=True)
+    return payload or None
 
 
 def _build_context_payload(
@@ -607,6 +586,7 @@ def _track_stream_tool_started(
     show_tool_calls: bool,
 ) -> None:
     """Track started tool-call metadata for streaming output."""
+    state.observed_tool_calls += 1
     display_tool_index = state.tool_count + 1 if show_tool_calls else None
     tool_msg, trace_entry = format_tool_started_event(event.tool, tool_index=display_tool_index)
     if trace_entry is not None:
@@ -673,22 +653,16 @@ def _track_model_request_metrics(
     if isinstance(event.input_tokens, int):
         state.latest_request_input_tokens = event.input_tokens
         state.request_metric_totals["input_tokens"] += event.input_tokens
-        state.observed_request_metric_keys.add("input_tokens")
     if isinstance(event.output_tokens, int):
         state.request_metric_totals["output_tokens"] += event.output_tokens
-        state.observed_request_metric_keys.add("output_tokens")
     if isinstance(event.total_tokens, int):
         state.request_metric_totals["total_tokens"] += event.total_tokens
-        state.observed_request_metric_keys.add("total_tokens")
     if isinstance(event.reasoning_tokens, int):
         state.request_metric_totals["reasoning_tokens"] += event.reasoning_tokens
-        state.observed_request_metric_keys.add("reasoning_tokens")
     if isinstance(event.cache_read_tokens, int):
         state.request_metric_totals["cache_read_tokens"] += event.cache_read_tokens
-        state.observed_request_metric_keys.add("cache_read_tokens")
     if isinstance(event.cache_write_tokens, int):
         state.request_metric_totals["cache_write_tokens"] += event.cache_write_tokens
-        state.observed_request_metric_keys.add("cache_write_tokens")
     if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
         state.first_token_latency = float(event.time_to_first_token)
 
@@ -1615,7 +1589,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             fallback_metrics = _build_model_request_metrics_fallback(
                                 state.request_metric_totals,
                                 state.first_token_latency,
-                                state.observed_request_metric_keys,
                             )
                             cancelled_metadata = _build_ai_run_metadata_content(
                                 agent_name=agent_name,
@@ -1629,7 +1602,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 room_id=room_id,
                                 metrics=fallback_metrics,
                                 context_input_tokens=state.latest_request_input_tokens,
-                                tool_count=len(state.completed_tools) + len(state.pending_tools),
+                                tool_count=state.observed_tool_calls,
                             )
                             if cancelled_metadata:
                                 run_metadata_collector.update(cancelled_metadata)
@@ -1654,7 +1627,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     fallback_metrics = _build_model_request_metrics_fallback(
                         state.request_metric_totals,
                         state.first_token_latency,
-                        state.observed_request_metric_keys,
                     )
                     run_metadata = _build_ai_run_metadata_content(
                         agent_name=agent_name,
@@ -1677,7 +1649,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         tool_count=(
                             len(state.completed_run_event.tools)
                             if state.completed_run_event is not None and state.completed_run_event.tools is not None
-                            else len(state.completed_tools) + len(state.pending_tools)
+                            else state.observed_tool_calls
                         ),
                     )
                     if run_metadata:

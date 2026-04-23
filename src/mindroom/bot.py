@@ -1757,73 +1757,44 @@ class TeamBot(AgentBot):
         )
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None
-            resolved_target = target or self._conversation_resolver.build_message_target(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-            )
-            fallback_envelope = response_envelope or MessageEnvelope(
-                source_event_id=reply_to_event_id or "",
-                room_id=room_id,
-                target=resolved_target,
-                requester_id=user_id or "",
-                sender_id=user_id or "",
-                body=prompt,
-                attachment_ids=tuple(attachment_ids or ()),
-                mentioned_agents=(),
-                agent_name=self.agent_name,
-                source_kind="message",
-            )
-            resolved_correlation_id = correlation_id or reply_to_event_id or room_id
-            response_event_id: str | None = None
-            if existing_event_id is not None:
+            response_event_id: str | None
+            delivery_kind: Literal["sent", "edited"] | None
+            if existing_event_id:
                 edited = await self._edit_message(
                     room_id=room_id,
                     event_id=existing_event_id,
                     new_text=team_resolution.reason,
-                    thread_id=resolved_target.resolved_thread_id,
+                    thread_id=thread_id,
                 )
-                if edited:
-                    response_event_id = existing_event_id
+                response_event_id = existing_event_id if edited else None
+                delivery_kind = "edited" if edited else None
             else:
                 response_event_id = await self._send_response(
                     room_id=room_id,
                     reply_to_event_id=reply_to_event_id,
                     response_text=team_resolution.reason,
-                    thread_id=resolved_target.resolved_thread_id,
-                    target=resolved_target,
+                    thread_id=thread_id,
                 )
-            if response_event_id is None:
-                await self._delivery_gateway.deps.response_hooks.emit_cancelled_response(
-                    correlation_id=resolved_correlation_id,
-                    envelope=fallback_envelope,
-                    visible_response_event_id=existing_event_id,
+                delivery_kind = "sent" if response_event_id is not None else None
+            if response_event_id is not None and delivery_kind is not None and response_envelope is not None:
+                await self._delivery_gateway.deps.response_hooks.emit_after_response(
+                    correlation_id=correlation_id or reply_to_event_id or room_id,
+                    envelope=response_envelope,
+                    response_text=team_resolution.reason,
+                    response_event_id=response_event_id,
+                    delivery_kind=delivery_kind,
                     response_kind="system",
-                    failure_reason="delivery_failed",
+                    continue_on_cancelled=True,
                 )
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=existing_event_id,
-                    is_visible_response=existing_event_id is not None,
-                    failure_reason="delivery_failed",
-                    retryable=True,
-                )
-            await self._delivery_gateway.deps.response_hooks.emit_after_response(
-                correlation_id=resolved_correlation_id,
-                envelope=fallback_envelope,
-                response_text=team_resolution.reason,
-                response_event_id=response_event_id,
-                delivery_kind="edited" if existing_event_id is not None else "sent",
-                response_kind="system",
-                continue_on_cancelled=True,
-            )
             return FinalDeliveryOutcome(
-                terminal_status="completed",
+                terminal_status="completed" if response_event_id is not None else "error",
                 event_id=response_event_id,
-                is_visible_response=True,
-                final_visible_body=team_resolution.reason,
-                delivery_kind="edited" if existing_event_id is not None else "sent",
-                mark_handled=True,
+                is_visible_response=response_event_id is not None,
+                final_visible_body=team_resolution.reason if response_event_id is not None else None,
+                delivery_kind=delivery_kind,
+                failure_reason=None if response_event_id is not None else "delivery_failed",
+                mark_handled=response_event_id is not None,
+                retryable=response_event_id is None,
             )
         assert team_resolution.mode is not None
 

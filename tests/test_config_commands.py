@@ -36,42 +36,6 @@ def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
     return resolve_runtime_paths(config_path=config_path)
 
 
-def _final_visible_resolution(event_id: str) -> str:
-    """Return one successful response event id for command reply tests."""
-    return event_id
-
-
-def _error_resolution() -> None:
-    """Return one failed command reply result with no visible response event."""
-    return None
-
-
-def _command_handler_context(
-    tmp_path: Path,
-    *,
-    config: object | None = None,
-    send_response: AsyncMock | None = None,
-    reload_plugins: AsyncMock | None = None,
-) -> CommandHandlerContext:
-    return CommandHandlerContext(
-        client=AsyncMock(),
-        config=(
-            config
-            if config is not None
-            else SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"]))
-        ),
-        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        logger=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
-        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
-        record_handled_turn=MagicMock(),
-        send_response=send_response or AsyncMock(return_value=_final_visible_resolution("$reply")),
-        reload_plugins=reload_plugins,
-    )
-
-
 class TestCommandParser:
     """Test config command parsing."""
 
@@ -284,7 +248,7 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         event_cache=make_event_cache_mock(),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
-        send_response=AsyncMock(return_value=_error_resolution()),
+        send_response=AsyncMock(return_value=None),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(
@@ -322,7 +286,7 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         event_cache=make_event_cache_mock(),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
-        send_response=AsyncMock(return_value=_final_visible_resolution("$reply")),
+        send_response=AsyncMock(return_value="$reply"),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(
@@ -349,42 +313,6 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_handle_command_does_not_record_handled_turn_when_standard_reply_send_fails(
-    tmp_path: Path,
-) -> None:
-    """Standard command replies should stay retryable when the reply send fails."""
-    context = CommandHandlerContext(
-        client=AsyncMock(),
-        config=MagicMock(),
-        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        logger=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
-        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
-        record_handled_turn=MagicMock(),
-        send_response=AsyncMock(return_value=_error_resolution()),
-    )
-    room = SimpleNamespace(room_id="!room:example.org")
-    event = SimpleNamespace(
-        sender="@alice:example.org",
-        event_id="$event",
-        source={"content": {"body": "!help"}},
-    )
-    command = Command(type=CommandType.HELP, args={"topic": None}, raw_text="!help")
-
-    await handle_command(
-        context=context,
-        room=room,
-        event=event,
-        command=command,
-        requester_user_id="@alice:example.org",
-    )
-
-    context.record_handled_turn.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tmp_path: Path) -> None:
     """Reload-plugins should be admin-only and call the injected reload callback once."""
     command = Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text="!reload-plugins")
@@ -408,7 +336,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
         event_cache=make_event_cache_mock(),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
-        send_response=AsyncMock(return_value=_final_visible_resolution("$reply")),
+        send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
     )
     await handle_command(
@@ -465,7 +393,7 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
         event_cache=make_event_cache_mock(),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
-        send_response=AsyncMock(return_value=_final_visible_resolution("$reply")),
+        send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
     )
 
@@ -502,7 +430,7 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
         event_cache=make_event_cache_mock(),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
-        send_response=AsyncMock(return_value=_final_visible_resolution("$reply")),
+        send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
     )
 
@@ -521,108 +449,6 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("command", "patch_target", "patch_return_value"),
-    [
-        (
-            Command(
-                type=CommandType.SCHEDULE,
-                args={"full_text": "in 5 minutes Check deployment"},
-                raw_text="!schedule",
-            ),
-            "mindroom.commands.handler.schedule_task",
-            ("task123", "✅ Scheduled: 5 minutes from now"),
-        ),
-        (
-            Command(
-                type=CommandType.CANCEL_SCHEDULE,
-                args={"cancel_all": False, "task_id": "task123"},
-                raw_text="!cancel_schedule task123",
-            ),
-            "mindroom.commands.handler.cancel_scheduled_task",
-            "✅ Cancelled task `task123`",
-        ),
-        (
-            Command(
-                type=CommandType.EDIT_SCHEDULE,
-                args={"task_id": "task123", "full_text": "in 10 minutes Check deployment"},
-                raw_text="!edit_schedule task123 in 10 minutes Check deployment",
-            ),
-            "mindroom.commands.handler.edit_scheduled_task",
-            "✅ Updated task `task123`.\n\nUpdated schedule",
-        ),
-    ],
-)
-async def test_mutating_command_does_not_record_handled_turn_when_reply_delivery_fails(
-    tmp_path: Path,
-    command: Command,
-    patch_target: str,
-    patch_return_value: object,
-) -> None:
-    """Mutating commands do not record handled turns when the confirmation reply never lands."""
-    context = _command_handler_context(
-        tmp_path,
-        config=SimpleNamespace(
-            authorization=AuthorizationConfig(global_users=["@admin:example.org"]),
-            agents={},
-            teams={},
-        ),
-        send_response=AsyncMock(return_value=_error_resolution()),
-    )
-    room = SimpleNamespace(room_id="!room:example.org")
-    event = SimpleNamespace(
-        sender="@alice:example.org",
-        event_id="$event",
-        source={"content": {"body": command.raw_text}},
-    )
-
-    with (
-        patch("mindroom.commands.handler.check_agent_mentioned", return_value=([], None, None)),
-        patch(patch_target, new=AsyncMock(return_value=patch_return_value)),
-    ):
-        await handle_command(
-            context=context,
-            room=room,
-            event=event,
-            command=command,
-            requester_user_id="@alice:example.org",
-        )
-
-    context.record_handled_turn.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_reload_plugins_does_not_record_handled_turn_when_reply_delivery_fails(tmp_path: Path) -> None:
-    """Successful plugin reloads do not record handled turns when the confirmation reply never lands."""
-    reload_plugins = AsyncMock(
-        return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 0),
-    )
-    context = _command_handler_context(
-        tmp_path,
-        send_response=AsyncMock(return_value=_error_resolution()),
-        reload_plugins=reload_plugins,
-    )
-    room = SimpleNamespace(room_id="!room:example.org")
-    event = SimpleNamespace(
-        sender="@admin:example.org",
-        event_id="$event",
-        source={"content": {"body": "!reload-plugins"}},
-    )
-    command = Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text="!reload-plugins")
-
-    await handle_command(
-        context=context,
-        room=room,
-        event=event,
-        command=command,
-        requester_user_id="@admin:example.org",
-    )
-
-    reload_plugins.assert_awaited_once()
-    context.record_handled_turn.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_handle_command_config_set_confirmation_records_preview_event_id(tmp_path: Path) -> None:
     """Config preview replies should persist confirmation state and record the preview event ID."""
     context = CommandHandlerContext(
@@ -635,7 +461,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         event_cache=make_event_cache_mock(),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
-        send_response=AsyncMock(return_value=_final_visible_resolution("$preview")),
+        send_response=AsyncMock(return_value="$preview"),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(
@@ -715,7 +541,7 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         event_cache=make_event_cache_mock(),
         build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
         record_handled_turn=MagicMock(),
-        send_response=AsyncMock(return_value=_final_visible_resolution("$preview")),
+        send_response=AsyncMock(return_value="$preview"),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(
@@ -767,70 +593,8 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         HandledTurnState.from_source_event_id(
             "$event",
             response_event_id="$preview",
-            visible_echo_event_id="$preview",
         ),
     )
-
-
-@pytest.mark.asyncio
-async def test_handle_command_config_set_preview_send_failure_stays_retryable(tmp_path: Path) -> None:
-    """Config preview setup should not record handled when the preview never lands."""
-    context = CommandHandlerContext(
-        client=AsyncMock(),
-        config=MagicMock(),
-        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        logger=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
-        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
-        record_handled_turn=MagicMock(),
-        send_response=AsyncMock(return_value=_error_resolution()),
-    )
-    room = SimpleNamespace(room_id="!room:example.org")
-    event = SimpleNamespace(
-        sender="@alice:example.org",
-        event_id="$event",
-        source={"content": {"body": "!config set defaults.markdown false"}},
-    )
-    command = Command(
-        type=CommandType.CONFIG,
-        args={"args_text": "set defaults.markdown false"},
-        raw_text="!config set defaults.markdown false",
-    )
-    change_info = {
-        "config_path": "defaults.markdown",
-        "old_value": True,
-        "new_value": False,
-    }
-
-    with (
-        patch(
-            "mindroom.commands.handler.handle_config_command",
-            AsyncMock(return_value=("preview", change_info)),
-        ),
-        patch("mindroom.commands.handler.config_confirmation.register_pending_change") as mock_register,
-        patch(
-            "mindroom.commands.handler.config_confirmation.store_pending_change_in_matrix",
-            new_callable=AsyncMock,
-        ) as mock_store_pending,
-        patch(
-            "mindroom.commands.handler.config_confirmation.add_confirmation_reactions",
-            new_callable=AsyncMock,
-        ) as mock_add_reactions,
-    ):
-        await handle_command(
-            context=context,
-            room=room,
-            event=event,
-            command=command,
-            requester_user_id="@alice:example.org",
-        )
-
-    context.record_handled_turn.assert_not_called()
-    mock_register.assert_not_called()
-    mock_store_pending.assert_not_awaited()
-    mock_add_reactions.assert_not_awaited()
 
 
 @pytest.mark.asyncio
