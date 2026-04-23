@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class KnowledgeGitConfig(BaseModel):
@@ -63,10 +63,32 @@ class KnowledgeBaseConfig(BaseModel):
         ge=0,
         description="Number of overlapping characters between adjacent chunks",
     )
+    include_extensions: list[str] | None = Field(
+        default=None,
+        description="Optional file extensions to include for indexing, for example ['.md', '.py']",
+    )
+    exclude_extensions: list[str] = Field(
+        default_factory=list,
+        description="Optional file extensions to exclude from indexing after include filtering",
+    )
     git: KnowledgeGitConfig | None = Field(
         default=None,
         description="Optional Git sync configuration for this knowledge base",
     )
+
+    @field_validator("include_extensions", "exclude_extensions")
+    @classmethod
+    def normalize_extensions(cls, value: list[str] | None) -> list[str] | None:
+        """Normalize configured extensions to lowercase dotted suffixes."""
+        if value is None:
+            return None
+        normalized: list[str] = []
+        for extension in value:
+            stripped = extension.strip().lower()
+            if not stripped:
+                continue
+            normalized.append(stripped if stripped.startswith(".") else f".{stripped}")
+        return normalized
 
     @model_validator(mode="after")
     def validate_chunking(self) -> KnowledgeBaseConfig:

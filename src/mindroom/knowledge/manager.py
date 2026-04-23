@@ -64,6 +64,60 @@ _INDEXING_STATUSES = {
 _INDEXING_AVAILABILITY_INITIALIZING = "initializing"
 _INDEXING_AVAILABILITY_READY = "ready"
 _INDEXING_AVAILABILITY_REFRESH_FAILED = "refresh_failed"
+_TEXT_LIKE_EXTENSIONS = {
+    ".md",
+    ".markdown",
+    ".txt",
+    ".text",
+    ".rst",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".csv",
+    ".tsv",
+    ".html",
+    ".xml",
+    ".py",
+    ".pyi",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hh",
+    ".hpp",
+    ".java",
+    ".kt",
+    ".kts",
+    ".go",
+    ".rs",
+    ".rb",
+    ".php",
+    ".swift",
+    ".scala",
+    ".sc",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".fish",
+    ".ps1",
+    ".sql",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".vue",
+    ".svelte",
+    ".proto",
+}
 
 
 @dataclass(frozen=True)
@@ -127,6 +181,8 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         str(git_config.skip_hidden) if git_config is not None else "",
         str(tuple(git_config.include_patterns)) if git_config is not None else "",
         str(tuple(git_config.exclude_patterns)) if git_config is not None else "",
+        str(tuple(base_config.include_extensions)) if base_config.include_extensions is not None else "",
+        str(tuple(base_config.exclude_extensions)),
     )
 
 
@@ -624,11 +680,27 @@ class KnowledgeManager:
         return any(part.startswith(".") for part in relative_path.parts)
 
     def _include_file(self, file_path: Path) -> bool:
+        if not file_path.is_file():
+            return False
         try:
             relative_path = file_path.relative_to(self._knowledge_source_path())
         except ValueError:
             return False
-        return file_path.is_file() and self._include_relative_path(relative_path.as_posix())
+
+        base_config = self.config.get_knowledge_base_config(self.base_id)
+        include_extensions = set(base_config.include_extensions) if base_config.include_extensions is not None else None
+        exclude_extensions = set(base_config.exclude_extensions)
+        allowed_extensions = include_extensions
+        if allowed_extensions is None and base_config.git is None:
+            allowed_extensions = _TEXT_LIKE_EXTENSIONS
+
+        suffix = file_path.suffix.lower()
+        if allowed_extensions is not None and suffix not in allowed_extensions:
+            return False
+        if suffix in exclude_extensions:
+            return False
+
+        return self._include_relative_path(relative_path.as_posix())
 
     def _include_relative_path(self, relative_path: str) -> bool:
         path_obj = Path(relative_path)

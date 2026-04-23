@@ -258,7 +258,13 @@ def _mind_private_agent(
     )
 
 
-def _make_config(path: Path, *, embedder_dimensions: int | None = None) -> Config:
+def _make_config(
+    path: Path,
+    *,
+    embedder_dimensions: int | None = None,
+    include_extensions: list[str] | None = None,
+    exclude_extensions: list[str] | None = None,
+) -> Config:
     memory: dict[str, object] | None = None
     if embedder_dimensions is not None:
         memory = {
@@ -275,7 +281,12 @@ def _make_config(path: Path, *, embedder_dimensions: int | None = None) -> Confi
         agents={},
         models={},
         knowledge_bases={
-            "research": KnowledgeBaseConfig(path=str(path), watch=False),
+            "research": KnowledgeBaseConfig(
+                path=str(path),
+                watch=False,
+                include_extensions=include_extensions,
+                exclude_extensions=exclude_extensions or [],
+            ),
         },
         **({"memory": memory} if memory is not None else {}),
     )
@@ -4207,6 +4218,53 @@ def test_list_files_skips_hidden_paths_when_git_skip_hidden_enabled(
 
     listed = [path.relative_to(manager.knowledge_path).as_posix() for path in manager.list_files()]
     assert listed == ["public/doc.md"]
+
+
+def test_text_only_default_file_filter_excludes_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-git knowledge bases should ignore binary-ish files by default."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_config(tmp_path / "knowledge"),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    (manager.knowledge_path / "guide.md").write_text("ok", encoding="utf-8")
+    (manager.knowledge_path / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (manager.knowledge_path / "audio.mp3").write_bytes(b"ID3")
+    (manager.knowledge_path / "video.mp4").write_bytes(b"\x00\x00\x00\x18ftyp")
+    (manager.knowledge_path / "paper.pdf").write_bytes(b"%PDF-1.7")
+
+    listed = [path.relative_to(manager.knowledge_path).as_posix() for path in manager.list_files()]
+    assert listed == ["guide.md"]
+
+
+def test_user_override_can_re_enable_specific_extensions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit include_extensions should allow a normally filtered suffix back in."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_config(tmp_path / "knowledge", include_extensions=[".pdf"]),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    (manager.knowledge_path / "guide.md").write_text("skip", encoding="utf-8")
+    (manager.knowledge_path / "paper.pdf").write_bytes(b"%PDF-1.7")
+
+    listed = [path.relative_to(manager.knowledge_path).as_posix() for path in manager.list_files()]
+    assert listed == ["paper.pdf"]
 
 
 def test_list_files_respects_include_and_exclude_patterns(
