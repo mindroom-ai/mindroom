@@ -662,9 +662,7 @@ class MultiAgentOrchestrator:
             if pending.room_id is not None
         }
         blocked_room_ids.update(
-            pending.room_id
-            for pending in approval_store.list_unconfirmed_deliveries()
-            if pending.room_id in room_ids
+            pending.room_id for pending in approval_store.list_unconfirmed_deliveries() if pending.room_id in room_ids
         )
         return blocked_room_ids
 
