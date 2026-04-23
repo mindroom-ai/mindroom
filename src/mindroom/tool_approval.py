@@ -44,9 +44,9 @@ _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
 _DEFAULT_RESTART_REASON = "MindRoom restarted before approval completed."
 _DEFAULT_REINITIALIZE_REASON = "MindRoom reinitialized before approval completed."
 _DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
-    "Tool approval requires a router-managed Matrix room. "
-    "Ad-hoc invited rooms accepted via accept_invites do not support approval-gated tools; "
-    "retry from a managed room."
+    "Tool approval requires the router to be joined to the Matrix room. "
+    "In ad-hoc invited rooms accepted via accept_invites, approval only works if the router "
+    "is already joined there; otherwise retry from a managed room."
 )
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."

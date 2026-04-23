@@ -183,6 +183,7 @@ async def _request_tool_approval(
     timeout_seconds: float = 60,
     requester_id: str = "@user:localhost",
     arguments: dict[str, object] | None = None,
+    thread_id: str | None = "$thread",
 ) -> tuple[ApprovalManager, asyncio.Task[ApprovalDecision], PendingApproval | None]:
     store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
     task = asyncio.create_task(
@@ -191,7 +192,7 @@ async def _request_tool_approval(
             arguments=arguments or {"command": "echo hi"},
             agent_name="code",
             room_id="!room:localhost",
-            thread_id="$thread",
+            thread_id=thread_id,
             requester_id=requester_id,
             approver_user_id=requester_id,
             matched_rule="run_shell_*",
@@ -1272,9 +1273,9 @@ async def test_request_approval_returns_specific_reason_when_router_transport_is
 
     assert decision.status == "expired"
     assert decision.reason == (
-        "Tool approval requires a router-managed Matrix room. "
-        "Ad-hoc invited rooms accepted via accept_invites do not support approval-gated tools; "
-        "retry from a managed room."
+        "Tool approval requires the router to be joined to the Matrix room. "
+        "In ad-hoc invited rooms accepted via accept_invites, approval only works if the router "
+        "is already joined there; otherwise retry from a managed room."
     )
     router_client.room_send.assert_not_awaited()
 
@@ -1904,9 +1905,9 @@ async def test_orchestrator_send_approval_event_raises_when_router_not_joined(tm
     with pytest.raises(
         RuntimeError,
         match=(
-            r"Tool approval requires a router-managed Matrix room\. "
-            r"Ad-hoc invited rooms accepted via accept_invites do not support "
-            r"approval-gated tools; retry from a managed room\."
+            r"Tool approval requires the router to be joined to the Matrix room\. "
+            r"In ad-hoc invited rooms accepted via accept_invites, approval only works if "
+            r"the router is already joined there; otherwise retry from a managed room\."
         ),
     ):
         await orchestrator._send_approval_event(
@@ -2946,6 +2947,94 @@ async def test_truncated_approval_notice_is_sent_once_by_router_bot(tmp_path: Pa
     assert store.list_pending() == [pending]
     router_bot.client.room_send.assert_awaited_once()
     general_bot.client.room_send.assert_not_awaited()
+
+    await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
+    decision = await task
+    assert decision.status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_truncated_approval_notice_is_plain_room_message_in_room_mode(tmp_path: Path) -> None:
+    """Room-mode truncated approval notices should be plain room messages, not threaded replies."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    role="Help generally",
+                    rooms=["!room:localhost"],
+                    thread_mode="room",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            tool_approval=ToolApprovalConfig(
+                rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+            ),
+        ),
+        runtime_paths,
+    )
+    router_bot = _agent_bot(tmp_path, config=config, agent_name="router")
+    general_bot = _agent_bot(tmp_path, config=config, agent_name="general")
+    router_bot.running = True
+    general_bot.running = True
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
+    router_bot.orchestrator = orchestrator
+    general_bot.orchestrator = orchestrator
+    assert router_bot.client is not None
+    router_bot.client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$notice", room_id="!room:localhost"),
+    )
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock()
+    store, task, pending = await _request_tool_approval(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        arguments={"command": "echo hi", "prompt": "x" * 5000},
+        thread_id=None,
+    )
+
+    assert pending is not None
+    room = _approval_room()
+    reaction = nio.ReactionEvent.from_dict(
+        {
+            "type": "m.reaction",
+            "event_id": "$reaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$approval",
+                    "key": "✅",
+                },
+            },
+        },
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(router_bot._turn_policy), "can_reply_to_sender", return_value=True),
+        patch.object(type(general_bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await asyncio.gather(
+            router_bot._handle_reaction_inner(room, reaction),
+            general_bot._handle_reaction_inner(room, reaction),
+        )
+
+    assert task.done() is False
+    assert store.list_pending() == [pending]
+    router_bot.client.room_send.assert_awaited_once()
+    notice_content = router_bot.client.room_send.await_args.kwargs["content"]
+    assert notice_content["msgtype"] == "m.notice"
+    assert notice_content["body"] == (
+        "Cannot approve: the displayed arguments are truncated. "
+        "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    )
+    assert "m.relates_to" not in notice_content
 
     await store.deny(pending.id, reason="cleanup", resolved_by="@user:localhost")
     decision = await task

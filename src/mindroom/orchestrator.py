@@ -562,20 +562,21 @@ class MultiAgentOrchestrator:
             )
             return False
 
-        thread_root_event_id = thread_id or approval_event_id
+        content: dict[str, Any] = {
+            "msgtype": "m.notice",
+            "body": reason,
+        }
+        if isinstance(thread_id, str) and thread_id:
+            content["m.relates_to"] = {
+                "rel_type": "m.thread",
+                "event_id": thread_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": approval_event_id},
+            }
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="m.room.message",
-            content={
-                "msgtype": "m.notice",
-                "body": reason,
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": thread_root_event_id,
-                    "is_falling_back": True,
-                    "m.in_reply_to": {"event_id": approval_event_id},
-                },
-            },
+            content=content,
         )
         if isinstance(response, nio.RoomSendResponse):
             return True
