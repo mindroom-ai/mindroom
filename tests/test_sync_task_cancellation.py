@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,8 +17,11 @@ from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.runtime import (
     SYNC_RESTART_CANCEL_MSG,
+    USER_STOP_CANCEL_MSG,
+    MatrixSyncStalledError,
     _SyncIteration,
     cancel_sync_task,
+    classify_cancel_source,
     is_sync_restart_cancel,
     matrix_sync_startup_timeout_seconds,
     stop_entities,
@@ -156,10 +160,103 @@ async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_sync_forever_with_restart_retries_on_sync_restart_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A watchdog-race cancellation should still reach the stalled-sync retry path."""
+    bot = _FakeBot()
+    watch_calls = 0
+
+    async def sync_then_stop() -> None:
+        if bot.sync_calls > 0:
+            bot.running = False
+            return
+        await _FakeBot.sync_forever(bot)
+
+    async def fake_watch(
+        _bot: _FakeBot,
+        sync_task: asyncio.Task[object],
+        watchdog_cancelled_sync: asyncio.Event,
+    ) -> None:
+        nonlocal watch_calls
+        watch_calls += 1
+        if watch_calls == 1:
+            msg = "Matrix sync loop stalled for test_agent"
+            await asyncio.sleep(0)
+            watchdog_cancelled_sync.set()
+            sync_task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+            with suppress(asyncio.CancelledError):
+                await sync_task
+            await asyncio.sleep(0)
+            raise MatrixSyncStalledError(msg)
+        await sync_task
+
+    monkeypatch.setattr(_SyncIteration, "_watch", staticmethod(fake_watch))
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+
+    bot.sync_forever = sync_then_stop
+
+    await sync_forever_with_restart(bot, max_retries=2)
+
+    assert watch_calls == 2
+    assert bot.first_call_cancelled is True
+    assert bot.first_call_cancel_args == (SYNC_RESTART_CANCEL_MSG,)
+    assert bot.sync_calls == 1
+    assert bot.prepare_for_sync_shutdown_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_iteration_wait_does_not_block_on_unrelated_sync_cancellation() -> None:
+    """Direct sync-task cancellation should surface immediately without waiting for the watchdog."""
+    bot = _FakeBot()
+    watchdog_started = asyncio.Event()
+
+    async def blocked_sync() -> None:
+        await asyncio.Event().wait()
+
+    async def sleeping_watchdog() -> None:
+        watchdog_started.set()
+        await asyncio.sleep(60)
+
+    iteration = _SyncIteration(
+        bot=bot,
+        sync_task=asyncio.create_task(blocked_sync()),
+        watchdog_task=asyncio.create_task(sleeping_watchdog()),
+    )
+
+    await asyncio.wait_for(watchdog_started.wait(), timeout=0.1)
+    assert iteration.sync_task is not None
+    iteration.sync_task.cancel(msg="external_cancel")
+
+    with pytest.raises(asyncio.CancelledError, match="external_cancel"):
+        await asyncio.wait_for(iteration.wait(), timeout=0.05)
+
+    await iteration.cancel()
+
+
+@pytest.mark.asyncio
 async def test_is_sync_restart_cancel_checks_cancel_message() -> None:
     """The restart helper should only match the dedicated cancel message."""
     assert is_sync_restart_cancel(asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)) is True
     assert is_sync_restart_cancel(asyncio.CancelledError()) is False
+
+
+@pytest.mark.asyncio
+async def test_classify_cancel_source_user_stop() -> None:
+    """User-stop cancellations should keep their dedicated provenance."""
+    assert classify_cancel_source(asyncio.CancelledError(USER_STOP_CANCEL_MSG)) == "user_stop"
+
+
+@pytest.mark.asyncio
+async def test_classify_cancel_source_sync_restart() -> None:
+    """Sync-restart cancellations should keep their dedicated provenance."""
+    assert classify_cancel_source(asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)) == "sync_restart"
+
+
+@pytest.mark.asyncio
+async def test_classify_cancel_source_unknown_returns_interrupted() -> None:
+    """Untagged cancellations should surface as generic interruptions."""
+    assert classify_cancel_source(asyncio.CancelledError()) == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -452,6 +549,38 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
 
     task3.cancel()
     await asyncio.gather(task3, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_entities_completes_with_real_supervisor_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    """stop_entities must finish promptly when cancelling a real supervisor task."""
+    bot = _FakeBot()
+    bot.agent_name = "agent1"
+    bot.stop = AsyncMock(side_effect=lambda **_kwargs: setattr(bot, "running", False))
+
+    sync_started = asyncio.Event()
+
+    async def blocking_sync() -> None:
+        sync_started.set()
+        await _FakeBot.sync_forever(bot)
+
+    bot.sync_forever = blocking_sync
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+
+    supervisor_task = asyncio.create_task(sync_forever_with_restart(bot), name="supervisor_agent1")
+    await asyncio.wait_for(sync_started.wait(), timeout=1.0)
+
+    started_at = time.monotonic()
+    await asyncio.wait_for(
+        stop_entities({"agent1"}, {"agent1": bot}, {"agent1": supervisor_task}),
+        timeout=2.0,
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed <= 2.0
+    assert supervisor_task.done()
+    assert bot.prepare_for_sync_shutdown_calls >= 2
+    bot.stop.assert_awaited_once_with(reason="restart")
 
 
 @pytest.mark.asyncio

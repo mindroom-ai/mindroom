@@ -24,8 +24,6 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
-    STREAM_STATUS_CANCELLED,
-    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
@@ -52,7 +50,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.orchestration.runtime import is_sync_restart_cancel
+from mindroom.orchestration.runtime import CancelSource, classify_cancel_source
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,
     ResponseOutcome,
@@ -64,7 +62,6 @@ from mindroom.streaming import (
     StreamingDeliveryCancelled,
     StreamingDeliveryError,
     StreamingResponse,
-    build_restart_interrupted_body,
     clean_partial_reply_text,
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
@@ -121,8 +118,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 type MatrixEventId = str
-
-_CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
@@ -171,6 +166,15 @@ def _visible_body_state_for_text(
     return text, "visible_body"
 
 
+def _cancel_failure_reason(cancel_source: CancelSource) -> str:
+    """Return the canonical failure reason for one cancellation provenance."""
+    if cancel_source == "sync_restart":
+        return "sync_restart_cancelled"
+    if cancel_source == "user_stop":
+        return "cancelled_by_user"
+    return "interrupted"
+
+
 def _stream_transport_outcome_from_delivery_exception(
     *,
     error: StreamingDeliveryError | StreamingDeliveryCancelled,
@@ -181,16 +185,17 @@ def _stream_transport_outcome_from_delivery_exception(
         if error.transport_outcome.failure_reason is not None:
             return error.transport_outcome
         if isinstance(error, StreamingDeliveryCancelled):
-            failure_reason = "sync_restart_cancelled" if is_sync_restart_cancel(error.error) else "cancelled_by_user"
+            failure_reason = _cancel_failure_reason(classify_cancel_source(error.error))
         else:
             failure_reason = str(error.error)
         return replace(error.transport_outcome, failure_reason=failure_reason)
 
     rendered_body, visible_body_state = _visible_body_state_for_text(error.accumulated_text)
     if isinstance(error, StreamingDeliveryCancelled):
+        cancel_source = classify_cancel_source(error.error)
         terminal_result: Literal["failed", "cancelled"] = "cancelled"
-        terminal_status: Literal["error", "cancelled"] = "cancelled"
-        failure_reason = "sync_restart_cancelled" if is_sync_restart_cancel(error.error) else "cancelled_by_user"
+        terminal_status: Literal["error", "cancelled"] = "cancelled" if cancel_source == "user_stop" else "error"
+        failure_reason = _cancel_failure_reason(cancel_source)
     else:
         terminal_result = "failed"
         terminal_status = "error"
@@ -516,11 +521,27 @@ class ResponseRunner:
             error_type=error.__class__.__name__,
         )
 
-    def _cancelled_response_update(self, *, restart: bool) -> tuple[str, dict[str, str]]:
-        """Return the visible note and terminal status for one cancelled response."""
-        if restart:
-            return build_restart_interrupted_body(""), {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
-        return _CANCELLED_RESPONSE_TEXT, {STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED}
+    def _log_cancelled_response(
+        self,
+        *,
+        exc: asyncio.CancelledError,
+        message_id: str | None,
+        restart_message: str,
+        user_stop_message: str,
+        interrupted_message: str,
+    ) -> None:
+        """Log one CancelledError with the right provenance label."""
+        cancel_source = classify_cancel_source(exc)
+        if cancel_source == "sync_restart":
+            self.deps.logger.info(restart_message, message_id=message_id)
+        elif cancel_source == "user_stop":
+            self.deps.logger.info(user_stop_message, message_id=message_id)
+        else:
+            self.deps.logger.warning(
+                interrupted_message,
+                message_id=message_id,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     def _latest_stream_event_id(
         self,
@@ -1582,25 +1603,21 @@ class ResponseRunner:
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
                 except asyncio.CancelledError as exc:
-                    restart = is_sync_restart_cancel(exc)
-                    if restart:
-                        self.deps.logger.info(
-                            "Team non-streaming response interrupted by sync restart",
-                            message_id=message_id,
-                        )
-                    else:
-                        self.deps.logger.warning(
-                            "Team non-streaming response cancelled — traceback for diagnosis",
-                            message_id=message_id,
-                            exc_info=True,
-                        )
+                    self._log_cancelled_response(
+                        exc=exc,
+                        message_id=message_id,
+                        restart_message="Team non-streaming response interrupted by sync restart",
+                        user_stop_message="Team non-streaming response cancelled by user",
+                        interrupted_message="Team non-streaming response interrupted — traceback for diagnosis",
+                    )
                     if message_id:
+                        cancel_source = classify_cancel_source(exc)
                         final_delivery_outcome = await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                             CancelledVisibleNoteRequest(
                                 target=delivery_target,
                                 event_id=message_id,
                                 existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
-                                restart=restart,
+                                cancel_source=cancel_source,
                                 response_kind="team",
                                 response_envelope=resolved_response_envelope,
                                 correlation_id=resolved_correlation_id,
@@ -1609,7 +1626,7 @@ class ResponseRunner:
                     else:
                         final_delivery_outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                             outcome=FinalDeliveryOutcome.cancelled_without_visible_response(
-                                failure_reason="sync_restart_cancelled" if restart else "cancelled_by_user",
+                                failure_reason=_cancel_failure_reason(classify_cancel_source(exc)),
                             ),
                             correlation_id=resolved_correlation_id,
                             envelope=resolved_response_envelope,
@@ -1783,7 +1800,7 @@ class ResponseRunner:
             ),
         )
 
-    async def run_cancellable_response(  # noqa: C901, PLR0912, PLR0915
+    async def run_cancellable_response(
         self,
         *,
         room_id: str,
@@ -1870,20 +1887,16 @@ class ResponseRunner:
                 except asyncio.CancelledError as exc:
                     if isinstance(exc, StreamingDeliveryCancelled):
                         raise
-                    failure_reason = "sync_restart_cancelled" if is_sync_restart_cancel(exc) else "cancelled_by_user"
+                    failure_reason = _cancel_failure_reason(classify_cancel_source(exc))
                     if on_cancelled is not None:
                         on_cancelled(failure_reason)
-                    if is_sync_restart_cancel(exc):
-                        self.deps.logger.info(
-                            "Response interrupted by sync restart",
-                            message_id=message_to_track or tracked_message_id,
-                        )
-                    else:
-                        self.deps.logger.warning(
-                            "Response cancelled — traceback for diagnosis",
-                            message_id=message_to_track or tracked_message_id,
-                            exc_info=True,
-                        )
+                    self._log_cancelled_response(
+                        exc=exc,
+                        message_id=message_to_track or tracked_message_id,
+                        restart_message="Response interrupted by sync restart",
+                        user_stop_message="Response cancelled by user",
+                        interrupted_message="Response interrupted — traceback for diagnosis",
+                    )
                 except Exception as error:
                     self.deps.logger.exception("Error during response generation", error=str(error))
                     raise
@@ -2157,7 +2170,7 @@ class ResponseRunner:
             )
             raise
 
-    async def process_and_respond(  # noqa: C901, PLR0912
+    async def process_and_respond(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
@@ -2229,25 +2242,21 @@ class ResponseRunner:
             finally:
                 await lifecycle.emit_session_started(session_started_watch)
         except asyncio.CancelledError as exc:
-            restart = is_sync_restart_cancel(exc)
-            if restart:
-                self.deps.logger.info(
-                    "Non-streaming response interrupted by sync restart",
-                    message_id=request.existing_event_id,
-                )
-            else:
-                self.deps.logger.warning(
-                    "Non-streaming response cancelled — traceback for diagnosis",
-                    message_id=request.existing_event_id,
-                    exc_info=True,
-                )
+            cancel_source = classify_cancel_source(exc)
+            self._log_cancelled_response(
+                exc=exc,
+                message_id=request.existing_event_id,
+                restart_message="Non-streaming response interrupted by sync restart",
+                user_stop_message="Non-streaming response cancelled by user",
+                interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
+            )
             if request.existing_event_id:
                 return await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                     CancelledVisibleNoteRequest(
                         target=runtime.resolved_target,
                         event_id=request.existing_event_id,
                         existing_event_is_placeholder=request.existing_event_is_placeholder,
-                        restart=restart,
+                        cancel_source=cancel_source,
                         response_kind=response_kind,
                         response_envelope=response_envelope,
                         correlation_id=correlation_id,
@@ -2255,7 +2264,7 @@ class ResponseRunner:
                 )
             return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
                 outcome=FinalDeliveryOutcome.cancelled_without_visible_response(
-                    failure_reason="sync_restart_cancelled" if restart else "cancelled_by_user",
+                    failure_reason=_cancel_failure_reason(cancel_source),
                 ),
                 correlation_id=correlation_id,
                 envelope=response_envelope,
@@ -2433,17 +2442,13 @@ class ResponseRunner:
                 ),
             )
         except asyncio.CancelledError as exc:
-            if is_sync_restart_cancel(exc):
-                self.deps.logger.info(
-                    "Bot streaming response interrupted by sync restart",
-                    message_id=request.existing_event_id,
-                )
-            else:
-                self.deps.logger.warning(
-                    "Bot streaming response cancelled — traceback for diagnosis",
-                    message_id=request.existing_event_id,
-                    exc_info=True,
-                )
+            self._log_cancelled_response(
+                exc=exc,
+                message_id=request.existing_event_id,
+                restart_message="Bot streaming response interrupted by sync restart",
+                user_stop_message="Bot streaming response cancelled by user",
+                interrupted_message="Bot streaming response interrupted — traceback for diagnosis",
+            )
             raise
         except Exception as error:
             self.deps.logger.exception("Error in streaming response", error=str(error))

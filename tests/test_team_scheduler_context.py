@@ -13,7 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -22,7 +22,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
 from mindroom.response_runner import ResponseRunner
-from mindroom.streaming import build_restart_interrupted_body
+from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -155,7 +155,7 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path) -> None:
-    """Cancelled team runs should replace the thinking placeholder with a cancellation note."""
+    """Generic team interruptions should replace the thinking placeholder with an interruption note."""
     bot = _make_bot(tmp_path)
     team_agents = [
         MatrixID.from_agent(
@@ -190,7 +190,7 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$thinking",
-                    content_sent={"body": "**[Response cancelled by user]**"},
+                    content_sent={"body": INTERRUPTED_RESPONSE_NOTE},
                 ),
             ),
         ) as mock_edit,
@@ -213,8 +213,8 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
         )
 
     assert mock_edit.await_args.args[2] == "$thinking"
-    assert mock_edit.await_args.args[4] == "**[Response cancelled by user]**"
-    assert mock_edit.await_args.args[3][STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
+    assert mock_edit.await_args.args[4] == INTERRUPTED_RESPONSE_NOTE
+    assert mock_edit.await_args.args[3][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
 
 @pytest.mark.asyncio

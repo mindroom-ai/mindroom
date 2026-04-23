@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING
 import nio
 from agno.run.cancel import acancel_run
 
+from mindroom.cancellation import request_task_cancel
 from mindroom.logging_config import get_logger
+from mindroom.orchestration.runtime import USER_STOP_CANCEL_MSG
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -323,7 +325,7 @@ class StopManager:
                     run_id=tracked.run_id,
                     **target_log,
                 )
-                tracked.task.cancel()
+                request_task_cancel(tracked.task, cancel_msg=USER_STOP_CANCEL_MSG)
                 if tracked.run_id:
                     logger.info(
                         "Scheduling best-effort Agno run cleanup after hard task cancel",

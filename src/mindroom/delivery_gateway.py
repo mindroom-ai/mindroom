@@ -34,7 +34,7 @@ from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     StreamDeliveryState,
     StreamingResponse,
-    build_restart_interrupted_body,
+    build_cancelled_response_update,
     send_streaming_response,
 )
 
@@ -52,6 +52,8 @@ if TYPE_CHECKING:
     from mindroom.streaming_delivery import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
+
+CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
 
 
 @dataclass
@@ -315,7 +317,7 @@ class CancelledVisibleNoteRequest:
     target: MessageTarget
     event_id: str
     existing_event_is_placeholder: bool
-    restart: bool
+    cancel_source: CancelSource
     response_kind: str
     response_envelope: MessageEnvelope
     correlation_id: str
@@ -507,18 +509,19 @@ class DeliveryGateway:
         )
         return outcome
 
-    def _cancelled_note_update(self, *, restart: bool) -> tuple[str, dict[str, str], str]:
+    def _cancelled_note_update(self, *, cancel_source: CancelSource) -> tuple[str, dict[str, str], str]:
         """Return the terminal note body, content metadata, and failure reason."""
-        if restart:
-            return (
-                build_restart_interrupted_body(""),
-                {constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_ERROR},
-                "sync_restart_cancelled",
-            )
+        cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=cancel_source)
+        if cancel_source == "sync_restart":
+            failure_reason = "sync_restart_cancelled"
+        elif cancel_source == "user_stop":
+            failure_reason = "cancelled_by_user"
+        else:
+            failure_reason = "interrupted"
         return (
-            "**[Response cancelled by user]**",
-            {constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_CANCELLED},
-            "cancelled_by_user",
+            cancelled_text,
+            {constants.STREAM_STATUS_KEY: stream_status},
+            failure_reason,
         )
 
     def _current_stream_body(self, outcome: StreamTransportOutcome) -> str:
@@ -1091,7 +1094,7 @@ class DeliveryGateway:
         request: CancelledVisibleNoteRequest,
     ) -> FinalDeliveryOutcome:
         """Edit the in-flight visible response into a terminal cancellation note."""
-        cancelled_text, extra_content, failure_reason = self._cancelled_note_update(restart=request.restart)
+        cancelled_text, extra_content, failure_reason = self._cancelled_note_update(cancel_source=request.cancel_source)
         edited = await self.edit_text(
             EditTextRequest(
                 target=request.target,
