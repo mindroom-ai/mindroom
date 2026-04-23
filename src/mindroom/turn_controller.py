@@ -986,16 +986,11 @@ class TurnController:
                     response_text=action.rejection_message,
                 ),
             )
-            if response_event_id is not None:
-                self._mark_source_events_responded(
-                    handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
-                        response_event_id,
-                    ),
-                )
-                if dispatch_timing is not None:
-                    dispatch_timing.mark_first_visible_reply("final")
-                    dispatch_timing.mark("response_complete")
-                    dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
+            self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+            if dispatch_timing is not None and response_event_id is not None:
+                dispatch_timing.mark_first_visible_reply("final")
+                dispatch_timing.mark("response_complete")
+                dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
             return
 
         if not dispatch.context.am_i_mentioned:
@@ -1022,15 +1017,11 @@ class TurnController:
                 error=error,
             )
             if response_event_id is not None:
-                self._mark_source_events_responded(
-                    handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
-                        response_event_id,
-                    ),
-                )
-            if dispatch_timing is not None and response_event_id is not None:
-                dispatch_timing.mark_first_visible_reply("final")
-                dispatch_timing.mark("response_complete")
-                dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
+                self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+                if dispatch_timing is not None:
+                    dispatch_timing.mark_first_visible_reply("final")
+                    dispatch_timing.mark("response_complete")
+                    dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
             return
 
         with bound_log_context(**dispatch.target.log_context):
@@ -1150,18 +1141,10 @@ class TurnController:
                 error=failure,
             )
             if response_event_id is not None:
-                self._mark_source_events_responded(
-                    handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
-                        response_event_id,
-                    ),
-                )
+                self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
             return
         if response_event_id is not None:
-            self._mark_source_events_responded(
-                handled_turn.with_response_event_id(response_event_id).with_visible_echo_event_id(
-                    response_event_id,
-                ),
-            )
+            self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
