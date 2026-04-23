@@ -754,13 +754,129 @@ class TestStreamingBehavior:
         assert "search_web" in bodies[1]
 
     @pytest.mark.asyncio
+    async def test_visible_tool_start_does_not_block_subsequent_stream_events_on_matrix_send(self) -> None:
+        """Visible tool-start refreshes must not backpressure later stream events on Matrix I/O."""
+        mock_client = _make_matrix_client_mock()
+        first_send_started = asyncio.Event()
+        allow_send_to_finish = asyncio.Event()
+        second_yield_started = asyncio.Event()
+
+        async def slow_room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
+            _ = (args, kwargs)
+            first_send_started.set()
+            await allow_send_to_finish.wait()
+            mock_response = MagicMock()
+            mock_response.__class__ = nio.RoomSendResponse
+            mock_response.event_id = "$tool_start_backpressure"
+            return mock_response
+
+        mock_client.room_send.side_effect = slow_room_send
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            max_idle=0.25,
+            show_tool_calls=True,
+        )
+        streaming.last_update = 100.0
+        streaming.stream_started_at = 100.0
+
+        async def response_stream() -> AsyncIterator[object]:
+            yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
+            second_yield_started.set()
+            yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
+
+        await first_send_started.wait()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert second_yield_started.is_set()
+
+        allow_send_to_finish.set()
+        await consume_task
+        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        assert shutdown_error is None
+
+    @pytest.mark.asyncio
+    async def test_visible_tool_start_burst_coalesces_to_one_nonterminal_send(self) -> None:
+        """Rapid visible tool-start bursts should not emit one Matrix edit per tool."""
+        mock_client = _make_matrix_client_mock()
+        first_send_started = asyncio.Event()
+        allow_send_to_finish = asyncio.Event()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$tool_start_burst"
+
+        async def slow_room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
+            _ = (args, kwargs)
+            first_send_started.set()
+            await allow_send_to_finish.wait()
+            return mock_response
+
+        mock_client.room_send.side_effect = slow_room_send
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            min_update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            min_char_update_interval=10.0,
+            max_idle=0.25,
+            show_tool_calls=True,
+        )
+        streaming.last_update = 100.0
+        streaming.stream_started_at = 100.0
+
+        async def response_stream() -> AsyncIterator[object]:
+            yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
+            yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
+
+        await first_send_started.wait()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        allow_send_to_finish.set()
+        await consume_task
+        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        assert shutdown_error is None
+
+        assert mock_client.room_send.call_count == 1
+        assert "search_web" in streaming.accumulated_text
+        assert "save_file" in streaming.accumulated_text
+
+    @pytest.mark.asyncio
     async def test_idle_flush_fires_on_tool_completion_after_pause(self) -> None:
         """A paused tool completion should emit before finalization via the idle trigger."""
         mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
         mock_response.__class__ = nio.RoomSendResponse
         mock_response.event_id = "$stream_tool_complete_1"
-        mock_client.room_send.return_value = mock_response
+        first_send_seen = asyncio.Event()
+
+        async def room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
+            _ = (args, kwargs)
+            first_send_seen.set()
+            return mock_response
+
+        mock_client.room_send.side_effect = room_send
 
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -785,9 +901,10 @@ class TestStreamingBehavior:
 
         async def response_stream() -> AsyncIterator[object]:
             yield ToolCallStartedEvent(tool=tool)
+            await first_send_seen.wait()
             yield ToolCallCompletedEvent(tool=tool, content="ok")
 
-        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.5, 100.5, 100.5]):
+        with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.0, 100.5, 100.5, 100.5]):
             await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
 
         assert mock_client.room_send.call_count == 2
@@ -3243,6 +3360,52 @@ class TestStreamingBehavior:
         first_body = mock_client.room_send.call_args_list[0].kwargs["content"]["body"]
         assert "save_file" in first_body
         assert "Worker startup failed" not in first_body
+
+    @pytest.mark.asyncio
+    async def test_worker_warmup_failure_notice_clears_before_hidden_tool_start(self) -> None:
+        """A hidden tool-start keepalive should drop stale worker failure suffixes before sending."""
+        mock_client = _make_matrix_client_mock()
+        mock_response = MagicMock()
+        mock_response.__class__ = nio.RoomSendResponse
+        mock_response.event_id = "$warmup_hidden_tool_start"
+        mock_client.room_send.return_value = mock_response
+
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            show_tool_calls=False,
+            progress_update_interval=0.0,
+        )
+        streaming.last_update = 100.0
+        streaming.stream_started_at = 100.0
+        streaming.apply_worker_progress_event(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="failed",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=4.0,
+                    error="boom",
+                ),
+            ),
+        )
+
+        async def response_stream() -> AsyncIterator[object]:
+            yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+
+        with patch("mindroom.streaming.time.time", return_value=100.25):
+            await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
+        await streaming.finalize(mock_client)
+
+        assert mock_client.room_send.call_count == 2
+        first_body = mock_client.room_send.call_args_list[0].kwargs["content"]["body"]
+        assert first_body == "Thinking..."
 
 
 class TestStreamingConfig:

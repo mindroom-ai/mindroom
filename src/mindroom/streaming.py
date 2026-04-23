@@ -248,6 +248,7 @@ class StreamingResponse:
     stream_started_at: float | None = None
     chars_since_last_update: int = 0
     last_delta_at: float | None = None
+    last_boundary_refresh_at: float | None = None
     placeholder_progress_sent: bool = False
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
@@ -335,11 +336,13 @@ class StreamingResponse:
         if sent:
             self._mark_nonterminal_delivery()
 
-    def _mark_nonterminal_delivery(self) -> None:
+    def _mark_nonterminal_delivery(self, *, boundary_refresh: bool = False) -> None:
         """Reset throttle state after a non-terminal send or edit reached Matrix."""
         now = time.time()
         self.last_update = now
         self.last_delta_at = now
+        if boundary_refresh:
+            self.last_boundary_refresh_at = now
         self.chars_since_last_update = 0
 
     async def _throttled_send(

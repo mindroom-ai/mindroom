@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn
@@ -87,6 +88,7 @@ class _DeliveryRequest:
 
     progress_hint: bool = False
     force_refresh: bool = False
+    boundary_refresh: bool = False
     phase_boundary_flush: bool = False
     allow_empty_progress: bool = False
     prior_delta_at: float | None = None
@@ -103,6 +105,7 @@ def _queue_delivery_request(
     *,
     progress_hint: bool = False,
     force_refresh: bool = False,
+    boundary_refresh: bool = False,
     phase_boundary_flush: bool = False,
     allow_empty_progress: bool = False,
     prior_delta_at: float | None = None,
@@ -114,6 +117,7 @@ def _queue_delivery_request(
         _DeliveryRequest(
             progress_hint=progress_hint,
             force_refresh=force_refresh,
+            boundary_refresh=boundary_refresh,
             phase_boundary_flush=phase_boundary_flush,
             allow_empty_progress=allow_empty_progress,
             prior_delta_at=prior_delta_at,
@@ -146,6 +150,7 @@ async def _apply_visible_text_chunk(
     *,
     apply_chunk: Callable[[str], None],
     force_refresh: bool = False,
+    boundary_refresh: bool = False,
     wait_for_delivery: bool = False,
 ) -> None:
     """Apply one visible text-like chunk and queue the matching delivery request."""
@@ -158,6 +163,7 @@ async def _apply_visible_text_chunk(
     completion = _queue_delivery_request(
         delivery_queue,
         force_refresh=force_refresh,
+        boundary_refresh=boundary_refresh,
         prior_delta_at=None if force_refresh else prior_delta_at,
         wait_for_delivery=wait_for_delivery,
     )
@@ -186,6 +192,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             if not streaming.show_tool_calls:
                 await _flush_phase_boundary_if_needed(streaming, delivery_queue)
                 if chunk.tool is not None:
+                    streaming._warmup_state.clear_terminal_failures()
                     streaming._ensure_hidden_tool_gap()
                 _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue
@@ -204,8 +211,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 delivery_queue,
                 text_chunk,
                 apply_chunk=streaming._append_incremental_text,
-                force_refresh=True,
-                wait_for_delivery=True,
+                boundary_refresh=True,
             )
             continue
         elif isinstance(chunk, ToolCallCompletedEvent):
@@ -349,6 +355,7 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
             merged_request = _DeliveryRequest(
                 progress_hint=merged_request.progress_hint or next_request.progress_hint,
                 force_refresh=merged_request.force_refresh or next_request.force_refresh,
+                boundary_refresh=merged_request.boundary_refresh or next_request.boundary_refresh,
                 phase_boundary_flush=merged_request.phase_boundary_flush or next_request.phase_boundary_flush,
                 allow_empty_progress=merged_request.allow_empty_progress or next_request.allow_empty_progress,
                 prior_delta_at=_merge_prior_delta_at(
@@ -367,6 +374,26 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
                 )
                 if sent:
                     streaming._mark_nonterminal_delivery()
+            elif merged_request.boundary_refresh:
+                current_time = time.time()
+                should_send_boundary_refresh = (
+                    streaming.event_id is None
+                    or streaming.last_boundary_refresh_at is None
+                    or (current_time - streaming.last_boundary_refresh_at) >= streaming.progress_update_interval
+                )
+                if should_send_boundary_refresh:
+                    sent = await streaming._send_or_edit_message(
+                        client,
+                        allow_empty_progress=merged_request.allow_empty_progress,
+                    )
+                    if sent:
+                        streaming._mark_nonterminal_delivery(boundary_refresh=True)
+                else:
+                    await streaming._throttled_send(
+                        client,
+                        progress_hint=True,
+                        prior_delta_at=merged_request.prior_delta_at,
+                    )
             elif not merged_request.phase_boundary_flush:
                 await streaming._throttled_send(
                     client,
