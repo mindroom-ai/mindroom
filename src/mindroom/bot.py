@@ -387,6 +387,7 @@ class AgentBot:
             agent_name=self.agent_name,
             hook_registry_state=self._hook_registry_state,
             hook_send_message=self._hook_send_message,
+            agent_message_snapshot_reader=self._hook_agent_message_snapshot,
         )
         self._knowledge_access_support = KnowledgeAccessSupport(
             runtime=self._runtime_view,
@@ -608,6 +609,11 @@ class AgentBot:
     def startup_thread_prewarm_registry(self, value: StartupThreadPrewarmRegistry | None) -> None:
         """Update the shared startup thread-prewarm room-claim registry."""
         self._runtime_view.startup_thread_prewarm_registry = value
+
+    @property
+    def runtime_started_at(self) -> float:
+        """Return the current runtime freshness boundary for this bot."""
+        return self._runtime_view.runtime_started_at
 
     @property
     def hook_registry(self) -> HookRegistry:
@@ -1564,6 +1570,31 @@ class AgentBot:
             return event_id
         self.logger.error("Failed to send hook message", room_id=room_id, source_hook=source_hook)
         return None
+
+    async def _hook_agent_message_snapshot(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        sender: str,
+        *,
+        runtime_started_at: float | None,
+    ) -> object | None:
+        """Read the latest visible cached sender message for hook helpers."""
+        event_cache = self._runtime_view.event_cache
+        if event_cache is None:
+            self.logger.warning(
+                "Agent-message snapshot requested before event cache is ready",
+                room_id=room_id,
+                thread_id=thread_id,
+                sender=sender,
+            )
+            return None
+        return await event_cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            sender,
+            runtime_started_at=runtime_started_at,
+        )
 
     async def _edit_message(
         self,

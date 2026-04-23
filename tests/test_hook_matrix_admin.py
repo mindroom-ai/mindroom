@@ -16,6 +16,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.hooks import HookContext, HookContextSupport
 from mindroom.hooks.registry import HookRegistry, HookRegistryState
 from mindroom.logging_config import get_logger
+from mindroom.matrix.cache import AgentMessageSnapshot
 from mindroom.orchestrator import MultiAgentOrchestrator
 from tests.conftest import (
     bind_runtime_paths,
@@ -53,6 +54,51 @@ def test_hooks_package_reexports_hook_matrix_admin_api() -> None:
 def test_hook_context_declares_matrix_admin_field() -> None:
     """HookContext should expose a bound matrix admin helper."""
     assert "matrix_admin" in HookContext.__dataclass_fields__
+
+
+def test_hook_context_declares_agent_message_snapshot_reader_field() -> None:
+    """HookContext should expose a bound agent-message snapshot reader."""
+    assert "agent_message_snapshot_reader" in HookContext.__dataclass_fields__
+
+
+@pytest.mark.asyncio
+async def test_hook_context_delegates_latest_agent_message_snapshot_reads(tmp_path: Path) -> None:
+    """HookContext should route latest-agent-message snapshot reads through the bound helper."""
+    config = _config(tmp_path)
+    reader = AsyncMock(
+        return_value=AgentMessageSnapshot(
+            content={"body": "Working...", "msgtype": "m.text"},
+            origin_server_ts=2000,
+        ),
+    )
+    context = HookContext(
+        event_name="message:enrich",
+        plugin_name="workloop",
+        settings={},
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        logger=get_logger("tests.hook_matrix_admin"),
+        correlation_id="corr-snapshot",
+        runtime_started_at=1234.0,
+        agent_message_snapshot_reader=reader,
+    )
+
+    snapshot = await context.get_latest_agent_message_snapshot(
+        "!room:localhost",
+        "@agent:localhost",
+        thread_id="$thread_root",
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={"body": "Working...", "msgtype": "m.text"},
+        origin_server_ts=2000,
+    )
+    reader.assert_awaited_once_with(
+        room_id="!room:localhost",
+        thread_id="$thread_root",
+        sender="@agent:localhost",
+        runtime_started_at=1234.0,
+    )
 
 
 @pytest.mark.asyncio
@@ -141,6 +187,7 @@ def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path:
         client=AsyncMock(spec=nio.AsyncClient),
         orchestrator=orchestrator,
         config=config,
+        runtime_started_at=0.0,
     )
     support = HookContextSupport(
         runtime=runtime,
@@ -167,6 +214,7 @@ def test_hook_context_support_builds_router_matrix_admin_without_orchestrator(tm
         client=AsyncMock(spec=nio.AsyncClient),
         orchestrator=None,
         config=config,
+        runtime_started_at=0.0,
     )
     support = HookContextSupport(
         runtime=runtime,
@@ -196,6 +244,7 @@ def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp
         client=AsyncMock(spec=nio.AsyncClient),
         orchestrator=orchestrator,
         config=config,
+        runtime_started_at=0.0,
     )
     support = HookContextSupport(
         runtime=runtime,
@@ -220,6 +269,7 @@ def test_hook_context_support_returns_none_without_router_matrix_admin(tmp_path:
         client=None,
         orchestrator=None,
         config=config,
+        runtime_started_at=0.0,
     )
     support = HookContextSupport(
         runtime=runtime,

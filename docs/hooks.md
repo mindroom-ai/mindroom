@@ -494,6 +494,7 @@ Every hook context includes these fields:
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
+| `runtime_started_at` | `float \| None` | Unix timestamp for the current runtime freshness boundary, useful when plugin state must ignore cache rows from before the latest bot start |
 | `state_root` | `Path` | Plugin state directory (property) |
 
 Every hook context also exposes the following helpers:
@@ -518,6 +519,12 @@ When `state_key` is `None`, returns a `{state_key: content}` dict of all state e
 Returns `None` when no room state querier is available (e.g. no Matrix client bound).
 When both the current bot and the router can query room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
 Transport exceptions from the underlying Matrix client propagate to the hook.
+
+**`await ctx.get_latest_agent_message_snapshot(room_id, sender, *, thread_id=None)`**
+Returns the latest visible cached `m.room.message` from `sender` in the given room or thread scope.
+The helper automatically applies `ctx.runtime_started_at` so room-level reads ignore visible cache rows from before the current bot runtime.
+It returns `None` when no reader is bound, when the advisory cache is disabled or missing usable rows, or when the sender has no cached message in that scope.
+It raises `AgentMessageSnapshotUnavailable` when a thread snapshot exists but fails the cache freshness contract, such as a stale or invalidated thread cache row.
 
 **`await ctx.put_room_state(room_id, event_type, state_key, content)`**
 Writes a single Matrix room state event and returns `True` on success, `False` on Matrix error response.

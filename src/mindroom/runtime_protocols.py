@@ -43,10 +43,13 @@ class SupportsConfigOrchestrator(SupportsConfig, Protocol):
 
 
 class SupportsClientConfigOrchestrator(SupportsClientConfig, Protocol):
-    """Expose client/config access plus the orchestrator."""
+    """Expose client/config access, orchestrator access, and runtime freshness."""
 
     @property
     def orchestrator(self) -> MultiAgentOrchestrator | None: ...  # noqa: D102
+
+    @property
+    def runtime_started_at(self) -> float: ...  # noqa: D102
 
 
 if TYPE_CHECKING:
