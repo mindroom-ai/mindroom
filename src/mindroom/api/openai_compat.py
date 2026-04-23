@@ -39,7 +39,7 @@ from mindroom.history.runtime import (
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
 )
-from mindroom.knowledge import get_agent_knowledge, initialize_shared_knowledge_managers
+from mindroom.knowledge import KnowledgeAvailability, get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.routing import suggest_agent
@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.config.main import Config
+    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
 
 logger = get_logger(__name__)
 
@@ -638,20 +639,13 @@ async def _resolve_auto_route(
     return routed
 
 
-async def _ensure_knowledge_initialized(config: Config, runtime_paths: RuntimePaths) -> None:
-    """Initialize knowledge managers if needed.
-
-    Safe to call multiple times — `initialize_shared_knowledge_managers` is
-    idempotent and reuses existing managers that match the config.
-    """
-    if not config.knowledge_bases:
-        return
-    await initialize_shared_knowledge_managers(
-        config=config,
-        runtime_paths=runtime_paths,
-        start_watchers=False,
-        reindex_on_create=False,
-    )
+def _request_knowledge_refresh_owner(request: Request) -> KnowledgeRefreshOwner | None:
+    """Return the app-scoped background knowledge refresh owner, if configured."""
+    try:
+        owner = request.app.state.knowledge_refresh_owner
+    except AttributeError:
+        return None
+    return cast("KnowledgeRefreshOwner | None", owner)
 
 
 def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]:
@@ -661,6 +655,31 @@ def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]
         agent=agent_name,
         knowledge_bases=missing_base_ids,
     )
+
+
+def _knowledge_availability_system_message(unavailable_bases: dict[str, KnowledgeAvailability]) -> str | None:
+    """Render one OpenAI-compatible system message for unavailable or stale knowledge."""
+    if not unavailable_bases:
+        return None
+
+    lines: list[str] = []
+    for base_id, availability in sorted(unavailable_bases.items()):
+        if availability is KnowledgeAvailability.INITIALIZING:
+            lines.append(
+                f"Knowledge base `{base_id}` is initializing and unavailable for semantic search this turn. "
+                "Do not claim to have searched it.",
+            )
+        elif availability is KnowledgeAvailability.CONFIG_MISMATCH:
+            lines.append(
+                f"Knowledge base `{base_id}` is refreshing against newer config and may be stale this turn. "
+                "Do not claim to have searched the latest contents.",
+            )
+        elif availability is KnowledgeAvailability.REFRESH_FAILED:
+            lines.append(
+                f"Knowledge base `{base_id}` had a recent refresh failure and may be stale this turn. "
+                "Do not claim to have searched the latest contents.",
+            )
+    return "\n".join(lines) if lines else None
 
 
 # ---------------------------------------------------------------------------
@@ -779,14 +798,7 @@ async def chat_completions(
         thread_id=None,
         resolved_thread_id=None,
     )
-
-    # Initialize shared knowledge managers once per request (idempotent).
-    # `/v1` only supports shared/unscoped agent state today, so private
-    # requester-local knowledge is intentionally out of scope here.
-    try:
-        await _ensure_knowledge_initialized(config, runtime_paths)
-    except Exception:
-        logger.warning("Knowledge initialization failed, proceeding without knowledge", exc_info=True)
+    knowledge_refresh_owner = _request_knowledge_refresh_owner(request)
 
     # Team execution path
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
@@ -818,16 +830,22 @@ async def chat_completions(
                 )
     else:
         # Resolve knowledge base for this agent
+        unavailable_bases: dict[str, KnowledgeAvailability] = {}
         try:
             knowledge = get_agent_knowledge(
                 agent_name,
                 config,
                 runtime_paths,
                 on_missing_bases=_log_missing_knowledge_bases(agent_name),
+                on_unavailable_bases=unavailable_bases.update,
+                refresh_owner=knowledge_refresh_owner,
             )
         except Exception:
             logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
             knowledge = None
+        availability_hint = _knowledge_availability_system_message(unavailable_bases)
+        if availability_hint:
+            prompt = f"{availability_hint}\n\n{prompt}"
         if req.stream:
             response = await _stream_completion(
                 agent_name,

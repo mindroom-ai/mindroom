@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.manager import KnowledgeManager
+    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -131,6 +132,7 @@ def get_agent_knowledge(
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
     on_missing_bases: Callable[[list[str]], None] | None = None,
     on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
     resolved_knowledge: dict[str, tuple[Knowledge | None, KnowledgeAvailability]] = {}
@@ -153,6 +155,11 @@ def get_agent_knowledge(
             shared_manager_lookup=shared_manager_lookup,
             on_availability=_set_availability,
         )
+        if refresh_owner is not None:
+            if availability is KnowledgeAvailability.INITIALIZING:
+                refresh_owner.schedule_initial_load(base_id)
+            elif availability is not KnowledgeAvailability.READY:
+                refresh_owner.schedule_refresh(base_id)
         resolved_knowledge[base_id] = (knowledge, availability)
         return resolved_knowledge[base_id]
 
@@ -181,9 +188,10 @@ class KnowledgeAccessSupport:
         request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     ) -> Knowledge | None:
         """Return the current knowledge assigned to one or more agent bases."""
+        orchestrator = self.runtime.orchestrator
+        refresh_owner = orchestrator.knowledge_refresh_owner if orchestrator is not None else None
 
         def _shared_manager(base_id: str) -> KnowledgeManager | None:
-            orchestrator = self.runtime.orchestrator
             if orchestrator is None:
                 return None
             return orchestrator.knowledge_managers.get(base_id)
@@ -199,6 +207,7 @@ class KnowledgeAccessSupport:
                 agent_name=agent_name,
                 knowledge_bases=missing_base_ids,
             ),
+            refresh_owner=refresh_owner,
         )
 
 

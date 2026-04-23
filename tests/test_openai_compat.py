@@ -3835,7 +3835,6 @@ class TestKnowledgeIntegration:
 
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils._get_knowledge_for_base", return_value=mock_knowledge),
         ):
             mock_ai.return_value = "Response with knowledge"
@@ -3872,7 +3871,7 @@ class TestKnowledgeIntegration:
             runtime_paths: RuntimePaths | None = None,
             request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
             shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
-            execution_identity: ToolExecutionIdentity | None = None,  # noqa: ARG001
+            on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
         ) -> MagicMock | None:
             observed_calls.append((base_id, config, runtime_paths))
             if config is None or runtime_paths is None or base_id != "docs":
@@ -3882,7 +3881,6 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
             TestClient(app) as client,
         ):
@@ -3903,7 +3901,6 @@ class TestKnowledgeIntegration:
         """Knowledge is None when agent has no knowledge_bases."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
         ):
             mock_ai.return_value = "Response"
 
@@ -3917,12 +3914,15 @@ class TestKnowledgeIntegration:
 
         assert mock_ai.call_args.kwargs["knowledge"] is None
 
-    def test_knowledge_initialization_called(self, knowledge_app_client: TestClient) -> None:
-        """_ensure_knowledge_initialized is called for configs with knowledge_bases."""
+    def test_chat_completions_does_not_await_initialize_shared_knowledge_managers(
+        self,
+        knowledge_app_client: TestClient,
+    ) -> None:
+        """Chat completions should not await shared-manager initialization on the request path."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
-                "mindroom.api.openai_compat.initialize_shared_knowledge_managers",
+                "mindroom.knowledge.shared_managers.initialize_shared_knowledge_managers",
                 new_callable=AsyncMock,
             ) as mock_init,
         ):
@@ -3936,15 +3936,42 @@ class TestKnowledgeIntegration:
                 },
             )
 
-        mock_init.assert_awaited_once()
-        assert mock_init.await_args.kwargs["reindex_on_create"] is False
+        assert mock_init.await_count == 0
 
-    def test_knowledge_unavailable_returns_none(self, knowledge_app_client: TestClient) -> None:
-        """When knowledge manager is not found, knowledge is None."""
+    def test_unready_kb_emits_system_hint(self, knowledge_app_client: TestClient) -> None:
+        """Missing published knowledge should inject a system-style degraded hint."""
+        from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
+
+        scheduled_base_ids: list[str] = []
+
+        class _FakeRefreshOwner:
+            def schedule_refresh(self, base_id: str) -> None:
+                scheduled_base_ids.append(f"refresh:{base_id}")
+
+            def schedule_initial_load(self, base_id: str) -> None:
+                scheduled_base_ids.append(base_id)
+
+            def is_refreshing(self, base_id: str) -> bool:
+                _ = base_id
+                return False
+
+        def fake_get_knowledge_for_base(
+            base_id: str,
+            *,
+            config: Config | None = None,  # noqa: ARG001
+            runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
+            request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
+            shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
+            on_availability: Callable[[KnowledgeAvailability], None] | None = None,
+        ) -> None:
+            _ = base_id
+            if on_availability is not None:
+                on_availability(KnowledgeAvailability.INITIALIZING)
+
+        knowledge_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", return_value=None),
+            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
         ):
             mock_ai.return_value = "Response without knowledge"
 
@@ -3958,6 +3985,11 @@ class TestKnowledgeIntegration:
 
         assert response.status_code == 200
         assert mock_ai.call_args.kwargs["knowledge"] is None
+        assert (
+            "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
+            in mock_ai.call_args.kwargs["prompt"]
+        )
+        assert scheduled_base_ids == ["docs"]
 
     def test_streaming_with_knowledge(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is passed through in streaming mode too."""
@@ -3970,7 +4002,6 @@ class TestKnowledgeIntegration:
 
         with (
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
-            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils._get_knowledge_for_base", return_value=mock_knowledge),
         ):
             response = knowledge_app_client.post(
@@ -4016,14 +4047,13 @@ class TestKnowledgeIntegration:
             runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
             request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
             shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
-            execution_identity: ToolExecutionIdentity | None = None,  # noqa: ARG001
+            on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
         ) -> MagicMock | None:
             return {"docs": mock_knowledge_docs, "wiki": mock_knowledge_wiki}.get(base_id)
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
             TestClient(app) as client,
         ):
@@ -4045,13 +4075,12 @@ class TestKnowledgeIntegration:
         assert isinstance(knowledge_arg.vector_db, MultiKnowledgeVectorDb)
         assert knowledge_arg.max_results == 10  # max(5, 10)
 
-    def test_knowledge_init_failure_graceful_fallback(self, knowledge_app_client: TestClient) -> None:
-        """When knowledge initialization fails, request proceeds with knowledge=None."""
+    def test_knowledge_resolution_failure_graceful_fallback(self, knowledge_app_client: TestClient) -> None:
+        """When knowledge resolution fails, request proceeds with knowledge=None."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
-                "mindroom.api.openai_compat.initialize_shared_knowledge_managers",
-                new_callable=AsyncMock,
+                "mindroom.api.openai_compat.get_agent_knowledge",
                 side_effect=RuntimeError("DB connection failed"),
             ),
         ):
