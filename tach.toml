@@ -299,7 +299,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.final_delivery",
     "mindroom.matrix.client_delivery",
-    "mindroom.orchestration.runtime",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
 ]

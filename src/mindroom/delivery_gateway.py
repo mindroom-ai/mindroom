@@ -34,7 +34,6 @@ from mindroom.hooks.types import (
 from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.orchestration.runtime import classify_cancel_source
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import StreamingResponse, build_cancelled_response_update, send_streaming_response
 
@@ -300,7 +299,13 @@ class DeliveryGateway:
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
         """Normalize CancelledError values to the canonical cancellation reason strings."""
-        return cancel_failure_reason(classify_cancel_source(error))
+        if not error.args:
+            return cancel_failure_reason("interrupted")
+        if error.args[0] == "user_stop":
+            return cancel_failure_reason("user_stop")
+        if error.args[0] == "sync_restart":
+            return cancel_failure_reason("sync_restart")
+        return cancel_failure_reason("interrupted")
 
     async def _cleanup_completed_placeholder_only_stream(
         self,
