@@ -128,11 +128,7 @@ class _EventCacheWriteCoordinator:
         return len(self._pending_tasks(tasks))
 
     def _pending_entry_tasks(self, entries: list[_RoomQueueEntry]) -> tuple[_UpdateTask, ...]:
-        tasks = [
-            entry.task
-            for entry in entries
-            if isinstance(entry, _QueuedUpdate) and not entry.task.done()
-        ]
+        tasks = [entry.task for entry in entries if isinstance(entry, _QueuedUpdate) and not entry.task.done()]
         return tuple(dict.fromkeys(tasks))
 
     def _room_pending_tasks(self, room_id: str) -> tuple[_UpdateTask, ...]:

@@ -5619,7 +5619,7 @@ class TestThreadingBehavior:
             )
 
     @pytest.mark.asyncio
-    async def test_run_thread_update_preserves_same_thread_order_across_ignored_cancelled_room_fence(
+    async def test_run_thread_update_preserves_same_thread_order_across_ignored_cancelled_room_fence(  # noqa: PLR0915
         self,
     ) -> None:
         """Ignoring a cancelled room fence must not let a later same-thread update jump the queue."""
