@@ -459,6 +459,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _app.state.knowledge_refresh_owner = knowledge_refresh_owner
     initial_config = _app_context(_app).runtime_config
     if initial_config is not None:
+        # API-only /v1 mode does not keep shared-knowledge refresh running after
+        # this startup bootstrap. Restart the API process to pick up shared-KB changes.
+        # Matrix/orchestrator-managed runtimes keep full background refresh enabled.
         for base_id in sorted(initial_config.knowledge_bases):
             knowledge_refresh_owner.schedule_initial_load(base_id)
 

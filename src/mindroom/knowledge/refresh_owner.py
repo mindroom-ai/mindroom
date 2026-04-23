@@ -60,7 +60,12 @@ class KnowledgeRefreshOwner(Protocol):
 
 @dataclass(slots=True)
 class StandaloneKnowledgeRefreshOwner:
-    """Own shared-knowledge refresh in API-only runtimes with no orchestrator."""
+    """Own shared-knowledge refresh in API-only runtimes with no orchestrator.
+
+    API-only ``/v1`` mode only performs the initial shared-base load at startup.
+    Restart the API process to pick up later shared-knowledge changes.
+    Matrix/orchestrator-managed runtimes keep ongoing background refresh enabled.
+    """
 
     load_config: Callable[[], tuple[Config | None, RuntimePaths]]
     _tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False)
