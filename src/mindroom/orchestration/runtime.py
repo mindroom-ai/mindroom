@@ -145,9 +145,14 @@ class _SyncIteration:
     bot: AgentBot | TeamBot
     sync_task: asyncio.Task[Any] | None
     watchdog_task: asyncio.Task[Any] | None
+    watchdog_cancelled_sync: asyncio.Event = field(default_factory=asyncio.Event)
 
     @staticmethod
-    async def _watch(bot: AgentBot | TeamBot, sync_task: asyncio.Task[Any]) -> None:
+    async def _watch(
+        bot: AgentBot | TeamBot,
+        sync_task: asyncio.Task[Any],
+        watchdog_cancelled_sync: asyncio.Event,
+    ) -> None:
         """Cancel a sync task when it stops reporting successful sync responses.
 
         Before the first ``SyncResponse`` (or ``SyncError``) arrives, the monotonic
@@ -182,6 +187,7 @@ class _SyncIteration:
                     last_sync_time=bot.last_sync_time.isoformat() if bot.last_sync_time is not None else None,
                 )
 
+            watchdog_cancelled_sync.set()
             request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
             with suppress(asyncio.CancelledError):
                 await sync_task
@@ -196,8 +202,9 @@ class _SyncIteration:
         # startup timeout instead of inheriting a stale timestamp from a previous
         # stall/restart cycle.
         bot.reset_watchdog_clock()
+        watchdog_cancelled_sync = asyncio.Event()
         sync_task = asyncio.create_task(bot.sync_forever(), name=f"matrix_sync_{bot.agent_name}")
-        watchdog_coro = cls._watch(bot, sync_task)
+        watchdog_coro = cls._watch(bot, sync_task, watchdog_cancelled_sync)
         try:
             watchdog_task = asyncio.create_task(
                 watchdog_coro,
@@ -207,7 +214,12 @@ class _SyncIteration:
             watchdog_coro.close()
             sync_task.cancel()
             raise
-        return cls(bot=bot, sync_task=sync_task, watchdog_task=watchdog_task)
+        return cls(
+            bot=bot,
+            sync_task=sync_task,
+            watchdog_task=watchdog_task,
+            watchdog_cancelled_sync=watchdog_cancelled_sync,
+        )
 
     async def wait(self) -> None:
         """Wait for the first task to finish and surface the real failure."""
@@ -223,7 +235,8 @@ class _SyncIteration:
                 return
             # Let the watchdog surface its stalled-sync error when it initiated the
             # cancellation; otherwise preserve the original sync-task cancellation.
-            await self.watchdog_task
+            if self.watchdog_cancelled_sync.is_set():
+                await self.watchdog_task
             await self.sync_task
             return
         await self.watchdog_task

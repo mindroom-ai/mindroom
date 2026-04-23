@@ -173,12 +173,17 @@ async def test_sync_forever_with_restart_retries_on_sync_restart_cancel(
             return
         await _FakeBot.sync_forever(bot)
 
-    async def fake_watch(_bot: _FakeBot, sync_task: asyncio.Task[object]) -> None:
+    async def fake_watch(
+        _bot: _FakeBot,
+        sync_task: asyncio.Task[object],
+        watchdog_cancelled_sync: asyncio.Event,
+    ) -> None:
         nonlocal watch_calls
         watch_calls += 1
         if watch_calls == 1:
             msg = "Matrix sync loop stalled for test_agent"
             await asyncio.sleep(0)
+            watchdog_cancelled_sync.set()
             sync_task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
             with suppress(asyncio.CancelledError):
                 await sync_task
@@ -198,6 +203,35 @@ async def test_sync_forever_with_restart_retries_on_sync_restart_cancel(
     assert bot.first_call_cancel_args == (SYNC_RESTART_CANCEL_MSG,)
     assert bot.sync_calls == 1
     assert bot.prepare_for_sync_shutdown_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_iteration_wait_does_not_block_on_unrelated_sync_cancellation() -> None:
+    """Direct sync-task cancellation should surface immediately without waiting for the watchdog."""
+    bot = _FakeBot()
+    watchdog_started = asyncio.Event()
+
+    async def blocked_sync() -> None:
+        await asyncio.Event().wait()
+
+    async def sleeping_watchdog() -> None:
+        watchdog_started.set()
+        await asyncio.sleep(60)
+
+    iteration = _SyncIteration(
+        bot=bot,
+        sync_task=asyncio.create_task(blocked_sync()),
+        watchdog_task=asyncio.create_task(sleeping_watchdog()),
+    )
+
+    await asyncio.wait_for(watchdog_started.wait(), timeout=0.1)
+    assert iteration.sync_task is not None
+    iteration.sync_task.cancel(msg="external_cancel")
+
+    with pytest.raises(asyncio.CancelledError, match="external_cancel"):
+        await asyncio.wait_for(iteration.wait(), timeout=0.05)
+
+    await iteration.cancel()
 
 
 @pytest.mark.asyncio
