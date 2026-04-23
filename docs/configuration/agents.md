@@ -140,7 +140,7 @@ agents:
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
-| `accept_invites` | bool | `true` | Accept authorized inbound Matrix room invites for this agent. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Set to `false` to ignore new invites for this agent. Approval-gated tools still require a router-managed room, so ad-hoc invited rooms only support approval if the router is already joined there |
+| `accept_invites` | bool | `true` | Accept authorized inbound Matrix room invites for this agent. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Set to `false` to ignore new invites for this agent. Approval-gated tools still require the router to be joined to the room, so ad-hoc invited rooms only support approval if the router is already joined there |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |

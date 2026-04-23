@@ -710,6 +710,33 @@ async def test_evaluate_tool_approval_rejects_bad_scripts(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_evaluate_tool_approval_sanitizes_import_failures(tmp_path: Path) -> None:
+    """Import-time script failures should expose only the exception type."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    script_path = tmp_path / "approval_scripts" / "broken_import.py"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text("raise RuntimeError('token sk-secret-123')\n", encoding="utf-8")
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", script="approval_scripts/broken_import.py")],
+        ),
+    )
+
+    with pytest.raises(ToolApprovalScriptError) as exc_info:
+        await evaluate_tool_approval(
+            config,
+            runtime_paths,
+            "run_shell_command",
+            {"command": "echo hi"},
+            "code",
+        )
+
+    assert str(exc_info.value) == (f"Approval script '{script_path}' failed to import with RuntimeError")
+    assert "sk-secret-123" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) -> None:
     """Approvals should send a pending card, wait, then edit it on approval."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1246,7 +1273,8 @@ async def test_request_approval_returns_specific_reason_when_router_transport_is
     assert decision.status == "expired"
     assert decision.reason == (
         "Tool approval requires a router-managed Matrix room. "
-        "Invite the router to this room or retry from a managed room."
+        "Ad-hoc invited rooms accepted via accept_invites do not support approval-gated tools; "
+        "retry from a managed room."
     )
     router_client.room_send.assert_not_awaited()
 
@@ -1877,7 +1905,8 @@ async def test_orchestrator_send_approval_event_raises_when_router_not_joined(tm
         RuntimeError,
         match=(
             r"Tool approval requires a router-managed Matrix room\. "
-            r"Invite the router to this room or retry from a managed room\."
+            r"Ad-hoc invited rooms accepted via accept_invites do not support "
+            r"approval-gated tools; retry from a managed room\."
         ),
     ):
         await orchestrator._send_approval_event(

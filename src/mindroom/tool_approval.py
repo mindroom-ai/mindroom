@@ -44,7 +44,9 @@ _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
 _DEFAULT_RESTART_REASON = "MindRoom restarted before approval completed."
 _DEFAULT_REINITIALIZE_REASON = "MindRoom reinitialized before approval completed."
 _DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
-    "Tool approval requires a router-managed Matrix room. Invite the router to this room or retry from a managed room."
+    "Tool approval requires a router-managed Matrix room. "
+    "Ad-hoc invited rooms accepted via accept_invites do not support approval-gated tools; "
+    "retry from a managed room."
 )
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
@@ -1199,7 +1201,7 @@ def _load_script_module(
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
-        msg = f"Approval script '{resolved_path}' failed to import: {exc!s}"
+        msg = f"Approval script '{resolved_path}' failed to import with {type(exc).__name__}"
         raise ToolApprovalScriptError(msg) from exc
 
     with _SCRIPT_CACHE_LOCK:
