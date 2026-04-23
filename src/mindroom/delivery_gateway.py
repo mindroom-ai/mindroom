@@ -65,7 +65,7 @@ class ResponseHookService:
 
     hook_context: HookContextSupport
 
-    async def apply_before_response(
+    async def apply_before_response(  # noqa: D102
         self,
         *,
         correlation_id: str,
@@ -75,7 +75,6 @@ class ResponseHookService:
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
     ) -> ResponseDraft:
-        """Run message:before_response hooks on one generated response."""
         draft = ResponseDraft(
             response_text=response_text,
             response_kind=response_kind,
@@ -91,7 +90,7 @@ class ResponseHookService:
         )
         return await emit_transform(self.hook_context.registry, EVENT_MESSAGE_BEFORE_RESPONSE, context)
 
-    async def apply_final_response_transform(
+    async def apply_final_response_transform(  # noqa: D102
         self,
         *,
         correlation_id: str,
@@ -99,7 +98,6 @@ class ResponseHookService:
         response_text: str,
         response_kind: str,
     ) -> FinalResponseDraft:
-        """Run message:final_response_transform hooks on one completed streamed response."""
         draft = FinalResponseDraft(
             response_text=response_text,
             response_kind=response_kind,
@@ -107,7 +105,6 @@ class ResponseHookService:
         )
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM):
             return draft
-
         context = FinalResponseTransformContext(
             **self.hook_context.base_kwargs(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM, correlation_id),
             draft=draft,
@@ -118,7 +115,7 @@ class ResponseHookService:
             context,
         )
 
-    async def emit_after_response(
+    async def emit_after_response(  # noqa: D102
         self,
         *,
         correlation_id: str,
@@ -129,10 +126,8 @@ class ResponseHookService:
         response_kind: str,
         continue_on_cancelled: bool = False,
     ) -> None:
-        """Emit message:after_response after the final send or edit succeeds."""
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_AFTER_RESPONSE):
             return
-
         context = AfterResponseContext(
             **self.hook_context.base_kwargs(EVENT_MESSAGE_AFTER_RESPONSE, correlation_id),
             result=ResponseResult(
@@ -150,7 +145,7 @@ class ResponseHookService:
             continue_on_cancelled=continue_on_cancelled,
         )
 
-    async def emit_cancelled_response(
+    async def emit_cancelled_response(  # noqa: D102
         self,
         *,
         correlation_id: str,
@@ -159,10 +154,8 @@ class ResponseHookService:
         response_kind: str = "ai",
         failure_reason: str | None = None,
     ) -> None:
-        """Emit message:cancelled when final delivery does not complete cleanly."""
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_CANCELLED):
             return
-
         context = CancelledResponseContext(
             **self.hook_context.base_kwargs(EVENT_MESSAGE_CANCELLED, correlation_id),
             info=CancelledResponseInfo(
@@ -176,7 +169,6 @@ class ResponseHookService:
 
 
 def _classify_cancel_source(exc: asyncio.CancelledError) -> CancelSource:
-    """Return the visible cancellation provenance for delivery-layer cancellations."""
     if len(exc.args) == 0:
         return "interrupted"
     if exc.args[0] == "user_stop":
@@ -187,9 +179,7 @@ def _classify_cancel_source(exc: asyncio.CancelledError) -> CancelSource:
 
 
 @dataclass(frozen=True)
-class SendTextRequest:
-    """Parameters for one visible Matrix send."""
-
+class SendTextRequest:  # noqa: D101
     target: MessageTarget
     response_text: str
     skip_mentions: bool = False
@@ -198,9 +188,7 @@ class SendTextRequest:
 
 
 @dataclass(frozen=True)
-class EditTextRequest:
-    """Parameters for one Matrix edit."""
-
+class EditTextRequest:  # noqa: D101
     target: MessageTarget
     event_id: str
     new_text: str
@@ -209,9 +197,7 @@ class EditTextRequest:
 
 
 @dataclass(frozen=True)
-class FinalDeliveryRequest:
-    """Parameters for final hook-wrapped response delivery."""
-
+class FinalDeliveryRequest:  # noqa: D101
     target: MessageTarget
     existing_event_id: str | None
     response_text: str

@@ -30,11 +30,107 @@ FinalDeliveryState = Literal[
     "error_without_visible_response",
 ]
 
+_AFTER_RESPONSE = 1
+_CANCELLED_RESPONSE = 2
+_MARK_HANDLED = 4
+_RETRYABLE = 8
+_PERSIST_RESPONSE_IDENTITY = 16
+_QUEUE_THREAD_SUMMARY = 32
+_REGISTER_INTERACTIVE_FOLLOW_UP = 64
+_SHIELD_LATE_FAILURES = 128
+
+_VISIBLE_EVENT = 0
+_RESPONSE_EVENT = 1
+_TURN_COMPLETION_EVENT = 2
+_FLAGS = 3
+
+FinalDeliveryPolicy = tuple[EventIdSource, EventIdSource, EventIdSource, int]
+
+
+FINAL_DELIVERY_POLICY: dict[FinalDeliveryState, FinalDeliveryPolicy] = {
+    "final_visible_delivery": (
+        "final_visible_event",
+        "final_visible_event",
+        "final_visible_event",
+        _AFTER_RESPONSE
+        | _MARK_HANDLED
+        | _PERSIST_RESPONSE_IDENTITY
+        | _QUEUE_THREAD_SUMMARY
+        | _REGISTER_INTERACTIVE_FOLLOW_UP
+        | _SHIELD_LATE_FAILURES,
+    ),
+    "kept_prior_visible_stream_after_completed_terminal_failure": (
+        "last_physical_stream_event",
+        "last_physical_stream_event",
+        "last_physical_stream_event",
+        _CANCELLED_RESPONSE
+        | _MARK_HANDLED
+        | _PERSIST_RESPONSE_IDENTITY
+        | _QUEUE_THREAD_SUMMARY
+        | _REGISTER_INTERACTIVE_FOLLOW_UP
+        | _SHIELD_LATE_FAILURES,
+    ),
+    "kept_prior_visible_stream_after_cancel": (
+        "last_physical_stream_event",
+        "none",
+        "last_physical_stream_event",
+        _CANCELLED_RESPONSE | _RETRYABLE | _SHIELD_LATE_FAILURES,
+    ),
+    "kept_prior_visible_stream_after_error": (
+        "last_physical_stream_event",
+        "last_physical_stream_event",
+        "last_physical_stream_event",
+        _CANCELLED_RESPONSE | _MARK_HANDLED | _PERSIST_RESPONSE_IDENTITY | _SHIELD_LATE_FAILURES,
+    ),
+    "kept_prior_visible_response_after_suppression": (
+        "final_visible_event",
+        "none",
+        "none",
+        _CANCELLED_RESPONSE | _RETRYABLE,
+    ),
+    "kept_prior_visible_response_after_error": (
+        "final_visible_event",
+        "none",
+        "none",
+        _CANCELLED_RESPONSE | _RETRYABLE,
+    ),
+    "cancelled_with_visible_response": (
+        "final_visible_event",
+        "none",
+        "final_visible_event",
+        _CANCELLED_RESPONSE | _RETRYABLE | _SHIELD_LATE_FAILURES,
+    ),
+    "cancelled_with_visible_note": (
+        "final_visible_event",
+        "none",
+        "final_visible_event",
+        _CANCELLED_RESPONSE | _RETRYABLE | _SHIELD_LATE_FAILURES,
+    ),
+    "cancelled_without_visible_response": ("none", "none", "none", _CANCELLED_RESPONSE | _RETRYABLE),
+    "suppressed_without_visible_response": ("none", "none", "none", _CANCELLED_RESPONSE | _MARK_HANDLED),
+    "suppressed_redacted": ("none", "none", "none", _CANCELLED_RESPONSE | _MARK_HANDLED),
+    "suppression_cleanup_failed": (
+        "last_physical_stream_event",
+        "none",
+        "last_physical_stream_event",
+        _CANCELLED_RESPONSE | _MARK_HANDLED | _SHIELD_LATE_FAILURES,
+    ),
+    "error_without_visible_response": ("none", "none", "none", _CANCELLED_RESPONSE | _RETRYABLE),
+}
+
+
+def _copy_dict(value: dict[str, str] | dict[str, Any] | None) -> dict[str, Any] | None:
+    return dict(value) if value else None
+
+
+def _copy_options_list(
+    options_list: tuple[dict[str, str], ...] | list[dict[str, str]] | None,
+) -> tuple[dict[str, str], ...] | None:
+    return tuple(dict(item) for item in options_list) if options_list is not None else None
+
 
 @dataclass(frozen=True)
-class StreamTransportOutcome:
-    """Transport facts emitted by streamed delivery finalization."""
-
+class StreamTransportOutcome:  # noqa: D101
     last_physical_stream_event_id: str | None
     terminal_operation: StreamTerminalOperation
     terminal_result: StreamTerminalResult
@@ -46,14 +142,9 @@ class StreamTransportOutcome:
     option_map: dict[str, str] | None = None
     options_list: tuple[dict[str, str], ...] | None = None
 
-    def __post_init__(self) -> None:
-        """Normalize optional mappings and validate stream delivery invariants."""
-        object.__setattr__(self, "option_map", dict(self.option_map) if self.option_map else None)
-        object.__setattr__(
-            self,
-            "options_list",
-            tuple(dict(item) for item in self.options_list) if self.options_list is not None else None,
-        )
+    def __post_init__(self) -> None:  # noqa: D105
+        object.__setattr__(self, "option_map", _copy_dict(self.option_map))
+        object.__setattr__(self, "options_list", _copy_options_list(self.options_list))
         if self.terminal_result == "not_attempted" and self.terminal_operation != "none":
             msg = "terminal_operation must be 'none' when terminal_result is 'not_attempted'"
             raise ValueError(msg)
@@ -68,226 +159,16 @@ class StreamTransportOutcome:
             raise ValueError(msg)
 
     @property
-    def has_any_physical_stream_event(self) -> bool:
-        """Whether streaming emitted any Matrix event at all."""
+    def has_any_physical_stream_event(self) -> bool:  # noqa: D102
         return self.last_physical_stream_event_id is not None
 
     @property
-    def has_rendered_visible_body(self) -> bool:
-        """Whether the transport ended with a visible response body."""
+    def has_rendered_visible_body(self) -> bool:  # noqa: D102
         return self.visible_body_state == "visible_body"
 
 
 @dataclass(frozen=True)
-class FinalDeliveryPolicy:
-    """Policy knobs derived from each canonical final delivery state."""
-
-    emits_after_response: bool
-    emits_cancelled_response: bool
-    visible_response_event_source: EventIdSource
-    response_identity_event_source: EventIdSource
-    turn_completion_event_source: EventIdSource
-    should_mark_handled: bool
-    retryable: bool
-    should_persist_response_identity: bool
-    should_queue_thread_summary: bool
-    should_register_interactive_follow_up: bool
-    should_shield_late_failures: bool
-
-
-def _policy(
-    emits_after_response: bool,
-    emits_cancelled_response: bool,
-    visible_response_event_source: EventIdSource,
-    response_identity_event_source: EventIdSource,
-    turn_completion_event_source: EventIdSource,
-    should_mark_handled: bool,
-    retryable: bool,
-    should_persist_response_identity: bool,
-    should_queue_thread_summary: bool,
-    should_register_interactive_follow_up: bool,
-    should_shield_late_failures: bool,
-) -> FinalDeliveryPolicy:
-    return FinalDeliveryPolicy(
-        emits_after_response=emits_after_response,
-        emits_cancelled_response=emits_cancelled_response,
-        visible_response_event_source=visible_response_event_source,
-        response_identity_event_source=response_identity_event_source,
-        turn_completion_event_source=turn_completion_event_source,
-        should_mark_handled=should_mark_handled,
-        retryable=retryable,
-        should_persist_response_identity=should_persist_response_identity,
-        should_queue_thread_summary=should_queue_thread_summary,
-        should_register_interactive_follow_up=should_register_interactive_follow_up,
-        should_shield_late_failures=should_shield_late_failures,
-    )
-
-
-FINAL_DELIVERY_POLICY: dict[FinalDeliveryState, FinalDeliveryPolicy] = {
-    "final_visible_delivery": _policy(
-        True,
-        False,
-        "final_visible_event",
-        "final_visible_event",
-        "final_visible_event",
-        True,
-        False,
-        True,
-        True,
-        True,
-        True,
-    ),
-    "kept_prior_visible_stream_after_completed_terminal_failure": _policy(
-        False,
-        True,
-        "last_physical_stream_event",
-        "last_physical_stream_event",
-        "last_physical_stream_event",
-        True,
-        False,
-        True,
-        True,
-        True,
-        True,
-    ),
-    "kept_prior_visible_stream_after_cancel": _policy(
-        False,
-        True,
-        "last_physical_stream_event",
-        "none",
-        "last_physical_stream_event",
-        False,
-        True,
-        False,
-        False,
-        False,
-        True,
-    ),
-    "kept_prior_visible_stream_after_error": _policy(
-        False,
-        True,
-        "last_physical_stream_event",
-        "last_physical_stream_event",
-        "last_physical_stream_event",
-        True,
-        False,
-        True,
-        False,
-        False,
-        True,
-    ),
-    "kept_prior_visible_response_after_suppression": _policy(
-        False,
-        True,
-        "final_visible_event",
-        "none",
-        "none",
-        False,
-        True,
-        False,
-        False,
-        False,
-        False,
-    ),
-    "kept_prior_visible_response_after_error": _policy(
-        False,
-        True,
-        "final_visible_event",
-        "none",
-        "none",
-        False,
-        True,
-        False,
-        False,
-        False,
-        False,
-    ),
-    "cancelled_with_visible_response": _policy(
-        False,
-        True,
-        "final_visible_event",
-        "none",
-        "final_visible_event",
-        False,
-        True,
-        False,
-        False,
-        False,
-        True,
-    ),
-    "cancelled_with_visible_note": _policy(
-        False,
-        True,
-        "final_visible_event",
-        "none",
-        "final_visible_event",
-        False,
-        True,
-        False,
-        False,
-        False,
-        True,
-    ),
-    "cancelled_without_visible_response": _policy(
-        False,
-        True,
-        "none",
-        "none",
-        "none",
-        False,
-        True,
-        False,
-        False,
-        False,
-        False,
-    ),
-    "suppressed_without_visible_response": _policy(
-        False,
-        True,
-        "none",
-        "none",
-        "none",
-        True,
-        False,
-        False,
-        False,
-        False,
-        False,
-    ),
-    "suppressed_redacted": _policy(False, True, "none", "none", "none", True, False, False, False, False, False),
-    "suppression_cleanup_failed": _policy(
-        False,
-        True,
-        "last_physical_stream_event",
-        "none",
-        "last_physical_stream_event",
-        True,
-        False,
-        False,
-        False,
-        False,
-        True,
-    ),
-    "error_without_visible_response": _policy(
-        False,
-        True,
-        "none",
-        "none",
-        "none",
-        False,
-        True,
-        False,
-        False,
-        False,
-        False,
-    ),
-}
-
-
-@dataclass(frozen=True)
-class FinalDeliveryOutcome:
-    """Canonical semantic terminal delivery outcome."""
-
+class FinalDeliveryOutcome:  # noqa: D101
     state: FinalDeliveryState
     terminal_status: TerminalStatus
     final_visible_event_id: str | None
@@ -300,110 +181,94 @@ class FinalDeliveryOutcome:
     option_map: dict[str, str] | None = None
     options_list: tuple[dict[str, str], ...] | None = None
 
-    def __post_init__(self) -> None:
-        """Freeze mutable fields and validate visible-delivery consistency."""
+    def __post_init__(self) -> None:  # noqa: D105
         object.__setattr__(self, "tool_trace", tuple(self.tool_trace))
         object.__setattr__(self, "extra_content", dict(self.extra_content or {}))
-        object.__setattr__(self, "option_map", dict(self.option_map) if self.option_map else None)
-        object.__setattr__(
-            self,
-            "options_list",
-            tuple(dict(item) for item in self.options_list) if self.options_list is not None else None,
-        )
+        object.__setattr__(self, "option_map", _copy_dict(self.option_map))
+        object.__setattr__(self, "options_list", _copy_options_list(self.options_list))
         if self.final_visible_event_id is None and self.delivery_kind is not None:
             msg = "delivery_kind requires final_visible_event_id"
             raise ValueError(msg)
 
-    @property
-    def policy(self) -> FinalDeliveryPolicy:
-        """Return the semantic policy for this outcome state."""
-        return FINAL_DELIVERY_POLICY[self.state]
+    def _policy_value(self, index: int) -> EventIdSource | int:
+        return FINAL_DELIVERY_POLICY[self.state][index]
 
-    def _event_id_from(self, source: EventIdSource) -> str | None:
-        if source == "none":
-            return None
+    def _event_id_from(self, index: int) -> str | None:
+        source = self._policy_value(index)
         if source == "final_visible_event":
             return self.final_visible_event_id
-        return self.last_physical_stream_event_id
+        if source == "last_physical_stream_event":
+            return self.last_physical_stream_event_id
+        return None
+
+    def _flags(self) -> int:
+        return FINAL_DELIVERY_POLICY[self.state][_FLAGS]
+
+    def _has_flag(self, flag: int) -> bool:
+        return bool(self._flags() & flag)
 
     @property
-    def visible_response_event_id(self) -> str | None:
-        """Event ID callers should treat as the visible response."""
-        return self._event_id_from(self.policy.visible_response_event_source)
+    def visible_response_event_id(self) -> str | None:  # noqa: D102
+        return self._event_id_from(_VISIBLE_EVENT)
 
     @property
-    def response_identity_event_id(self) -> str | None:
-        """Event ID that should anchor response identity persistence."""
-        return self._event_id_from(self.policy.response_identity_event_source)
+    def response_identity_event_id(self) -> str | None:  # noqa: D102
+        return self._event_id_from(_RESPONSE_EVENT)
 
     @property
-    def turn_completion_event_id(self) -> str | None:
-        """Event ID that should be recorded as the completed turn artifact."""
-        return self._event_id_from(self.policy.turn_completion_event_source)
+    def turn_completion_event_id(self) -> str | None:  # noqa: D102
+        return self._event_id_from(_TURN_COMPLETION_EVENT)
 
     @property
-    def emits_after_response(self) -> bool:
-        """Whether after-response hooks should run for this outcome."""
-        return self.policy.emits_after_response
+    def emits_after_response(self) -> bool:  # noqa: D102
+        return self._has_flag(_AFTER_RESPONSE)
 
     @property
-    def emits_cancelled_response(self) -> bool:
-        """Whether cancelled-response hooks should run for this outcome."""
-        return self.policy.emits_cancelled_response
+    def emits_cancelled_response(self) -> bool:  # noqa: D102
+        return self._has_flag(_CANCELLED_RESPONSE)
 
     @property
-    def should_mark_handled(self) -> bool:
-        """Whether the source turn should be marked handled."""
-        return self.policy.should_mark_handled
+    def should_mark_handled(self) -> bool:  # noqa: D102
+        return self._has_flag(_MARK_HANDLED)
 
     @property
-    def retryable(self) -> bool:
-        """Whether the caller may safely retry this delivery path."""
-        return self.policy.retryable
+    def retryable(self) -> bool:  # noqa: D102
+        return self._has_flag(_RETRYABLE)
 
     @property
-    def should_persist_response_identity(self) -> bool:
-        """Whether response identity metadata should be persisted."""
-        return self.policy.should_persist_response_identity
+    def should_persist_response_identity(self) -> bool:  # noqa: D102
+        return self._has_flag(_PERSIST_RESPONSE_IDENTITY)
 
     @property
-    def should_queue_thread_summary(self) -> bool:
-        """Whether thread-summary work should run after delivery."""
-        return self.policy.should_queue_thread_summary
+    def should_queue_thread_summary(self) -> bool:  # noqa: D102
+        return self._has_flag(_QUEUE_THREAD_SUMMARY)
 
     @property
-    def should_register_interactive_follow_up(self) -> bool:
-        """Whether interactive follow-up state should be registered."""
-        return self.policy.should_register_interactive_follow_up
+    def should_register_interactive_follow_up(self) -> bool:  # noqa: D102
+        return self._has_flag(_REGISTER_INTERACTIVE_FOLLOW_UP)
 
     @property
-    def should_shield_late_failures(self) -> bool:
-        """Whether late hook failures should be downgraded to logging."""
-        return self.policy.should_shield_late_failures
+    def should_shield_late_failures(self) -> bool:  # noqa: D102
+        return self._has_flag(_SHIELD_LATE_FAILURES)
 
     @property
-    def has_final_visible_delivery(self) -> bool:
-        """Whether this outcome produced the final visible response."""
+    def has_final_visible_delivery(self) -> bool:  # noqa: D102
         return self.state == "final_visible_delivery"
 
     @property
-    def has_any_visible_response(self) -> bool:
-        """Whether any visible response remains associated with the turn."""
+    def has_any_visible_response(self) -> bool:  # noqa: D102
         return self.visible_response_event_id is not None
 
     @property
-    def event_id(self) -> str | None:
-        """Compatibility alias for the visible response event ID."""
+    def event_id(self) -> str | None:  # noqa: D102
         return self.visible_response_event_id
 
     @property
-    def response_text(self) -> str:
-        """Compatibility alias for the final visible response body."""
+    def response_text(self) -> str:  # noqa: D102
         return self.final_visible_body or ""
 
     @property
-    def suppressed(self) -> bool:
-        """Whether delivery ended in a suppression state."""
+    def suppressed(self) -> bool:  # noqa: D102
         return self.state in {
             "kept_prior_visible_response_after_suppression",
             "suppressed_without_visible_response",
