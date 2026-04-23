@@ -545,6 +545,11 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
                 _hook_matrix_admin=MagicMock(return_value=object()),
                 _hook_room_state_querier=MagicMock(return_value=None),
                 _hook_room_state_putter=MagicMock(return_value=None),
+                knowledge_refresh_owner=SimpleNamespace(
+                    schedule_refresh=lambda _base_id: None,
+                    schedule_initial_load=lambda _base_id: None,
+                    is_refreshing=lambda _base_id: False,
+                ),
             ),
         )
 
