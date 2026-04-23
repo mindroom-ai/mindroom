@@ -57,7 +57,6 @@ from mindroom.delivery_gateway import (
     DeliveryGateway,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
-    _late_delivery_failure_outcome,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome, TurnDeliveryResolution
 from mindroom.handled_turns import HandledTurnState
@@ -106,7 +105,6 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
-    _late_stream_finalize_preserved_outcome,
     _merge_response_extra_content,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
@@ -3141,144 +3139,6 @@ class TestAgentBot:
         assert delivery.response_identity_event_id is None
         assert delivery.should_mark_handled is False
         assert delivery.retryable is True
-
-    def test_failed_placeholder_edit_does_not_preserve_response_identity(self) -> None:
-        """A failed placeholder edit must not preserve a response identity."""
-        outcome = _late_delivery_failure_outcome(
-            tracked_event_id="$placeholder",
-            existing_event_id="$placeholder",
-            existing_event_is_placeholder=True,
-            placeholder_event_id=None,
-            failure_reason="delivery_failed",
-            tracked_event_was_visible=False,
-        )
-
-        assert outcome.response_identity_event_id is None
-
-    def test_late_failure_after_visible_placeholder_edit_preserves_visible_stream(self) -> None:
-        """A late failure after a visible placeholder edit must preserve the visible streamed reply."""
-        outcome = _late_delivery_failure_outcome(
-            tracked_event_id="$placeholder",
-            existing_event_id="$placeholder",
-            existing_event_is_placeholder=True,
-            placeholder_event_id=None,
-            failure_reason="late_finalize_exception",
-            tracked_event_was_visible=True,
-        )
-
-        assert outcome.state == "kept_prior_visible_stream_after_error"
-        assert outcome.visible_response_event_id == "$placeholder"
-        assert outcome.response_identity_event_id == "$placeholder"
-
-    def test_missing_delivery_preserves_visible_stream_error_state(self) -> None:
-        """Late exceptions after a visible stream lands must preserve the visible stream event."""
-        outcome = _late_delivery_failure_outcome(
-            tracked_event_id="$stream",
-            existing_event_id=None,
-            existing_event_is_placeholder=False,
-            placeholder_event_id=None,
-            failure_reason="late_finalize_exception",
-            tracked_event_was_visible=True,
-        )
-
-        assert outcome.state == "kept_prior_visible_stream_after_error"
-        assert outcome.visible_response_event_id == "$stream"
-
-    @pytest.mark.parametrize(
-        ("failure_reason", "expected_state"),
-        [
-            ("plain boom", "error_without_visible_response"),
-            ("cancelled_by_user", "cancelled_without_visible_response"),
-        ],
-    )
-    def test_missing_delivery_after_placeholder_does_not_promote_placeholder_to_visible_response(
-        self,
-        failure_reason: str,
-        expected_state: str,
-    ) -> None:
-        """A leaked placeholder id must not become the canonical visible terminal response."""
-        outcome = _late_delivery_failure_outcome(
-            tracked_event_id="$thinking",
-            existing_event_id=None,
-            existing_event_is_placeholder=False,
-            placeholder_event_id="$thinking",
-            failure_reason=failure_reason,
-            tracked_event_was_visible=False,
-        )
-
-        assert outcome.state == expected_state
-        assert outcome.visible_response_event_id is None
-        assert outcome.response_identity_event_id is None
-        assert outcome.should_mark_handled is False
-
-    def test_late_stream_finalize_preserved_outcome_uses_cancel_state(self) -> None:
-        """Late streamed-finalization cancellation must preserve the cancel-specific policy row."""
-        outcome = _late_stream_finalize_preserved_outcome(
-            transport_outcome=StreamTransportOutcome(
-                last_physical_stream_event_id="$stream",
-                terminal_operation="edit",
-                terminal_result="cancelled",
-                terminal_status="cancelled",
-                rendered_body="partial",
-                visible_body_state="visible_body",
-                failure_reason="cancelled_by_user",
-            ),
-            failure_reason="cancelled_by_user",
-            cancelled=True,
-        )
-
-        assert outcome is not None
-        assert outcome.state == "kept_prior_visible_stream_after_cancel"
-        assert outcome.response_identity_event_id is None
-        assert outcome.should_queue_thread_summary is False
-
-    def test_late_stream_finalize_preserved_outcome_uses_error_state(self) -> None:
-        """Late streamed-finalization errors must preserve the error-specific policy row."""
-        outcome = _late_stream_finalize_preserved_outcome(
-            transport_outcome=StreamTransportOutcome(
-                last_physical_stream_event_id="$stream",
-                terminal_operation="edit",
-                terminal_result="succeeded",
-                terminal_status="completed",
-                rendered_body="partial",
-                visible_body_state="visible_body",
-                failure_reason=None,
-            ),
-            failure_reason="hook crashed",
-            cancelled=False,
-        )
-
-        assert outcome is not None
-        assert outcome.state == "kept_prior_visible_stream_after_error"
-        assert outcome.response_identity_event_id == "$stream"
-
-    def test_late_delivery_failure_reason_with_cancel_substring_stays_error(self) -> None:
-        """Ordinary errors mentioning cancel must not flip into cancelled policy rows."""
-        outcome = _late_delivery_failure_outcome(
-            tracked_event_id=None,
-            existing_event_id=None,
-            existing_event_is_placeholder=False,
-            placeholder_event_id=None,
-            failure_reason="failed to cancel old task before replacement",
-            tracked_event_was_visible=False,
-        )
-
-        assert outcome.state == "error_without_visible_response"
-        assert outcome.should_mark_handled is False
-
-    def test_missing_delivery_after_visible_placeholder_send_preserves_visible_stream(self) -> None:
-        """A late failure must preserve visible streamed content even when the event id is still the original send."""
-        outcome = _late_delivery_failure_outcome(
-            tracked_event_id="$thinking",
-            existing_event_id=None,
-            existing_event_is_placeholder=False,
-            placeholder_event_id="$thinking",
-            failure_reason="late_finalize_exception",
-            tracked_event_was_visible=True,
-        )
-
-        assert outcome.state == "kept_prior_visible_stream_after_error"
-        assert outcome.visible_response_event_id == "$thinking"
 
     def test_response_outcome_prefers_terminal_status_over_delivery_kind(self) -> None:
         """Pipeline outcome summaries must not report cancelled or error states as plain send/edit success."""

@@ -97,7 +97,10 @@ async def enrich_with_calendar(ctx):
 ### Transformer (`emit_transform`)
 
 Hooks run serially.
-Each hook receives a mutable `ResponseDraft` and may modify or replace it.
+`message:before_response` receives a mutable `ResponseDraft`.
+`message:final_response_transform` receives a mutable `FinalResponseDraft`.
+Both hooks may replace `draft.response_text`.
+Only `message:before_response` may suppress the reply.
 Failures skip that hook's changes; the previous draft continues to the next hook.
 
 ```python
@@ -112,6 +115,11 @@ async def add_disclaimer(ctx):
 @hook("message:before_response", priority=20)
 async def redact_secrets(ctx):
     ctx.draft.response_text = scrub_api_keys(ctx.draft.response_text)
+
+
+@hook("message:final_response_transform", priority=10)
+async def add_links(ctx):
+    ctx.draft.response_text = linkify_references(ctx.draft.response_text)
 ```
 
 ### Gate (`emit_gate`)
@@ -138,9 +146,10 @@ async def block_secret_reads(ctx):
 | `message:received` | Observer | `MessageReceivedContext` | After authorization, dedup, and voice normalization; before command parsing, routing, and image/file/video attachment registration | `suppress` |
 | `message:enrich` | Collector | `MessageEnrichContext` | After routing resolves target agent/team; before AI generation | `add_metadata()` |
 | `system:enrich` | Collector | `SystemEnrichContext` | After message enrichment; before AI generation | `add_instruction()` |
-| `message:before_response` | Transformer | `BeforeResponseContext` | After AI generation; before Matrix send (streaming: after stream completes, before final edit) | `draft.response_text`, `draft.suppress` |
+| `message:before_response` | Transformer | `BeforeResponseContext` | After AI generation; before the first visible Matrix send or edit | `draft.response_text`, `draft.suppress` |
+| `message:final_response_transform` | Transformer | `FinalResponseTransformContext` | On clean streamed success after real visible assistant text has already landed, before one best-effort final edit | `draft.response_text` |
 | `message:after_response` | Observer | `AfterResponseContext` | After final Matrix send or edit | None (frozen) |
-| `message:cancelled` | Observer | `CancelledResponseContext` | After final delivery ends without a clean completed visible response, including explicit cancellation and terminal delivery failure recovery | None (frozen) |
+| `message:cancelled` | Observer | `CancelledResponseContext` | After any terminal outcome other than clean success, including explicit cancellation, interruption, suppression, and delivery-failure recovery | None (frozen) |
 | `agent:started` | Observer | `AgentLifecycleContext` | After bot starts (Matrix login, presence, callbacks registered) | None (frozen) |
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None (frozen) |
 | `bot:ready` | Observer | `AgentLifecycleContext` | After bot completes room joins and initial sync | None (frozen) |
@@ -153,12 +162,15 @@ async def block_secret_reads(ctx):
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
 
-`message:before_response` only runs for AI-generated replies.
+`message:before_response` only runs for AI-generated replies before the first real visible assistant text is sent.
+For streaming replies, once real visible assistant text has landed, `message:before_response` does not receive a post-visible finalize pass.
+Use `message:final_response_transform` for one text-only best-effort replacement on clean streamed success.
+`message:final_response_transform` may not suppress, redact, delete, or mutate response metadata.
 System-style replies such as command confirmations, routing rejections, dispatch-failure error messages, and team-resolution fallback messages are delivered as `response_kind="system"` and may emit `message:after_response` or `message:cancelled` without a preceding `message:before_response`.
 
 For `compaction:before` and `compaction:after`, `ctx.messages` contains raw `agno.models.message.Message` objects from the compacted session payload.
 MindRoom does not sanitize attachments, media, tool calls, tool args, provider metadata, citations, reasoning fields, metrics, references, or extra Pydantic fields before these hooks run.
-For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation from streaming or delivery failure recovery.
+For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
 
 ### Default timeouts
 
@@ -168,6 +180,7 @@ For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explic
 | `message:enrich` | 2000 |
 | `system:enrich` | 2000 |
 | `message:before_response` | 200 |
+| `message:final_response_transform` | 200 |
 | `message:after_response` | 3000 |
 | `message:cancelled` | 3000 |
 | `reaction:received` | 500 |
@@ -567,6 +580,12 @@ ResponseDraft(
     extra_content: dict[str, Any] | None,
     envelope: MessageEnvelope,
     suppress: bool = False,
+)
+
+FinalResponseDraft(
+    response_text: str,
+    response_kind: str,  # "ai", "team", "router", "system"
+    envelope: MessageEnvelope,
 )
 
 ResponseResult(

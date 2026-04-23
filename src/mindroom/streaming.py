@@ -398,13 +398,18 @@ class StreamingResponse:
     ) -> _TerminalStreamStatus:
         """Apply terminal text adjustments and return the terminal stream status."""
         ai_run_payload = self.extra_content.get(AI_RUN_METADATA_KEY) if self.extra_content is not None else None
+        resolved_cancel_source = cancel_source
+        if resolved_cancel_source is None:
+            if restart_interrupted:
+                resolved_cancel_source = "sync_restart"
+            elif cancelled:
+                resolved_cancel_source = "user_stop"
         observed_nonvisible_activity = (
             self.observed_reasoning_content or self.observed_tool_calls > 0 or self.placeholder_progress_sent
         )
         no_visible_text_error = (
             error is None
-            and not restart_interrupted
-            and not cancelled
+            and resolved_cancel_source is None
             and not self.accumulated_text.strip()
             and observed_nonvisible_activity
         )
@@ -420,12 +425,6 @@ class StreamingResponse:
             error_note = _format_stream_error_note(error)
             self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
             return STREAM_STATUS_ERROR
-        resolved_cancel_source = cancel_source
-        if resolved_cancel_source is None:
-            if restart_interrupted:
-                resolved_cancel_source = "sync_restart"
-            elif cancelled:
-                resolved_cancel_source = "user_stop"
         if resolved_cancel_source is not None:
             self.accumulated_text, stream_status = build_cancelled_response_update(
                 self.accumulated_text,

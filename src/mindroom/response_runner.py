@@ -175,6 +175,15 @@ def _cancel_failure_reason(cancel_source: CancelSource) -> str:
     return "interrupted"
 
 
+class HandledCancelledResponse(asyncio.CancelledError):
+    """Preserve a terminal outcome when cancellation must still propagate upward."""
+
+    def __init__(self, error: asyncio.CancelledError, *, final_delivery_outcome: FinalDeliveryOutcome) -> None:
+        super().__init__(*error.args)
+        self.error = error
+        self.final_delivery_outcome = final_delivery_outcome
+
+
 def _stream_transport_outcome_from_delivery_exception(
     *,
     error: StreamingDeliveryError | StreamingDeliveryCancelled,
@@ -208,35 +217,6 @@ def _stream_transport_outcome_from_delivery_exception(
         rendered_body=rendered_body,
         visible_body_state=visible_body_state,
         failure_reason=failure_reason,
-    )
-
-
-def _late_stream_finalize_preserved_outcome(
-    *,
-    transport_outcome: StreamTransportOutcome,
-    failure_reason: str,
-    cancelled: bool,
-) -> FinalDeliveryOutcome | None:
-    """Preserve one already-visible streamed reply when finalization fails late."""
-    if (
-        transport_outcome.last_physical_stream_event_id is None
-        or transport_outcome.visible_body_state != "visible_body"
-    ):
-        return None
-    if cancelled:
-        return FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
-            last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
-            final_visible_body=transport_outcome.rendered_body,
-            failure_reason=failure_reason,
-            option_map=transport_outcome.option_map,
-            options_list=transport_outcome.options_list,
-        )
-    return FinalDeliveryOutcome.keep_prior_visible_stream_after_error(
-        last_physical_stream_event_id=transport_outcome.last_physical_stream_event_id,
-        final_visible_body=transport_outcome.rendered_body,
-        failure_reason=failure_reason,
-        option_map=transport_outcome.option_map,
-        options_list=transport_outcome.options_list,
     )
 
 
@@ -560,6 +540,7 @@ class ResponseRunner:
         normalized_reason = (failure_reason or "").strip().lower()
         return normalized_reason in {
             "cancelled_by_user",
+            "interrupted",
             "sync_restart_cancelled",
             "stream_finalize_cancelled",
             "terminal_update_cancelled",
@@ -2206,7 +2187,7 @@ class ResponseRunner:
             )
             raise
 
-    async def process_and_respond(  # noqa: C901
+    async def process_and_respond(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2288,7 +2269,7 @@ class ResponseRunner:
                 interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
             )
             if request.existing_event_id:
-                return await self.deps.delivery_gateway.deliver_cancelled_visible_note(
+                outcome = await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                     CancelledVisibleNoteRequest(
                         target=runtime.resolved_target,
                         event_id=request.existing_event_id,
@@ -2299,14 +2280,18 @@ class ResponseRunner:
                         correlation_id=correlation_id,
                     ),
                 )
-            return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
-                outcome=FinalDeliveryOutcome.cancelled_without_visible_response(
-                    failure_reason=_cancel_failure_reason(cancel_source),
-                ),
-                correlation_id=correlation_id,
-                envelope=response_envelope,
-                response_kind=response_kind,
-            )
+            else:
+                outcome = await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
+                    outcome=FinalDeliveryOutcome.cancelled_without_visible_response(
+                        failure_reason=_cancel_failure_reason(cancel_source),
+                    ),
+                    correlation_id=correlation_id,
+                    envelope=response_envelope,
+                    response_kind=response_kind,
+                )
+            if cancel_source == "user_stop":
+                raise HandledCancelledResponse(exc, final_delivery_outcome=outcome) from exc
+            return outcome
         except Exception as error:
             self.deps.logger.exception("Error in non-streaming response", error=str(error))
             raise
@@ -2349,7 +2334,7 @@ class ResponseRunner:
             compaction_outcomes_collector.extend(compaction_outcomes)
         return delivery
 
-    async def process_and_respond_streaming(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2432,6 +2417,9 @@ class ResponseRunner:
                 error=error,
                 existing_event_id=request.existing_event_id,
             )
+            cancel_source = (
+                classify_cancel_source(error.error) if isinstance(error, StreamingDeliveryCancelled) else None
+            )
             if stream_transport_outcome.terminal_status == "cancelled":
                 if stream_transport_outcome.failure_reason == "sync_restart_cancelled":
                     self.deps.logger.info(
@@ -2467,7 +2455,7 @@ class ResponseRunner:
                 run_metadata_content,
                 request.attachment_ids,
             )
-            return await self.deps.delivery_gateway.finalize_streamed_response(
+            outcome = await self.deps.delivery_gateway.finalize_streamed_response(
                 FinalizeStreamedResponseRequest(
                     target=runtime.resolved_target,
                     stream_transport_outcome=stream_transport_outcome,
@@ -2481,6 +2469,9 @@ class ResponseRunner:
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
+            if cancel_source == "user_stop" and isinstance(error, StreamingDeliveryCancelled):
+                raise HandledCancelledResponse(error, final_delivery_outcome=outcome) from error
+            return outcome
         except asyncio.CancelledError as exc:
             self._log_cancelled_response(
                 exc=exc,
@@ -2492,29 +2483,22 @@ class ResponseRunner:
             raise
         except Exception as error:
             self.deps.logger.exception("Error in streaming response", error=str(error))
-            late_outcome = (
-                _late_stream_finalize_preserved_outcome(
-                    transport_outcome=transport_outcome,
-                    failure_reason=str(error),
-                    cancelled=False,
-                )
-                if transport_outcome is not None
-                else None
-            )
-            if late_outcome is not None:
-                return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
-                    outcome=late_outcome,
-                    correlation_id=correlation_id,
-                    envelope=response_envelope,
-                    response_kind=response_kind,
-                )
-            return await self.deps.delivery_gateway.emit_terminal_outcome_hooks(
-                outcome=FinalDeliveryOutcome.error_without_visible_response(
-                    failure_reason=str(error),
-                ),
-                correlation_id=correlation_id,
-                envelope=response_envelope,
+            return await self._resolve_raw_late_stream_failure(
+                target=runtime.resolved_target,
+                tracked_event_id=request.existing_event_id,
+                stream_state=local_stream_state,
+                existing_event_id=request.existing_event_id,
+                existing_event_is_placeholder=request.existing_event_is_placeholder,
+                placeholder_event_id=request.existing_event_id if request.existing_event_is_placeholder else None,
+                failure_reason=str(error),
                 response_kind=response_kind,
+                response_envelope=response_envelope,
+                correlation_id=correlation_id,
+                tool_trace=tool_trace if self._show_tool_calls() else None,
+                extra_content=_merge_response_extra_content(
+                    run_metadata_content,
+                    request.attachment_ids,
+                ),
             )
 
         response_extra_content = _merge_response_extra_content(
@@ -2738,23 +2722,27 @@ class ResponseRunner:
             if message_id is not None:
                 tracked_event_id = message_id
             delivery_request = self._request_for_delivery(normalized_request, message_id=message_id)
-            if use_streaming:
-                final_delivery_outcome = await self.process_and_respond_streaming(
-                    delivery_request,
-                    run_id=response_run_id,
-                    compaction_outcomes_collector=compaction_outcomes,
-                    on_delivery_started=note_delivery_started,
-                    stream_state=stream_state,
-                    tool_trace_collector=tool_trace,
-                    run_metadata_content_collector=run_metadata_content,
-                )
-            else:
-                final_delivery_outcome = await self.process_and_respond(
-                    delivery_request,
-                    run_id=response_run_id,
-                    compaction_outcomes_collector=compaction_outcomes,
-                    on_delivery_started=note_delivery_started,
-                )
+            try:
+                if use_streaming:
+                    final_delivery_outcome = await self.process_and_respond_streaming(
+                        delivery_request,
+                        run_id=response_run_id,
+                        compaction_outcomes_collector=compaction_outcomes,
+                        on_delivery_started=note_delivery_started,
+                        stream_state=stream_state,
+                        tool_trace_collector=tool_trace,
+                        run_metadata_content_collector=run_metadata_content,
+                    )
+                else:
+                    final_delivery_outcome = await self.process_and_respond(
+                        delivery_request,
+                        run_id=response_run_id,
+                        compaction_outcomes_collector=compaction_outcomes,
+                        on_delivery_started=note_delivery_started,
+                    )
+            except HandledCancelledResponse as error:
+                final_delivery_outcome = error.final_delivery_outcome
+                raise
 
         thinking_msg = None
         if not request.existing_event_id:

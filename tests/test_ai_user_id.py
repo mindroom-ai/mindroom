@@ -450,7 +450,7 @@ def _build_response_runner(  # noqa: C901, PLR0915
         event_id = transport_outcome.last_physical_stream_event_id
         has_visible_body = transport_outcome.visible_body_state == "visible_body" and event_id is not None
         if transport_outcome.visible_body_state == "placeholder_only":
-            return (
+            outcome = (
                 FinalDeliveryOutcome.cancelled_without_visible_response(
                     failure_reason=request.failure_reason,
                 )
@@ -459,8 +459,8 @@ def _build_response_runner(  # noqa: C901, PLR0915
                     failure_reason=request.failure_reason,
                 )
             )
-        if has_visible_body:
-            return (
+        elif has_visible_body:
+            outcome = (
                 FinalDeliveryOutcome.keep_prior_visible_stream_after_cancel(
                     last_physical_stream_event_id=event_id,
                     final_visible_body=body,
@@ -477,14 +477,21 @@ def _build_response_runner(  # noqa: C901, PLR0915
                     options_list=transport_outcome.options_list,
                 )
             )
-        return (
-            FinalDeliveryOutcome.cancelled_without_visible_response(
-                failure_reason=request.failure_reason,
+        else:
+            outcome = (
+                FinalDeliveryOutcome.cancelled_without_visible_response(
+                    failure_reason=request.failure_reason,
+                )
+                if request.cancelled
+                else FinalDeliveryOutcome.error_without_visible_response(
+                    failure_reason=request.failure_reason,
+                )
             )
-            if request.cancelled
-            else FinalDeliveryOutcome.error_without_visible_response(
-                failure_reason=request.failure_reason,
-            )
+        return await _default_emit_terminal_outcome_hooks(
+            outcome=outcome,
+            correlation_id=request.correlation_id,
+            envelope=request.response_envelope,
+            response_kind=request.response_kind,
         )
 
     def _open_test_storage(storage: object | None) -> object:
