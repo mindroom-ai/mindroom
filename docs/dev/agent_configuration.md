@@ -356,6 +356,7 @@ defaults:
   show_tool_calls: true
   allow_self_config: false
   max_preload_chars: 50000  # Hard cap for context_files preload
+  thread_summary_temperature: 0.2  # Set null to omit temperature and use provider defaults
   thread_summary_first_threshold: 1  # First automatic thread summary after 1 message
   thread_summary_subsequent_interval: 10  # Re-summarize after each additional 10 messages
   # num_history_runs: null  # Default: all
@@ -364,6 +365,9 @@ defaults:
   # worker_tools: null  # Default: use built-in routing policy
   # worker_scope: null  # Default: no worker scoping
 ```
+
+Automatic thread summaries use `defaults.thread_summary_temperature` when the selected provider supports runtime temperature overrides.
+MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 
 ## Room Configuration
 

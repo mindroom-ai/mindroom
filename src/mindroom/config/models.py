@@ -379,6 +379,14 @@ class DefaultsConfig(BaseModel):
         default=None,
         description="Model config name for generating thread summaries (e.g., 'haiku'). Uses 'default' if not set.",
     )
+    thread_summary_temperature: float | None = Field(
+        default=0.2,
+        description=(
+            "Temperature override for automatic thread summaries. "
+            "Set to null to omit temperature and use provider defaults. "
+            "MindRoom always omits temperature for Vertex Claude thread summaries."
+        ),
+    )
     thread_summary_first_threshold: int = Field(
         default=1,
         ge=1,
