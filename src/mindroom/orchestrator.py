@@ -1240,6 +1240,7 @@ class MultiAgentOrchestrator:
             sender=self._send_approval_event,
             editor=self._edit_approval_event,
             recoverer=self._recover_approval_event_id,
+            runtime_loop=self._runtime_loop,
         )
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)

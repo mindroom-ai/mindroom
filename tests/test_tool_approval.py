@@ -1941,6 +1941,76 @@ async def test_failed_resolved_edit_is_retried_at_runtime(
 
 
 @pytest.mark.asyncio
+async def test_unsynced_resolution_retry_survives_sync_tool_loop_death(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sync-tool retries should stay alive on the runtime loop after the worker loop exits."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr(tool_approval_module, "_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS", 0.01)
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock(side_effect=[RuntimeError("boom"), True])
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        runtime_loop=asyncio.get_running_loop(),
+    )
+    result: ApprovalDecision | None = None
+    error: BaseException | None = None
+
+    def worker() -> None:
+        nonlocal result, error
+        try:
+            result = asyncio.run(
+                store.request_approval(
+                    tool_name="run_shell_command",
+                    arguments={"command": "echo hi"},
+                    agent_name="code",
+                    room_id="!room:localhost",
+                    thread_id="$thread",
+                    requester_id="@user:localhost",
+                    approver_user_id="@user:localhost",
+                    matched_rule="run_shell_*",
+                    script_path=None,
+                    timeout_seconds=0.01,
+                ),
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            error = exc
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+
+    async with asyncio.timeout(1):
+        while True:
+            pending = store.anchored_request_for_event(
+                approval_event_id="$approval",
+                room_id="!room:localhost",
+            )
+            if pending is not None:
+                break
+            await asyncio.sleep(0)
+
+    await asyncio.to_thread(thread.join, 1)
+
+    assert error is None
+    assert not thread.is_alive()
+    assert result is not None
+    assert result.status == "expired"
+
+    def _wait_for_resolution_sync() -> bool:
+        deadline = time.monotonic() + 1
+        while pending.resolution_synced_at is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return pending.resolution_synced_at is not None
+
+    assert await asyncio.to_thread(_wait_for_resolution_sync)
+    assert editor.await_count == 2
+    assert pending.resolution_synced_at is not None
+
+
+@pytest.mark.asyncio
 async def test_sync_unsynced_approval_event_resolutions_claim_one_replay_under_concurrency(tmp_path: Path) -> None:
     """Concurrent replay workers should claim each approval once before editing."""
     runtime_paths = test_runtime_paths(tmp_path)

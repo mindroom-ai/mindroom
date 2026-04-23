@@ -345,7 +345,8 @@ class ApprovalManager:
         self._pending_send_completion: dict[str, asyncio.Event] = {}
         self._pending_send_room_index: dict[str, set[str]] = {}
         self._replay_in_progress: set[str] = set()
-        self._unsynced_resolution_retry_task: asyncio.Task[None] | None = None
+        self._runtime_loop: asyncio.AbstractEventLoop | None = None
+        self._unsynced_resolution_retry_task: asyncio.Task[None] | Future[None] | None = None
         self._allow_unsynced_resolution_retries = True
         self._load_existing()
 
@@ -552,13 +553,33 @@ class ApprovalManager:
                 for approval in self._requests_by_id.values()
             )
 
+    def _has_unconfirmed_deliveries(self) -> bool:
+        with self._state_lock:
+            return any(
+                approval.status != "pending"
+                and approval.room_id is not None
+                and approval.event_id is None
+                and approval.resolution_synced_at is None
+                for approval in self._requests_by_id.values()
+            )
+
+    def _has_unsynced_resolution_work(self) -> bool:
+        return self._has_unsynced_resolved() or self._has_unconfirmed_deliveries()
+
+    def list_unsynced_resolved_in_rooms(self, room_ids: set[str]) -> list[PendingApproval]:
+        """Return resolved approvals in the given rooms whose Matrix cards still need one edit."""
+        return [approval for approval in self.list_unsynced_resolved() if approval.room_id in room_ids]
+
     def _ensure_unsynced_resolution_retry_task(self) -> None:
-        if not self._has_unsynced_resolved():
+        if not self._has_unsynced_resolution_work():
+            return
+        runtime_loop = self._runtime_loop
+        if runtime_loop is None or runtime_loop.is_closed():
             return
         try:
-            running_loop = asyncio.get_running_loop()
+            current_loop = asyncio.get_running_loop()
         except RuntimeError:
-            return
+            current_loop = None
 
         with self._state_lock:
             if not self._allow_unsynced_resolution_retries:
@@ -566,23 +587,32 @@ class ApprovalManager:
             existing_task = self._unsynced_resolution_retry_task
             if existing_task is not None and not existing_task.done():
                 return
-            self._unsynced_resolution_retry_task = running_loop.create_task(
-                self._run_unsynced_resolution_retry_loop(),
-            )
+            if current_loop is runtime_loop:
+                self._unsynced_resolution_retry_task = runtime_loop.create_task(
+                    self._run_unsynced_resolution_retry_loop(),
+                )
+            else:
+                self._unsynced_resolution_retry_task = asyncio.run_coroutine_threadsafe(
+                    self._run_unsynced_resolution_retry_loop(),
+                    runtime_loop,
+                )
 
     async def _run_unsynced_resolution_retry_loop(self) -> None:
         current_task = asyncio.current_task()
+        with self._state_lock:
+            if isinstance(self._unsynced_resolution_retry_task, Future):
+                self._unsynced_resolution_retry_task = current_task
         try:
-            while self._has_unsynced_resolved():
+            while self._has_unsynced_resolution_work():
                 await asyncio.sleep(_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS)
-                if not self._has_unsynced_resolved():
+                if not self._has_unsynced_resolution_work():
                     return
                 await self.sync_unsynced_resolved()
         finally:
             with self._state_lock:
                 if self._unsynced_resolution_retry_task is current_task:
                     self._unsynced_resolution_retry_task = None
-            if self._has_unsynced_resolved():
+            if self._has_unsynced_resolution_work():
                 self._ensure_unsynced_resolution_retry_task()
 
     async def cancel_unsynced_resolution_retry_task(self) -> None:
@@ -595,18 +625,26 @@ class ApprovalManager:
             return
         if retry_task.done():
             with suppress(asyncio.CancelledError):
+                if isinstance(retry_task, asyncio.Task):
+                    await retry_task
+                else:
+                    await asyncio.wrap_future(retry_task)
+            return
+        if isinstance(retry_task, asyncio.Task):
+            retry_task_loop = retry_task.get_loop()
+            if retry_task_loop.is_closed():
+                return
+            current_loop = asyncio.get_running_loop()
+            if retry_task_loop is not current_loop:
+                retry_task_loop.call_soon_threadsafe(retry_task.cancel)
+                return
+            retry_task.cancel()
+            with suppress(asyncio.CancelledError):
                 await retry_task
-            return
-        retry_task_loop = retry_task.get_loop()
-        if retry_task_loop.is_closed():
-            return
-        current_loop = asyncio.get_running_loop()
-        if retry_task_loop is not current_loop:
-            retry_task_loop.call_soon_threadsafe(retry_task.cancel)
             return
         retry_task.cancel()
         with suppress(asyncio.CancelledError):
-            await retry_task
+            await asyncio.wrap_future(retry_task)
 
     def list_unconfirmed_deliveries(self) -> list[PendingApproval]:
         """Return resolved approvals that still need their original event ids recovered."""
@@ -1624,13 +1662,20 @@ def initialize_approval_store(
     sender: MatrixEventSender | None = None,
     editor: MatrixEventEditor | None = None,
     recoverer: MatrixApprovalEventRecoverer | None = None,
+    runtime_loop: asyncio.AbstractEventLoop | None = None,
 ) -> ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
 
+    if runtime_loop is None:
+        with suppress(RuntimeError):
+            runtime_loop = asyncio.get_running_loop()
+
     storage_dir = runtime_paths.storage_root / _APPROVALS_DIRNAME
     if _MANAGER is not None and _MANAGER.storage_dir == storage_dir:
         _MANAGER.configure_transport(sender=sender, editor=editor, recoverer=recoverer)
+        if runtime_loop is not None:
+            _MANAGER._runtime_loop = runtime_loop
         _MANAGER._ensure_unsynced_resolution_retry_task()
         return _MANAGER
 
@@ -1638,6 +1683,7 @@ def initialize_approval_store(
         _MANAGER.abort_pending(reason=_DEFAULT_REINITIALIZE_REASON)
 
     _MANAGER = ApprovalManager(runtime_paths, sender=sender, editor=editor, recoverer=recoverer)
+    _MANAGER._runtime_loop = runtime_loop
     _MANAGER._ensure_unsynced_resolution_retry_task()
     return _MANAGER
 
