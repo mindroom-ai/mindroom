@@ -932,6 +932,29 @@ class ApprovalManager:
             )
             return False
 
+    async def replay_resolved_card_for_room(
+        self,
+        *,
+        approval_event_id: str,
+        room_id: str,
+    ) -> bool:
+        """Re-emit one resolved approval card that never synced its terminal edit."""
+        pending = self._anchored_request(
+            approval_event_id=approval_event_id,
+            room_id=room_id,
+        )
+        if pending is None or pending.status == "pending" or pending.resolution_synced_at is not None:
+            return False
+        claimed_pending = self._claim_unsynced_resolved_replay(pending.id)
+        if claimed_pending is None:
+            return False
+        try:
+            previous_synced_at = claimed_pending.resolution_synced_at
+            await self._edit_resolved_event(claimed_pending)
+            return claimed_pending.resolution_synced_at != previous_synced_at
+        finally:
+            self._finish_unsynced_resolved_replay(pending.id)
+
     async def approve(
         self,
         approval_id: str,

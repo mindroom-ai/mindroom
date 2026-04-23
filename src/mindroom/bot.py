@@ -1425,6 +1425,12 @@ class AgentBot:
         )
         if pending is None:
             return
+        if pending.status != "pending" and pending.resolution_synced_at is None:
+            await approval_manager.replay_resolved_card_for_room(
+                approval_event_id=approval_event_id,
+                room_id=room.room_id,
+            )
+            return
         sender_is_requester = pending.approver_user_id == event.sender
         pending_is_open = pending.status == "pending"
 

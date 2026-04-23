@@ -3177,6 +3177,67 @@ async def test_unauthorized_non_requester_click_emits_reconciliation_edit(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_resolved_unsynced_approval_replay_unsticks_second_clicker(tmp_path: Path) -> None:
+    """A later custom-event click should replay the resolved card when the first edit never synced."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        runtime_paths,
+        tool_approval=ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+        ),
+    )
+    bot = _agent_bot(tmp_path, config=config)
+    sender = AsyncMock(return_value=_sent_approval_event())
+    editor = AsyncMock(side_effect=[RuntimeError("boom"), True])
+    store, task, pending = await _request_tool_approval(runtime_paths, sender=sender, editor=editor)
+
+    assert pending is not None
+    room = _approval_room()
+    resolve_event = _custom_response_event(
+        approval_event_id="$approval",
+        status="denied",
+        reason="Use a safer command",
+    )
+
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(type(bot._turn_policy), "can_reply_to_sender", return_value=True),
+    ):
+        await bot._on_unknown_event(room, resolve_event)
+
+    decision = await task
+    assert decision.status == "denied"
+    assert editor.await_count == 1
+    assert (
+        store.anchored_request_for_event(
+            approval_event_id="$approval",
+            room_id="!room:localhost",
+        )
+        is not None
+    )
+
+    replay_event = _custom_response_event(
+        approval_event_id="$approval",
+        status="approved",
+        sender="@other:localhost",
+    )
+
+    with patch("mindroom.bot.is_authorized_sender", return_value=True):
+        await bot._on_unknown_event(room, replay_event)
+
+    assert editor.await_count == 2
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+    assert editor.await_args.args[2]["status"] == "denied"
+    assert (
+        store.anchored_request_for_event(
+            approval_event_id="$approval",
+            room_id="!room:localhost",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_bot_custom_approval_response_event_denies_truncated_approval_and_edits_card(
     tmp_path: Path,
 ) -> None:
