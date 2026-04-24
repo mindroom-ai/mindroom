@@ -63,6 +63,7 @@ _DECLINED_RESULT_TEMPLATE = (
     "Reason: {reason}\n\n"
     "Adjust your approach — try a different tool or different arguments."
 )
+_APPROVAL_POLICY_FAILURE_REASON = "Tool approval policy failed."
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 ToolHookResult = Any
 # Agno upgrade landmine — see ARCH-000.md for context.
@@ -372,21 +373,22 @@ async def _maybe_block_for_tool_approval(
     approval_arguments = deepcopy(args)
     script_arguments = deepcopy(approval_arguments)
     try:
-        requires_approval, matched_rule, script_path, timeout_seconds = await evaluate_tool_approval(
+        requires_approval, timeout_seconds = await evaluate_tool_approval(
             resolved_context.config,
             resolved_context.runtime_paths,
             tool_name,
             script_arguments,
             resolved_context.agent_name,
         )
-    except ToolApprovalScriptError as exc:
+    except ToolApprovalScriptError:
+        logger.warning("Tool approval policy failed", exc_info=True)
         return await _blocked_tool_result(
             hook_registry=hook_registry,
             resolved_context=resolved_context,
             hook_arguments=hook_arguments,
             args=args,
             tool_name=tool_name,
-            reason=str(exc),
+            reason=_APPROVAL_POLICY_FAILURE_REASON,
             has_after_hooks=has_after_hooks,
             started_at=started_at,
         )
@@ -419,8 +421,6 @@ async def _maybe_block_for_tool_approval(
             resolved_context.runtime_paths,
             resolved_context.requester_id,
         ),
-        matched_rule=matched_rule,
-        script_path=script_path,
         timeout_seconds=timeout_seconds,
     )
     if approval_decision.status == "approved":

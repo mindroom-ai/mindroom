@@ -134,13 +134,14 @@ def _approval_edit(
     card: dict[str, Any],
     *,
     event_id: str = "$approval-edit",
+    sender: str | None = None,
     status: str = "approved",
 ) -> dict[str, Any]:
     content = {**card["content"], "status": status}
     return {
         "event_id": event_id,
         "room_id": card["room_id"],
-        "sender": card["sender"],
+        "sender": sender or card["sender"],
         "type": "io.mindroom.tool_approval",
         "origin_server_ts": int(card["origin_server_ts"]) + 1,
         "content": {
@@ -260,7 +261,97 @@ async def test_handle_response_event_wrong_clicker_noops(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_handle_response_event_orphan_approval_is_consumed_and_restart_denied(tmp_path: Path) -> None:
+async def test_handle_response_event_rejects_live_card_from_wrong_room(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room-a:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender, room_id="!room-a:localhost")
+
+    result = await store.handle_response_event(
+        room_id="!room-b:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+
+    assert result.consumed is False
+    assert result.resolved is False
+    assert not task.done()
+    editor.assert_not_awaited()
+
+    await store.resolve_approval(
+        card_event_id=pending.card_event_id,
+        room_id=pending.room_id,
+        status="denied",
+        reason="cleanup",
+        resolved_by="@user:localhost",
+    )
+    await task
+
+
+@pytest.mark.asyncio
+async def test_handle_response_event_approval_id_rejects_live_waiter_from_wrong_room(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room-a:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender, room_id="!room-a:localhost")
+
+    result = await store.handle_response_event(
+        room_id="!room-b:localhost",
+        sender_id="@user:localhost",
+        approval_id=pending.approval_id,
+        status="approved",
+        reason=None,
+    )
+
+    assert result.consumed is False
+    assert result.resolved is False
+    assert not task.done()
+    editor.assert_not_awaited()
+
+    await store.resolve_approval(
+        card_event_id=pending.card_event_id,
+        room_id=pending.room_id,
+        status="denied",
+        reason="cleanup",
+        resolved_by="@user:localhost",
+    )
+    await task
+
+
+@pytest.mark.asyncio
+async def test_handle_response_event_orphan_approval_falls_through_until_startup_cleanup(tmp_path: Path) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
@@ -268,6 +359,7 @@ async def test_handle_response_event_orphan_approval_is_consumed_and_restart_den
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
+        approval_room_ids=lambda: {"!room:localhost"},
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
@@ -279,12 +371,13 @@ async def test_handle_response_event_orphan_approval_is_consumed_and_restart_den
         reason=None,
     )
 
-    assert result.consumed is True
-    assert result.resolved is True
+    assert result.consumed is False
+    assert result.resolved is False
+    editor.assert_not_awaited()
+
+    assert await store.auto_deny_pending_on_startup() == 1
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
-    replacement = editor.await_args.args[2]
-    assert replacement["status"] == "denied"
-    assert replacement["resolution_reason"] == "Bot restarted before approval — original request was cancelled."
+    assert editor.await_args.args[2]["status"] == "denied"
 
 
 @pytest.mark.asyncio
@@ -770,17 +863,18 @@ async def test_get_pending_approval_returns_none_for_resolved_card(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_card_response_history_fallback_consumes_already_resolved_card_when_cache_cold(tmp_path: Path) -> None:
+async def test_card_response_for_cached_approval_does_not_scan_history(tmp_path: Path) -> None:
     cache = FakeEventCache()
     card = _approval_card()
     await cache.store_event("$approval", "!room:localhost", card)
-    scanner = AsyncMock(return_value=[card, _approval_edit(card, status="approved")])
+    scanner = AsyncMock(side_effect=RuntimeError("scanner should not run"))
     editor = AsyncMock(return_value=True)
     store = ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
         room_event_scanner=scanner,
+        transport_sender=lambda: "@mindroom_router:localhost",
     )
 
     result = await store.handle_response_event(
@@ -791,8 +885,9 @@ async def test_card_response_history_fallback_consumes_already_resolved_card_whe
         reason="Too late.",
     )
 
-    assert result.consumed is True
+    assert result.consumed is False
     assert result.resolved is False
+    scanner.assert_not_awaited()
     editor.assert_not_awaited()
 
 
@@ -815,6 +910,42 @@ async def test_get_pending_approval_history_fallback_applies_replacement_edits(t
     assert await store.get_pending_approval("!room:localhost", "approval-1") is None
     assert await store.auto_deny_pending_on_startup() == 0
     editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_history_terminal_edit_from_different_sender_is_ignored(tmp_path: Path) -> None:
+    card = _approval_card(sender="@mindroom_router:localhost")
+    fake_edit = _approval_edit(card, sender="@attacker:localhost", status="approved")
+    scanner = AsyncMock(return_value=[fake_edit, card])
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        room_event_scanner=scanner,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    pending = await store.get_pending_approval("!room:localhost", "approval-1")
+
+    assert pending is not None
+    assert pending.card_event_id == "$approval"
+
+
+@pytest.mark.asyncio
+async def test_cached_terminal_edit_from_different_sender_is_ignored(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    card = _approval_card(sender="@mindroom_router:localhost")
+    fake_edit = _approval_edit(card, sender="@attacker:localhost", status="approved")
+    await cache.store_event("$approval", "!room:localhost", card)
+    await cache.store_event("$fake-edit", "!room:localhost", fake_edit)
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    pending = await store.get_pending_approval("!room:localhost", "approval-1")
+
+    assert pending is not None
+    assert pending.card_event_id == "$approval"
 
 
 @pytest.mark.asyncio
@@ -877,13 +1008,14 @@ async def test_get_pending_approval_returns_none_for_cross_router_cached_pending
 
 
 @pytest.mark.asyncio
-async def test_get_pending_approval_cache_miss_falls_back_to_room_get_event(tmp_path: Path) -> None:
-    card = _approval_card()
-    fetcher = AsyncMock(return_value=card)
+async def test_response_for_unknown_card_does_not_fetch_or_scan_matrix(tmp_path: Path) -> None:
+    fetcher = AsyncMock(side_effect=RuntimeError("fetcher should not run"))
+    scanner = AsyncMock(side_effect=RuntimeError("scanner should not run"))
     editor = AsyncMock(return_value=True)
     store = ApprovalManager(
         test_runtime_paths(tmp_path),
         event_fetcher=fetcher,
+        room_event_scanner=scanner,
         editor=editor,
         transport_sender=lambda: "@mindroom_router:localhost",
     )
@@ -896,16 +1028,19 @@ async def test_get_pending_approval_cache_miss_falls_back_to_room_get_event(tmp_
         reason=None,
     )
 
-    assert result.resolved is True
-    fetcher.assert_awaited_once_with("!room:localhost", "$approval")
+    assert result.consumed is False
+    assert result.resolved is False
+    fetcher.assert_not_awaited()
+    scanner.assert_not_awaited()
+    editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_card_response_fetched_same_router_card_consumes_terminal_history_edit(tmp_path: Path) -> None:
-    cache = FakeEventCache()
-    card = _approval_card(sender="@mindroom_router:localhost")
-    fetcher = AsyncMock(return_value=card)
-    scanner = AsyncMock(return_value=[_approval_edit(card, status="approved")])
+async def test_response_for_unknown_card_does_not_scan_history(tmp_path: Path) -> None:
+    cache = MagicMock()
+    cache.get_event = AsyncMock(side_effect=RuntimeError("cache should not run"))
+    fetcher = AsyncMock(side_effect=RuntimeError("fetcher should not run"))
+    scanner = AsyncMock(side_effect=RuntimeError("scanner should not run"))
     editor = AsyncMock(return_value=True)
     store = ApprovalManager(
         test_runtime_paths(tmp_path),
@@ -924,14 +1059,16 @@ async def test_card_response_fetched_same_router_card_consumes_terminal_history_
         reason="Too late.",
     )
 
-    assert result.consumed is True
+    assert result.consumed is False
     assert result.resolved is False
-    scanner.assert_awaited_once()
+    cache.get_event.assert_not_awaited()
+    fetcher.assert_not_awaited()
+    scanner.assert_not_awaited()
     editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_card_response_uses_same_router_cached_pending_without_history_scan(tmp_path: Path) -> None:
+async def test_card_response_ignores_same_router_cached_pending_without_history_scan(tmp_path: Path) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     scanner = AsyncMock(side_effect=RuntimeError("pagination failed"))
@@ -952,9 +1089,10 @@ async def test_card_response_uses_same_router_cached_pending_without_history_sca
         reason="No.",
     )
 
-    assert result.resolved is True
+    assert result.consumed is False
+    assert result.resolved is False
     scanner.assert_not_awaited()
-    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+    editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -979,23 +1117,19 @@ async def test_card_response_ignores_cross_router_matrix_only_card(tmp_path: Pat
 
     assert result.consumed is False
     assert result.resolved is False
-    assert result.thread_id == "$thread"
+    assert result.thread_id is None
     editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_concurrent_response_events_emit_one_terminal_edit(tmp_path: Path) -> None:
+async def test_concurrent_cached_response_events_fall_through_without_terminal_edits(tmp_path: Path) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
-    edit_started = asyncio.Event()
-    release_edit = asyncio.Event()
     edit_count = 0
 
     async def editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
         nonlocal edit_count
         edit_count += 1
-        edit_started.set()
-        await release_edit.wait()
         return True
 
     store = ApprovalManager(
@@ -1013,7 +1147,6 @@ async def test_concurrent_response_events_emit_one_terminal_edit(tmp_path: Path)
             reason=None,
         ),
     )
-    await asyncio.wait_for(edit_started.wait(), timeout=1)
     second = asyncio.create_task(
         store.handle_response_event(
             room_id="!room:localhost",
@@ -1023,12 +1156,13 @@ async def test_concurrent_response_events_emit_one_terminal_edit(tmp_path: Path)
             reason="Clicked elsewhere.",
         ),
     )
-    await asyncio.sleep(0)
-    release_edit.set()
     first_result, second_result = await asyncio.gather(first, second)
 
-    assert [first_result.resolved, second_result.resolved].count(True) == 1
-    assert edit_count == 1
+    assert first_result.consumed is False
+    assert second_result.consumed is False
+    assert first_result.resolved is False
+    assert second_result.resolved is False
+    assert edit_count == 0
 
 
 @pytest.mark.asyncio
@@ -1359,7 +1493,7 @@ async def test_evaluate_tool_approval_rule_action_requires_approval(tmp_path: Pa
         runtime_paths,
     )
 
-    requires_approval, matched_rule, script_path, timeout_seconds = await evaluate_tool_approval(
+    requires_approval, timeout_seconds = await evaluate_tool_approval(
         config,
         runtime_paths,
         "read_file",
@@ -1368,8 +1502,6 @@ async def test_evaluate_tool_approval_rule_action_requires_approval(tmp_path: Pa
     )
 
     assert requires_approval is True
-    assert matched_rule == "read_*"
-    assert script_path is None
     assert timeout_seconds > 0
 
 

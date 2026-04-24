@@ -1566,7 +1566,7 @@ async def test_tool_approval_scripts_cannot_mutate_rendered_approval_payload(tmp
 
 @pytest.mark.asyncio
 async def test_tool_approval_script_error_text_is_sanitized_in_decline_result(tmp_path: Path) -> None:
-    """Approval script failures should expose the exception type without leaking secret values."""
+    """Approval script failures should not leak policy internals to the requester."""
     runtime_paths = test_runtime_paths(tmp_path)
     script_path = tmp_path / "approval_scripts" / "broken.py"
     script_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1604,7 +1604,9 @@ async def test_tool_approval_script_error_text_is_sanitized_in_decline_result(tm
         result = await bridge("read_file", next_func, {"secret": "sk-secret-123"})
 
     assert next_func.await_count == 0
-    assert "ValueError" in result
+    assert "Tool approval policy failed." in result
+    assert "ValueError" not in result
+    assert "approval_scripts" not in result
     assert "sk-secret-123" not in result
 
 
@@ -1645,7 +1647,9 @@ async def test_tool_hook_bridge_sanitizes_import_time_approval_script_failures(t
         result = await bridge("read_file", next_func, {"secret": "sk-secret-123"})
 
     assert next_func.await_count == 0
-    assert "RuntimeError" in result
+    assert "Tool approval policy failed." in result
+    assert "RuntimeError" not in result
+    assert "approval_scripts" not in result
     assert "sk-secret-123" not in result
 
 

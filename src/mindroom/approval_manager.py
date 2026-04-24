@@ -322,11 +322,8 @@ class ApprovalManager:
         timeout_seconds: float,
         agent_name: str | None = None,
         thread_id: str | None = None,
-        matched_rule: str | None = None,
-        script_path: str | None = None,
     ) -> ApprovalDecision:
         """Send one Matrix approval card and wait for the Matrix-backed resolution."""
-        del matched_rule, script_path
         if room_id is None:
             return self._new_decision(status="denied", reason=_DEFAULT_MISSING_CONTEXT_REASON, resolved_by=None)
         if approver_user_id is None:
@@ -451,7 +448,10 @@ class ApprovalManager:
         except Exception as exc:
             logger.warning("approval.history_scan_failed", room_id=room_id, error=str(exc))
             return cached_pending if cached_pending_is_same_router else None
-        history_latest_edits = _latest_replacement_edits_by_card_event_id(history_events)
+        history_latest_edits = _latest_replacement_edits_by_card_event_id(
+            history_events,
+            card_senders=_card_senders_by_event_id(history_events),
+        )
         history_matched = False
         for event in history_events:
             if not _is_original_approval_card(event):
@@ -550,10 +550,15 @@ class ApprovalManager:
             event_id = card_event.get("event_id")
             if isinstance(event_id, str) and event_id:
                 candidates_by_event_id.setdefault(event_id, card_event)
+        card_senders = {
+            event_id: str(card_event["sender"])
+            for event_id, card_event in candidates_by_event_id.items()
+            if isinstance(card_event.get("sender"), str)
+        }
         return (
             candidates_by_event_id,
             cached_event_ids,
-            _latest_replacement_edits_by_card_event_id(history_events),
+            _latest_replacement_edits_by_card_event_id(history_events, card_senders=card_senders),
             history_scan_succeeded,
         )
 
@@ -570,6 +575,8 @@ class ApprovalManager:
                 room_id=pending.room_id,
                 card_event_id=pending.card_event_id,
             )
+            if not _terminal_edit_matches_card_sender(cached_latest_edit, pending.card_sender_id):
+                cached_latest_edit = None
             if cached_latest_edit is not None and pending.latest_status(cached_latest_edit) != "pending":
                 return _StartupTerminalState.RESOLVED
         if history_scan_succeeded and pending.latest_status(history_latest_edit) != "pending":
@@ -597,8 +604,10 @@ class ApprovalManager:
 
         live_waiter = self._live_waiter_for_card(live_card_event_id) if live_card_event_id is not None else None
         if live_waiter is not None:
+            if live_waiter.room_id != room_id:
+                return ApprovalActionResult(consumed=False, resolved=False, card_event_id=live_waiter.card_event_id)
             pending = await self._pending_approval_for_card(
-                room_id=room_id,
+                room_id=live_waiter.room_id,
                 card_event_id=live_waiter.card_event_id,
             )
             if pending is None:
@@ -617,29 +626,8 @@ class ApprovalManager:
                 resolved_by=sender_id,
             )
 
-        pending = await self._matrix_pending_for_response(
-            room_id=room_id,
-            card_event_id=card_event_id,
-            approval_id=approval_id,
-        )
-        if pending is None:
-            consumed = card_event_id is not None and await self._known_approval_card(
-                room_id=room_id,
-                card_event_id=card_event_id,
-            )
-            return ApprovalActionResult(consumed=consumed, resolved=False, card_event_id=card_event_id)
-        if pending.approver_user_id != sender_id or pending.card_sender_id != self._transport_sender_id():
-            return ApprovalActionResult(
-                consumed=False,
-                resolved=False,
-                thread_id=pending.thread_id,
-                card_event_id=pending.card_event_id,
-            )
-        return await self._deny_matrix_only_card(
-            pending=pending,
-            reason=_STARTUP_AUTO_DENY_REASON,
-            resolved_by=sender_id,
-        )
+        consumed = card_event_id is not None and self._known_in_memory_approval_card(card_event_id)
+        return ApprovalActionResult(consumed=consumed, resolved=False, card_event_id=card_event_id)
 
     def _configure_transport(
         self,
@@ -1033,7 +1021,9 @@ class ApprovalManager:
     ) -> tuple[dict[str, Any] | None, bool]:
         latest_edit = await self._latest_edit(room_id=pending.room_id, card_event_id=pending.card_event_id)
         if latest_edit is not None:
-            return latest_edit, True
+            if _terminal_edit_matches_card_sender(latest_edit, pending.card_sender_id):
+                return latest_edit, True
+            latest_edit = None
         if (
             self._event_cache is not None
             and origin == _CardOrigin.CACHE_HIT
@@ -1049,7 +1039,13 @@ class ApprovalManager:
         except Exception as exc:
             logger.warning("approval.history_scan_failed", room_id=pending.room_id, error=str(exc))
             return None, False
-        return _latest_replacement_edits_by_card_event_id(history_events).get(pending.card_event_id), True
+        return (
+            _latest_replacement_edits_by_card_event_id(
+                history_events,
+                card_senders={pending.card_event_id: pending.card_sender_id},
+            ).get(pending.card_event_id),
+            True,
+        )
 
     async def _scan_cached_room_cards(
         self,
@@ -1160,27 +1156,14 @@ class ApprovalManager:
         except InvalidStateError:
             return
 
-    async def _matrix_pending_for_response(
-        self,
-        *,
-        room_id: str,
-        card_event_id: str | None,
-        approval_id: str | None,
-    ) -> PendingApproval | None:
-        if card_event_id is not None:
-            return await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
-        if approval_id is not None:
-            return await self.get_pending_approval(room_id, approval_id)
-        return None
-
-    async def _known_approval_card(self, *, room_id: str, card_event_id: str) -> bool:
-        card_event = await self._card_event(room_id=room_id, card_event_id=card_event_id)
-        if card_event is None:
-            return False
-        with suppress(TypeError, ValueError):
-            PendingApproval.from_card_event(card_event, room_id=room_id)
-            return True
-        return False
+    def _known_in_memory_approval_card(self, card_event_id: str) -> bool:
+        with self._live_lock:
+            return (
+                card_event_id in self._pending_by_card_event
+                or card_event_id in self._resolving_card_event_ids
+                or card_event_id in self._resolved_card_event_ids
+                or card_event_id in self._cancelled_card_event_ids
+            )
 
     async def _wait_for_competing_terminal_decision(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
         if waiter.future.done():
@@ -1210,6 +1193,8 @@ class ApprovalManager:
             )
             if not terminal_state_known:
                 return None
+        if not _terminal_edit_matches_card_sender(latest_edit, pending.card_sender_id):
+            latest_edit = None
         if pending.latest_status(latest_edit) != "pending":
             return None
         return pending
@@ -1393,7 +1378,29 @@ def _is_original_approval_card(event: dict[str, Any]) -> bool:
     return isinstance(content, dict) and not _is_replace_content(content)
 
 
-def _latest_replacement_edits_by_card_event_id(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _terminal_edit_matches_card_sender(edit: dict[str, Any] | None, card_sender_id: str) -> bool:
+    if edit is None:
+        return True
+    return edit.get("sender") == card_sender_id
+
+
+def _card_senders_by_event_id(events: list[dict[str, Any]]) -> dict[str, str]:
+    card_senders: dict[str, str] = {}
+    for event in events:
+        if not _is_original_approval_card(event):
+            continue
+        event_id = event.get("event_id")
+        sender = event.get("sender")
+        if isinstance(event_id, str) and isinstance(sender, str):
+            card_senders[event_id] = sender
+    return card_senders
+
+
+def _latest_replacement_edits_by_card_event_id(
+    events: list[dict[str, Any]],
+    *,
+    card_senders: dict[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
     latest_edits: dict[str, dict[str, Any]] = {}
     for event in events:
         if event.get("type") != "io.mindroom.tool_approval":
@@ -1406,6 +1413,9 @@ def _latest_replacement_edits_by_card_event_id(events: list[dict[str, Any]]) -> 
             continue
         card_event_id = relates_to.get("event_id")
         if not isinstance(card_event_id, str) or not card_event_id:
+            continue
+        expected_sender = card_senders.get(card_event_id) if card_senders is not None else None
+        if expected_sender is not None and event.get("sender") != expected_sender:
             continue
         current = latest_edits.get(card_event_id)
         if current is None or _event_timestamp_ms(event) >= _event_timestamp_ms(current):

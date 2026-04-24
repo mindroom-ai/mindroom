@@ -161,26 +161,22 @@ async def evaluate_tool_approval(
     tool_name: str,
     arguments: dict[str, Any],
     agent_name: str,
-) -> tuple[bool, str, str | None, float]:
+) -> tuple[bool, float]:
     """Return the approval decision for one tool call."""
     approval_config = config.tool_approval
     require_approval = approval_config.default == "require_approval"
-    matched_rule = "<default>"
-    script_path: str | None = None
     timeout_seconds = approval_config.timeout_days * 24 * 60 * 60
 
     for rule in approval_config.rules:
         if not fnmatchcase(tool_name, rule.match):
             continue
-        matched_rule = rule.match
         if rule.timeout_days is not None:
             timeout_seconds = rule.timeout_days * 24 * 60 * 60
         if rule.action is not None:
-            return rule.action == "require_approval", matched_rule, None, timeout_seconds
+            return rule.action == "require_approval", timeout_seconds
 
         assert rule.script is not None
         module, resolved_path = _load_script_module(rule.script, runtime_paths)
-        script_path = str(resolved_path)
         check = _check_callable_from_module(module, resolved_path)
         try:
             result = check(tool_name, arguments, agent_name)
@@ -193,9 +189,9 @@ async def evaluate_tool_approval(
         if not isinstance(result, bool):
             msg = f"Approval script '{resolved_path}' returned a non-bool result."
             raise ToolApprovalScriptError(msg)
-        return result, matched_rule, script_path, timeout_seconds
+        return result, timeout_seconds
 
-    return require_approval, matched_rule, script_path, timeout_seconds
+    return require_approval, timeout_seconds
 
 
 async def shutdown_approval_store(reason: str = _DEFAULT_SHUTDOWN_REASON) -> None:

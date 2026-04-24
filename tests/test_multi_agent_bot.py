@@ -4145,6 +4145,47 @@ class TestAgentBot:
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
+    async def test_plain_rich_reply_does_not_probe_approval_matrix_transport(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Ordinary rich replies should not touch approval fetch or history transport."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot._turn_controller.handle_text_event = AsyncMock()
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        event_cache = MagicMock()
+        event_cache.get_event = AsyncMock(side_effect=RuntimeError("cache should not run"))
+        store = initialize_approval_store(
+            runtime_paths,
+            event_cache=event_cache,
+            event_fetcher=AsyncMock(side_effect=RuntimeError("fetcher should not run")),
+            room_event_scanner=AsyncMock(side_effect=RuntimeError("scanner should not run")),
+        )
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.sender = "@user:localhost"
+        event.body = "!help"
+        event.source = {
+            "content": {
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$ordinary-message"}},
+            },
+        }
+
+        try:
+            await bot._on_message(room, event)
+
+            bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+            event_cache.get_event.assert_not_awaited()
+            assert store._event_fetcher is not None
+            store._event_fetcher.assert_not_awaited()
+            assert store._room_event_scanner is not None
+            store._room_event_scanner.assert_not_awaited()
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
     async def test_duplicate_live_approval_reply_is_consumed_without_falling_through(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -11841,7 +11882,10 @@ class TestMultiAgentOrchestrator:
                     process_env={},
                 ),
             )
-            await orchestrator.initialize()
+            try:
+                await orchestrator.initialize()
+            finally:
+                await orchestrator._close_runtime_support_services()
 
         mock_load_config.assert_called_once()
         assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
@@ -12485,8 +12529,6 @@ class TestMultiAgentOrchestrator:
                 thread_id=None,
                 requester_id="@user:localhost",
                 approver_user_id="@user:localhost",
-                matched_rule="run_shell_*",
-                script_path=None,
                 timeout_seconds=60,
             ),
         )
@@ -12860,8 +12902,6 @@ class TestMultiAgentOrchestrator:
                 thread_id="$thread",
                 requester_id="@user:localhost",
                 approver_user_id="@user:localhost",
-                matched_rule="run_shell_*",
-                script_path=None,
                 timeout_seconds=60,
             ),
         )
@@ -12907,6 +12947,7 @@ class TestMultiAgentOrchestrator:
             assert router_bot.client.room_send.await_count == 2
         finally:
             await shutdown_approval_store()
+            await orchestrator._close_runtime_support_services()
 
     @pytest.mark.asyncio
     async def test_requesting_bot_room_reconcile_keeps_router_owned_approval_pending(  # noqa: PLR0915
@@ -13012,8 +13053,6 @@ class TestMultiAgentOrchestrator:
                 thread_id="$thread",
                 requester_id="@user:localhost",
                 approver_user_id="@user:localhost",
-                matched_rule="run_shell_*",
-                script_path=None,
                 timeout_seconds=60,
             ),
         )
@@ -13605,7 +13644,10 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
-            updated = await orchestrator.update_config()
+            try:
+                updated = await orchestrator.update_config()
+            finally:
+                await orchestrator._close_runtime_support_services()
 
         assert updated is True
         assert orchestrator.agent_bots["coach"] is new_bot
@@ -13685,7 +13727,10 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
-            updated = await orchestrator.update_config()
+            try:
+                updated = await orchestrator.update_config()
+            finally:
+                await orchestrator._close_runtime_support_services()
 
         assert updated is True
         assert orchestrator.agent_bots["coach"] is new_bot
