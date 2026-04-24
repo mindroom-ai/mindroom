@@ -687,6 +687,7 @@ class TestThreadHistory:
             ANY,
             hydrate_sidecars=False,
             allow_stale_fallback=True,
+            cache_write_guard_started_at=None,
             cache_reject_diagnostics={
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
             },
@@ -735,6 +736,7 @@ class TestThreadHistory:
             ANY,
             hydrate_sidecars=False,
             allow_stale_fallback=True,
+            cache_write_guard_started_at=None,
             cache_reject_diagnostics={
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
             },
