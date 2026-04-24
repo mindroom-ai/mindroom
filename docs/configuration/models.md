@@ -118,6 +118,7 @@ models:
   default:
     provider: codex
     id: gpt-5.5
+    context_window: 258000
     # Prompt caching is enabled automatically per active agent session.
     extra_kwargs:
       reasoning_effort: medium

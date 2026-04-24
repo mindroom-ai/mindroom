@@ -357,6 +357,7 @@ class TestConfigInit:
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
+        assert config["models"]["default"]["context_window"] == 258_000
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
         assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
         assert "Prompt caching is enabled automatically per active agent session." in target.read_text()
@@ -386,6 +387,7 @@ class TestConfigInit:
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
+        assert config["models"]["default"]["context_window"] == 258_000
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
 
     @pytest.mark.parametrize("profile", ["openai-codex", "public-openai-codex"])
@@ -585,6 +587,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
+        assert config["models"]["default"]["context_window"] == 258_000
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
         assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
 
