@@ -313,6 +313,7 @@ def _make_git_config(
     path: Path,
     *,
     repo_url: str = "https://github.com/example/knowledge.git",
+    include_extensions: list[str] | None = None,
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
     lfs: bool = False,
@@ -326,6 +327,7 @@ def _make_git_config(
             "research": KnowledgeBaseConfig(
                 path=str(path),
                 watch=False,
+                include_extensions=include_extensions,
                 git=KnowledgeGitConfig(
                     repo_url=repo_url,
                     branch="main",
@@ -4652,7 +4654,7 @@ def test_text_only_default_file_filter_excludes_binary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Non-git knowledge bases should ignore binary-ish files by default."""
+    """Knowledge bases should ignore binary-ish files by default."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
@@ -4671,6 +4673,44 @@ def test_text_only_default_file_filter_excludes_binary(
 
     listed = [path.relative_to(manager.knowledge_path).as_posix() for path in manager.list_files()]
     assert listed == ["guide.md"]
+
+
+@pytest.mark.asyncio
+async def test_git_backed_file_filter_uses_text_like_default_and_extension_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git-backed semantic indexing should skip binary files unless explicitly included."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    knowledge_path = tmp_path / "knowledge"
+    config = _make_git_config(knowledge_path)
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    (manager.knowledge_path / "guide.md").write_text("ok", encoding="utf-8")
+    (manager.knowledge_path / "diagram.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(manager, "_run_git", AsyncMock(return_value="guide.md\x00diagram.png\x00"))
+
+    listed = [path.relative_to(manager.knowledge_path).as_posix() for path in manager.list_files()]
+    assert listed == ["guide.md"]
+    assert await manager._git_list_tracked_files() == {"guide.md"}
+
+    override_config = _make_git_config(knowledge_path, include_extensions=[".png"])
+    override_manager = KnowledgeManager(
+        base_id="research",
+        config=override_config,
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    monkeypatch.setattr(override_manager, "_run_git", AsyncMock(return_value="guide.md\x00diagram.png\x00"))
+
+    listed = [path.relative_to(override_manager.knowledge_path).as_posix() for path in override_manager.list_files()]
+    assert listed == ["diagram.png"]
+    assert await override_manager._git_list_tracked_files() == {"diagram.png"}
 
 
 def test_user_override_can_re_enable_specific_extensions(

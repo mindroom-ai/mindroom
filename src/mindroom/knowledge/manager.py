@@ -700,20 +700,21 @@ class KnowledgeManager:
         except ValueError:
             return False
 
+        return self._include_semantic_relative_path(relative_path.as_posix())
+
+    def _include_semantic_relative_path(self, relative_path: str) -> bool:
+        if not self._include_relative_path(relative_path):
+            return False
+
         base_config = self.config.get_knowledge_base_config(self.base_id)
         include_extensions = set(base_config.include_extensions) if base_config.include_extensions is not None else None
         exclude_extensions = set(base_config.exclude_extensions)
-        allowed_extensions = include_extensions
-        if allowed_extensions is None and base_config.git is None:
-            allowed_extensions = _TEXT_LIKE_EXTENSIONS
+        allowed_extensions = include_extensions if include_extensions is not None else _TEXT_LIKE_EXTENSIONS
 
-        suffix = file_path.suffix.lower()
-        if allowed_extensions is not None and suffix not in allowed_extensions:
+        suffix = Path(relative_path).suffix.lower()
+        if suffix not in allowed_extensions:
             return False
-        if suffix in exclude_extensions:
-            return False
-
-        return self._include_relative_path(relative_path.as_posix())
+        return suffix not in exclude_extensions
 
     def _include_relative_path(self, relative_path: str) -> bool:
         path_obj = Path(relative_path)
@@ -832,11 +833,11 @@ class KnowledgeManager:
     async def _git_list_tracked_files(self) -> set[str]:
         output = await self._run_git(["ls-files", "-z"])
         raw_paths = [entry for entry in output.split("\x00") if entry]
-        return {path for path in raw_paths if self._include_relative_path(path)}
+        return {path for path in raw_paths if self._include_semantic_relative_path(path)}
 
     async def _git_dirty_tracked_files(self) -> set[str]:
         output = await self._run_git(["diff", "--name-only", "--no-renames", "HEAD"])
-        return {path for path in output.splitlines() if self._include_relative_path(path)}
+        return {path for path in output.splitlines() if self._include_semantic_relative_path(path)}
 
     async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
         runtime_paths = self.runtime_paths
@@ -930,7 +931,7 @@ class KnowledgeManager:
             changed_paths = after_files
         else:
             diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
-            changed_paths = {path for path in diff_output.splitlines() if self._include_relative_path(path)}
+            changed_paths = {path for path in diff_output.splitlines() if self._include_semantic_relative_path(path)}
 
         removed_files = before_files - after_files
         changed_files = (
