@@ -829,6 +829,49 @@ async def test_get_pending_approval_history_scan_without_edit_keeps_cached_termi
 
 
 @pytest.mark.asyncio
+async def test_get_pending_approval_returns_same_router_cached_pending_when_history_scan_fails(
+    tmp_path: Path,
+) -> None:
+    cache = FakeEventCache()
+    await cache.store_event("$approval", "!room:localhost", _approval_card())
+    scanner = AsyncMock(side_effect=RuntimeError("pagination failed"))
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        event_cache=cache,
+        room_event_scanner=scanner,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    pending = await store.get_pending_approval("!room:localhost", "approval-1")
+
+    assert pending is not None
+    assert pending.card_event_id == "$approval"
+    scanner.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_pending_approval_returns_none_for_cross_router_cached_pending_when_history_scan_fails(
+    tmp_path: Path,
+) -> None:
+    cache = FakeEventCache()
+    await cache.store_event(
+        "$approval",
+        "!room:localhost",
+        _approval_card(sender="@other_router:localhost"),
+    )
+    scanner = AsyncMock(side_effect=RuntimeError("pagination failed"))
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        event_cache=cache,
+        room_event_scanner=scanner,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.get_pending_approval("!room:localhost", "approval-1") is None
+    scanner.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_get_pending_approval_cache_miss_falls_back_to_room_get_event(tmp_path: Path) -> None:
     card = _approval_card()
     fetcher = AsyncMock(return_value=card)
@@ -845,6 +888,33 @@ async def test_get_pending_approval_cache_miss_falls_back_to_room_get_event(tmp_
 
     assert result.resolved is True
     fetcher.assert_awaited_once_with("!room:localhost", "$approval")
+
+
+@pytest.mark.asyncio
+async def test_card_response_uses_same_router_cached_pending_without_history_scan(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    await cache.store_event("$approval", "!room:localhost", _approval_card())
+    scanner = AsyncMock(side_effect=RuntimeError("pagination failed"))
+    editor = AsyncMock(return_value=True)
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        room_event_scanner=scanner,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.handle_response_event(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="denied",
+        reason="No.",
+    )
+
+    assert result.resolved is True
+    scanner.assert_not_awaited()
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
 
 
 @pytest.mark.asyncio
@@ -1069,7 +1139,7 @@ async def test_auto_deny_pending_on_startup_merges_cached_and_history_cards(tmp_
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_skips_cached_cards_when_history_scan_fails(
+async def test_auto_deny_pending_on_startup_denies_same_router_cached_cards_when_history_scan_fails(
     tmp_path: Path,
 ) -> None:
     cache = FakeEventCache()
@@ -1085,17 +1155,20 @@ async def test_auto_deny_pending_on_startup_skips_cached_cards_when_history_scan
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 0
+    assert await store.auto_deny_pending_on_startup() == 1
     scanner.assert_awaited()
-    editor.assert_not_awaited()
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+    replacement = editor.await_args.args[2]
+    assert replacement["status"] == "denied"
+    assert replacement["resolution_reason"] == "Bot restarted before approval — original request was cancelled."
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_leaves_cached_unknown_terminal_state_when_history_scan_fails(
+async def test_auto_deny_pending_on_startup_skips_cross_router_cached_cards_when_history_scan_fails(
     tmp_path: Path,
 ) -> None:
     cache = FakeEventCache()
-    await cache.store_event("$approval", "!room:localhost", _approval_card())
+    await cache.store_event("$approval", "!room:localhost", _approval_card(sender="@other_router:localhost"))
     editor = AsyncMock(return_value=True)
     scanner = AsyncMock(side_effect=RuntimeError("network unavailable"))
     store = ApprovalManager(
@@ -1112,11 +1185,13 @@ async def test_auto_deny_pending_on_startup_leaves_cached_unknown_terminal_state
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_skips_cached_card_without_terminal_when_history_scan_fails(
+async def test_auto_deny_pending_on_startup_skips_same_router_cached_terminal_edit_when_history_scan_fails(
     tmp_path: Path,
 ) -> None:
     cache = FakeEventCache()
-    await cache.store_event("$approval", "!room:localhost", _approval_card())
+    card = _approval_card()
+    await cache.store_event("$approval", "!room:localhost", card)
+    await cache.store_event("$approval-edit", "!room:localhost", _approval_edit(card, status="approved"))
     editor = AsyncMock(return_value=True)
     scanner = AsyncMock(side_effect=RuntimeError("history unavailable"))
     store = ApprovalManager(

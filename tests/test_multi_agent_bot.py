@@ -95,6 +95,7 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.orchestrator import (
     MultiAgentOrchestrator,
+    RoomMessagesError,
     _EmbeddedApiServerContext,
     _run_api_server,
     _run_auxiliary_task_forever,
@@ -11406,6 +11407,24 @@ class TestMultiAgentOrchestrator:
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         assert orchestrator.agent_bots == {}
         assert not orchestrator.running
+
+    @pytest.mark.asyncio
+    async def test_scan_approval_room_events_now_raises_on_room_messages_error(self, tmp_path: Path) -> None:
+        """Matrix pagination errors must propagate so startup cleanup can treat history as unknown."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.client = MagicMock()
+        router_bot.client.rooms = {"!room:localhost": object()}
+        router_bot.client.room_messages = AsyncMock(return_value=nio.RoomMessagesError(message="forbidden"))
+        orchestrator.agent_bots = {"router": router_bot}
+
+        with pytest.raises(RoomMessagesError, match="room_messages failed: forbidden"):
+            await orchestrator._scan_approval_room_events_now(
+                "!room:localhost",
+                since_ts_ms=0,
+                limit=10,
+            )
 
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:

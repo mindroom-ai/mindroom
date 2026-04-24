@@ -165,6 +165,10 @@ def _raise_embedded_api_server_exit(api_server: _EmbeddedApiServerContext, *, re
     raise RuntimeError(msg)
 
 
+class RoomMessagesError(RuntimeError):
+    """One Matrix room history pagination failure."""
+
+
 @dataclass
 class _ConfigReloadDrainState:
     """Track response-drain state for a queued config reload."""
@@ -559,7 +563,13 @@ class MultiAgentOrchestrator:
                 message_filter={"types": ["io.mindroom.tool_approval"]},
                 direction=nio.MessageDirection.back,
             )
-            if not isinstance(response, nio.RoomMessagesResponse) or not response.chunk:
+            if isinstance(response, nio.RoomMessagesError):
+                msg = f"room_messages failed: {response.message}"
+                raise RoomMessagesError(msg)
+            if not isinstance(response, nio.RoomMessagesResponse):
+                msg = f"unexpected response type: {type(response).__name__}"
+                raise RoomMessagesError(msg)
+            if not response.chunk:
                 return events
             for event in response.chunk:
                 source = _normalize_approval_nio_event(event)

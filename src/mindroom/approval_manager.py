@@ -417,6 +417,7 @@ class ApprovalManager:
                 return pending
 
         cached_pending: PendingApproval | None = None
+        cached_pending_is_same_router = False
         for event in await self._scan_cached_room_cards(room_id, since_ts_ms=_lookback_cutoff_ms(24), limit=500):
             event_id = event.get("event_id")
             latest_edit = (
@@ -431,6 +432,7 @@ class ApprovalManager:
             )
             if pending is not None:
                 cached_pending = pending
+                cached_pending_is_same_router = pending.card_sender_id == self._transport_sender_id()
                 break
 
         try:
@@ -441,7 +443,7 @@ class ApprovalManager:
             )
         except Exception as exc:
             logger.warning("approval.history_scan_failed", room_id=room_id, error=str(exc))
-            return cached_pending
+            return cached_pending if cached_pending_is_same_router else None
         history_latest_edits = _latest_replacement_edits_by_card_event_id(history_events)
         history_matched = False
         for event in history_events:
@@ -467,13 +469,13 @@ class ApprovalManager:
     async def auto_deny_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
         """Auto-deny unresolved approval cards after startup using Matrix as source of truth."""
         # AUTO-DENY MUST emit `m.replace` denied for same-router cards whose terminal state is
-        # PENDING_CONFIRMED: no cached terminal edit exists, and a successful bounded history scan
-        # found no later terminal edit for that card.
+        # PENDING_CONFIRMED: no cached terminal edit exists, because this router write-throughs every
+        # terminal edit it sends.
         # AUTO-DENY MUST NOT emit anything for other routers' cards or RESOLVED cards with a
         # cached or history-observed approved/denied/expired edit.
-        # UNKNOWN means we cannot prove whether Matrix already has a terminal edit, for example a
-        # cached original card with no cached edit while the history scan failed. UNKNOWN is skipped:
-        # missing a cleanup is safer than false-denying a card a human already approved.
+        # UNKNOWN means cross-router or history-discovered state cannot prove whether Matrix already
+        # has a terminal edit. UNKNOWN is skipped: missing a cleanup is safer than false-denying a
+        # card a human already approved.
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return 0
@@ -562,10 +564,12 @@ class ApprovalManager:
             )
             if cached_latest_edit is not None and pending.latest_status(cached_latest_edit) != "pending":
                 return _StartupTerminalState.RESOLVED
+        if history_scan_succeeded and pending.latest_status(history_latest_edit) != "pending":
+            return _StartupTerminalState.RESOLVED
+        if cached_candidate and pending.card_sender_id == self._transport_sender_id():
+            return _StartupTerminalState.PENDING_CONFIRMED
         if not history_scan_succeeded:
             return _StartupTerminalState.UNKNOWN
-        if pending.latest_status(history_latest_edit) != "pending":
-            return _StartupTerminalState.RESOLVED
         return _StartupTerminalState.PENDING_CONFIRMED
 
     async def handle_response_event(
@@ -1008,6 +1012,8 @@ class ApprovalManager:
         latest_edit = await self._latest_edit(room_id=pending.room_id, card_event_id=pending.card_event_id)
         if latest_edit is not None:
             return latest_edit, True
+        if self._event_cache is not None and pending.card_sender_id == self._transport_sender_id():
+            return None, True
         try:
             history_events = await self._scan_room_messages_for_approval_events(
                 pending.room_id,
