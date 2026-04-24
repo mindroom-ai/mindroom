@@ -1068,24 +1068,42 @@ def test_sandbox_runner_shared_startup_still_rejects_missing_plugins(
         _refresh_runner_app_from_env()
 
 
-def test_sandbox_runner_still_rejects_invalid_tools_after_skipping_worker_plugins(
+def test_sandbox_runner_defers_unavailable_authored_tools_for_worker_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker plugin filtering must not weaken authored tool validation."""
+    """Dedicated workers should trust primary-runtime config validation and reject only executed tools."""
     config_path = _missing_plugin_path_with_invalid_tool_config_path(tmp_path)
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
     _set_worker_tool_validation_snapshot("agentspace_slack_search")
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
+    _set_sandbox_token(monkeypatch)
 
-    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
-        _refresh_runner_app_from_env()
+    runtime_paths, config = _refresh_runner_app_from_env()
 
-    assert str(exc_info.value) == (
-        "agents.invalid.tools[0].definitely_not_a_tool: Unknown tool 'definitely_not_a_tool'."
-    )
+    assert runtime_paths.config_path.exists()
+    assert config.plugins == []
+
+    with (
+        patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create),
+        TestClient(sandbox_runner_app) as client,
+    ):
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "definitely_not_a_tool",
+                "function_name": "run",
+                "args": [],
+                "kwargs": {},
+            },
+        )
+
+    assert response.status_code == 200
+    response_payload = response.json()
+    assert response_payload["ok"] is False
+    assert "Unknown tool: definitely_not_a_tool" in response_payload["error"]
 
 
 def test_sandbox_runner_execute_rejects_invalid_mcp_tool_overrides(
