@@ -766,6 +766,46 @@ class TestChatCompletions:
         assert mock_compact.await_args.kwargs["check"] is check
         assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
 
+    @pytest.mark.asyncio
+    async def test_non_stream_completion_returns_before_post_response_compaction(
+        self,
+        test_config: Config,
+    ) -> None:
+        """The non-streaming helper should attach compaction to response finalization."""
+        check = _make_post_response_compaction_check()
+
+        async def fake_ai_response(**kwargs: object) -> str:
+            collector = kwargs.get("post_response_compaction_checks_collector")
+            if isinstance(collector, list):
+                collector.append(check)
+            return "Response"
+
+        with (
+            patch("mindroom.api.openai_compat.ai_response", side_effect=fake_ai_response),
+            patch(
+                "mindroom.api.openai_compat.run_post_response_compaction_check",
+                new_callable=AsyncMock,
+                create=True,
+            ) as mock_compact,
+        ):
+            response = await openai_compat._non_stream_completion(
+                "general",
+                "Hi",
+                "session-1",
+                test_config,
+                _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+                None,
+                None,
+            )
+
+            mock_compact.assert_not_awaited()
+            assert response.background is not None
+            await response.background()
+
+        mock_compact.assert_awaited_once()
+        assert mock_compact.await_args.kwargs["check"] is check
+        assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
+
     def test_does_not_pass_include_default_tools_flag(self, app_client: TestClient) -> None:
         """Default tool behavior is now resolved from agent config, not a runtime flag."""
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
@@ -1295,6 +1335,50 @@ class TestStreamingCompletion:
 
         assert response.status_code == 200
         assert response.text.strip().endswith("data: [DONE]")
+        mock_compact.assert_awaited_once()
+        assert mock_compact.await_args.kwargs["check"] is check
+        assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
+
+    @pytest.mark.asyncio
+    async def test_streaming_completion_compacts_from_response_background(
+        self,
+        test_config: Config,
+    ) -> None:
+        """The streaming generator should emit [DONE] before response-finalizer compaction."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        check = _make_post_response_compaction_check()
+
+        async def mock_stream(**kwargs: object) -> AsyncIterator[RunContentEvent]:
+            collector = kwargs.get("post_response_compaction_checks_collector")
+            if isinstance(collector, list):
+                collector.append(check)
+            yield RunContentEvent(content="ok")
+
+        with (
+            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
+            patch(
+                "mindroom.api.openai_compat.run_post_response_compaction_check",
+                new_callable=AsyncMock,
+                create=True,
+            ) as mock_compact,
+        ):
+            response = await openai_compat._stream_completion(
+                "general",
+                "Hello",
+                "session-1",
+                test_config,
+                _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+                None,
+                None,
+            )
+            assert isinstance(response, StreamingResponse)
+            chunks = [chunk async for chunk in response.body_iterator]
+            assert chunks[-1] == "data: [DONE]\n\n"
+            mock_compact.assert_not_awaited()
+            assert response.background is not None
+            await response.background()
+
         mock_compact.assert_awaited_once()
         assert mock_compact.await_args.kwargs["check"] is check
         assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
@@ -1857,6 +1941,70 @@ class TestMessageConversion:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_openai_completion_lock_releases_after_response_background() -> None:
+    """A sequential request should wait until response-finalizer compaction finishes."""
+    from starlette.background import BackgroundTask  # noqa: PLC0415
+
+    events: list[str] = []
+    completion_lock = asyncio.Lock()
+    await completion_lock.acquire()
+
+    async def existing_background() -> None:
+        assert completion_lock.locked()
+        events.append("compact")
+
+    response = JSONResponse(
+        content={"ok": True},
+        background=BackgroundTask(existing_background),
+    )
+
+    wrapped = openai_compat._attach_openai_completion_lock_release(response, completion_lock)
+    assert wrapped.background is not None
+    await wrapped.background()
+
+    assert events == ["compact"]
+    assert not completion_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_response_runs_background_when_client_closes_after_done() -> None:
+    """A client closing after [DONE] should not skip the response finalizer."""
+    from starlette.background import BackgroundTask  # noqa: PLC0415
+    from starlette.requests import ClientDisconnect  # noqa: PLC0415
+
+    events: list[str] = []
+
+    async def body() -> AsyncIterator[str]:
+        yield "data: [DONE]\n\n"
+
+    async def background() -> None:
+        events.append("compact")
+
+    response = openai_compat._OpenAIStreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        background=BackgroundTask(background),
+    )
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.body" and message.get("body") == b"":
+            error_message = "client closed"
+            raise OSError(error_message)
+
+    with pytest.raises(ClientDisconnect):
+        await response(
+            {"type": "http", "asgi": {"spec_version": "2.4"}},
+            receive,
+            send,
+        )
+
+    assert events == ["compact"]
+
+
 class TestSessionIdDerivation:
     """Tests for _derive_session_id()."""
 
@@ -2417,6 +2565,58 @@ class TestTeamCompletion:
         assert mock_compact.await_args.kwargs["check"] is check
         assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
 
+    @pytest.mark.asyncio
+    async def test_team_non_streaming_returns_before_post_response_compaction(
+        self,
+        team_config: Config,
+    ) -> None:
+        """The non-streaming team helper should attach compaction to response finalization."""
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        check = _make_post_response_compaction_check()
+        mock_team = _make_test_team()
+        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team consensus result"))
+        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+            patch(
+                "mindroom.api.openai_compat.run_post_response_compaction_check",
+                new_callable=AsyncMock,
+                create=True,
+            ) as mock_compact,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="Build a feature",
+                post_response_compaction_checks=[check],
+            )
+            response = await openai_compat._non_stream_team_completion(
+                "super_team",
+                "team/super_team",
+                "Build a feature",
+                "session-1",
+                team_config,
+                _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+                None,
+            )
+
+            mock_compact.assert_not_awaited()
+            assert response.background is not None
+            await response.background()
+
+        mock_compact.assert_awaited_once()
+        assert mock_compact.await_args.kwargs["check"] is check
+        assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
+
     def test_team_non_streaming_unready_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
         """Non-streaming team completions should prepend the degraded knowledge notice."""
         from agno.run.team import TeamRunOutput  # noqa: PLC0415
@@ -2687,6 +2887,64 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         assert response.text.strip().endswith("data: [DONE]")
+        mock_compact.assert_awaited_once()
+        assert mock_compact.await_args.kwargs["check"] is check
+        assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
+
+    @pytest.mark.asyncio
+    async def test_team_streaming_compacts_from_response_background(
+        self,
+        team_config: Config,
+    ) -> None:
+        """The team stream should emit [DONE] before response-finalizer compaction."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        check = _make_post_response_compaction_check()
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="ok")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+            patch(
+                "mindroom.api.openai_compat.run_post_response_compaction_check",
+                new_callable=AsyncMock,
+                create=True,
+            ) as mock_compact,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="Build it",
+                post_response_compaction_checks=[check],
+            )
+            response = await openai_compat._stream_team_completion(
+                "super_team",
+                "team/super_team",
+                "Build it",
+                "session-1",
+                team_config,
+                _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+                None,
+            )
+            assert isinstance(response, StreamingResponse)
+            chunks = [chunk async for chunk in response.body_iterator]
+            assert chunks[-1] == "data: [DONE]\n\n"
+            mock_compact.assert_not_awaited()
+            assert response.background is not None
+            await response.background()
+
         mock_compact.assert_awaited_once()
         assert mock_compact.await_args.kwargs["check"] is check
         assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None

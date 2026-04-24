@@ -6,6 +6,7 @@ Exposes MindRoom agents as an OpenAI-compatible API so any chat frontend
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -33,6 +34,7 @@ from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from starlette.background import BackgroundTask
 
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
@@ -91,6 +93,7 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
+    from starlette.types import Receive, Scope, Send
 
     from mindroom.config.main import Config
     from mindroom.history.types import PostResponseCompactionCheck
@@ -100,6 +103,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
 _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES: frozenset[WorkerScope | None] = frozenset({None, "shared"})
+_OPENAI_COMPLETION_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
 
 
 @dataclass(slots=True)
@@ -108,6 +112,77 @@ class _ToolStreamState:
 
     next_tool_id: int = 1
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
+
+
+class _OpenAIJSONResponse(JSONResponse):
+    """JSON response that always runs its finalizer after a send attempt."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        background = self.background
+        self.background = None
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if background is not None:
+                await background()
+
+
+class _OpenAIStreamingResponse(StreamingResponse):
+    """Streaming response that always runs its finalizer after a send attempt."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        background = self.background
+        self.background = None
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if background is not None:
+                await background()
+
+
+def _openai_completion_lock(
+    *,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    session_id: str,
+) -> asyncio.Lock:
+    key = (str(runtime_paths.storage_root), agent_name, session_id)
+    lock = _OPENAI_COMPLETION_LOCKS.get(key)
+    if lock is not None:
+        return lock
+    if len(_OPENAI_COMPLETION_LOCKS) >= 100:
+        for candidate_key, candidate_lock in list(_OPENAI_COMPLETION_LOCKS.items()):
+            if len(_OPENAI_COMPLETION_LOCKS) < 100:
+                break
+            if not candidate_lock.locked():
+                _OPENAI_COMPLETION_LOCKS.pop(candidate_key, None)
+    lock = asyncio.Lock()
+    _OPENAI_COMPLETION_LOCKS[key] = lock
+    return lock
+
+
+async def _run_response_background_then_release_lock(
+    background: BackgroundTask | None,
+    completion_lock: asyncio.Lock,
+) -> None:
+    try:
+        if background is not None:
+            await background()
+    finally:
+        if completion_lock.locked():
+            completion_lock.release()
+
+
+def _attach_openai_completion_lock_release(
+    response: JSONResponse | StreamingResponse,
+    completion_lock: asyncio.Lock,
+) -> JSONResponse | StreamingResponse:
+    response.background = BackgroundTask(
+        _run_response_background_then_release_lock,
+        response.background,
+        completion_lock,
+    )
+    return response
 
 
 def _load_config(
@@ -752,7 +827,7 @@ async def list_models(
 
 
 @router.post("/chat/completions", response_model=None)
-async def chat_completions(
+async def chat_completions(  # noqa: C901, PLR0912
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
@@ -800,26 +875,19 @@ async def chat_completions(
         resolved_thread_id=None,
     )
     knowledge_refresh_owner = _request_knowledge_refresh_owner(request)
+    completion_lock = _openai_completion_lock(
+        runtime_paths=runtime_paths,
+        agent_name=agent_name,
+        session_id=session_id,
+    )
+    await completion_lock.acquire()
 
-    # Team execution path
-    if agent_name.startswith(_TEAM_MODEL_PREFIX):
-        team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
-        if req.stream:
-            response: JSONResponse | StreamingResponse = await _stream_team_completion(
-                team_name,
-                agent_name,
-                prompt,
-                session_id,
-                config,
-                runtime_paths,
-                thread_history,
-                req.user,
-                execution_identity=execution_identity,
-                refresh_owner=knowledge_refresh_owner,
-            )
-        else:
-            with tool_execution_identity(execution_identity):
-                response = await _non_stream_team_completion(
+    try:
+        # Team execution path
+        if agent_name.startswith(_TEAM_MODEL_PREFIX):
+            team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
+            if req.stream:
+                response: JSONResponse | StreamingResponse = await _stream_team_completion(
                     team_name,
                     agent_name,
                     prompt,
@@ -831,40 +899,40 @@ async def chat_completions(
                     execution_identity=execution_identity,
                     refresh_owner=knowledge_refresh_owner,
                 )
-    else:
-        # Resolve knowledge base for this agent
-        unavailable_bases: dict[str, KnowledgeAvailability] = {}
-        try:
-            knowledge = get_agent_knowledge(
-                agent_name,
-                config,
-                runtime_paths,
-                on_missing_bases=_log_missing_knowledge_bases(agent_name),
-                on_unavailable_bases=unavailable_bases.update,
-                refresh_owner=knowledge_refresh_owner,
-            )
-        except Exception:
-            logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
-            knowledge = None
-        availability_hint = _knowledge_availability_system_message(unavailable_bases)
-        if availability_hint:
-            prompt = f"{availability_hint}\n\n{prompt}"
-        if req.stream:
-            response = await _stream_completion(
-                agent_name,
-                prompt,
-                session_id,
-                config,
-                runtime_paths,
-                thread_history,
-                req.user,
-                knowledge,
-                execution_identity=execution_identity,
-                refresh_owner=knowledge_refresh_owner,
-            )
+            else:
+                with tool_execution_identity(execution_identity):
+                    response = await _non_stream_team_completion(
+                        team_name,
+                        agent_name,
+                        prompt,
+                        session_id,
+                        config,
+                        runtime_paths,
+                        thread_history,
+                        req.user,
+                        execution_identity=execution_identity,
+                        refresh_owner=knowledge_refresh_owner,
+                    )
         else:
-            with tool_execution_identity(execution_identity):
-                response = await _non_stream_completion(
+            # Resolve knowledge base for this agent
+            unavailable_bases: dict[str, KnowledgeAvailability] = {}
+            try:
+                knowledge = get_agent_knowledge(
+                    agent_name,
+                    config,
+                    runtime_paths,
+                    on_missing_bases=_log_missing_knowledge_bases(agent_name),
+                    on_unavailable_bases=unavailable_bases.update,
+                    refresh_owner=knowledge_refresh_owner,
+                )
+            except Exception:
+                logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
+                knowledge = None
+            availability_hint = _knowledge_availability_system_message(unavailable_bases)
+            if availability_hint:
+                prompt = f"{availability_hint}\n\n{prompt}"
+            if req.stream:
+                response = await _stream_completion(
                     agent_name,
                     prompt,
                     session_id,
@@ -876,8 +944,25 @@ async def chat_completions(
                     execution_identity=execution_identity,
                     refresh_owner=knowledge_refresh_owner,
                 )
+            else:
+                with tool_execution_identity(execution_identity):
+                    response = await _non_stream_completion(
+                        agent_name,
+                        prompt,
+                        session_id,
+                        config,
+                        runtime_paths,
+                        thread_history,
+                        req.user,
+                        knowledge,
+                        execution_identity=execution_identity,
+                        refresh_owner=knowledge_refresh_owner,
+                    )
+    except Exception:
+        completion_lock.release()
+        raise
 
-    return response
+    return _attach_openai_completion_lock_release(response, completion_lock)
 
 
 # ---------------------------------------------------------------------------
@@ -923,12 +1008,6 @@ async def _non_stream_completion(
         return _error_response(500, "Agent execution failed", error_type="server_error")
 
     logger.info("Chat completion sent", model=agent_name, stream=False, session_id=session_id)
-    await _run_openai_post_response_compaction_checks(
-        post_response_compaction_checks,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-    )
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     response = _ChatCompletionResponse(
         id=completion_id,
@@ -940,7 +1019,15 @@ async def _non_stream_completion(
             ),
         ],
     )
-    return JSONResponse(content=response.model_dump())
+    return _OpenAIJSONResponse(
+        content=response.model_dump(),
+        background=_openai_post_response_compaction_task(
+            post_response_compaction_checks,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1173,16 +1260,19 @@ async def _stream_completion(  # noqa: C901
 
             # 5. Stream terminator
             yield "data: [DONE]\n\n"
-            await _run_openai_post_response_compaction_checks(
-                post_response_compaction_checks,
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=execution_identity,
-            )
         finally:
             await stream.aclose()
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return _OpenAIStreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        background=_openai_post_response_compaction_task(
+            post_response_compaction_checks,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+        ),
+    )
 
 
 async def _run_openai_post_response_compaction_checks(
@@ -1208,6 +1298,25 @@ async def _run_openai_post_response_compaction_checks(
                 session_id=check.session_id,
                 scope=check.scope.key,
             )
+
+
+def _openai_post_response_compaction_task(
+    checks: Sequence[PostResponseCompactionCheck],
+    *,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> BackgroundTask | None:
+    """Return a response-finalizer task for post-response OpenAI compaction."""
+    if not checks:
+        return None
+    return BackgroundTask(
+        _run_openai_post_response_compaction_checks,
+        tuple(checks),
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1411,12 +1520,6 @@ async def _non_stream_team_completion(
                 return _error_response(500, "Team execution failed", error_type="server_error")
 
             logger.info("Team completion sent", team=team_name, stream=False)
-            await _run_openai_post_response_compaction_checks(
-                post_response_compaction_checks,
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=execution_identity,
-            )
             completion_id = f"chatcmpl-{uuid4().hex[:12]}"
             result = _ChatCompletionResponse(
                 id=completion_id,
@@ -1428,7 +1531,15 @@ async def _non_stream_team_completion(
                     ),
                 ],
             )
-            return JSONResponse(content=result.model_dump())
+            return _OpenAIJSONResponse(
+                content=result.model_dump(),
+                background=_openai_post_response_compaction_task(
+                    post_response_compaction_checks,
+                    runtime_paths=runtime_paths,
+                    config=config,
+                    execution_identity=execution_identity,
+                ),
+            )
     finally:
         close_team_runtime_sqlite_dbs(
             agents=agents,
@@ -1566,16 +1677,19 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                     team_name=team_name,
                 ):
                     yield chunk
-                await _run_openai_post_response_compaction_checks(
-                    post_response_compaction_checks,
-                    runtime_paths=runtime_paths,
-                    config=config,
-                    execution_identity=execution_identity,
-                )
             finally:
                 await _cleanup()
 
-        return StreamingResponse(_event_generator(), media_type="text/event-stream")
+        return _OpenAIStreamingResponse(
+            _event_generator(),
+            media_type="text/event-stream",
+            background=_openai_post_response_compaction_task(
+                post_response_compaction_checks,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+            ),
+        )
     except Exception:
         stack.close()
         close_team_runtime_sqlite_dbs(
