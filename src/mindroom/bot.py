@@ -429,6 +429,7 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._sync_shutting_down = False
+        self._certified_sync_token: str | None = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._runtime_view = BotRuntimeState(
             client=None,
@@ -1037,22 +1038,31 @@ class AgentBot:
             token = load_sync_token(self.storage_path, self.agent_name)
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+            self._certified_sync_token = None
             return False
 
         if token is None:
+            self._certified_sync_token = None
             return False
 
         self.client.next_batch = token
+        self._certified_sync_token = token
         self.logger.info("matrix_sync_token_restored")
         return True
 
+    def _certify_sync_response_token(self, response: nio.SyncResponse) -> bool:
+        """Record the response token that just passed durable cache catch-up."""
+        token = response.next_batch
+        if not isinstance(token, str) or not token:
+            return False
+        self._certified_sync_token = token
+        return True
+
     def _persist_sync_token(self) -> None:
-        """Persist the current Matrix sync token."""
+        """Persist the latest Matrix sync token certified by cache catch-up."""
         if self._runtime_view.sync_token_persistence_suppressed or self._runtime_view.sync_token_cache_catchup_pending:
             return
-        if self.client is None:
-            return
-        token = self.client.next_batch
+        token = self._certified_sync_token
         if not isinstance(token, str) or not token:
             return
 
@@ -1063,6 +1073,7 @@ class AgentBot:
 
     def _clear_sync_token_state(self) -> None:
         """Clear in-memory and persisted Matrix sync token state."""
+        self._certified_sync_token = None
         if self.client is not None:
             self.client.next_batch = None
         try:
@@ -1099,10 +1110,10 @@ class AgentBot:
         joined_timeline_classification: _JoinedTimelineTrustClassification,
         durable_cache_available: bool,
         validation_errors: list[BaseException],
-    ) -> list[BaseException]:
+    ) -> tuple[list[BaseException], bool]:
         """Return validation or cache-write failures that block token persistence."""
         if validation_errors or not joined_timeline_classification.valid or not durable_cache_available:
-            return validation_errors
+            return validation_errors, durable_cache_available
         try:
             sync_cache_tasks = self._conversation_cache.cache_sync_timeline(
                 response,
@@ -1115,10 +1126,11 @@ class AgentBot:
             if current_task is not None and current_task.cancelling():
                 self._runtime_view.suppress_sync_token_persistence()
                 raise
-            return [exc]
+            return [exc], durable_cache_available
         except Exception as exc:
-            return [exc]
-        return await self._sync_cache_failures(sync_cache_tasks)
+            return [exc], durable_cache_available
+        sync_cache_errors = await self._sync_cache_failures(sync_cache_tasks)
+        return sync_cache_errors, self._durable_event_cache_catchup_available()
 
     def _log_sync_cache_errors(self, sync_cache_errors: list[BaseException]) -> None:
         """Log cache certification failures for one sync response."""
@@ -1324,7 +1336,7 @@ class AgentBot:
                 response,
             )
             durable_cache_available = self._durable_event_cache_catchup_available()
-            sync_cache_errors = await self._sync_response_cache_errors(
+            sync_cache_errors, durable_cache_available = await self._sync_response_cache_errors(
                 response,
                 joined_timeline_classification=joined_timeline_classification,
                 durable_cache_available=durable_cache_available,
@@ -1365,7 +1377,11 @@ class AgentBot:
                 first_sync_response=first_sync_response,
             )
 
-        if persist_sync_token:
+        if (
+            persist_sync_token
+            and not self._runtime_view.sync_token_persistence_suppressed
+            and self._certify_sync_response_token(_response)
+        ):
             self._persist_sync_token()
         self._first_sync_done = True
 
@@ -1380,7 +1396,7 @@ class AgentBot:
         """Update the watchdog clock on sync errors without marking cache state fresh."""
         logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
-        if not self._first_sync_done and _response.status_code == "M_UNKNOWN_POS":
+        if _response.status_code == "M_UNKNOWN_POS":
             restored_sync_token = self._runtime_view.restored_sync_token
             self._runtime_view.mark_restored_sync_token_invalid()
             if restored_sync_token:
@@ -1390,6 +1406,7 @@ class AgentBot:
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,
                 error=str(_response),
+                first_sync=not self._first_sync_done,
                 restored_sync_token=restored_sync_token,
             )
 

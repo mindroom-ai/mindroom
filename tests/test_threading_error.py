@@ -1444,6 +1444,8 @@ class TestThreadingBehavior:
         bot: AgentBot,
         sync_response: nio.SyncResponse,
     ) -> None:
+        if bot.client is not None and not isinstance(sync_response.next_batch, str):
+            sync_response.next_batch = bot.client.next_batch
         with (
             patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
             patch.object(bot, "_maybe_start_startup_thread_prewarm"),
@@ -2070,6 +2072,91 @@ class TestThreadingBehavior:
         finally:
             await event_cache.close()
 
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
+    async def test_restored_first_sync_cache_disabled_before_queued_write_runs(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Restored-token catch-up must fail closed if cache availability is lost after preflight."""
+        room_id = "!test:localhost"
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock()
+        bot.event_cache = event_cache
+        coordinator = _install_runtime_write_coordinator(bot)
+        blocker_started = asyncio.Event()
+        release_blocker = asyncio.Event()
+        sync_cache_task_queued = asyncio.Event()
+
+        async def block_room_cache_queue() -> None:
+            blocker_started.set()
+            await release_blocker.wait()
+
+        blocker_task = coordinator.queue_room_update(
+            room_id,
+            block_room_cache_queue,
+            name="test_block_room_cache_queue",
+        )
+        await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
+
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_midflight_disable"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_midflight_disable")
+        sync_response = self._sync_response(
+            {
+                room_id: MagicMock(
+                    timeline=MagicMock(
+                        events=[
+                            _text_event(
+                                event_id="$midflight_disable:localhost",
+                                body="Midflight disable",
+                                sender="@user:localhost",
+                                server_timestamp=1234567890,
+                            ),
+                        ],
+                        limited=False,
+                    ),
+                ),
+            },
+        )
+
+        original_queue_room_update = coordinator.queue_room_update
+
+        def queue_room_update_spy(
+            queued_room_id: str,
+            update_coro_factory: object,
+            *,
+            name: str,
+            log_exceptions: bool = True,
+        ) -> asyncio.Task[object]:
+            task = original_queue_room_update(
+                queued_room_id,
+                update_coro_factory,
+                name=name,
+                log_exceptions=log_exceptions,
+            )
+            if name == "matrix_cache_sync_timeline":
+                sync_cache_task_queued.set()
+            return task
+
+        with patch.object(coordinator, "queue_room_update", side_effect=queue_room_update_spy):
+            response_task = asyncio.create_task(
+                self._run_sync_response_without_startup_side_effects(bot, sync_response),
+            )
+            try:
+                await asyncio.wait_for(sync_cache_task_queued.wait(), timeout=1.0)
+                event_cache.durable_writes_available = False
+                release_blocker.set()
+                await asyncio.wait_for(response_task, timeout=1.0)
+            finally:
+                release_blocker.set()
+                await asyncio.gather(blocker_task, response_task, return_exceptions=True)
+
+        event_cache.store_events_batch.assert_awaited()
         assert bot._runtime_view.restored_sync_token is False
         assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
         assert bot.client.next_batch is None

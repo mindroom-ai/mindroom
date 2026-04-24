@@ -172,10 +172,32 @@ async def test_unknown_pos_restored_first_sync_suppresses_later_token_persistenc
     bot._first_sync_done = True
     bot.client.next_batch = "s_later"
     response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_later"
     response.rooms = MagicMock(join={})
     await bot._on_sync_response(response)
 
     assert load_sync_token(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_path: Path) -> None:
+    """Post-start M_UNKNOWN_POS must not leave a poisoned sync token in place."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_rejected_after_start"
+    bot._first_sync_done = True
+    bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+    bot._runtime_view.mark_sync_catchup_applied()
+    save_sync_token(tmp_path, bot.agent_name, "s_rejected_after_start")
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    await bot._on_sync_error(sync_error)
+
+    assert bot.client.next_batch is None
+    assert load_sync_token(tmp_path, bot.agent_name) is None
+    assert bot._runtime_view.restored_sync_token is False
+    assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
 
 
 @pytest.mark.asyncio
@@ -196,12 +218,32 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Path) -> None:
-    """Shutdown should flush the current client sync token to disk."""
+    """Shutdown should flush the latest cache-certified sync token to disk."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_shutdown"
+    response = MagicMock()
+    response.next_batch = "s_shutdown"
+    assert bot._certify_sync_response_token(response)
     bot._coalescing_gate.drain_all = AsyncMock()
 
     await bot.prepare_for_sync_shutdown()
 
     assert load_sync_token(tmp_path, bot.agent_name) == "s_shutdown"
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp_path: Path) -> None:
+    """Shutdown must not flush a nio-advanced token before sync-response certification starts."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot._coalescing_gate.drain_all = AsyncMock()
+    save_sync_token(tmp_path, bot.agent_name, "s_before_precallback")
+    restored_sync_token = bot._restore_saved_sync_token()
+    bot._runtime_view.mark_runtime_started(restored_sync_token=restored_sync_token)
+
+    bot.client.next_batch = "s_after_precallback"
+
+    await bot.prepare_for_sync_shutdown()
+
+    assert load_sync_token(tmp_path, bot.agent_name) == "s_before_precallback"
