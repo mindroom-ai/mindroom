@@ -21,7 +21,6 @@ from mindroom.config.models import (
     ToolConfigEntry,
     validate_unique_tool_entries,
 )
-from mindroom.tool_system.catalog import TOOL_METADATA, normalize_authored_tool_overrides
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
     agent_workspace_relative_path,
@@ -286,6 +285,12 @@ class AgentConfig(BaseModel):
 
     def get_tool_overrides(self, tool_name: str) -> dict[str, object] | None:
         """Return normalized per-agent runtime overrides for one configured tool."""
+        # why-lazy: config.agent is imported by config.main; the tool catalog loads hook/runtime helpers.
+        from mindroom.tool_system.catalog import (  # noqa: PLC0415
+            TOOL_METADATA,
+            normalize_authored_tool_overrides,
+        )
+
         for entry in self.tools:
             if entry.name == tool_name and entry.overrides:
                 metadata = TOOL_METADATA.get(tool_name)

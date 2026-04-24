@@ -22,6 +22,7 @@ async def send_message_result(
     content: dict[str, Any],
 ) -> DeliveredMatrixEvent | None:
     """Late-bind Matrix delivery to avoid the hooks facade import cycle."""
+    # why-lazy: client_delivery imports config through Matrix formatting helpers during facade startup.
     from mindroom.matrix.client_delivery import send_message_result as _send_message_result  # noqa: PLC0415
 
     return await _send_message_result(client, room_id, content)
@@ -59,6 +60,7 @@ async def send_hook_message(
     conversation_cache: ConversationCacheProtocol,
 ) -> str | None:
     """Send one hook-originated Matrix message."""
+    # why-lazy: mentions imports config during hooks facade startup.
     from mindroom.matrix.mentions import format_message_with_mentions  # noqa: PLC0415
 
     resolved_sender_domain = resolve_hook_sender_domain(client, sender_domain=sender_domain)
