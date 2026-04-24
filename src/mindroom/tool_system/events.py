@@ -25,6 +25,7 @@ _MAX_TOOL_TRACE_EVENTS = 120
 _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
 _TOOL_MARKER_PATTERN = re.compile(r"🔧 `([^`]+)` \[(\d+)\]( ⏳)?")
+_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 StructuredResultDict = dict[str, object]
 StructuredResultList = list[object]
 
@@ -300,8 +301,39 @@ def _tool_marker_line(tool_name: str, tool_index: int | None, *, pending: bool) 
     return f"{_TOOL_REF_ICON} `{safe_tool_name}`{suffix}{pending_suffix}"
 
 
+def is_visible_tool_marker_line(line: str) -> bool:
+    """Return whether one plain-text line is a Matrix-visible tool marker."""
+    return _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) is not None
+
+
+def _line_ending(line: str) -> str:
+    if line.endswith("\r\n"):
+        return "\r\n"
+    if line.endswith("\n"):
+        return "\n"
+    return "\n"
+
+
+def ensure_visible_tool_marker_spacing(text: str) -> str:
+    """Ensure visible tool-marker lines cannot become setext headings."""
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return text
+
+    spaced_lines: list[str] = []
+    for index, line in enumerate(lines):
+        spaced_lines.append(line)
+        line_text = line.rstrip("\r\n")
+        if not is_visible_tool_marker_line(line_text):
+            continue
+        next_line = lines[index + 1] if index + 1 < len(lines) else None
+        if next_line is not None and next_line.strip():
+            spaced_lines.append(_line_ending(line) if line.endswith(("\n", "\r")) else "\n\n")
+    return "".join(spaced_lines)
+
+
 def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool) -> str:
-    return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n"
+    return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n\n"
 
 
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
