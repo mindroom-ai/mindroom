@@ -421,6 +421,19 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools._google_oauth"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.tool_system.dependencies",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.custom_tools.gmail",
+    "mindroom.custom_tools.google_calendar",
+    "mindroom.custom_tools.google_sheets",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.matrix_message"
 depends_on = [
     "mindroom.constants",
@@ -572,6 +585,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.mcp.manager",
     "mindroom.mcp.registry",
+    "mindroom.mcp.toolkit",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_support",
     "mindroom.scheduling", "mindroom.tool_system.plugins", "mindroom.tool_system.skills",
@@ -674,7 +688,6 @@ path = "mindroom.memory"
 depends_on = [
     "mindroom.config.main",
     "mindroom.constants", "mindroom.tool_system.worker_routing",
-    "mindroom.memory._policy",
     "mindroom.memory.auto_flush",
     "mindroom.memory.functions",
     "mindroom.memory._prompting",
@@ -685,6 +698,11 @@ path = "mindroom.memory._policy"
 depends_on = [
     "mindroom.memory._shared",
     "mindroom.runtime_resolution",
+]
+visibility = [
+    "mindroom.memory._file_backend",
+    "mindroom.memory._mem0_backend",
+    "mindroom.memory.functions",
 ]
 
 [[modules]]
@@ -780,8 +798,17 @@ depends_on = [
 [[modules]]
 path = "mindroom.mcp.registry"
 depends_on = [
+    "mindroom.mcp.toolkit",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.registry_state",
+]
+
+[[modules]]
+path = "mindroom.mcp.toolkit"
+depends_on = []
+visibility = [
+    "mindroom.mcp.registry",
+    "mindroom.orchestrator",
 ]
 
 [[modules]]
