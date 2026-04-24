@@ -840,7 +840,32 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
 
     assert outcome.terminal_status == "error"
     assert outcome.final_visible_event_id == "$placeholder"
-    assert cancelled_seen == []
+    runner = SimpleNamespace(
+        deps=SimpleNamespace(
+            delivery_gateway=SimpleNamespace(
+                deps=SimpleNamespace(response_hooks=response_hooks),
+            ),
+        ),
+        _log_post_response_effects_failure=MagicMock(),
+        _emit_pipeline_timing_summary=MagicMock(),
+        _response_outcome=MagicMock(return_value=None),
+    )
+    lifecycle = ResponseLifecycle(
+        runner=runner,
+        response_kind="ai",
+        request=MagicMock(),
+        response_envelope=_envelope(),
+        correlation_id="corr-suppressed-cleanup-fail",
+    )
+    await lifecycle.finalize(
+        outcome,
+        build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+    )
+
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].visible_response_event_id == "$placeholder"
+    assert cancelled_seen[0].failure_reason == outcome.failure_reason
 
 
 @pytest.mark.asyncio
@@ -898,4 +923,29 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
 
     assert outcome.terminal_status == "error"
     assert outcome.final_visible_event_id == "$placeholder"
-    assert cancelled_seen == []
+    runner = SimpleNamespace(
+        deps=SimpleNamespace(
+            delivery_gateway=SimpleNamespace(
+                deps=SimpleNamespace(response_hooks=response_hooks),
+            ),
+        ),
+        _log_post_response_effects_failure=MagicMock(),
+        _emit_pipeline_timing_summary=MagicMock(),
+        _response_outcome=MagicMock(return_value=None),
+    )
+    lifecycle = ResponseLifecycle(
+        runner=runner,
+        response_kind="ai",
+        request=MagicMock(),
+        response_envelope=_envelope(),
+        correlation_id="corr-suppressed-cleanup-exception",
+    )
+    await lifecycle.finalize(
+        outcome,
+        build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+    )
+
+    assert len(cancelled_seen) == 1
+    assert cancelled_seen[0].visible_response_event_id == "$placeholder"
+    assert cancelled_seen[0].failure_reason == outcome.failure_reason

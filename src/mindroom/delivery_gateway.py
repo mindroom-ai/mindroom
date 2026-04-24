@@ -9,7 +9,6 @@ from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom import constants, interactive
-from mindroom.cancellation import CancelSource, cancel_failure_reason
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     AfterResponseContext,
@@ -201,7 +200,7 @@ class CancelledVisibleNoteRequest:
     target: MessageTarget
     event_id: str
     existing_event_is_placeholder: bool
-    cancel_source: CancelSource
+    cancel_source: Literal["user_stop", "sync_restart", "interrupted"]
     response_kind: str
     response_envelope: MessageEnvelope
     correlation_id: str
@@ -231,6 +230,7 @@ class StreamingDeliveryRequest:
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
+    preserve_existing_visible_on_empty_terminal: bool = False
 
 
 @dataclass(frozen=True)
@@ -277,13 +277,23 @@ class DeliveryGateway:
             raise RuntimeError(msg)
         return client
 
-    def _cancelled_note_update(self, *, cancel_source: CancelSource) -> tuple[str, dict[str, str], str]:
+    def _cancelled_note_update(
+        self,
+        *,
+        cancel_source: Literal["user_stop", "sync_restart", "interrupted"],
+    ) -> tuple[str, dict[str, str], str]:
         """Return the terminal note body, content metadata, and failure reason."""
         cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=cancel_source)
+        if cancel_source == "sync_restart":
+            failure_reason = "sync_restart_cancelled"
+        elif cancel_source == "user_stop":
+            failure_reason = "cancelled_by_user"
+        else:
+            failure_reason = "interrupted"
         return (
             cancelled_text,
             {constants.STREAM_STATUS_KEY: stream_status},
-            cancel_failure_reason(cancel_source),
+            failure_reason,
         )
 
     def _current_stream_body(self, outcome: StreamTransportOutcome) -> str:
@@ -300,12 +310,12 @@ class DeliveryGateway:
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
         """Normalize CancelledError values to the canonical cancellation reason strings."""
         if not error.args:
-            return cancel_failure_reason("interrupted")
+            return "interrupted"
         if error.args[0] == "user_stop":
-            return cancel_failure_reason("user_stop")
+            return "cancelled_by_user"
         if error.args[0] == "sync_restart":
-            return cancel_failure_reason("sync_restart")
-        return cancel_failure_reason("interrupted")
+            return "sync_restart_cancelled"
+        return "interrupted"
 
     async def _cleanup_completed_placeholder_only_stream(
         self,
@@ -851,6 +861,10 @@ class DeliveryGateway:
             visible_event_id_callback=request.visible_event_id_callback,
             latest_thread_event_id=latest_thread_event_id,
             conversation_cache=self.deps.resolver.deps.conversation_cache,
+            preserve_existing_visible_on_empty_terminal=(
+                request.preserve_existing_visible_on_empty_terminal
+                or (request.existing_event_id is not None and not request.adopt_existing_placeholder)
+            ),
         )
 
     async def _finalize_visible_replacement_edit(

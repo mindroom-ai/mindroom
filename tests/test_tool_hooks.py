@@ -1441,6 +1441,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
     bot = _agent_bot(tmp_path, config=config)
     bot.event_cache = MagicMock()
     bot.hook_registry = HookRegistry.from_plugins(plugins)
+    bot.orchestrator = MagicMock(knowledge_managers={}, knowledge_refresh_owner=None)
 
     try:
         with (

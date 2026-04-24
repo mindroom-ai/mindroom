@@ -20,7 +20,6 @@ from mindroom.ai import (
 )
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
-from mindroom.cancellation import cancel_failure_reason
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -114,6 +113,12 @@ if TYPE_CHECKING:
         ToolRuntimeSupport,
     )
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+_CANCEL_FAILURE_REASON_BY_SOURCE = {
+    "user_stop": "cancelled_by_user",
+    "sync_restart": "sync_restart_cancelled",
+    "interrupted": "interrupted",
+}
 
 type MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
@@ -1413,7 +1418,7 @@ class ResponseRunner:
                             ),
                         )
                     else:
-                        failure_reason = cancel_failure_reason(classify_cancel_source(exc))
+                        failure_reason = _CANCEL_FAILURE_REASON_BY_SOURCE[classify_cancel_source(exc)]
                         final_delivery_outcome = FinalDeliveryOutcome(
                             terminal_status="cancelled",
                             event_id=None,
@@ -1676,7 +1681,7 @@ class ResponseRunner:
                 try:
                     await task
                 except asyncio.CancelledError as exc:
-                    failure_reason = cancel_failure_reason(classify_cancel_source(exc))
+                    failure_reason = _CANCEL_FAILURE_REASON_BY_SOURCE[classify_cancel_source(exc)]
                     if on_cancelled is not None:
                         on_cancelled(failure_reason)
                     self._log_cancelled_response(
@@ -2042,7 +2047,7 @@ class ResponseRunner:
                         correlation_id=correlation_id,
                     ),
                 )
-            failure_reason = cancel_failure_reason(cancel_source)
+            failure_reason = _CANCEL_FAILURE_REASON_BY_SOURCE[cancel_source]
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id=None,
@@ -2350,6 +2355,7 @@ class ResponseRunner:
         delivery_stage_started = False
         delivery_failure_reason: str | None = None
         delivery_cancelled = False
+        early_delivery_error: BaseException | None = None
         tool_trace: list[Any] = []
         run_metadata_content: dict[str, Any] = {}
         resolved_correlation_id = self._correlation_id_for_request(request)
@@ -2448,16 +2454,120 @@ class ResponseRunner:
                 on_cancelled=note_task_cancelled,
             )
             tracked_event_id = tracked_event_id or run_message_id
+        except asyncio.CancelledError as error:
+            if not delivery_stage_started:
+                delivery_failure_reason = _CANCEL_FAILURE_REASON_BY_SOURCE[classify_cancel_source(error)]
+                delivery_cancelled = True
+                tracked_event_id = tracked_event_id or run_message_id
+                event_id = tracked_event_id or (
+                    request.existing_event_id if request.existing_event_is_placeholder else None
+                )
+                if event_id is not None:
+                    final_delivery_outcome = await self.deps.delivery_gateway.finalize_streamed_response(
+                        FinalizeStreamedResponseRequest(
+                            target=resolved_target,
+                            stream_transport_outcome=StreamTransportOutcome(
+                                last_physical_stream_event_id=event_id,
+                                terminal_status="cancelled",
+                                rendered_body=PROGRESS_PLACEHOLDER,
+                                visible_body_state="placeholder_only",
+                                failure_reason=delivery_failure_reason,
+                            ),
+                            initial_delivery_kind="edited" if request.existing_event_id else "sent",
+                            response_kind="ai",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        ),
+                    )
+                else:
+                    final_delivery_outcome = FinalDeliveryOutcome(
+                        terminal_status="cancelled",
+                        event_id=None,
+                        failure_reason=delivery_failure_reason,
+                    )
+                early_delivery_error = error
+            else:
+                raise
         except Exception as error:
             if not delivery_stage_started:
-                raise
-            self._log_delivery_failure(response_kind="ai", error=error)
+                delivery_failure_reason = str(error) or "delivery_failed_before_start"
+                tracked_event_id = tracked_event_id or run_message_id
+                event_id = tracked_event_id or (
+                    request.existing_event_id if request.existing_event_is_placeholder else None
+                )
+                if event_id is not None:
+                    final_delivery_outcome = await self.deps.delivery_gateway.finalize_streamed_response(
+                        FinalizeStreamedResponseRequest(
+                            target=resolved_target,
+                            stream_transport_outcome=StreamTransportOutcome(
+                                last_physical_stream_event_id=event_id,
+                                terminal_status="error",
+                                rendered_body=PROGRESS_PLACEHOLDER,
+                                visible_body_state="placeholder_only",
+                                failure_reason=delivery_failure_reason,
+                            ),
+                            initial_delivery_kind="edited" if request.existing_event_id else "sent",
+                            response_kind="ai",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        ),
+                    )
+                else:
+                    final_delivery_outcome = FinalDeliveryOutcome(
+                        terminal_status="error",
+                        event_id=None,
+                        failure_reason=delivery_failure_reason,
+                    )
+                early_delivery_error = error
+            else:
+                self._log_delivery_failure(response_kind="ai", error=error)
         if final_delivery_outcome is None and delivery_cancelled:
-            final_delivery_outcome = FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                event_id=None,
-                failure_reason=delivery_failure_reason or "interrupted",
-            )
+            if not delivery_stage_started:
+                tracked_event_id = tracked_event_id or run_message_id
+                event_id = tracked_event_id or (
+                    request.existing_event_id if request.existing_event_is_placeholder else None
+                )
+                if event_id is not None:
+                    final_delivery_outcome = await self.deps.delivery_gateway.finalize_streamed_response(
+                        FinalizeStreamedResponseRequest(
+                            target=resolved_target,
+                            stream_transport_outcome=StreamTransportOutcome(
+                                last_physical_stream_event_id=event_id,
+                                terminal_status="cancelled",
+                                rendered_body=PROGRESS_PLACEHOLDER,
+                                visible_body_state="placeholder_only",
+                                failure_reason=delivery_failure_reason or "interrupted",
+                            ),
+                            initial_delivery_kind="edited" if request.existing_event_id else "sent",
+                            response_kind="ai",
+                            response_envelope=resolved_response_envelope,
+                            correlation_id=resolved_correlation_id,
+                            tool_trace=None,
+                            extra_content=None,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        ),
+                    )
+                else:
+                    final_delivery_outcome = FinalDeliveryOutcome(
+                        terminal_status="cancelled",
+                        event_id=None,
+                        failure_reason=delivery_failure_reason or "interrupted",
+                    )
+            else:
+                final_delivery_outcome = FinalDeliveryOutcome(
+                    terminal_status="cancelled",
+                    event_id=None,
+                    failure_reason=delivery_failure_reason or "interrupted",
+                )
         assert final_delivery_outcome is not None
         post_response_outcome = ResponseOutcome(
             response_run_id=response_run_id,
@@ -2487,7 +2597,7 @@ class ResponseRunner:
                 post_response_deps=post_response_deps,
             )
         except asyncio.CancelledError as exc:
-            failure_reason = cancel_failure_reason(classify_cancel_source(exc))
+            failure_reason = _CANCEL_FAILURE_REASON_BY_SOURCE[classify_cancel_source(exc)]
             cancelled_outcome = FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id=final_delivery_outcome.final_visible_event_id,
@@ -2503,4 +2613,6 @@ class ResponseRunner:
                 post_response_deps=post_response_deps,
             )
             raise
+        if early_delivery_error is not None:
+            raise early_delivery_error
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None

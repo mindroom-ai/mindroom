@@ -184,6 +184,27 @@ async def test_transport_placeholder_only_cancelled_terminal_update_keeps_commit
 
 
 @pytest.mark.asyncio
+async def test_transport_existing_visible_cancel_without_new_body_preserves_prior_event(
+    tmp_path: Path,
+) -> None:
+    """Cancelling a regeneration before new text lands must not overwrite the old visible reply."""
+    config = _config(tmp_path)
+    streaming = _streaming_response(config)
+    streaming.event_id = "$existing"
+    streaming.preserve_existing_visible_on_empty_terminal = True
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock()) as mock_edit:
+        outcome = await streaming.finalize(_client(), cancel_source="user_stop")
+
+    mock_edit.assert_not_awaited()
+    assert outcome.last_physical_stream_event_id == "$existing"
+    assert outcome.terminal_status == "cancelled"
+    assert outcome.rendered_body is None
+    assert outcome.visible_body_state == "none"
+    assert outcome.failure_reason == "cancelled_by_user"
+
+
+@pytest.mark.asyncio
 async def test_transport_failed_terminal_update_drops_committed_interactive_metadata(
     tmp_path: Path,
 ) -> None:

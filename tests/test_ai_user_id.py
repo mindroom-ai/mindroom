@@ -297,9 +297,15 @@ def _make_bot(
 
 def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
     matrix_admin = object()
+    knowledge_refresh_owner = SimpleNamespace(
+        schedule_refresh=lambda _base_id: None,
+        schedule_initial_load=lambda _base_id: None,
+        is_refreshing=lambda _base_id: False,
+    )
     return SimpleNamespace(
         config=config,
         runtime_paths=runtime_paths,
+        knowledge_refresh_owner=knowledge_refresh_owner,
         _hook_matrix_admin=lambda: matrix_admin,
         _hook_room_state_querier=lambda: None,
         _hook_room_state_putter=lambda: None,
@@ -761,6 +767,11 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
                 _hook_matrix_admin=MagicMock(return_value=object()),
                 _hook_room_state_querier=MagicMock(return_value=None),
                 _hook_room_state_putter=MagicMock(return_value=None),
+                knowledge_refresh_owner=SimpleNamespace(
+                    schedule_refresh=lambda _base_id: None,
+                    schedule_initial_load=lambda _base_id: None,
+                    is_refreshing=lambda _base_id: False,
+                ),
             ),
         )
 
@@ -1712,6 +1723,65 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
 
     assert resolution is None
     assert cancelled_seen == ["sync_restart_cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_early_cancellation_redacts_thinking_placeholder(
+    tmp_path: Path,
+) -> None:
+    """Cancellation after Thinking... but before delivery starts should redact the placeholder."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    cancelled_seen: list[str | None] = []
+
+    @hook(EVENT_MESSAGE_CANCELLED)
+    async def on_cancelled(ctx: CancelledResponseContext) -> None:
+        cancelled_seen.append(ctx.info.failure_reason)
+
+    registry = HookRegistry.from_plugins([_plugin("early-cancel-cleanup", [on_cancelled])])
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        on_task_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
+        on_task_cancelled("cancelled_by_user")
+        return "$thinking"
+
+    async def redact_message_event(*, room_id: str, event_id: str, reason: str) -> bool:
+        assert room_id == "!test:localhost"
+        assert event_id == "$thinking"
+        assert reason == "Completed placeholder-only streamed response"
+        assert cancelled_seen == []
+        return True
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+        redact_mock = AsyncMock(side_effect=redact_message_event)
+        object.__setattr__(coordinator.deps.delivery_gateway.deps, "redact_message_event", redact_mock)
+
+        resolution = await coordinator.generate_response_locked(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+    assert resolution is None
+    redact_mock.assert_awaited_once()
+    assert cancelled_seen == ["cancelled_by_user"]
 
 
 @pytest.mark.asyncio

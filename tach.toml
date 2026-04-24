@@ -289,6 +289,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials_sync",
     "mindroom.frontend_assets",
+    "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.matrix.health",
     "mindroom.orchestration.runtime",
@@ -421,6 +422,19 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools._google_oauth"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.tool_system.dependencies",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.custom_tools.gmail",
+    "mindroom.custom_tools.google_calendar",
+    "mindroom.custom_tools.google_sheets",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.matrix_message"
 depends_on = [
     "mindroom.constants",
@@ -453,24 +467,17 @@ depends_on = [
 [[modules]]
 path = "mindroom.delivery_gateway"
 depends_on = [
-    "mindroom.cancellation",
     "mindroom.constants",
-    "mindroom.final_delivery",
     "mindroom.matrix.client_delivery",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
 ]
 
 [[modules]]
-path = "mindroom.final_delivery"
-depends_on = ["mindroom.tool_system.events"]
-
-[[modules]]
 path = "mindroom.edit_regenerator"
 depends_on = [
     "mindroom.coalescing",
     "mindroom.conversation_resolver",
-    "mindroom.final_delivery",
     "mindroom.handled_turns",
     "mindroom.hooks.ingress",
     "mindroom.matrix.client_visible_messages",
@@ -579,6 +586,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.mcp.manager",
     "mindroom.mcp.registry",
+    "mindroom.mcp.toolkit",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_support",
     "mindroom.scheduling", "mindroom.tool_system.plugins", "mindroom.tool_system.skills",
@@ -590,10 +598,8 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_runtime",
-    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.delivery_gateway",
-    "mindroom.final_delivery",
     "mindroom.history.interrupted_replay",
     "mindroom.history.turn_recorder",
     "mindroom.knowledge",
@@ -683,7 +689,6 @@ path = "mindroom.memory"
 depends_on = [
     "mindroom.config.main",
     "mindroom.constants", "mindroom.tool_system.worker_routing",
-    "mindroom.memory._policy",
     "mindroom.memory.auto_flush",
     "mindroom.memory.functions",
     "mindroom.memory._prompting",
@@ -694,6 +699,11 @@ path = "mindroom.memory._policy"
 depends_on = [
     "mindroom.memory._shared",
     "mindroom.runtime_resolution",
+]
+visibility = [
+    "mindroom.memory._file_backend",
+    "mindroom.memory._mem0_backend",
+    "mindroom.memory.functions",
 ]
 
 [[modules]]
@@ -789,8 +799,17 @@ depends_on = [
 [[modules]]
 path = "mindroom.mcp.registry"
 depends_on = [
+    "mindroom.mcp.toolkit",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.registry_state",
+]
+
+[[modules]]
+path = "mindroom.mcp.toolkit"
+depends_on = []
+visibility = [
+    "mindroom.mcp.registry",
+    "mindroom.orchestrator",
 ]
 
 [[modules]]
@@ -1114,7 +1133,6 @@ depends_on = [
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
-    "mindroom.final_delivery",
     "mindroom.hooks.sender",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
@@ -1386,9 +1404,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.streaming"
 depends_on = [
-    "mindroom.cancellation",
     "mindroom.constants",
-    "mindroom.final_delivery",
     "mindroom.interactive",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
@@ -1417,7 +1433,6 @@ depends_on = [
 path = "mindroom.post_response_effects"
 depends_on = [
     "mindroom.delivery_gateway",
-    "mindroom.final_delivery",
     "mindroom.matrix.conversation_cache",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
@@ -1443,7 +1458,6 @@ depends_on = [
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.delivery_gateway",
-    "mindroom.final_delivery",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
     "mindroom.matrix.event_info",
@@ -1490,6 +1504,7 @@ depends_on = [
 path = "mindroom.knowledge"
 depends_on = [
     "mindroom.knowledge.manager",
+    "mindroom.knowledge.refresh_owner",
     "mindroom.knowledge.shared_managers",
     "mindroom.knowledge.utils",
 ]
@@ -1516,6 +1531,10 @@ depends_on = [
     "mindroom.constants",
     "mindroom.knowledge.chunking",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.refresh_owner"
+depends_on = ["mindroom.knowledge.shared_managers"]
 
 [[modules]]
 path = "mindroom.knowledge.utils"
@@ -1618,9 +1637,13 @@ expose = [
     "KnowledgeManager",
     "ensure_request_knowledge_managers",
     "ensure_shared_knowledge_manager",
+    "format_knowledge_availability_notice",
     "get_agent_knowledge",
     "get_shared_knowledge_manager_for_config",
     "initialize_shared_knowledge_managers",
+    "KnowledgeAvailability",
+    "OrchestratorKnowledgeRefreshOwner",
+    "StandaloneKnowledgeRefreshOwner",
     "shutdown_shared_knowledge_managers",
 ]
 from = ["mindroom.knowledge"]
