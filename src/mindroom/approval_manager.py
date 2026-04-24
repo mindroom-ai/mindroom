@@ -274,6 +274,12 @@ class _StartupTerminalState(Enum):
     UNKNOWN = "unknown"
 
 
+class _CardOrigin(Enum):
+    CACHE_HIT = "cache_hit"
+    FETCHED = "fetched"
+    HISTORY_SCAN = "history_scan"
+
+
 class ApprovalManager:
     """Coordinate live approval waiters against Matrix approval cards."""
 
@@ -429,6 +435,7 @@ class ApprovalManager:
                 approval_id=approval_id,
                 latest_edit=latest_edit,
                 latest_edit_known=True,
+                origin=_CardOrigin.CACHE_HIT,
             )
             if pending is not None:
                 cached_pending = pending
@@ -456,6 +463,7 @@ class ApprovalManager:
                 approval_id=approval_id,
                 latest_edit=history_latest_edits.get(card_event_id),
                 latest_edit_known=card_event_id in history_latest_edits,
+                origin=_CardOrigin.HISTORY_SCAN,
             )
             if history_pending is not None:
                 return history_pending
@@ -498,7 +506,7 @@ class ApprovalManager:
                     continue
                 state = await self._classify_startup_card(
                     pending,
-                    cached_candidate=event_id in cached_event_ids,
+                    origin=_CardOrigin.CACHE_HIT if event_id in cached_event_ids else _CardOrigin.HISTORY_SCAN,
                     history_latest_edit=history_latest_edits.get(event_id),
                     history_scan_succeeded=history_scan_succeeded,
                 )
@@ -553,11 +561,11 @@ class ApprovalManager:
         self,
         pending: PendingApproval,
         *,
-        cached_candidate: bool,
+        origin: _CardOrigin,
         history_latest_edit: dict[str, Any] | None,
         history_scan_succeeded: bool,
     ) -> _StartupTerminalState:
-        if cached_candidate:
+        if origin == _CardOrigin.CACHE_HIT:
             cached_latest_edit = await self._latest_edit(
                 room_id=pending.room_id,
                 card_event_id=pending.card_event_id,
@@ -566,7 +574,7 @@ class ApprovalManager:
                 return _StartupTerminalState.RESOLVED
         if history_scan_succeeded and pending.latest_status(history_latest_edit) != "pending":
             return _StartupTerminalState.RESOLVED
-        if cached_candidate and pending.card_sender_id == self._transport_sender_id():
+        if origin == _CardOrigin.CACHE_HIT and pending.card_sender_id == self._transport_sender_id():
             return _StartupTerminalState.PENDING_CONFIRMED
         if not history_scan_succeeded:
             return _StartupTerminalState.UNKNOWN
@@ -972,7 +980,7 @@ class ApprovalManager:
             return False
 
     async def _pending_approval_for_card(self, *, room_id: str, card_event_id: str) -> PendingApproval | None:
-        card_event = await self._card_event(room_id=room_id, card_event_id=card_event_id)
+        card_event, origin = await self._card_event_with_origin(room_id=room_id, card_event_id=card_event_id)
         if card_event is None:
             return None
         try:
@@ -983,7 +991,7 @@ class ApprovalManager:
             latest_edit = await self._latest_edit(room_id=room_id, card_event_id=card_event_id)
             terminal_state_known = True
         else:
-            latest_edit, terminal_state_known = await self._latest_edit_with_history_fallback(pending)
+            latest_edit, terminal_state_known = await self._latest_edit_with_history_fallback(pending, origin=origin)
         if not terminal_state_known:
             return None
         if pending.latest_status(latest_edit) != "pending":
@@ -991,28 +999,46 @@ class ApprovalManager:
         return pending
 
     async def _card_event(self, *, room_id: str, card_event_id: str) -> dict[str, Any] | None:
+        card_event, _origin = await self._card_event_with_origin(room_id=room_id, card_event_id=card_event_id)
+        return card_event
+
+    async def _card_event_with_origin(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+    ) -> tuple[dict[str, Any] | None, _CardOrigin]:
         with self._live_lock:
             live = self._pending_by_card_event.get(card_event_id)
             if live is not None:
-                return live.card_event
+                return live.card_event, _CardOrigin.CACHE_HIT
         if self._event_cache is not None:
             cached_event = await self._event_cache.get_event(room_id, card_event_id)
             if cached_event is not None:
-                return cached_event
+                return cached_event, _CardOrigin.CACHE_HIT
         if self._event_fetcher is not None:
-            return await self._event_fetcher(room_id, card_event_id)
-        return None
+            return await self._event_fetcher(room_id, card_event_id), _CardOrigin.FETCHED
+        return None, _CardOrigin.FETCHED
 
     async def _latest_edit(self, *, room_id: str, card_event_id: str) -> dict[str, Any] | None:
         if self._event_cache is None:
             return None
         return await self._event_cache.get_latest_edit(room_id, card_event_id)
 
-    async def _latest_edit_with_history_fallback(self, pending: PendingApproval) -> tuple[dict[str, Any] | None, bool]:
+    async def _latest_edit_with_history_fallback(
+        self,
+        pending: PendingApproval,
+        *,
+        origin: _CardOrigin,
+    ) -> tuple[dict[str, Any] | None, bool]:
         latest_edit = await self._latest_edit(room_id=pending.room_id, card_event_id=pending.card_event_id)
         if latest_edit is not None:
             return latest_edit, True
-        if self._event_cache is not None and pending.card_sender_id == self._transport_sender_id():
+        if (
+            self._event_cache is not None
+            and origin == _CardOrigin.CACHE_HIT
+            and pending.card_sender_id == self._transport_sender_id()
+        ):
             return None, True
         try:
             history_events = await self._scan_room_messages_for_approval_events(
@@ -1167,6 +1193,7 @@ class ApprovalManager:
         *,
         room_id: str,
         approval_id: str,
+        origin: _CardOrigin,
         latest_edit: dict[str, Any] | None = None,
         latest_edit_known: bool = False,
     ) -> PendingApproval | None:
@@ -1177,7 +1204,10 @@ class ApprovalManager:
         if pending.approval_id != approval_id:
             return None
         if not latest_edit_known:
-            latest_edit, terminal_state_known = await self._latest_edit_with_history_fallback(pending)
+            latest_edit, terminal_state_known = await self._latest_edit_with_history_fallback(
+                pending,
+                origin=origin,
+            )
             if not terminal_state_known:
                 return None
         if pending.latest_status(latest_edit) != "pending":

@@ -891,6 +891,36 @@ async def test_get_pending_approval_cache_miss_falls_back_to_room_get_event(tmp_
 
 
 @pytest.mark.asyncio
+async def test_card_response_fetched_same_router_card_consumes_terminal_history_edit(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    card = _approval_card(sender="@mindroom_router:localhost")
+    fetcher = AsyncMock(return_value=card)
+    scanner = AsyncMock(return_value=[_approval_edit(card, status="approved")])
+    editor = AsyncMock(return_value=True)
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        event_fetcher=fetcher,
+        room_event_scanner=scanner,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.handle_response_event(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="denied",
+        reason="Too late.",
+    )
+
+    assert result.consumed is True
+    assert result.resolved is False
+    scanner.assert_awaited_once()
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_card_response_uses_same_router_cached_pending_without_history_scan(tmp_path: Path) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
@@ -1161,6 +1191,27 @@ async def test_auto_deny_pending_on_startup_denies_same_router_cached_cards_when
     replacement = editor.await_args.args[2]
     assert replacement["status"] == "denied"
     assert replacement["resolution_reason"] == "Bot restarted before approval — original request was cancelled."
+
+
+@pytest.mark.asyncio
+async def test_auto_deny_pending_on_startup_preserves_same_router_cache_hit_when_history_scan_fails(
+    tmp_path: Path,
+) -> None:
+    cache = FakeEventCache()
+    await cache.store_event("$approval", "!room:localhost", _approval_card())
+    editor = AsyncMock(return_value=True)
+    scanner = AsyncMock(side_effect=RuntimeError("pagination failed"))
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        room_event_scanner=scanner,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.auto_deny_pending_on_startup() == 1
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
 
 
 @pytest.mark.asyncio
