@@ -477,7 +477,6 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
         runs_after=8,
         compacted_run_count=12,
         compacted_at="2026-01-01T00:00:00Z",
-        notify=True,
         history_budget_tokens=100_000,
         role_instructions_tokens=0,
         tool_definition_tokens=0,

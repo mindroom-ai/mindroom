@@ -101,23 +101,15 @@ class CompactionDecision:
 
 
 @dataclass(frozen=True)
-class OpportunisticCompactionRequest:
-    """Immediate post-response maintenance compaction request."""
+class PostResponseCompactionCheck:
+    """Post-response check for whether the updated session should compact now."""
 
     agent_name: str
     session_id: str
     scope_kind: _ScopeKind
     scope_id: str
-    summary_model: str
-    current_history_tokens: int
-    runs_before: int
-    history_budget_tokens: int | None
-    summary_input_budget_tokens: int
+    execution_plan: ResolvedHistoryExecutionPlan
     active_context_window: int | None
-    replay_window_tokens: int | None
-    threshold_tokens: int | None
-    reserve_tokens: int
-    notify: bool = False
 
     @property
     def scope(self) -> HistoryScope:
@@ -126,7 +118,7 @@ class OpportunisticCompactionRequest:
 
     @property
     def dedupe_key(self) -> tuple[str, str, str]:
-        """Return the in-process dedupe key for one compaction request."""
+        """Return the in-process dedupe key for one compaction check."""
         return (self.agent_name, self.scope.key, self.session_id)
 
 
@@ -203,7 +195,7 @@ def _should_render_overhead_tokens(tokens: int | None) -> TypeGuard[int]:
 
 @dataclass(frozen=True)
 class CompactionOutcome:
-    """Completed pre-run compaction result used for notices and tests."""
+    """Completed compaction result used for lifecycle notices and tests."""
 
     mode: _CompactionMode
     session_id: str
@@ -219,7 +211,6 @@ class CompactionOutcome:
     runs_after: int
     compacted_run_count: int
     compacted_at: str
-    notify: bool
     history_budget_tokens: int | None = None
     role_instructions_tokens: int | None = None
     tool_definition_tokens: int | None = None
@@ -290,4 +281,4 @@ class PreparedHistoryState:
     compaction_decision: CompactionDecision = field(
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
-    opportunistic_compaction_requests: list[OpportunisticCompactionRequest] = field(default_factory=list)
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = field(default_factory=list)

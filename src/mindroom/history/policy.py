@@ -90,7 +90,7 @@ def classify_compaction_decision(  # noqa: PLR0911
     trigger_budget_tokens: int | None = None,
     hard_budget_tokens: int | None = None,
 ) -> CompactionDecision:
-    """Classify compaction as none, immediate post-response maintenance, or foreground required."""
+    """Classify compaction as none, immediate post-response, or foreground required."""
     resolved_trigger_budget = plan.replay_budget_tokens if trigger_budget_tokens is None else trigger_budget_tokens
     resolved_hard_budget = plan.hard_replay_budget_tokens if hard_budget_tokens is None else hard_budget_tokens
 

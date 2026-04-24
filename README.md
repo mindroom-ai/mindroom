@@ -282,7 +282,6 @@ defaults:
   #   enabled: true
   #   threshold_percent: 0.8
   #   reserve_tokens: 16384
-  #   notify: false
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   num_history_runs: null             # Number of prior runs to include (null = all)
   thread_summary_first_threshold: 1  # First automatic summary after 1 thread message
@@ -306,6 +305,8 @@ agents:
 ```
 
 Auto-compaction is destructive inside the active session.
+It uses one Matrix lifecycle notice that is edited in place.
+It runs before a reply only when needed for that reply, and otherwise runs immediately after a successful reply when the updated session crosses the threshold.
 It rewrites the stored session summary and removes the compacted raw runs from the live session so Agno replays only the merged summary plus the remaining recent runs.
 
 2. Configure your Matrix homeserver and API keys (optional, defaults shown):

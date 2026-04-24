@@ -661,7 +661,7 @@ class _FailingStubVectorDb:
         raise RuntimeError(self.error_message)
 
 
-def _make_compaction_outcome(*, mode: str = "auto", notify: bool = True) -> CompactionOutcome:
+def _make_compaction_outcome(*, mode: str = "auto") -> CompactionOutcome:
     return CompactionOutcome(
         mode=mode,
         session_id="!test:localhost:$thread_root_id",
@@ -677,7 +677,6 @@ def _make_compaction_outcome(*, mode: str = "auto", notify: bool = True) -> Comp
         runs_after=7,
         compacted_run_count=12,
         compacted_at="2026-03-22T20:15:00Z",
-        notify=notify,
     )
 
 

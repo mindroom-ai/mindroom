@@ -47,7 +47,7 @@ from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
-    OpportunisticCompactionRequest,
+    PostResponseCompactionCheck,
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
@@ -132,7 +132,7 @@ class PreparedScopeHistory:
     compaction_decision: CompactionDecision = field(
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
-    opportunistic_compaction_requests: list[OpportunisticCompactionRequest] = field(default_factory=list)
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = field(default_factory=list)
 
 
 def resolve_history_scope(agent: Agent) -> HistoryScope | None:
@@ -219,7 +219,7 @@ async def prepare_scope_history(  # noqa: C901
         trigger_budget_tokens=trigger_history_budget,
         hard_budget_tokens=hard_history_budget,
     )
-    opportunistic_compaction_requests: list[OpportunisticCompactionRequest] = []
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     logger.info(
         "History preparation check",
         agent=agent_name,
@@ -234,33 +234,24 @@ async def prepare_scope_history(  # noqa: C901
         unavailable_reason=execution_plan.unavailable_reason,
     )
 
-    if compaction_decision.mode == "opportunistic" and visible_runs and execution_plan.summary_input_budget_tokens:
-        opportunistic_compaction_requests.append(
-            OpportunisticCompactionRequest(
+    if (
+        execution_plan.authored_compaction_enabled
+        and execution_plan.destructive_compaction_available
+        and execution_plan.summary_input_budget_tokens is not None
+    ):
+        post_response_compaction_checks.append(
+            PostResponseCompactionCheck(
                 agent_name=agent_name,
                 session_id=session.session_id,
                 scope_kind=scope_context.scope.kind,
                 scope_id=scope_context.scope.scope_id,
-                summary_model=execution_plan.compaction_model_name,
-                current_history_tokens=current_history_tokens,
-                runs_before=len(visible_runs),
-                history_budget_tokens=trigger_history_budget,
-                summary_input_budget_tokens=execution_plan.summary_input_budget_tokens,
+                execution_plan=execution_plan,
                 active_context_window=resolved_inputs.active_context_window,
-                replay_window_tokens=execution_plan.replay_window_tokens,
-                threshold_tokens=execution_plan.trigger_threshold_tokens,
-                reserve_tokens=execution_plan.reserve_tokens,
-                notify=resolved_inputs.compaction_config.notify,
             ),
         )
 
     if compaction_decision.mode == "required":
         assert execution_plan.summary_input_budget_tokens is not None
-        summary_model = _load_compaction_model(
-            config,
-            runtime_paths,
-            execution_plan.compaction_model_name,
-        )
         notice_event_id: str | None = None
         compaction_start = time.monotonic()
         if compaction_lifecycle is not None and visible_runs:
@@ -276,6 +267,11 @@ async def prepare_scope_history(  # noqa: C901
                 ),
             )
         try:
+            summary_model = _load_compaction_model(
+                config,
+                runtime_paths,
+                execution_plan.compaction_model_name,
+            )
             _next_state, outcome = await compact_scope_history(
                 storage=scope_context.storage,
                 session=session,
@@ -290,7 +286,6 @@ async def prepare_scope_history(  # noqa: C901
                 replay_window_tokens=execution_plan.replay_window_tokens,
                 threshold_tokens=execution_plan.trigger_threshold_tokens,
                 reserve_tokens=execution_plan.reserve_tokens,
-                notify=resolved_inputs.compaction_config.notify,
                 timing_scope=timing_scope,
             )
         except Exception as error:
@@ -351,7 +346,7 @@ async def prepare_scope_history(  # noqa: C901
         resolved_inputs=resolved_inputs,
         compaction_outcomes=compaction_outcomes,
         compaction_decision=compaction_decision,
-        opportunistic_compaction_requests=opportunistic_compaction_requests,
+        post_response_compaction_checks=post_response_compaction_checks,
     )
 
 
@@ -401,7 +396,7 @@ def finalize_history_preparation(
             ),
             replays_persisted_history=False,
             compaction_decision=prepared_scope_history.compaction_decision,
-            opportunistic_compaction_requests=prepared_scope_history.opportunistic_compaction_requests,
+            post_response_compaction_checks=prepared_scope_history.post_response_compaction_checks,
         )
 
     current_history_tokens = estimate_prompt_visible_history_tokens(
@@ -437,7 +432,7 @@ def finalize_history_preparation(
             replay_plan=replay_plan,
         ),
         compaction_decision=prepared_scope_history.compaction_decision,
-        opportunistic_compaction_requests=prepared_scope_history.opportunistic_compaction_requests,
+        post_response_compaction_checks=prepared_scope_history.post_response_compaction_checks,
     )
 
 
@@ -535,37 +530,60 @@ async def prepare_history_for_run(
     )
 
 
-async def run_opportunistic_compaction_request(
+async def run_post_response_compaction_check(
     *,
-    request: OpportunisticCompactionRequest,
+    check: PostResponseCompactionCheck,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     compaction_lifecycle: CompactionLifecycle | None = None,
 ) -> CompactionOutcome | None:
-    """Run one immediate post-response maintenance compaction request."""
-    scope = request.scope
+    """Run compaction after a response if the updated persisted session now crosses policy."""
+    scope = check.scope
     with open_resolved_scope_session_context(
-        agent_name=request.agent_name,
+        agent_name=check.agent_name,
         scope=scope,
-        session_id=request.session_id,
+        session_id=check.session_id,
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
     ) as scope_context:
         if scope_context is None or scope_context.session is None:
             return None
-        history_settings = _history_settings_for_opportunistic_request(
-            request=request,
+        history_settings = _history_settings_for_post_response_check(
+            check=check,
             config=config,
         )
         state = read_scope_state(scope_context.session, scope)
         if state.force_compact_before_next_run:
             logger.info(
-                "Skipping opportunistic compaction because foreground compaction is already requested",
-                session_id=request.session_id,
+                "Skipping post-response compaction because foreground compaction is already requested",
+                session_id=check.session_id,
                 scope=scope.key,
             )
+            return None
+        current_history_tokens = estimate_prompt_visible_history_tokens(
+            session=scope_context.session,
+            scope=scope,
+            history_settings=history_settings,
+        )
+        execution_plan = check.execution_plan
+        trigger_history_budget = execution_plan.replay_budget_tokens
+        hard_history_budget = execution_plan.hard_replay_budget_tokens or execution_plan.replay_budget_tokens
+        compaction_decision = classify_compaction_decision(
+            plan=execution_plan,
+            force_compact_before_next_run=False,
+            current_history_tokens=current_history_tokens,
+            trigger_budget_tokens=trigger_history_budget,
+            hard_budget_tokens=hard_history_budget,
+        )
+        visible_runs = runs_for_scope(completed_top_level_runs(scope_context.session), scope)
+        if (
+            compaction_decision.mode == "none"
+            or not visible_runs
+            or execution_plan.summary_input_budget_tokens is None
+            or trigger_history_budget is None
+        ):
             return None
         notice_event_id: str | None = None
         compaction_start = time.monotonic()
@@ -573,55 +591,55 @@ async def run_opportunistic_compaction_request(
             notice_event_id = await compaction_lifecycle.start(
                 CompactionLifecycleStart(
                     mode="auto",
-                    session_id=request.session_id,
+                    session_id=check.session_id,
                     scope=scope.key,
-                    summary_model=request.summary_model,
-                    before_tokens=request.current_history_tokens,
-                    history_budget_tokens=request.history_budget_tokens,
-                    runs_before=request.runs_before,
+                    summary_model=execution_plan.compaction_model_name,
+                    before_tokens=current_history_tokens,
+                    history_budget_tokens=trigger_history_budget,
+                    runs_before=len(visible_runs),
                 ),
             )
-        summary_model = _load_compaction_model(
-            config,
-            runtime_paths,
-            request.summary_model,
-        )
         try:
+            summary_model = _load_compaction_model(
+                config,
+                runtime_paths,
+                execution_plan.compaction_model_name,
+            )
             _next_state, outcome = await compact_scope_history(
                 storage=scope_context.storage,
                 session=scope_context.session,
                 scope=scope,
                 state=state,
                 history_settings=history_settings,
-                available_history_budget=request.history_budget_tokens,
-                summary_input_budget=request.summary_input_budget_tokens,
+                available_history_budget=trigger_history_budget,
+                summary_input_budget=execution_plan.summary_input_budget_tokens,
                 summary_model=summary_model,
-                summary_model_name=request.summary_model,
-                active_context_window=request.active_context_window,
-                replay_window_tokens=request.replay_window_tokens,
-                threshold_tokens=request.threshold_tokens,
-                reserve_tokens=request.reserve_tokens,
-                notify=request.notify,
+                summary_model_name=execution_plan.compaction_model_name,
+                active_context_window=check.active_context_window,
+                replay_window_tokens=execution_plan.replay_window_tokens,
+                threshold_tokens=execution_plan.trigger_threshold_tokens,
+                reserve_tokens=execution_plan.reserve_tokens,
             )
-        except Exception:
+        except Exception as error:
             duration_ms = _elapsed_ms(compaction_start)
             if compaction_lifecycle is not None:
+                failure_reason = str(error) or type(error).__name__
                 await compaction_lifecycle.complete_failure(
                     CompactionLifecycleFailure(
                         notice_event_id=notice_event_id,
                         mode="auto",
-                        session_id=request.session_id,
+                        session_id=check.session_id,
                         scope=scope.key,
-                        summary_model=request.summary_model,
-                        status="failed",
+                        summary_model=execution_plan.compaction_model_name,
+                        status="timeout" if "timed out" in failure_reason else "failed",
                         duration_ms=duration_ms,
-                        failure_reason="Opportunistic compaction failed.",
-                        history_budget_tokens=request.history_budget_tokens,
+                        failure_reason=failure_reason,
+                        history_budget_tokens=trigger_history_budget,
                     ),
                 )
             logger.exception(
-                "Opportunistic compaction failed",
-                session_id=request.session_id,
+                "Post-response compaction failed",
+                session_id=check.session_id,
                 scope=scope.key,
             )
             return None
@@ -632,13 +650,13 @@ async def run_opportunistic_compaction_request(
                     CompactionLifecycleFailure(
                         notice_event_id=notice_event_id,
                         mode="auto",
-                        session_id=request.session_id,
+                        session_id=check.session_id,
                         scope=scope.key,
-                        summary_model=request.summary_model,
+                        summary_model=execution_plan.compaction_model_name,
                         status="failed",
                         duration_ms=duration_ms,
                         failure_reason="No compactable history remained.",
-                        history_budget_tokens=request.history_budget_tokens,
+                        history_budget_tokens=trigger_history_budget,
                     ),
                 )
             return None
@@ -1151,16 +1169,16 @@ def _resolve_entity_preparation_inputs(
     )
 
 
-def _history_settings_for_opportunistic_request(
+def _history_settings_for_post_response_check(
     *,
-    request: OpportunisticCompactionRequest,
+    check: PostResponseCompactionCheck,
     config: Config,
 ) -> ResolvedHistorySettings:
     entity_name: str | None
-    if request.scope_kind == "team":
-        entity_name = request.scope_id if request.scope_id in config.teams else None
+    if check.scope_kind == "team":
+        entity_name = check.scope_id if check.scope_id in config.teams else None
     else:
-        entity_name = request.agent_name if request.agent_name in config.agents else None
+        entity_name = check.agent_name if check.agent_name in config.agents else None
     return (
         config.get_entity_history_settings(entity_name)
         if entity_name is not None

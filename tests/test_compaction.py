@@ -23,7 +23,7 @@ from mindroom.history.compaction import (
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
-from mindroom.history.types import CompactionOutcome, OpportunisticCompactionRequest, _to_k
+from mindroom.history.types import CompactionOutcome, PostResponseCompactionCheck, ResolvedHistoryExecutionPlan, _to_k
 from mindroom.memory import MemoryPromptParts
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -67,7 +67,6 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
         "runs_after": 8,
         "compacted_run_count": 12,
         "compacted_at": "2026-01-01T00:00:00Z",
-        "notify": True,
     }
     if "window_tokens" in overrides and "history_budget_tokens" not in overrides:
         defaults["history_budget_tokens"] = overrides["window_tokens"]
@@ -75,24 +74,32 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
     return CompactionOutcome(**defaults)
 
 
-def _make_opportunistic_request(**overrides: object) -> OpportunisticCompactionRequest:
+def _make_post_response_check(**overrides: object) -> PostResponseCompactionCheck:
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_config=True,
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        explicit_compaction_model=False,
+        compaction_model_name="summary-model",
+        compaction_context_window=64_000,
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=12_000,
+        reserve_tokens=4_096,
+        static_prompt_tokens=0,
+        replay_budget_tokens=10_000,
+        summary_input_budget_tokens=20_000,
+        hard_replay_budget_tokens=59_904,
+    )
     defaults: dict[str, object] = {
         "agent_name": "test_agent",
         "session_id": "session-1",
         "scope_kind": "agent",
         "scope_id": "test_agent",
-        "summary_model": "summary-model",
-        "current_history_tokens": 15_000,
-        "runs_before": 8,
-        "history_budget_tokens": 10_000,
-        "summary_input_budget_tokens": 20_000,
+        "execution_plan": execution_plan,
         "active_context_window": 64_000,
-        "replay_window_tokens": 64_000,
-        "threshold_tokens": 12_000,
-        "reserve_tokens": 4_096,
     }
     defaults.update(overrides)
-    return OpportunisticCompactionRequest(**defaults)
+    return PostResponseCompactionCheck(**defaults)
 
 
 def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
@@ -275,10 +282,12 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
 
 
 @pytest.mark.asyncio
-async def test_post_response_effects_start_opportunistic_compaction_after_visible_delivery() -> None:
-    """Opportunistic maintenance compaction should start only after the reply is visible."""
-    request = _make_opportunistic_request()
-    start_compaction = MagicMock()
+async def test_post_response_effects_start_compaction_check_after_response_link_persistence() -> None:
+    """Post-response compaction should use the final persisted session and preserve response linkage first."""
+    check = _make_post_response_check()
+    events: list[str] = []
+    persist_response_event_id = MagicMock(side_effect=lambda *_args: events.append("persist_response_event_id"))
+    start_compaction = MagicMock(side_effect=lambda *_args: events.append("start_compaction"))
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
@@ -289,15 +298,19 @@ async def test_post_response_effects_start_opportunistic_compaction_after_visibl
             delivery_kind="sent",
         ),
         ResponseOutcome(
-            opportunistic_compaction_requests=(request,),
+            response_run_id="run-1",
+            post_response_compaction_checks=(check,),
         ),
         PostResponseEffectsDeps(
             logger=MagicMock(),
-            start_opportunistic_compaction=start_compaction,
+            persist_response_event_id=persist_response_event_id,
+            start_post_response_compaction=start_compaction,
         ),
     )
 
-    start_compaction.assert_called_once_with((request,), "$response")
+    persist_response_event_id.assert_called_once_with("run-1", "$response")
+    start_compaction.assert_called_once_with((check,), "$response")
+    assert events == ["persist_response_event_id", "start_compaction"]
 
 
 # ---------------------------------------------------------------------------

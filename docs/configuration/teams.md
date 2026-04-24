@@ -78,7 +78,6 @@ teams:
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
-      notify: false
 ```
 
 ## Configuration Fields
@@ -95,7 +94,7 @@ teams:
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
 | `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
-| `compaction` | No | `defaults.compaction` | Team-scoped auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, `notify`). When the active team model has a known `context_window`, MindRoom always computes a final replay plan for the shared team scope and reduces or disables persisted replay for the run when needed. Authoring `defaults.compaction` enables the optional destructive compaction phase for inheriting agents and teams. A non-empty per-team block also enables that destructive phase for the team, but a bare `compaction: {}` is only a no-op override that inherits authored defaults. Replay safety always uses the active team model window. If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass |
+| `compaction` | No | `defaults.compaction` | Team-scoped auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`). When the active team model has a known `context_window`, MindRoom always computes a final replay plan for the shared team scope and reduces or disables persisted replay for the run when needed. Authoring `defaults.compaction` enables the optional destructive compaction phase for inheriting agents and teams. A non-empty per-team block also enables that destructive phase for the team, but a bare `compaction: {}` is only a no-op override that inherits authored defaults. Replay safety always uses the active team model window. If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass. Compaction uses an in-room lifecycle notice that is edited in place |
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
 

@@ -3839,7 +3839,7 @@ class TestUserIdPassthrough:
             replays_persisted_history=False,
             compaction_outcomes=[],
             compaction_decision=None,
-            opportunistic_compaction_requests=[],
+            post_response_compaction_checks=[],
         )
 
         with (

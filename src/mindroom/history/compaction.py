@@ -241,7 +241,6 @@ async def compact_scope_history(
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
     reserve_tokens: int,
-    notify: bool,
     timing_scope: str | None = None,
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
     """Compact one scope by rewriting session.summary and session.runs."""
@@ -340,7 +339,6 @@ async def compact_scope_history(
         runs_after=len(after_visible_runs),
         compacted_run_count=rewrite_result.compacted_run_count,
         compacted_at=compacted_at,
-        notify=notify,
         history_budget_tokens=available_history_budget,
     )
     await _emit_compaction_hook(

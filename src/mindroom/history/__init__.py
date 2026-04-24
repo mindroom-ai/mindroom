@@ -11,7 +11,7 @@ from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
-    OpportunisticCompactionRequest,
+    PostResponseCompactionCheck,
     PreparedHistoryState,
 )
 
@@ -25,7 +25,7 @@ __all__ = [
     "HistoryPolicy",
     "HistoryScope",
     "HistoryScopeState",
-    "OpportunisticCompactionRequest",
+    "PostResponseCompactionCheck",
     "PreparedHistoryState",
     "prepare_history_for_run",
 ]

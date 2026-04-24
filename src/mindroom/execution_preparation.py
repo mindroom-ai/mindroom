@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import (
         CompactionDecision,
         CompactionLifecycle,
-        OpportunisticCompactionRequest,
+        PostResponseCompactionCheck,
         PreparedHistoryState,
         ResolvedReplayPlan,
     )
@@ -96,7 +96,7 @@ class PreparedExecutionContext:
     replays_persisted_history: bool
     compaction_outcomes: list[CompactionOutcome]
     compaction_decision: CompactionDecision | None = None
-    opportunistic_compaction_requests: list[OpportunisticCompactionRequest] | None = None
+    post_response_compaction_checks: list[PostResponseCompactionCheck] | None = None
 
     @property
     def final_prompt(self) -> str:
@@ -608,7 +608,7 @@ async def _prepare_execution_context_common(
         replays_persisted_history=prepared_history.replays_persisted_history,
         compaction_outcomes=prepared_history.compaction_outcomes,
         compaction_decision=prepared_history.compaction_decision,
-        opportunistic_compaction_requests=prepared_history.opportunistic_compaction_requests,
+        post_response_compaction_checks=prepared_history.post_response_compaction_checks,
     )
 
 
