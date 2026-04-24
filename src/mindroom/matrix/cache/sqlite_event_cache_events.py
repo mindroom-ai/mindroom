@@ -88,6 +88,34 @@ async def load_event(
     return None if row is None else json.loads(row[0])
 
 
+async def load_recent_room_events(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    event_type: str,
+    since_ts_ms: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Return recent cached room events of one type, newest first."""
+    if limit <= 0:
+        return []
+    cursor = await db.execute(
+        """
+        SELECT event_json
+        FROM events
+        WHERE room_id = ?
+            AND origin_server_ts >= ?
+            AND json_extract(event_json, '$.type') = ?
+        ORDER BY origin_server_ts DESC, rowid DESC
+        LIMIT ?
+        """,
+        (room_id, since_ts_ms, event_type, limit),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [json.loads(row[0]) for row in rows]
+
+
 async def load_latest_edit(
     db: aiosqlite.Connection,
     *,

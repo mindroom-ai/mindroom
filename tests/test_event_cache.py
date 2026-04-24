@@ -395,6 +395,91 @@ async def test_get_recent_room_thread_ids_orders_by_latest_event_in_each_thread(
 
 
 @pytest.mark.asyncio
+async def test_get_recent_room_events_warm_path(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Recent room event lookups should filter by room, type, timestamp, and limit."""
+    cache = event_cache
+
+    events = [
+        (
+            "$approval_old",
+            "!room:localhost",
+            {
+                "event_id": "$approval_old",
+                "sender": "@bot:localhost",
+                "origin_server_ts": 1000,
+                "type": "io.mindroom.tool_approval",
+                "content": {"approval_id": "old"},
+            },
+        ),
+        (
+            "$approval_recent_1",
+            "!room:localhost",
+            {
+                "event_id": "$approval_recent_1",
+                "sender": "@bot:localhost",
+                "origin_server_ts": 3000,
+                "type": "io.mindroom.tool_approval",
+                "content": {"approval_id": "recent-1"},
+            },
+        ),
+        (
+            "$message_newer",
+            "!room:localhost",
+            {
+                "event_id": "$message_newer",
+                "sender": "@user:localhost",
+                "origin_server_ts": 5000,
+                "type": "m.room.message",
+                "content": {"body": "ignore", "msgtype": "m.text"},
+            },
+        ),
+        (
+            "$approval_other_room",
+            "!other-room:localhost",
+            {
+                "event_id": "$approval_other_room",
+                "sender": "@bot:localhost",
+                "origin_server_ts": 6000,
+                "type": "io.mindroom.tool_approval",
+                "content": {"approval_id": "other-room"},
+            },
+        ),
+        (
+            "$approval_recent_2",
+            "!room:localhost",
+            {
+                "event_id": "$approval_recent_2",
+                "sender": "@bot:localhost",
+                "origin_server_ts": 7000,
+                "type": "io.mindroom.tool_approval",
+                "content": {"approval_id": "recent-2"},
+            },
+        ),
+    ]
+
+    try:
+        await cache.store_events_batch(events)
+        all_recent = await cache.get_recent_room_events(
+            "!room:localhost",
+            event_type="io.mindroom.tool_approval",
+            since_ts_ms=2000,
+        )
+        first_only = await cache.get_recent_room_events(
+            "!room:localhost",
+            event_type="io.mindroom.tool_approval",
+            since_ts_ms=2000,
+            limit=1,
+        )
+    finally:
+        await cache.close()
+
+    assert [event["event_id"] for event in all_recent] == ["$approval_recent_2", "$approval_recent_1"]
+    assert [event["event_id"] for event in first_only] == ["$approval_recent_2"]
+
+
+@pytest.mark.asyncio
 async def test_event_cache_preserves_insertion_order_for_same_timestamp_events(
     event_cache: ConversationEventCache,
 ) -> None:

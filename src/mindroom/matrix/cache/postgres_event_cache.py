@@ -862,6 +862,29 @@ class PostgresEventCache:
             ),
         )
 
+    async def get_recent_room_events(
+        self,
+        room_id: str,
+        *,
+        event_type: str,
+        since_ts_ms: int,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return recent cached room events of `event_type` since `since_ts_ms`, newest first."""
+        return await self._read_operation(
+            room_id,
+            operation="get_recent_room_events",
+            disabled_result=[],
+            reader=lambda db: postgres_event_cache_events.load_recent_room_events(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+                event_type=event_type,
+                since_ts_ms=since_ts_ms,
+                limit=limit,
+            ),
+        )
+
     async def get_latest_edit(self, room_id: str, original_event_id: str) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
         return await self._read_operation(

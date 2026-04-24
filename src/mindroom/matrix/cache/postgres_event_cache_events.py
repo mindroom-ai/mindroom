@@ -12,6 +12,9 @@ if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
 
+_EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
+
+
 @dataclass(frozen=True, slots=True)
 class SerializedCachedEvent:
     """One normalized cached event plus its serialized storage row."""
@@ -119,6 +122,35 @@ async def load_event(
         (namespace, event_id),
     )
     return None if row is None else json.loads(row[0])
+
+
+async def load_recent_room_events(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    event_type: str,
+    since_ts_ms: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Return recent cached room events of one type, newest first."""
+    if limit <= 0:
+        return []
+    rows = await _fetchall(
+        db,
+        """
+        SELECT event_json
+        FROM mindroom_event_cache_events
+        WHERE namespace = %s
+            AND room_id = %s
+            AND origin_server_ts >= %s
+            AND event_json::jsonb ->> 'type' = %s
+        ORDER BY origin_server_ts DESC, write_seq DESC
+        LIMIT %s
+        """,
+        (namespace, room_id, since_ts_ms, event_type, limit),
+    )
+    return [json.loads(row[0]) for row in rows]
 
 
 async def load_latest_edit(
@@ -565,7 +597,7 @@ def _with_thread_root_self_rows(
 
 def _edit_cache_row(namespace: str, room_id: str, event: dict[str, Any]) -> tuple[str, str, str, str, int] | None:
     """Return one edit-index row for a cached event when it is an edit."""
-    if event.get("type") != "m.room.message":
+    if event.get("type") not in _EDITABLE_EVENT_TYPES:
         return None
 
     event_info = EventInfo.from_event(event)
