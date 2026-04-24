@@ -16,7 +16,6 @@ from mindroom.agents import get_agent_session, get_team_session, show_tool_calls
 from mindroom.ai import (
     ai_response,
     build_matrix_run_metadata,
-    run_post_response_history_compaction,
     stream_agent_response,
 )
 from mindroom.ai_runtime import queued_message_signal_context
@@ -30,6 +29,7 @@ from mindroom.constants import (
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
+from mindroom.history.runtime import run_post_response_compaction_check
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import (
     EnrichmentItem,
@@ -86,6 +86,7 @@ from .delivery_gateway import (
     DeliveryGateway,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
+    MatrixCompactionLifecycle,
     SendTextRequest,
     StreamingDeliveryRequest,
 )
@@ -109,9 +110,6 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.history.types import (
-        CompactionLifecycleFailure,
-        CompactionLifecycleStart,
-        CompactionLifecycleSuccess,
         CompactionOutcome,
         PostResponseCompactionCheck,
     )
@@ -433,37 +431,6 @@ class _PreparedResponseRuntime:
     tool_dispatch: ToolDispatchContext
     request_knowledge_managers: dict[str, Any]
     room_mode: bool = False
-
-
-@dataclass(frozen=True)
-class MatrixCompactionLifecycle:
-    """Matrix-backed foreground compaction lifecycle notice editor."""
-
-    delivery_gateway: DeliveryGateway
-    target: MessageTarget
-    reply_to_event_id: str
-
-    async def start(self, event: CompactionLifecycleStart) -> str | None:
-        """Send the initial visible lifecycle notice."""
-        return await self.delivery_gateway.send_compaction_lifecycle_start(
-            target=self.target,
-            reply_to_event_id=self.reply_to_event_id,
-            event=event,
-        )
-
-    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
-        """Edit the lifecycle notice after successful compaction."""
-        await self.delivery_gateway.edit_compaction_lifecycle_success(
-            target=self.target,
-            event=event,
-        )
-
-    async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
-        """Edit the lifecycle notice after failed compaction."""
-        await self.delivery_gateway.edit_compaction_lifecycle_failure(
-            target=self.target,
-            event=event,
-        )
 
 
 @dataclass
@@ -1692,7 +1659,7 @@ class ResponseRunner:
                 interactive_agent_name=self.deps.agent_name,
                 persist_response_event_id=persist_response_event_id,
                 execution_identity=tool_dispatch.execution_identity,
-                run_post_response_compaction=run_post_response_history_compaction,
+                run_post_response_compaction=run_post_response_compaction_check,
             ),
         )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
@@ -2741,7 +2708,7 @@ class ResponseRunner:
             queue_memory_persistence=queue_memory_persistence,
             persist_response_event_id=persist_response_event_id,
             execution_identity=execution_identity,
-            run_post_response_compaction=run_post_response_history_compaction,
+            run_post_response_compaction=run_post_response_compaction_check,
         )
         try:
             final_outcome = await lifecycle.finalize(

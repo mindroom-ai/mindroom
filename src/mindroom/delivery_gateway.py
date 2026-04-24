@@ -219,6 +219,37 @@ class CancelledVisibleNoteRequest:
 
 
 @dataclass(frozen=True)
+class MatrixCompactionLifecycle:
+    """Matrix-backed compaction lifecycle notice adapter."""
+
+    delivery_gateway: DeliveryGateway
+    target: MessageTarget
+    reply_to_event_id: str
+
+    async def start(self, event: CompactionLifecycleStart) -> str | None:
+        """Send the initial visible lifecycle notice."""
+        return await self.delivery_gateway.send_compaction_lifecycle_start(
+            target=self.target,
+            reply_to_event_id=self.reply_to_event_id,
+            event=event,
+        )
+
+    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
+        """Edit the lifecycle notice after successful compaction."""
+        await self.delivery_gateway.edit_compaction_lifecycle_success(
+            target=self.target,
+            event=event,
+        )
+
+    async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
+        """Edit the lifecycle notice after failed compaction."""
+        await self.delivery_gateway.edit_compaction_lifecycle_failure(
+            target=self.target,
+            event=event,
+        )
+
+
+@dataclass(frozen=True)
 class StreamingDeliveryRequest:
     """Parameters for streamed Matrix delivery."""
 

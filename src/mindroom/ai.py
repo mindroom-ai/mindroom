@@ -54,7 +54,6 @@ from mindroom.history.runtime import (
     apply_replay_plan,
     close_agent_runtime_sqlite_dbs,
     open_resolved_scope_session_context,
-    run_post_response_compaction_check,
 )
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
@@ -97,28 +96,10 @@ __all__ = [
     "AIStreamChunk",
     "ai_response",
     "build_matrix_run_metadata",
-    "run_post_response_history_compaction",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _AI_RUN_METADATA_VERSION = 1
-
-
-async def run_post_response_history_compaction(
-    check: PostResponseCompactionCheck,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-    compaction_lifecycle: CompactionLifecycle,
-) -> CompactionOutcome | None:
-    """Run immediate post-response history compaction through the AI/history boundary."""
-    return await run_post_response_compaction_check(
-        check=check,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        compaction_lifecycle=compaction_lifecycle,
-    )
 
 
 def _append_additional_context(agent: Agent, context_chunk: str) -> None:

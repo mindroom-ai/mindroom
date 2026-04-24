@@ -52,7 +52,7 @@ from mindroom.history.compaction import (
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
-from mindroom.history.policy import resolve_history_execution_plan, should_attempt_destructive_compaction
+from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
 from mindroom.history.runtime import (
     apply_replay_plan,
     estimate_preparation_static_tokens,
@@ -3540,7 +3540,7 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
     assert execution_plan.replay_budget_tokens == 490
 
 
-def test_should_attempt_destructive_compaction_forced_compaction_takes_priority() -> None:
+def test_classify_compaction_decision_forced_compaction_takes_priority() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_config=True,
         authored_compaction_enabled=True,
@@ -3556,14 +3556,17 @@ def test_should_attempt_destructive_compaction_forced_compaction_takes_priority(
         summary_input_budget_tokens=5_000,
     )
 
-    assert should_attempt_destructive_compaction(
+    decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=True,
         current_history_tokens=None,
     )
 
+    assert decision.mode == "required"
+    assert decision.reason == "forced"
 
-def test_should_attempt_destructive_compaction_uses_authored_compaction_when_over_budget() -> None:
+
+def test_classify_compaction_decision_uses_post_response_when_over_trigger_but_fits() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_config=True,
         authored_compaction_enabled=True,
@@ -3577,13 +3580,17 @@ def test_should_attempt_destructive_compaction_uses_authored_compaction_when_ove
         static_prompt_tokens=2_000,
         replay_budget_tokens=10_000,
         summary_input_budget_tokens=5_000,
+        hard_replay_budget_tokens=20_000,
     )
 
-    assert should_attempt_destructive_compaction(
+    decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=False,
         current_history_tokens=10_001,
     )
+
+    assert decision.mode == "opportunistic"
+    assert decision.reason == "over_trigger_fits_hard_budget"
 
 
 def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: Path) -> None:

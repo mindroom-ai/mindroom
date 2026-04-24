@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
+from mindroom.delivery_gateway import MatrixCompactionLifecycle
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
@@ -19,6 +20,7 @@ _active_post_response_compaction_jobs: set[tuple[str, str, str]] = set()
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
+    from typing import Protocol
 
     import nio
     import structlog
@@ -28,27 +30,25 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.history.types import (
-        CompactionLifecycleFailure,
-        CompactionLifecycleStart,
-        CompactionLifecycleSuccess,
-        CompactionOutcome,
-        PostResponseCompactionCheck,
-    )
+    from mindroom.history.types import CompactionOutcome, PostResponseCompactionCheck
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-    PostResponseCompactionRunner = Callable[
-        [
-            PostResponseCompactionCheck,
-            RuntimePaths,
-            Config,
-            ToolExecutionIdentity | None,
-            "_PostResponseCompactionLifecycle",
-        ],
-        Awaitable[CompactionOutcome | None],
-    ]
+    class PostResponseCompactionRunner(Protocol):
+        """Callable shape for direct post-response compaction execution."""
+
+        def __call__(
+            self,
+            *,
+            check: PostResponseCompactionCheck,
+            runtime_paths: RuntimePaths,
+            config: Config,
+            execution_identity: ToolExecutionIdentity | None,
+            compaction_lifecycle: MatrixCompactionLifecycle,
+        ) -> Awaitable[CompactionOutcome | None]:
+            """Run one post-response compaction check."""
+            ...
 
 
 @dataclass(frozen=True)
@@ -85,34 +85,6 @@ class PostResponseEffectsDeps:
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
-
-
-@dataclass(frozen=True)
-class _PostResponseCompactionLifecycle:
-    """Matrix-backed lifecycle for immediate post-response compaction."""
-
-    delivery_gateway: DeliveryGateway
-    target: MessageTarget
-    reply_to_event_id: str
-
-    async def start(self, event: CompactionLifecycleStart) -> str | None:
-        return await self.delivery_gateway.send_compaction_lifecycle_start(
-            target=self.target,
-            reply_to_event_id=self.reply_to_event_id,
-            event=event,
-        )
-
-    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
-        await self.delivery_gateway.edit_compaction_lifecycle_success(
-            target=self.target,
-            event=event,
-        )
-
-    async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
-        await self.delivery_gateway.edit_compaction_lifecycle_failure(
-            target=self.target,
-            event=event,
-        )
 
 
 @dataclass(frozen=True)
@@ -220,7 +192,7 @@ class PostResponseEffectsSupport:
             if dedupe_key in _active_post_response_compaction_jobs:
                 continue
             _active_post_response_compaction_jobs.add(dedupe_key)
-            compaction_lifecycle = _PostResponseCompactionLifecycle(
+            compaction_lifecycle = MatrixCompactionLifecycle(
                 delivery_gateway=self.delivery_gateway,
                 target=target,
                 reply_to_event_id=reply_to_event_id,
@@ -241,16 +213,16 @@ class PostResponseEffectsSupport:
         *,
         check: PostResponseCompactionCheck,
         execution_identity: ToolExecutionIdentity | None,
-        compaction_lifecycle: _PostResponseCompactionLifecycle,
+        compaction_lifecycle: MatrixCompactionLifecycle,
         run_compaction: PostResponseCompactionRunner,
     ) -> None:
         try:
             await run_compaction(
-                check,
-                self.runtime_paths,
-                self.runtime.config,
-                execution_identity,
-                compaction_lifecycle,
+                check=check,
+                runtime_paths=self.runtime_paths,
+                config=self.runtime.config,
+                execution_identity=execution_identity,
+                compaction_lifecycle=compaction_lifecycle,
             )
         finally:
             _active_post_response_compaction_jobs.discard(check.dedupe_key)

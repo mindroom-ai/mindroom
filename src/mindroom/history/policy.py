@@ -166,26 +166,6 @@ def classify_compaction_decision(  # noqa: PLR0911
     )
 
 
-def should_attempt_destructive_compaction(
-    *,
-    plan: ResolvedHistoryExecutionPlan,
-    force_compact_before_next_run: bool,
-    current_history_tokens: int | None,
-    replay_budget_tokens: int | None = None,
-) -> bool:
-    """Return whether durable session compaction should run before replay planning."""
-    return (
-        classify_compaction_decision(
-            plan=plan,
-            force_compact_before_next_run=force_compact_before_next_run,
-            current_history_tokens=current_history_tokens,
-            trigger_budget_tokens=replay_budget_tokens,
-            hard_budget_tokens=replay_budget_tokens,
-        ).mode
-        == "required"
-    )
-
-
 def manual_compaction_unavailable_message(plan: ResolvedHistoryExecutionPlan) -> str | None:
     """Return the user-facing error for an unavailable manual compaction request."""
     description = describe_compaction_unavailability(plan)

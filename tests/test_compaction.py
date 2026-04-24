@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,12 +13,15 @@ from agno.models.message import Message
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
+from mindroom import ai as ai_module
+from mindroom import delivery_gateway, post_response_effects
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.history import policy as policy_module
 from mindroom.history.compaction import (
     compute_prompt_token_breakdown,
     estimate_static_tokens,
@@ -120,6 +124,18 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
         runtime_paths,
     )
     return config, runtime_paths
+
+
+def test_compaction_lifecycle_uses_one_matrix_adapter() -> None:
+    """Foreground and post-response compaction should share one Matrix lifecycle adapter."""
+    assert hasattr(delivery_gateway, "MatrixCompactionLifecycle")
+    assert "_PostResponseCompactionLifecycle" not in inspect.getsource(post_response_effects)
+
+
+def test_compaction_policy_has_no_legacy_passthrough_wrappers() -> None:
+    """Compaction decisions should expose one policy surface without pass-through wrappers."""
+    assert not hasattr(ai_module, "run_post_response_history_compaction")
+    assert not hasattr(policy_module, "should_attempt_destructive_compaction")
 
 
 # ---------------------------------------------------------------------------
