@@ -38,10 +38,13 @@ def build_cancelled_error(reason: str | None) -> asyncio.CancelledError:
     return asyncio.CancelledError(reason or "Run cancelled")
 
 
-def cancel_failure_reason(cancel_source: CancelSource) -> str:
+def _cancel_failure_reason(cancel_source: CancelSource) -> str:
     """Return the canonical failure reason for one cancellation provenance."""
     if cancel_source == "sync_restart":
         return "sync_restart_cancelled"
     if cancel_source == "user_stop":
         return "cancelled_by_user"
     return "interrupted"
+
+
+cancel_failure_reason = _cancel_failure_reason

@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import nio
 from nio.responses import RoomGetEventError
@@ -79,7 +79,9 @@ __all__ = [
 ]
 
 
-_STARTUP_PREWARM_THREAD_LIMIT = 20
+_STARTUP_PREWARM_THREAD_LIMIT = 32
+_STARTUP_PREWARM_THREAD_CONCURRENCY = 32
+type StartupThreadPrewarmOutcome = Literal["warmed", "failed", "aborted"]
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -680,40 +682,30 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if thread_ids is None:
             return False
 
-        for thread_id in thread_ids:
-            if is_shutting_down():
-                return False
+        completed = True
+        pending_thread_ids = list(thread_ids)
 
-            if not thread_id:
-                threads_failed += 1
-                self.logger.warning(
-                    "startup_thread_prewarm_thread_failed",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    error="missing_thread_root_event_id",
-                )
-                await asyncio.sleep(0)
-                continue
-
-            try:
-                await self._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+        async def worker() -> None:
+            nonlocal completed, threads_failed, threads_warmed
+            while pending_thread_ids:
+                if is_shutting_down():
+                    completed = False
+                    return
+                outcome = await self._prewarm_one_startup_thread(
                     room_id,
-                    thread_id,
+                    pending_thread_ids.pop(0),
+                    is_shutting_down=is_shutting_down,
                 )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                threads_failed += 1
-                self.logger.warning(
-                    "startup_thread_prewarm_thread_failed",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    error=str(exc),
-                )
-            else:
-                threads_warmed += 1
+                if outcome == "aborted":
+                    completed = False
+                    return
+                if outcome == "failed":
+                    threads_failed += 1
+                else:
+                    threads_warmed += 1
 
-            await asyncio.sleep(0)
+        worker_count = min(_STARTUP_PREWARM_THREAD_CONCURRENCY, len(pending_thread_ids))
+        await asyncio.gather(*(worker() for _ in range(worker_count)))
 
         self.logger.info(
             "startup_thread_prewarm_complete",
@@ -722,7 +714,46 @@ class MatrixConversationCache(ConversationCacheProtocol):
             threads_failed=threads_failed,
             elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
         )
-        return True
+        return completed
+
+    async def _prewarm_one_startup_thread(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        is_shutting_down: Callable[[], bool],
+    ) -> StartupThreadPrewarmOutcome:
+        """Refresh one startup thread snapshot and return its room-level prewarm outcome."""
+        if is_shutting_down():
+            return "aborted"
+        if not thread_id:
+            self.logger.warning(
+                "startup_thread_prewarm_thread_failed",
+                room_id=room_id,
+                thread_id=thread_id,
+                error="missing_thread_root_event_id",
+            )
+            await asyncio.sleep(0)
+            return "failed"
+
+        try:
+            await self._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+                room_id,
+                thread_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.warning(
+                "startup_thread_prewarm_thread_failed",
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+            return "failed"
+
+        await asyncio.sleep(0)
+        return "warmed"
 
     async def get_thread_snapshot(
         self,

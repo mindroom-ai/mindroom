@@ -48,7 +48,7 @@ from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.frontend_assets import ensure_frontend_dist_dir
-from mindroom.knowledge import initialize_shared_knowledge_managers, shutdown_shared_knowledge_managers
+from mindroom.knowledge import StandaloneKnowledgeRefreshOwner
 from mindroom.logging_config import get_logger
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
@@ -451,21 +451,19 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("Syncing API credentials from runtime env")
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
+    def _load_current_runtime_config() -> tuple[Config | None, constants.RuntimePaths]:
+        snapshot = _app_context(_app)
+        return snapshot.runtime_config, snapshot.runtime_paths
+
+    knowledge_refresh_owner = StandaloneKnowledgeRefreshOwner(load_config=_load_current_runtime_config)
+    _app.state.knowledge_refresh_owner = knowledge_refresh_owner
     initial_config = _app_context(_app).runtime_config
-    knowledge_bootstrap_task = (
-        asyncio.create_task(
-            initialize_shared_knowledge_managers(
-                initial_config,
-                runtime_paths,
-                start_watchers=False,
-                reindex_on_create=False,
-                reconcile_existing_runtime=True,
-            ),
-            name="api_knowledge_bootstrap",
-        )
-        if initial_config is not None and initial_config.knowledge_bases
-        else None
-    )
+    if initial_config is not None:
+        # API-only /v1 mode does not keep shared-knowledge refresh running after
+        # this startup bootstrap. Restart the API process to pick up shared-KB changes.
+        # Matrix/orchestrator-managed runtimes keep full background refresh enabled.
+        for base_id in sorted(initial_config.knowledge_bases):
+            knowledge_refresh_owner.schedule_initial_load(base_id)
 
     stop_event = asyncio.Event()
     watch_task = asyncio.create_task(_watch_config(stop_event, _app))
@@ -480,11 +478,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await watch_task
     with suppress(asyncio.CancelledError):
         await worker_cleanup_task
-    if knowledge_bootstrap_task is not None:
-        knowledge_bootstrap_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await knowledge_bootstrap_task
-    await shutdown_shared_knowledge_managers()
+    await knowledge_refresh_owner.shutdown()
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)

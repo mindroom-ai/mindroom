@@ -375,8 +375,8 @@ async def test_emit_final_response_transform_preserves_previous_draft_on_failure
         _final_response_transform_context(tmp_path),
     )
 
-    assert seen == ["timeout"]
-    assert result.response_text == "start"
+    assert seen == ["timeout", "cancelled", "error", "start"]
+    assert result.response_text == "start ok"
 
 
 @pytest.mark.asyncio
