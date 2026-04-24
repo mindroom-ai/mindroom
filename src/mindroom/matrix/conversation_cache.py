@@ -558,12 +558,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         thread_id: str,
     ) -> ThreadHistoryResult:
+        fetch_started_at = time.time()
         return await fetch_thread_history(
             self._require_client(),
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
 
@@ -572,12 +574,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         thread_id: str,
     ) -> ThreadHistoryResult:
+        fetch_started_at = time.time()
         return await fetch_thread_snapshot(
             self._require_client(),
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
 
@@ -586,12 +590,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         thread_id: str,
     ) -> ThreadHistoryResult:
+        fetch_started_at = time.time()
         return await fetch_dispatch_thread_history(
             self._require_client(),
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
 
@@ -600,12 +606,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         thread_id: str,
     ) -> ThreadHistoryResult:
+        fetch_started_at = time.time()
         return await fetch_dispatch_thread_snapshot(
             self._require_client(),
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
             runtime_started_at=self.runtime.runtime_started_at,
+            cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
 

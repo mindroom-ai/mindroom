@@ -7791,6 +7791,7 @@ class TestAgentBot:
             "$thread_root",
             event_cache=bot.event_cache,
             runtime_started_at=bot._runtime_view.runtime_started_at,
+            cache_write_guard_started_at=ANY,
             trusted_sender_ids=trusted_sender_ids,
         )
 

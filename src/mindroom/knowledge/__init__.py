@@ -3,10 +3,6 @@
 # ruff: noqa: RUF022
 
 from mindroom.knowledge.manager import KnowledgeManager
-from mindroom.knowledge.refresh_owner import (
-    OrchestratorKnowledgeRefreshOwner,
-    StandaloneKnowledgeRefreshOwner,
-)
 from mindroom.knowledge.shared_managers import (
     ensure_shared_knowledge_manager,
     get_shared_knowledge_manager_for_config,
@@ -32,6 +28,4 @@ __all__ = [
     "KnowledgeAccessSupport",
     "KnowledgeAvailability",
     "format_knowledge_availability_notice",
-    "OrchestratorKnowledgeRefreshOwner",
-    "StandaloneKnowledgeRefreshOwner",
 ]

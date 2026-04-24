@@ -687,6 +687,7 @@ async def fetch_thread_history(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
+    cache_write_guard_started_at: float | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
     """Fetch all messages in a thread."""
@@ -717,6 +718,7 @@ async def fetch_thread_history(
         thread_id,
         event_cache,
         allow_stale_fallback=True,
+        cache_write_guard_started_at=cache_write_guard_started_at,
         cache_reject_diagnostics=cache_reject_diagnostics,
         trusted_sender_ids=trusted_sender_ids,
     )
@@ -729,6 +731,7 @@ async def fetch_thread_snapshot(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
+    cache_write_guard_started_at: float | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
     """Fetch lightweight thread context without hydrating sidecars when a fresh cache hit is unavailable."""
@@ -760,6 +763,7 @@ async def fetch_thread_snapshot(
         event_cache,
         hydrate_sidecars=False,
         allow_stale_fallback=True,
+        cache_write_guard_started_at=cache_write_guard_started_at,
         cache_reject_diagnostics=cache_reject_diagnostics,
         trusted_sender_ids=trusted_sender_ids,
     )
@@ -772,6 +776,7 @@ async def fetch_dispatch_thread_history(
     event_cache: ConversationEventCache,
     *,
     runtime_started_at: float | None = None,
+    cache_write_guard_started_at: float | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
     """Fetch strict full thread history for dispatch using only fresh cache data or a homeserver refill."""
@@ -803,6 +808,7 @@ async def fetch_dispatch_thread_history(
         event_cache,
         hydrate_sidecars=True,
         allow_stale_fallback=False,
+        cache_write_guard_started_at=cache_write_guard_started_at,
         cache_reject_diagnostics=cache_reject_diagnostics,
         trusted_sender_ids=trusted_sender_ids,
     )
