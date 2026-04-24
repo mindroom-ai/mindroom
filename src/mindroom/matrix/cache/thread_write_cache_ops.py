@@ -59,6 +59,7 @@ class ThreadMutationCacheOps:
         batch: Sequence[tuple[str, str, dict[str, object]]],
         *,
         failure_message: str,
+        raise_on_failure: bool = False,
     ) -> None:
         """Persist one sync batch fail-open so later mutation handling can continue."""
         if not batch:
@@ -72,6 +73,8 @@ class ThreadMutationCacheOps:
                 event_count=len(batch),
                 error=str(exc),
             )
+            if raise_on_failure:
+                raise
 
     async def redact_cached_event(
         self,
@@ -80,6 +83,7 @@ class ThreadMutationCacheOps:
         *,
         thread_id: str | None,
         failure_message: str,
+        raise_on_failure: bool = False,
     ) -> bool:
         """Apply one cached redaction fail-open and report whether a row changed."""
         try:
@@ -92,6 +96,8 @@ class ThreadMutationCacheOps:
                 redacted_event_id=redacted_event_id,
                 error=str(exc),
             )
+            if raise_on_failure:
+                raise
             return False
 
     async def invalidate_after_redaction(
@@ -103,6 +109,7 @@ class ThreadMutationCacheOps:
         success_reason: str,
         failure_reason: str,
         lookup_unavailable_reason: str,
+        raise_on_failure: bool = False,
     ) -> None:
         """Apply the post-redaction invalidation policy for one resolved impact."""
         if impact.state is MutationThreadImpactState.THREADED:
@@ -111,10 +118,15 @@ class ThreadMutationCacheOps:
                 room_id,
                 impact.thread_id,
                 reason=success_reason if redacted else failure_reason,
+                raise_on_failure=raise_on_failure,
             )
             return
         if impact.state is MutationThreadImpactState.UNKNOWN and redacted:
-            await self.invalidate_room_threads(room_id, reason=lookup_unavailable_reason)
+            await self.invalidate_room_threads(
+                room_id,
+                reason=lookup_unavailable_reason,
+                raise_on_failure=raise_on_failure,
+            )
 
     async def invalidate_known_thread(
         self,
@@ -122,6 +134,7 @@ class ThreadMutationCacheOps:
         thread_id: str,
         *,
         reason: str,
+        raise_on_failure: bool = False,
     ) -> None:
         """Mark one cached thread stale and fail closed if the marker cannot be written."""
         try:
@@ -140,12 +153,15 @@ class ThreadMutationCacheOps:
                 reason=reason,
                 stale_marker_error=exc,
             )
+            if raise_on_failure:
+                raise
 
     async def invalidate_room_threads(
         self,
         room_id: str,
         *,
         reason: str,
+        raise_on_failure: bool = False,
     ) -> None:
         """Mark one room's cached threads stale and fail closed if the marker cannot be written."""
         try:
@@ -162,6 +178,8 @@ class ThreadMutationCacheOps:
                 reason=reason,
                 stale_marker_error=exc,
             )
+            if raise_on_failure:
+                raise
 
     async def append_event_to_cache(
         self,
@@ -170,6 +188,7 @@ class ThreadMutationCacheOps:
         event_source: dict[str, Any],
         *,
         context: str,
+        raise_on_failure: bool = False,
     ) -> bool:
         """Append one event into a cached thread fail-open and report whether a row changed."""
         event_id = event_source.get("event_id")
@@ -184,6 +203,8 @@ class ThreadMutationCacheOps:
                 context=context,
                 error=str(exc),
             )
+            if raise_on_failure:
+                raise
             return False
         if not appended:
             self.logger.debug(
@@ -209,6 +230,8 @@ class ThreadMutationCacheOps:
                 context=context,
                 error=str(exc),
             )
+            if raise_on_failure:
+                raise
         return True
 
     def _disable_cache_after_fail_closed_invalidation(

@@ -104,6 +104,7 @@ async def _apply_thread_message_mutation(
     room_level_skip_message: str,
     invalidate_on_append_failure: bool,
     allow_room_invalidation: bool = True,
+    raise_on_cache_write_failure: bool = False,
 ) -> bool:
     if impact.state is MutationThreadImpactState.ROOM_LEVEL:
         cache_ops.logger.debug(
@@ -119,6 +120,7 @@ async def _apply_thread_message_mutation(
         await cache_ops.invalidate_room_threads(
             room_id,
             reason=_mutation_reason(context, "thread_lookup_unavailable"),
+            raise_on_failure=raise_on_cache_write_failure,
         )
         return True
     assert impact.thread_id is not None
@@ -127,18 +129,21 @@ async def _apply_thread_message_mutation(
         room_id,
         impact.thread_id,
         reason=_mutation_reason(context, "thread_mutation"),
+        raise_on_failure=raise_on_cache_write_failure,
     )
     appended = await cache_ops.append_event_to_cache(
         room_id,
         impact.thread_id,
         event_source,
         context=context,
+        raise_on_failure=raise_on_cache_write_failure,
     )
     if invalidate_on_append_failure and not appended:
         await cache_ops.invalidate_known_thread(
             room_id,
             impact.thread_id,
             reason=_mutation_reason(context, "append_failed"),
+            raise_on_failure=raise_on_cache_write_failure,
         )
     return False
 
@@ -175,6 +180,7 @@ async def _apply_thread_redaction_mutation(
     context: MutationWriteContext,
     allow_room_invalidation: bool = True,
     redact_room_level_event: bool = True,
+    raise_on_cache_write_failure: bool = False,
 ) -> bool:
     redact_failure_message = {
         "outbound": "Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
@@ -193,6 +199,7 @@ async def _apply_thread_redaction_mutation(
         redacted_event_id,
         thread_id=impact.thread_id,
         failure_message=redact_failure_message,
+        raise_on_failure=raise_on_cache_write_failure,
     )
     if impact.state is MutationThreadImpactState.UNKNOWN and redacted and not allow_room_invalidation:
         return False
@@ -203,6 +210,7 @@ async def _apply_thread_redaction_mutation(
         success_reason=_mutation_reason(context, "redaction"),
         failure_reason=_mutation_reason(context, "redaction_failed"),
         lookup_unavailable_reason=_mutation_reason(context, "redaction_lookup_unavailable"),
+        raise_on_failure=raise_on_cache_write_failure,
     )
     return impact.state is MutationThreadImpactState.UNKNOWN and redacted
 
@@ -741,6 +749,7 @@ class ThreadSyncWritePolicy:
         threaded_events: typing.Sequence[dict[str, object]],
         *,
         resolution_context: MutationResolutionContext,
+        raise_on_cache_write_failure: bool,
     ) -> None:
         room_threads_invalidated = False
         for event_source in threaded_events:
@@ -765,6 +774,7 @@ class ThreadSyncWritePolicy:
                     room_level_skip_message="Skipping sync thread cache bookkeeping for known non-threaded message mutation",
                     invalidate_on_append_failure=True,
                     allow_room_invalidation=not room_threads_invalidated,
+                    raise_on_cache_write_failure=raise_on_cache_write_failure,
                 )
                 or room_threads_invalidated
             )
@@ -775,6 +785,7 @@ class ThreadSyncWritePolicy:
         redacted_event_ids: typing.Sequence[str],
         *,
         resolution_context: MutationResolutionContext,
+        raise_on_cache_write_failure: bool,
     ) -> None:
         room_threads_invalidated = False
         for redacted_event_id in redacted_event_ids:
@@ -793,6 +804,7 @@ class ThreadSyncWritePolicy:
                     impact=impact,
                     context="sync",
                     allow_room_invalidation=not room_threads_invalidated,
+                    raise_on_cache_write_failure=raise_on_cache_write_failure,
                 )
                 or room_threads_invalidated
             )
@@ -803,6 +815,8 @@ class ThreadSyncWritePolicy:
         plain_events: typing.Sequence[dict[str, object]],
         threaded_events: typing.Sequence[dict[str, object]],
         redacted_event_ids: typing.Sequence[str],
+        *,
+        raise_on_cache_write_failure: bool,
     ) -> None:
         plain_batch = [
             (event_id, room_id, event_source)
@@ -818,11 +832,13 @@ class ThreadSyncWritePolicy:
             room_id,
             plain_batch,
             failure_message="Failed to persist sync events to cache",
+            raise_on_failure=raise_on_cache_write_failure,
         )
         await self._cache_ops.store_events_batch(
             room_id,
             threaded_batch,
             failure_message="Failed to persist sync threaded events to cache",
+            raise_on_failure=raise_on_cache_write_failure,
         )
         resolution_context = await self._resolver.build_sync_mutation_resolution_context(
             room_id,
@@ -833,11 +849,13 @@ class ThreadSyncWritePolicy:
             room_id,
             threaded_events,
             resolution_context=resolution_context,
+            raise_on_cache_write_failure=raise_on_cache_write_failure,
         )
         await self._apply_sync_redactions(
             room_id,
             redacted_event_ids,
             resolution_context=resolution_context,
+            raise_on_cache_write_failure=raise_on_cache_write_failure,
         )
 
     def _group_sync_timeline_updates(
@@ -868,7 +886,12 @@ class ThreadSyncWritePolicy:
                 )
         return room_plain_events, room_threaded_events, room_redactions
 
-    def cache_sync_timeline(self, response: nio.SyncResponse) -> list[asyncio.Task[object]]:
+    def cache_sync_timeline(
+        self,
+        response: nio.SyncResponse,
+        *,
+        raise_on_cache_write_failure: bool = False,
+    ) -> list[asyncio.Task[object]]:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
         if not self._cache_ops.cache_runtime_available():
             return []
@@ -887,6 +910,7 @@ class ThreadSyncWritePolicy:
                             plain_events,
                             threaded_events,
                             redacted_event_ids,
+                            raise_on_cache_write_failure=raise_on_cache_write_failure,
                         )
                     ),
                     name="matrix_cache_sync_timeline",

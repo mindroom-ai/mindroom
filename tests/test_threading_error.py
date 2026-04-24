@@ -1731,6 +1731,202 @@ class TestThreadingBehavior:
         assert load_sync_token(bot.storage_path, bot.agent_name) is None
 
     @pytest.mark.asyncio
+    async def test_restored_first_sync_real_store_failure_fails_closed(self, bot: AgentBot) -> None:
+        """Real sync timeline store failures must reach restored-token catch-up."""
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock(side_effect=RuntimeError("store failed"))
+        event_cache.append_event = AsyncMock(return_value=True)
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_store_failure"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_store_failure")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(
+                        events=[
+                            _text_event(
+                                event_id="$thread_msg:localhost",
+                                body="Thread reply",
+                                sender="@user:localhost",
+                                server_timestamp=1234567890,
+                                thread_id="$thread_root:localhost",
+                            ),
+                        ],
+                        limited=False,
+                    ),
+                ),
+            },
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        event_cache.store_events_batch.assert_awaited_once()
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
+    async def test_restored_first_sync_real_revalidation_failure_fails_closed(self, bot: AgentBot) -> None:
+        """Real sync thread-append revalidation failures must reach restored-token catch-up."""
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock()
+        event_cache.mark_thread_stale = AsyncMock()
+        event_cache.append_event = AsyncMock(return_value=True)
+        event_cache.revalidate_thread_after_incremental_update = AsyncMock(
+            side_effect=RuntimeError("revalidation failed"),
+        )
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_revalidation_failure"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_revalidation_failure")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(
+                        events=[
+                            _text_event(
+                                event_id="$thread_msg:localhost",
+                                body="Thread reply",
+                                sender="@user:localhost",
+                                server_timestamp=1234567890,
+                                thread_id="$thread_root:localhost",
+                            ),
+                        ],
+                        limited=False,
+                    ),
+                ),
+            },
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        event_cache.append_event.assert_awaited_once()
+        event_cache.revalidate_thread_after_incremental_update.assert_awaited_once()
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
+    async def test_restored_first_sync_real_stale_marker_failure_fails_closed(self, bot: AgentBot) -> None:
+        """Real sync invalidation marker failures must reach restored-token catch-up."""
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        event_cache.get_event = AsyncMock(return_value=None)
+        event_cache.mark_room_threads_stale = AsyncMock(side_effect=RuntimeError("stale marker failed"))
+        event_cache.invalidate_room_threads = AsyncMock()
+        bot.event_cache = event_cache
+        bot.client = _make_client_mock()
+        _install_runtime_write_coordinator(bot)
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_stale_marker_failure"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_stale_marker_failure")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(
+                        events=[
+                            _text_event(
+                                event_id="$room_edit:localhost",
+                                body="* Updated",
+                                sender="@user:localhost",
+                                server_timestamp=1234567891,
+                                replacement_of="$missing:localhost",
+                                new_body="Updated",
+                            ),
+                        ],
+                        limited=False,
+                    ),
+                ),
+            },
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="sync_thread_lookup_unavailable",
+        )
+        event_cache.invalidate_room_threads.assert_awaited_once_with("!test:localhost")
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
+    async def test_unsafe_restored_first_sync_suppresses_later_saved_token_for_restart(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Unsafe restored first sync must not let later same-runtime tokens trust old cache rows."""
+        support = await _bind_owned_runtime_support(bot)
+        room_id = "!test:localhost"
+        thread_id = "$thread_root:localhost"
+        try:
+            await bot.event_cache.replace_thread(
+                room_id,
+                thread_id,
+                [
+                    _text_event(
+                        event_id=thread_id,
+                        body="Old root",
+                        sender="@user:localhost",
+                        server_timestamp=1000,
+                    ).source,
+                    _text_event(
+                        event_id="$old_reply:localhost",
+                        body="Old reply",
+                        sender="@agent:localhost",
+                        server_timestamp=2000,
+                        thread_id=thread_id,
+                    ).source,
+                ],
+                validated_at=1.0,
+            )
+            bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+            bot.client.next_batch = "s_after_unsafe"
+            save_sync_token(bot.storage_path, bot.agent_name, "s_before_unsafe")
+            unsafe_response = self._sync_response(
+                {
+                    room_id: MagicMock(timeline=MagicMock(events=[], limited=True)),
+                },
+            )
+
+            await self._run_sync_response_without_startup_side_effects(bot, unsafe_response)
+
+            bot.client.next_batch = "s_later_success"
+            later_response = self._sync_response(
+                {
+                    room_id: MagicMock(timeline=MagicMock(events=[], limited=False)),
+                },
+            )
+            await self._run_sync_response_without_startup_side_effects(bot, later_response)
+
+            assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+            bot.client.next_batch = None
+            restored_on_restart = bot._restore_saved_sync_token()
+            bot._runtime_view.mark_runtime_started(restored_sync_token=restored_on_restart)
+            cache_state = await bot.event_cache.get_thread_cache_state(room_id, thread_id)
+        finally:
+            await _close_bound_runtime_support(bot, support)
+
+        assert restored_on_restart is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert (
+            matrix_cache.thread_cache_rejection_reason(
+                cache_state,
+                runtime_started_at=bot._runtime_view.runtime_started_at,
+            )
+            == "validated_before_runtime_start"
+        )
+
+    @pytest.mark.asyncio
     async def test_limited_first_sync_skips_token_persist_and_clears_saved_token(self, bot: AgentBot) -> None:
         """Limited restored-token catch-up must not persist the advanced token."""
         bot._runtime_view.mark_runtime_started(restored_sync_token=True)

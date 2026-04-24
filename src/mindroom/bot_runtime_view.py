@@ -49,6 +49,11 @@ class BotRuntimeView(Protocol):
     @property
     def pre_runtime_thread_cache_trusted(self) -> bool: ...  # noqa: D102
 
+    @property
+    def sync_token_persistence_suppressed(self) -> bool: ...  # noqa: D102
+
+    def suppress_sync_token_persistence(self) -> None: ...  # noqa: D102
+
 
 @dataclass
 class BotRuntimeState:
@@ -65,6 +70,7 @@ class BotRuntimeState:
     runtime_started_at: float = field(default_factory=time.time)
     restored_sync_token: bool = False
     sync_catchup_applied_at: float | None = None
+    sync_token_persistence_suppressed: bool = False
 
     @property
     def pre_runtime_thread_cache_trusted(self) -> bool:
@@ -80,6 +86,7 @@ class BotRuntimeState:
         self.runtime_started_at = time.time()
         self.restored_sync_token = restored_sync_token
         self.sync_catchup_applied_at = None
+        self.sync_token_persistence_suppressed = False
 
     def mark_sync_catchup_applied(self) -> None:
         """Record that the first post-start Matrix sync has applied cache catch-up."""
@@ -90,3 +97,7 @@ class BotRuntimeState:
         """Fail closed for pre-runtime cache reuse after a bad persisted sync token."""
         self.restored_sync_token = False
         self.sync_catchup_applied_at = None
+
+    def suppress_sync_token_persistence(self) -> None:
+        """Prevent later same-runtime tokens from becoming future restored-token trust roots."""
+        self.sync_token_persistence_suppressed = True

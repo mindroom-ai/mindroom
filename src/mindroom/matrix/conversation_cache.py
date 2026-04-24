@@ -893,6 +893,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Apply one redaction to the advisory cache when the affected thread is known."""
         await self._live.apply_redaction(room_id, event)
 
-    def cache_sync_timeline(self, response: nio.SyncResponse) -> list[asyncio.Task[object]]:
+    def cache_sync_timeline(
+        self,
+        response: nio.SyncResponse,
+        *,
+        raise_on_cache_write_failure: bool = False,
+    ) -> list[asyncio.Task[object]]:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
-        return self._sync.cache_sync_timeline(response)
+        return self._sync.cache_sync_timeline(
+            response,
+            raise_on_cache_write_failure=raise_on_cache_write_failure,
+        )

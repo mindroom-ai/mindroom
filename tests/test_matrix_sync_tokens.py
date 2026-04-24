@@ -157,6 +157,28 @@ async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_unknown_pos_restored_first_sync_suppresses_later_token_persistence(tmp_path: Path) -> None:
+    """A rejected restored token must not be replaced by a later same-runtime token."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_rejected"
+    bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+    save_sync_token(tmp_path, bot.agent_name, "s_rejected")
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    await bot._on_sync_error(sync_error)
+
+    bot._first_sync_done = True
+    bot.client.next_batch = "s_later"
+    response = MagicMock(spec=nio.SyncResponse)
+    response.rooms = MagicMock(join={})
+    await bot._on_sync_response(response)
+
+    assert load_sync_token(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
 async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> None:
     """Successful sync responses should update the saved next_batch token."""
     bot = _agent_bot(tmp_path)

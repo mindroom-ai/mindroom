@@ -1009,6 +1009,8 @@ class AgentBot:
 
     def _persist_sync_token(self) -> None:
         """Persist the current Matrix sync token."""
+        if self._runtime_view.sync_token_persistence_suppressed:
+            return
         if self.client is None:
             return
         token = self.client.next_batch
@@ -1065,6 +1067,7 @@ class AgentBot:
         """Clear restored-token trust and log why first-sync catch-up was unsafe."""
         limited_room_ids = joined_timeline_classification.limited_room_ids
         self._runtime_view.mark_restored_sync_token_invalid()
+        self._runtime_view.suppress_sync_token_persistence()
         self._clear_sync_token_state()
         if sync_cache_errors:
             self.logger.warning(
@@ -1124,7 +1127,10 @@ class AgentBot:
         if isinstance(_response, nio.SyncResponse):
             # Cache before persisting so a crash prefers replaying one batch over
             # skipping events whose timeline metadata never reached local state.
-            sync_cache_tasks = self._conversation_cache.cache_sync_timeline(_response)
+            sync_cache_tasks = self._conversation_cache.cache_sync_timeline(
+                _response,
+                raise_on_cache_write_failure=first_sync_response and self._runtime_view.restored_sync_token,
+            )
             if first_sync_response:
                 persist_sync_token = await self._finish_first_sync_cache_catchup(_response, sync_cache_tasks)
 
@@ -1151,6 +1157,8 @@ class AgentBot:
         if not self._first_sync_done and _response.status_code == "M_UNKNOWN_POS":
             restored_sync_token = self._runtime_view.restored_sync_token
             self._runtime_view.mark_restored_sync_token_invalid()
+            if restored_sync_token:
+                self._runtime_view.suppress_sync_token_persistence()
             self._clear_sync_token_state()
             self.logger.warning(
                 "matrix_sync_token_rejected",
