@@ -28,7 +28,8 @@ from agno.team import Team
 from pydantic import BaseModel, Field
 
 from mindroom import ai_runtime, model_loading
-from mindroom.agents import create_agent, get_team_session
+from mindroom.agent_storage import get_team_session
+from mindroom.agents import create_agent
 from mindroom.ai import build_matrix_run_metadata
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.cancellation import build_cancelled_error

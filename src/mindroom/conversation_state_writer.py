@@ -9,7 +9,7 @@ from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
-from mindroom.agents import (
+from mindroom.agent_storage import (
     create_session_storage,
     get_agent_session,
     get_team_session,

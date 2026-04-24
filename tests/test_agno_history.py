@@ -31,7 +31,8 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 from defusedxml.ElementTree import fromstring
 
-from mindroom.agents import create_agent, create_session_storage, get_agent_session
+from mindroom.agent_storage import create_session_storage, get_agent_session
+from mindroom.agents import create_agent
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.background_tasks import _get_background_task_count, wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, TeamConfig

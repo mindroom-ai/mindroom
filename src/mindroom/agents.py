@@ -20,7 +20,6 @@ from agno.run.team import TeamRunOutput
 import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
-from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
@@ -716,9 +715,9 @@ def remove_run_by_event_id(
     Returns True if a run was removed.
     """
     session = (
-        get_team_session(storage, session_id)
+        agent_storage.get_team_session(storage, session_id)
         if session_type is SessionType.TEAM
-        else get_agent_session(
+        else agent_storage.get_agent_session(
             storage,
             session_id,
         )
@@ -1255,14 +1254,11 @@ def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
 __all__ = [
     "build_agent_toolkit",
     "create_agent",
-    "create_session_storage",
     "describe_agent",
     "ensure_default_agent_workspaces",
     "get_agent_ids_for_room",
-    "get_agent_session",
     "get_agent_toolkit_names",
     "get_rooms_for_entity",
-    "get_team_session",
     "remove_run_by_event_id",
     "show_tool_calls_for_agent",
 ]

@@ -16,7 +16,8 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunContext, RunStatus
 from agno.session.agent import AgentSession
 
-from mindroom.agents import create_agent, create_session_storage
+from mindroom.agent_storage import create_session_storage
+from mindroom.agents import create_agent
 from mindroom.ai import ai_response
 from mindroom.api.openai_compat import _build_team, _derive_session_id
 from mindroom.config.agent import AgentConfig, TeamConfig

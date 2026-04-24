@@ -90,7 +90,13 @@ path = "mindroom.agent_storage"
 depends_on = ["mindroom.runtime_resolution"]
 visibility = [
     "mindroom.agents",
+    "mindroom.conversation_state_writer",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
+    "mindroom.memory.auto_flush",
+    "mindroom.response_runner",
+    "mindroom.teams",
+    "mindroom.turn_store",
 ]
 
 [[modules]]
@@ -171,6 +177,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.hooks",
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.tool_system.runtime_context",
@@ -541,7 +548,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.history.interrupted_replay"
 depends_on = [
-    "mindroom.agents",
+    "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.tool_system.events",
 ]
@@ -692,6 +699,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_runtime",
@@ -725,6 +733,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.teams"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_runtime",
@@ -806,7 +815,7 @@ visibility = [
 [[modules]]
 path = "mindroom.memory.auto_flush"
 depends_on = [
-    "mindroom.agents",
+    "mindroom.agent_storage",
     "mindroom.logging_config",
     "mindroom.memory.functions",
     "mindroom.model_loading",
@@ -1213,7 +1222,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.conversation_state_writer"
 depends_on = [
-    "mindroom.agents",
+    "mindroom.agent_storage",
     "mindroom.history",
     "mindroom.runtime_protocols",
 ]
@@ -1557,6 +1566,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.turn_store"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.constants",
     "mindroom.handled_turns",
@@ -2277,6 +2287,7 @@ expose = [
     "EVENT_MESSAGE_BEFORE_RESPONSE",
     "EVENT_MESSAGE_CANCELLED",
     "EVENT_MESSAGE_ENRICH",
+    "EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM",
     "EVENT_MESSAGE_RECEIVED",
     "EVENT_REACTION_RECEIVED",
     "EVENT_SCHEDULE_FIRED",
@@ -2293,6 +2304,8 @@ expose = [
     "ConfigReloadedContext",
     "CustomEventContext",
     "EnrichmentItem",
+    "FinalResponseDraft",
+    "FinalResponseTransformContext",
     "HookCallback",
     "HookContext",
     "HookContextSupport",
@@ -2323,6 +2336,7 @@ expose = [
     "default_timeout_ms_for_event",
     "emit",
     "emit_collect",
+    "emit_final_response_transform",
     "emit_gate",
     "emit_transform",
     "get_hook_metadata",

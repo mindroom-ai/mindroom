@@ -15,7 +15,7 @@ from agno.db.base import SessionType
 from agno.session.agent import AgentSession
 
 from mindroom import model_loading
-from mindroom.agents import create_session_storage
+from mindroom.agent_storage import create_session_storage
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.runtime_resolution import resolve_agent_execution
