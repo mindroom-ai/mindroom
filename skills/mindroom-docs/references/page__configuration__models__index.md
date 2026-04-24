@@ -102,7 +102,7 @@ models:
 
 ## Codex Subscription Models
 
-Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API. Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens. MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint. The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-plugin-style form `openai-codex/gpt-5.5`. If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`.
+Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API. Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens. MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint. The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-plugin-style form `openai-codex/gpt-5.5`. If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`. For starter config generation, use `mindroom config init --profile public-codex` or `mindroom config init --provider codex`.
 
 ```
 models:

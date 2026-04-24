@@ -31,9 +31,16 @@ Use `--provider` to select a different provider preset:
 # Use Anthropic Claude
 uvx mindroom config init --profile public --provider anthropic
 
+# Use Codex CLI ChatGPT subscription auth
+uvx mindroom config init --profile public-codex
+
 # Use Vertex AI Claude (Google Cloud)
 uvx mindroom config init --profile public-vertexai-anthropic
 ```
+
+`public-codex` is the canonical profile name for hosted Matrix with Codex CLI subscription auth.
+The shorter `codex` profile alias is also accepted.
+Run `codex login` before starting MindRoom when using this profile.
 
 `public-vertexai-anthropic` is the canonical profile name for Vertex AI Claude on hosted Matrix.
 Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
@@ -54,6 +61,7 @@ Set at least one key:
 - `ANTHROPIC_API_KEY=...`, or
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
+- For Codex CLI subscription auth: run `codex login`.
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` and authenticate with `gcloud auth application-default login`.
 
 ### 3. Pair your local install from chat UI
