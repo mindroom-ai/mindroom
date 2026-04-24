@@ -65,6 +65,8 @@ class _FakePreparedExecution:
     compaction_outcomes: list[object]
     replay_plan: object | None = None
     replays_persisted_history: bool = False
+    compaction_decision: object | None = None
+    opportunistic_compaction_requests: list[object] | None = None
 
     @property
     def final_prompt(self) -> str:

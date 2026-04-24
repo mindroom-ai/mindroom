@@ -93,6 +93,7 @@ def test_final_delivery_outcomes_use_canonical_event_fields(
 
 
 def test_final_delivery_outcome_cancelled_for_empty_prompt_is_not_retryable() -> None:
+    """Empty prompt cancellation should not mark the incoming turn handled."""
     outcome = FinalDeliveryOutcome.cancelled_for_empty_prompt()
 
     assert outcome.terminal_status == "cancelled"

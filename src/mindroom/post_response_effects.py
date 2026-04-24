@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
-from mindroom.delivery_gateway import CompactionNoticeRequest
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
@@ -16,6 +15,8 @@ from mindroom.thread_summary import (
 )
 from mindroom.timing import timed
 
+_active_opportunistic_compaction_jobs: set[tuple[str, str, str]] = set()
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
@@ -23,13 +24,31 @@ if TYPE_CHECKING:
     import structlog
     from agno.db.base import SessionType
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.history.types import CompactionOutcome
+    from mindroom.history.types import (
+        CompactionLifecycleFailure,
+        CompactionLifecycleStart,
+        CompactionLifecycleSuccess,
+        CompactionOutcome,
+        OpportunisticCompactionRequest,
+    )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+    OpportunisticCompactionRunner = Callable[
+        [
+            OpportunisticCompactionRequest,
+            RuntimePaths,
+            Config,
+            ToolExecutionIdentity | None,
+            "_PostResponseCompactionLifecycle",
+        ],
+        Awaitable[CompactionOutcome | None],
+    ]
 
 
 @dataclass(frozen=True)
@@ -40,14 +59,13 @@ class ResponseOutcome:
     session_id: str | None = None
     session_type: SessionType | None = None
     execution_identity: ToolExecutionIdentity | None = None
-    compaction_outcomes: tuple[CompactionOutcome, ...] = ()
+    opportunistic_compaction_requests: tuple[OpportunisticCompactionRequest, ...] = ()
     interactive_target: MessageTarget | None = None
     thread_summary_room_id: str | None = None
     thread_summary_thread_id: str | None = None
     thread_summary_message_count_hint: int | None = None
     memory_prompt: str | None = None
     memory_thread_history: Sequence[ResolvedVisibleMessage] | None = None
-    dispatch_compaction_when_suppressed: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,17 +80,39 @@ class PostResponseEffectsDeps:
         ]
         | None
     ) = None
-    dispatch_compaction_notices: (
-        Callable[
-            [str, Sequence[CompactionOutcome]],
-            Awaitable[None],
-        ]
-        | None
-    ) = None
     queue_memory_persistence: Callable[[], None] | None = None
+    start_opportunistic_compaction: Callable[[Sequence[OpportunisticCompactionRequest], str], None] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
+
+
+@dataclass(frozen=True)
+class _PostResponseCompactionLifecycle:
+    """Matrix-backed lifecycle for immediate post-response compaction."""
+
+    delivery_gateway: DeliveryGateway
+    target: MessageTarget
+    reply_to_event_id: str
+
+    async def start(self, event: CompactionLifecycleStart) -> str | None:
+        return await self.delivery_gateway.send_compaction_lifecycle_start(
+            target=self.target,
+            reply_to_event_id=self.reply_to_event_id,
+            event=event,
+        )
+
+    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
+        await self.delivery_gateway.edit_compaction_lifecycle_success(
+            target=self.target,
+            event=event,
+        )
+
+    async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
+        await self.delivery_gateway.edit_compaction_lifecycle_failure(
+            target=self.target,
+            event=event,
+        )
 
 
 @dataclass(frozen=True)
@@ -141,33 +181,6 @@ class PostResponseEffectsSupport:
             options_list,
         )
 
-    async def _dispatch_compaction_notices(
-        self,
-        *,
-        room_id: str,
-        reply_to_event_id: str,
-        main_response_event_id: str | None,
-        thread_id: str | None,
-        compaction_outcomes: Sequence[CompactionOutcome],
-    ) -> None:
-        """Send compaction notices for all outcomes that request one."""
-        if main_response_event_id is None:
-            return
-        for outcome in compaction_outcomes:
-            if not outcome.notify:
-                continue
-            await self.delivery_gateway.send_compaction_notice(
-                CompactionNoticeRequest(
-                    target=MessageTarget.resolve(
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        reply_to_event_id=reply_to_event_id,
-                    ),
-                    main_response_event_id=main_response_event_id,
-                    outcome=outcome,
-                ),
-            )
-
     def queue_thread_summary(
         self,
         room_id: str,
@@ -192,15 +205,66 @@ class PostResponseEffectsSupport:
             owner=self.runtime,
         )
 
+    def start_opportunistic_compactions(
+        self,
+        requests: Sequence[OpportunisticCompactionRequest],
+        *,
+        execution_identity: ToolExecutionIdentity | None,
+        target: MessageTarget,
+        reply_to_event_id: str,
+        run_compaction: OpportunisticCompactionRunner,
+    ) -> None:
+        """Start immediate post-response maintenance compaction tasks."""
+        for request in requests:
+            dedupe_key = request.dedupe_key
+            if dedupe_key in _active_opportunistic_compaction_jobs:
+                continue
+            _active_opportunistic_compaction_jobs.add(dedupe_key)
+            compaction_lifecycle = _PostResponseCompactionLifecycle(
+                delivery_gateway=self.delivery_gateway,
+                target=target,
+                reply_to_event_id=reply_to_event_id,
+            )
+            create_background_task(
+                self._run_opportunistic_compaction(
+                    request=request,
+                    execution_identity=execution_identity,
+                    compaction_lifecycle=compaction_lifecycle,
+                    run_compaction=run_compaction,
+                ),
+                name=f"history_compaction_{request.agent_name}_{request.session_id}",
+                owner=self.runtime,
+            )
+
+    async def _run_opportunistic_compaction(
+        self,
+        *,
+        request: OpportunisticCompactionRequest,
+        execution_identity: ToolExecutionIdentity | None,
+        compaction_lifecycle: _PostResponseCompactionLifecycle,
+        run_compaction: OpportunisticCompactionRunner,
+    ) -> None:
+        try:
+            await run_compaction(
+                request,
+                self.runtime_paths,
+                self.runtime.config,
+                execution_identity,
+                compaction_lifecycle,
+            )
+        finally:
+            _active_opportunistic_compaction_jobs.discard(request.dedupe_key)
+
     def build_deps(
         self,
         *,
         room_id: str,
-        reply_to_event_id: str,
         thread_id: str | None,
         interactive_agent_name: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
+        run_opportunistic_compaction: OpportunisticCompactionRunner | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
 
@@ -219,23 +283,27 @@ class PostResponseEffectsSupport:
                 agent_name=interactive_agent_name,
             )
 
-        async def dispatch_compaction_notices(
-            main_response_event_id: str,
-            compaction_outcomes: Sequence[CompactionOutcome],
-        ) -> None:
-            await self._dispatch_compaction_notices(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                main_response_event_id=main_response_event_id,
-                thread_id=thread_id,
-                compaction_outcomes=compaction_outcomes,
-            )
-
         return PostResponseEffectsDeps(
             logger=self.logger,
             register_interactive=register_interactive,
-            dispatch_compaction_notices=dispatch_compaction_notices,
             queue_memory_persistence=queue_memory_persistence,
+            start_opportunistic_compaction=(
+                (
+                    lambda requests, response_event_id: self.start_opportunistic_compactions(
+                        requests,
+                        execution_identity=execution_identity,
+                        target=MessageTarget.resolve(
+                            room_id=room_id,
+                            thread_id=thread_id,
+                            reply_to_event_id=response_event_id,
+                        ),
+                        reply_to_event_id=response_event_id,
+                        run_compaction=run_opportunistic_compaction,
+                    )
+                )
+                if run_opportunistic_compaction is not None
+                else None
+            ),
             persist_response_event_id=persist_response_event_id,
             should_queue_thread_summary=self.should_queue_thread_summary,
             queue_thread_summary=self.queue_thread_summary,
@@ -266,23 +334,29 @@ async def apply_post_response_effects(
             [dict(item) for item in final_delivery_outcome.options_list],
         )
 
-    if (
-        response_event_id is not None
-        and deps.dispatch_compaction_notices is not None
-        and outcome.compaction_outcomes
-        and (not final_delivery_outcome.suppressed or outcome.dispatch_compaction_when_suppressed)
-    ):
-        await deps.dispatch_compaction_notices(
-            response_event_id,
-            outcome.compaction_outcomes,
-        )
-
     if deps.queue_memory_persistence is not None:
         try:
             deps.queue_memory_persistence()
         except Exception:
             deps.logger.exception(
                 "Failed to queue memory persistence after response",
+                session_id=outcome.session_id,
+                room_id=outcome.interactive_target.room_id if outcome.interactive_target is not None else None,
+                thread_id=(
+                    outcome.interactive_target.resolved_thread_id if outcome.interactive_target is not None else None
+                ),
+            )
+
+    if (
+        response_event_id is not None
+        and outcome.opportunistic_compaction_requests
+        and deps.start_opportunistic_compaction is not None
+    ):
+        try:
+            deps.start_opportunistic_compaction(outcome.opportunistic_compaction_requests, response_event_id)
+        except Exception:
+            deps.logger.exception(
+                "Failed to start opportunistic compaction after response",
                 session_id=outcome.session_id,
                 room_id=outcome.interactive_target.room_id if outcome.interactive_target is not None else None,
                 thread_id=(

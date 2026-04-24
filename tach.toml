@@ -1623,6 +1623,7 @@ expose = [
     "AIStreamChunk",
     "build_matrix_run_metadata",
     "ai_response",
+    "run_opportunistic_history_compaction",
     "stream_agent_response",
 ]
 from = ["mindroom.ai"]

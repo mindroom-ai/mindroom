@@ -9,7 +9,7 @@ from mindroom.history.compaction import (
     resolve_compaction_runtime_settings,
     resolve_effective_compaction_threshold,
 )
-from mindroom.history.types import ResolvedHistoryExecutionPlan, _CompactionAvailabilityReason
+from mindroom.history.types import CompactionDecision, ResolvedHistoryExecutionPlan, _CompactionAvailabilityReason
 from mindroom.token_budget import compute_compaction_input_budget
 
 if TYPE_CHECKING:
@@ -42,7 +42,13 @@ def resolve_history_execution_plan(
 
     threshold_tokens = None
     replay_budget_tokens = None
+    hard_replay_budget_tokens = None
     if replay_window_tokens is not None and static_prompt_tokens is not None:
+        hard_replay_budget_tokens = _resolve_replay_budget_without_compaction(
+            compaction_config=compaction_config,
+            replay_window_tokens=replay_window_tokens,
+            static_prompt_tokens=static_prompt_tokens,
+        )
         if compaction_config.enabled:
             threshold_tokens = _resolve_replay_threshold_tokens(
                 compaction_config=compaction_config,
@@ -56,11 +62,7 @@ def resolve_history_execution_plan(
                 static_prompt_tokens=static_prompt_tokens,
             )
         else:
-            replay_budget_tokens = _resolve_replay_budget_without_compaction(
-                compaction_config=compaction_config,
-                replay_window_tokens=replay_window_tokens,
-                static_prompt_tokens=static_prompt_tokens,
-            )
+            replay_budget_tokens = hard_replay_budget_tokens
 
     return ResolvedHistoryExecutionPlan(
         authored_compaction_config=has_authored_compaction_config,
@@ -76,6 +78,91 @@ def resolve_history_execution_plan(
         replay_budget_tokens=replay_budget_tokens,
         summary_input_budget_tokens=summary_input_budget_tokens,
         unavailable_reason=unavailable_reason,
+        hard_replay_budget_tokens=hard_replay_budget_tokens,
+    )
+
+
+def classify_compaction_decision(  # noqa: PLR0911
+    *,
+    plan: ResolvedHistoryExecutionPlan,
+    force_compact_before_next_run: bool,
+    current_history_tokens: int | None,
+    trigger_budget_tokens: int | None = None,
+    hard_budget_tokens: int | None = None,
+) -> CompactionDecision:
+    """Classify compaction as none, immediate post-response maintenance, or foreground required."""
+    resolved_trigger_budget = plan.replay_budget_tokens if trigger_budget_tokens is None else trigger_budget_tokens
+    resolved_hard_budget = plan.hard_replay_budget_tokens if hard_budget_tokens is None else hard_budget_tokens
+
+    if force_compact_before_next_run:
+        if plan.destructive_compaction_available:
+            return CompactionDecision(
+                mode="required",
+                reason="forced",
+                current_history_tokens=current_history_tokens,
+                trigger_budget_tokens=resolved_trigger_budget,
+                hard_budget_tokens=resolved_hard_budget,
+                fitted_replay_tokens=(
+                    0 if current_history_tokens is None else min(current_history_tokens, resolved_hard_budget or 0)
+                ),
+            )
+        return CompactionDecision(
+            mode="none",
+            reason="forced_unavailable",
+            current_history_tokens=current_history_tokens,
+            trigger_budget_tokens=resolved_trigger_budget,
+            hard_budget_tokens=resolved_hard_budget,
+        )
+
+    if not plan.authored_compaction_enabled:
+        return CompactionDecision(
+            mode="none",
+            reason="auto_disabled",
+            current_history_tokens=current_history_tokens,
+            trigger_budget_tokens=resolved_trigger_budget,
+            hard_budget_tokens=resolved_hard_budget,
+        )
+    if not plan.destructive_compaction_available:
+        return CompactionDecision(
+            mode="none",
+            reason="compaction_unavailable",
+            current_history_tokens=current_history_tokens,
+            trigger_budget_tokens=resolved_trigger_budget,
+            hard_budget_tokens=resolved_hard_budget,
+        )
+    if current_history_tokens is None or resolved_trigger_budget is None:
+        return CompactionDecision(
+            mode="none",
+            reason="missing_budget",
+            current_history_tokens=current_history_tokens,
+            trigger_budget_tokens=resolved_trigger_budget,
+            hard_budget_tokens=resolved_hard_budget,
+        )
+    if current_history_tokens <= resolved_trigger_budget:
+        return CompactionDecision(
+            mode="none",
+            reason="under_trigger",
+            current_history_tokens=current_history_tokens,
+            trigger_budget_tokens=resolved_trigger_budget,
+            hard_budget_tokens=resolved_hard_budget,
+            fitted_replay_tokens=current_history_tokens,
+        )
+    if resolved_hard_budget is None or current_history_tokens > resolved_hard_budget:
+        return CompactionDecision(
+            mode="required",
+            reason="history_exceeds_hard_budget",
+            current_history_tokens=current_history_tokens,
+            trigger_budget_tokens=resolved_trigger_budget,
+            hard_budget_tokens=resolved_hard_budget,
+            fitted_replay_tokens=resolved_hard_budget,
+        )
+    return CompactionDecision(
+        mode="opportunistic",
+        reason="over_trigger_fits_hard_budget",
+        current_history_tokens=current_history_tokens,
+        trigger_budget_tokens=resolved_trigger_budget,
+        hard_budget_tokens=resolved_hard_budget,
+        fitted_replay_tokens=current_history_tokens,
     )
 
 
@@ -87,17 +174,16 @@ def should_attempt_destructive_compaction(
     replay_budget_tokens: int | None = None,
 ) -> bool:
     """Return whether durable session compaction should run before replay planning."""
-    if force_compact_before_next_run and plan.destructive_compaction_available:
-        return True
-
-    if not plan.authored_compaction_enabled or not plan.destructive_compaction_available:
-        return False
-
-    effective_replay_budget_tokens = plan.replay_budget_tokens if replay_budget_tokens is None else replay_budget_tokens
-    if effective_replay_budget_tokens is None or current_history_tokens is None:
-        return False
-
-    return current_history_tokens > effective_replay_budget_tokens
+    return (
+        classify_compaction_decision(
+            plan=plan,
+            force_compact_before_next_run=force_compact_before_next_run,
+            current_history_tokens=current_history_tokens,
+            trigger_budget_tokens=replay_budget_tokens,
+            hard_budget_tokens=replay_budget_tokens,
+        ).mode
+        == "required"
+    )
 
 
 def manual_compaction_unavailable_message(plan: ResolvedHistoryExecutionPlan) -> str | None:

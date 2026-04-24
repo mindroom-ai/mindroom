@@ -54,6 +54,7 @@ from mindroom.history.runtime import (
     apply_replay_plan,
     close_agent_runtime_sqlite_dbs,
     open_resolved_scope_session_context,
+    run_opportunistic_compaction_request,
 )
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
@@ -84,6 +85,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.history.types import CompactionLifecycle, OpportunisticCompactionRequest
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.events import ToolTraceEntry
@@ -95,10 +97,28 @@ __all__ = [
     "AIStreamChunk",
     "ai_response",
     "build_matrix_run_metadata",
+    "run_opportunistic_history_compaction",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _AI_RUN_METADATA_VERSION = 1
+
+
+async def run_opportunistic_history_compaction(
+    request: OpportunisticCompactionRequest,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    compaction_lifecycle: CompactionLifecycle,
+) -> object | None:
+    """Run immediate post-response history compaction through the AI/history boundary."""
+    return await run_opportunistic_compaction_request(
+        request=request,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        compaction_lifecycle=compaction_lifecycle,
+    )
 
 
 def _append_additional_context(agent: Agent, context_chunk: str) -> None:
@@ -761,6 +781,8 @@ async def _prepare_agent_and_prompt(
     active_event_ids: Collection[str] = frozenset(),
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    opportunistic_compaction_requests_collector: list[OpportunisticCompactionRequest] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_owner: KnowledgeRefreshOwner | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
@@ -836,6 +858,7 @@ async def _prepare_agent_and_prompt(
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         compaction_outcomes_collector=compaction_outcomes_collector,
+        compaction_lifecycle=compaction_lifecycle,
         current_sender_id=current_sender_id,
         timing_scope=timing_scope,
     )
@@ -843,6 +866,12 @@ async def _prepare_agent_and_prompt(
         compaction_outcomes=prepared_execution.compaction_outcomes,
         replay_plan=prepared_execution.replay_plan,
         replays_persisted_history=prepared_execution.replays_persisted_history,
+        compaction_decision=(
+            prepared_execution.compaction_decision
+            if prepared_execution.compaction_decision is not None
+            else PreparedHistoryState().compaction_decision
+        ),
+        opportunistic_compaction_requests=list(prepared_execution.opportunistic_compaction_requests or []),
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
@@ -860,10 +889,14 @@ async def _prepare_agent_and_prompt(
             compaction_outcomes=enriched_outcomes,
             replay_plan=prepared_history.replay_plan,
             replays_persisted_history=prepared_history.replays_persisted_history,
+            compaction_decision=prepared_history.compaction_decision,
+            opportunistic_compaction_requests=prepared_history.opportunistic_compaction_requests,
         )
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.clear()
             compaction_outcomes_collector.extend(enriched_outcomes)
+    if opportunistic_compaction_requests_collector is not None:
+        opportunistic_compaction_requests_collector.extend(prepared_history.opportunistic_compaction_requests)
 
     logger.info(
         "Preparing agent and prompt",
@@ -902,6 +935,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    opportunistic_compaction_requests_collector: list[OpportunisticCompactionRequest] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_owner: KnowledgeRefreshOwner | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
@@ -946,6 +981,10 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         compaction_outcomes_collector: Optional list that receives completed
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
+        opportunistic_compaction_requests_collector: Optional list that receives
+            immediate post-response maintenance compaction requests from this run.
+        compaction_lifecycle: Optional lifecycle sink for ordered foreground
+            compaction notices.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
         refresh_owner: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
@@ -1009,6 +1048,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     active_event_ids=active_event_ids,
                     execution_identity=execution_identity,
                     compaction_outcomes_collector=compaction_outcomes_collector,
+                    opportunistic_compaction_requests_collector=opportunistic_compaction_requests_collector,
+                    compaction_lifecycle=compaction_lifecycle,
                     delegation_depth=delegation_depth,
                     refresh_owner=refresh_owner,
                     system_enrichment_items=system_enrichment_items,
@@ -1343,6 +1384,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    opportunistic_compaction_requests_collector: list[OpportunisticCompactionRequest] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_owner: KnowledgeRefreshOwner | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
@@ -1385,6 +1428,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         compaction_outcomes_collector: Optional list that receives completed
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
+        opportunistic_compaction_requests_collector: Optional list that receives
+            immediate post-response maintenance compaction requests from this run.
+        compaction_lifecycle: Optional lifecycle sink for ordered foreground
+            compaction notices.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
         refresh_owner: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
@@ -1451,6 +1498,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     active_event_ids=active_event_ids,
                     execution_identity=execution_identity,
                     compaction_outcomes_collector=compaction_outcomes_collector,
+                    opportunistic_compaction_requests_collector=opportunistic_compaction_requests_collector,
+                    compaction_lifecycle=compaction_lifecycle,
                     delegation_depth=delegation_depth,
                     refresh_owner=refresh_owner,
                     system_enrichment_items=system_enrichment_items,

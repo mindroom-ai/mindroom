@@ -17,13 +17,15 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.compaction import (
     compute_prompt_token_breakdown,
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
-from mindroom.history.types import CompactionOutcome, _to_k
+from mindroom.history.types import CompactionOutcome, OpportunisticCompactionRequest, _to_k
 from mindroom.memory import MemoryPromptParts
+from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -71,6 +73,26 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
         defaults["history_budget_tokens"] = overrides["window_tokens"]
     defaults.update(overrides)
     return CompactionOutcome(**defaults)
+
+
+def _make_opportunistic_request(**overrides: object) -> OpportunisticCompactionRequest:
+    defaults: dict[str, object] = {
+        "agent_name": "test_agent",
+        "session_id": "session-1",
+        "scope_kind": "agent",
+        "scope_id": "test_agent",
+        "summary_model": "summary-model",
+        "current_history_tokens": 15_000,
+        "runs_before": 8,
+        "history_budget_tokens": 10_000,
+        "summary_input_budget_tokens": 20_000,
+        "active_context_window": 64_000,
+        "replay_window_tokens": 64_000,
+        "threshold_tokens": 12_000,
+        "reserve_tokens": 4_096,
+    }
+    defaults.update(overrides)
+    return OpportunisticCompactionRequest(**defaults)
 
 
 def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
@@ -250,6 +272,32 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     assert outcome.format_notice() == (
         "\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget\n   Overhead: 62 prompt"
     )
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_start_opportunistic_compaction_after_visible_delivery() -> None:
+    """Opportunistic maintenance compaction should start only after the reply is visible."""
+    request = _make_opportunistic_request()
+    start_compaction = MagicMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Reply",
+            delivery_kind="sent",
+        ),
+        ResponseOutcome(
+            opportunistic_compaction_requests=(request,),
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            start_opportunistic_compaction=start_compaction,
+        ),
+    )
+
+    start_compaction.assert_called_once_with((request,), "$response")
 
 
 # ---------------------------------------------------------------------------

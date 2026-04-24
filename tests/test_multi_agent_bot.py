@@ -60,7 +60,7 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
-from mindroom.history import CompactionOutcome
+from mindroom.history import CompactionLifecycleStart, CompactionOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -3169,8 +3169,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(event.event_id)
-            .with_response_event_id("$cancelled"),
+            HandledTurnState.from_source_event_id(event.event_id).with_response_event_id("$cancelled"),
         )
 
     @pytest.mark.asyncio
@@ -4246,7 +4245,17 @@ class TestAgentBot:
             return None
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-            kwargs["compaction_outcomes_collector"].append(_make_compaction_outcome())
+            await kwargs["compaction_lifecycle"].start(
+                CompactionLifecycleStart(
+                    mode="auto",
+                    session_id="session-1",
+                    scope="agent:test_agent",
+                    summary_model="summary-model",
+                    before_tokens=30_000,
+                    history_budget_tokens=100_000,
+                    runs_before=20,
+                ),
+            )
             return "ok"
 
         scheduled_tasks: list[asyncio.Task[None]] = []
@@ -4302,9 +4311,9 @@ class TestAgentBot:
                 new_callable=AsyncMock,
             ) as mock_thread_summary,
             patch(
-                "mindroom.delivery_gateway.DeliveryGateway.send_compaction_notice",
+                "mindroom.delivery_gateway.DeliveryGateway.send_compaction_lifecycle_start",
                 new=AsyncMock(return_value="$notice"),
-            ) as mock_send_compaction_notice,
+            ) as mock_send_compaction_lifecycle_start,
         ):
             await bot._generate_response(
                 room_id="!test:localhost",
@@ -4329,10 +4338,10 @@ class TestAgentBot:
             conversation_cache=bot._conversation_cache,
             message_count_hint=1,
         )
-        mock_send_compaction_notice.assert_awaited_once()
-        compaction_request = mock_send_compaction_notice.await_args.args[0]
-        assert compaction_request.target.resolved_thread_id == root_event_id
-        assert compaction_request.target.reply_to_event_id == root_event_id
+        mock_send_compaction_lifecycle_start.assert_awaited_once()
+        compaction_notice_kwargs = mock_send_compaction_lifecycle_start.await_args.kwargs
+        assert compaction_notice_kwargs["target"].resolved_thread_id == root_event_id
+        assert compaction_notice_kwargs["reply_to_event_id"] == "$response"
         assert "thread_summary_!test:localhost_$root_event" in scheduled_names
 
     @pytest.mark.asyncio

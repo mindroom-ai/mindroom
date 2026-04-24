@@ -376,7 +376,6 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     )
     deps = support.build_deps(
         room_id="!room:localhost",
-        reply_to_event_id="$event",
         thread_id="$thread",
         interactive_agent_name="general",
     )

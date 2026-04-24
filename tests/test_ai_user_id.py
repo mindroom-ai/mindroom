@@ -3838,6 +3838,8 @@ class TestUserIdPassthrough:
             unseen_event_ids=[],
             replays_persisted_history=False,
             compaction_outcomes=[],
+            compaction_decision=None,
+            opportunistic_compaction_requests=[],
         )
 
         with (

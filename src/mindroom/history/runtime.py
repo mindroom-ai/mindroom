@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -28,9 +29,9 @@ from mindroom.history.compaction import (
     runs_for_scope,
 )
 from mindroom.history.policy import (
+    classify_compaction_decision,
     describe_compaction_unavailability,
     resolve_history_execution_plan,
-    should_attempt_destructive_compaction,
 )
 from mindroom.history.storage import (
     clear_force_compaction_state,
@@ -39,9 +40,14 @@ from mindroom.history.storage import (
     write_scope_state,
 )
 from mindroom.history.types import (
+    CompactionDecision,
+    CompactionLifecycleFailure,
+    CompactionLifecycleStart,
+    CompactionLifecycleSuccess,
     HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
+    OpportunisticCompactionRequest,
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
@@ -62,13 +68,18 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.history.types import CompactionOutcome
+    from mindroom.history.types import CompactionLifecycle, CompactionOutcome
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
 _TEAM_STATE_ROOT_DIRNAME = "teams"
 _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
+
+
+def _elapsed_ms(start: float) -> int:
+    """Return elapsed monotonic milliseconds."""
+    return int((time.monotonic() - start) * 1000)
 
 
 @timed("system_prompt_assembly.history_prepare.compaction_model_init")
@@ -118,6 +129,10 @@ class PreparedScopeHistory:
     session: AgentSession | TeamSession | None
     resolved_inputs: _ResolvedPreparationInputs
     compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
+    compaction_decision: CompactionDecision = field(
+        default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
+    )
+    opportunistic_compaction_requests: list[OpportunisticCompactionRequest] = field(default_factory=list)
 
 
 def resolve_history_scope(agent: Agent) -> HistoryScope | None:
@@ -132,7 +147,7 @@ def resolve_history_scope(agent: Agent) -> HistoryScope | None:
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
-async def prepare_scope_history(
+async def prepare_scope_history(  # noqa: C901
     *,
     agent: Agent,
     agent_name: str,
@@ -151,6 +166,7 @@ async def prepare_scope_history(
     scope: HistoryScope | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
     timing_scope: str | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning."""
     resolved_inputs = _resolve_preparation_inputs(
@@ -175,9 +191,12 @@ async def prepare_scope_history(
         )
 
     execution_plan = resolved_inputs.execution_plan
-    history_budget = available_history_budget
-    if history_budget is None:
-        history_budget = execution_plan.replay_budget_tokens
+    trigger_history_budget = available_history_budget
+    if trigger_history_budget is None:
+        trigger_history_budget = execution_plan.replay_budget_tokens
+    hard_history_budget = available_history_budget
+    if hard_history_budget is None:
+        hard_history_budget = execution_plan.hard_replay_budget_tokens or execution_plan.replay_budget_tokens
 
     session = scope_context.session
     state = _prepare_scope_state_for_run(
@@ -192,31 +211,70 @@ async def prepare_scope_history(
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
     )
-    should_compact = should_attempt_destructive_compaction(
+    visible_runs = runs_for_scope(completed_top_level_runs(session), scope_context.scope)
+    compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
         current_history_tokens=current_history_tokens,
-        replay_budget_tokens=history_budget,
+        trigger_budget_tokens=trigger_history_budget,
+        hard_budget_tokens=hard_history_budget,
     )
+    opportunistic_compaction_requests: list[OpportunisticCompactionRequest] = []
     logger.info(
         "History preparation check",
         agent=agent_name,
         auto_enabled=execution_plan.authored_compaction_enabled and execution_plan.destructive_compaction_available,
         compaction_available=execution_plan.destructive_compaction_available,
-        replay_budget=history_budget,
+        trigger_budget=trigger_history_budget,
+        hard_budget=hard_history_budget,
         current_tokens=current_history_tokens,
         force=state.force_compact_before_next_run,
-        compaction_requested=should_compact,
+        compaction_decision=compaction_decision.mode,
+        compaction_reason=compaction_decision.reason,
         unavailable_reason=execution_plan.unavailable_reason,
     )
 
-    if should_compact:
+    if compaction_decision.mode == "opportunistic" and visible_runs and execution_plan.summary_input_budget_tokens:
+        opportunistic_compaction_requests.append(
+            OpportunisticCompactionRequest(
+                agent_name=agent_name,
+                session_id=session.session_id,
+                scope_kind=scope_context.scope.kind,
+                scope_id=scope_context.scope.scope_id,
+                summary_model=execution_plan.compaction_model_name,
+                current_history_tokens=current_history_tokens,
+                runs_before=len(visible_runs),
+                history_budget_tokens=trigger_history_budget,
+                summary_input_budget_tokens=execution_plan.summary_input_budget_tokens,
+                active_context_window=resolved_inputs.active_context_window,
+                replay_window_tokens=execution_plan.replay_window_tokens,
+                threshold_tokens=execution_plan.trigger_threshold_tokens,
+                reserve_tokens=execution_plan.reserve_tokens,
+                notify=resolved_inputs.compaction_config.notify,
+            ),
+        )
+
+    if compaction_decision.mode == "required":
         assert execution_plan.summary_input_budget_tokens is not None
         summary_model = _load_compaction_model(
             config,
             runtime_paths,
             execution_plan.compaction_model_name,
         )
+        notice_event_id: str | None = None
+        compaction_start = time.monotonic()
+        if compaction_lifecycle is not None and visible_runs:
+            notice_event_id = await compaction_lifecycle.start(
+                CompactionLifecycleStart(
+                    mode="manual" if state.force_compact_before_next_run else "auto",
+                    session_id=session.session_id,
+                    scope=scope_context.scope.key,
+                    summary_model=execution_plan.compaction_model_name,
+                    before_tokens=current_history_tokens,
+                    history_budget_tokens=hard_history_budget,
+                    runs_before=len(visible_runs),
+                ),
+            )
         try:
             _next_state, outcome = await compact_scope_history(
                 storage=scope_context.storage,
@@ -224,7 +282,7 @@ async def prepare_scope_history(
                 scope=scope_context.scope,
                 state=state,
                 history_settings=resolved_inputs.history_settings,
-                available_history_budget=history_budget,
+                available_history_budget=hard_history_budget,
                 summary_input_budget=execution_plan.summary_input_budget_tokens,
                 summary_model=summary_model,
                 summary_model_name=execution_plan.compaction_model_name,
@@ -235,9 +293,25 @@ async def prepare_scope_history(
                 notify=resolved_inputs.compaction_config.notify,
                 timing_scope=timing_scope,
             )
-        except Exception:
+        except Exception as error:
             clear_force_compaction_state(session, scope_context.scope, state)
             scope_context.storage.upsert_session(session)
+            duration_ms = _elapsed_ms(compaction_start)
+            if compaction_lifecycle is not None and visible_runs:
+                failure_reason = str(error) or type(error).__name__
+                await compaction_lifecycle.complete_failure(
+                    CompactionLifecycleFailure(
+                        notice_event_id=notice_event_id,
+                        mode="manual" if state.force_compact_before_next_run else "auto",
+                        session_id=session.session_id,
+                        scope=scope_context.scope.key,
+                        summary_model=execution_plan.compaction_model_name,
+                        status="timeout" if "timed out" in failure_reason else "failed",
+                        duration_ms=duration_ms,
+                        failure_reason=failure_reason,
+                        history_budget_tokens=hard_history_budget,
+                    ),
+                )
             logger.exception(
                 "Compaction failed; continuing without compaction",
                 session_id=session.session_id,
@@ -246,6 +320,20 @@ async def prepare_scope_history(
             )
         else:
             if outcome is not None:
+                duration_ms = _elapsed_ms(compaction_start)
+                outcome = replace(
+                    outcome,
+                    lifecycle_notice_event_id=notice_event_id,
+                    duration_ms=duration_ms,
+                )
+                if compaction_lifecycle is not None and visible_runs:
+                    await compaction_lifecycle.complete_success(
+                        CompactionLifecycleSuccess(
+                            notice_event_id=notice_event_id,
+                            outcome=outcome,
+                            duration_ms=duration_ms,
+                        ),
+                    )
                 compaction_outcomes.append(outcome)
                 logger.info(
                     "Compaction completed",
@@ -262,6 +350,8 @@ async def prepare_scope_history(
         session=scope_context.session,
         resolved_inputs=resolved_inputs,
         compaction_outcomes=compaction_outcomes,
+        compaction_decision=compaction_decision,
+        opportunistic_compaction_requests=opportunistic_compaction_requests,
     )
 
 
@@ -287,7 +377,13 @@ def finalize_history_preparation(
     )
     history_budget = available_history_budget
     if history_budget is None:
-        history_budget = execution_plan.replay_budget_tokens
+        history_budget = (
+            execution_plan.hard_replay_budget_tokens
+            if execution_plan.authored_compaction_enabled
+            else execution_plan.replay_budget_tokens
+        )
+        if history_budget is None:
+            history_budget = execution_plan.replay_budget_tokens
         if execution_plan.authored_compaction_enabled and execution_plan.unavailable_reason is not None:
             description = describe_compaction_unavailability(execution_plan)
             logger.warning(
@@ -304,6 +400,8 @@ def finalize_history_preparation(
                 estimated_tokens=0,
             ),
             replays_persisted_history=False,
+            compaction_decision=prepared_scope_history.compaction_decision,
+            opportunistic_compaction_requests=prepared_scope_history.opportunistic_compaction_requests,
         )
 
     current_history_tokens = estimate_prompt_visible_history_tokens(
@@ -338,6 +436,8 @@ def finalize_history_preparation(
             scope=prepared_scope_history.scope,
             replay_plan=replay_plan,
         ),
+        compaction_decision=prepared_scope_history.compaction_decision,
+        opportunistic_compaction_requests=prepared_scope_history.opportunistic_compaction_requests,
     )
 
 
@@ -362,6 +462,7 @@ async def prepare_history_for_run(
     available_history_budget: int | None = None,
     scope: HistoryScope | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
 ) -> PreparedHistoryState:
     """Prepare one scope by compacting durable history and planning safe replay for the run."""
     resolved_scope = scope or resolve_history_scope(agent)
@@ -395,6 +496,7 @@ async def prepare_history_for_run(
             available_history_budget=available_history_budget,
             scope=resolved_scope,
             execution_plan=execution_plan,
+            compaction_lifecycle=compaction_lifecycle,
         )
     else:
         with open_scope_session_context(
@@ -423,6 +525,7 @@ async def prepare_history_for_run(
                 available_history_budget=available_history_budget,
                 scope=resolved_scope,
                 execution_plan=execution_plan,
+                compaction_lifecycle=compaction_lifecycle,
             )
     return finalize_history_preparation(
         prepared_scope_history=prepared_scope_history,
@@ -430,6 +533,130 @@ async def prepare_history_for_run(
         static_prompt_tokens=static_prompt_tokens,
         available_history_budget=available_history_budget,
     )
+
+
+async def run_opportunistic_compaction_request(
+    *,
+    request: OpportunisticCompactionRequest,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
+) -> CompactionOutcome | None:
+    """Run one immediate post-response maintenance compaction request."""
+    scope = request.scope
+    with open_resolved_scope_session_context(
+        agent_name=request.agent_name,
+        scope=scope,
+        session_id=request.session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+    ) as scope_context:
+        if scope_context is None or scope_context.session is None:
+            return None
+        history_settings = _history_settings_for_opportunistic_request(
+            request=request,
+            config=config,
+        )
+        state = read_scope_state(scope_context.session, scope)
+        if state.force_compact_before_next_run:
+            logger.info(
+                "Skipping opportunistic compaction because foreground compaction is already requested",
+                session_id=request.session_id,
+                scope=scope.key,
+            )
+            return None
+        notice_event_id: str | None = None
+        compaction_start = time.monotonic()
+        if compaction_lifecycle is not None:
+            notice_event_id = await compaction_lifecycle.start(
+                CompactionLifecycleStart(
+                    mode="auto",
+                    session_id=request.session_id,
+                    scope=scope.key,
+                    summary_model=request.summary_model,
+                    before_tokens=request.current_history_tokens,
+                    history_budget_tokens=request.history_budget_tokens,
+                    runs_before=request.runs_before,
+                ),
+            )
+        summary_model = _load_compaction_model(
+            config,
+            runtime_paths,
+            request.summary_model,
+        )
+        try:
+            _next_state, outcome = await compact_scope_history(
+                storage=scope_context.storage,
+                session=scope_context.session,
+                scope=scope,
+                state=state,
+                history_settings=history_settings,
+                available_history_budget=request.history_budget_tokens,
+                summary_input_budget=request.summary_input_budget_tokens,
+                summary_model=summary_model,
+                summary_model_name=request.summary_model,
+                active_context_window=request.active_context_window,
+                replay_window_tokens=request.replay_window_tokens,
+                threshold_tokens=request.threshold_tokens,
+                reserve_tokens=request.reserve_tokens,
+                notify=request.notify,
+            )
+        except Exception:
+            duration_ms = _elapsed_ms(compaction_start)
+            if compaction_lifecycle is not None:
+                await compaction_lifecycle.complete_failure(
+                    CompactionLifecycleFailure(
+                        notice_event_id=notice_event_id,
+                        mode="auto",
+                        session_id=request.session_id,
+                        scope=scope.key,
+                        summary_model=request.summary_model,
+                        status="failed",
+                        duration_ms=duration_ms,
+                        failure_reason="Opportunistic compaction failed.",
+                        history_budget_tokens=request.history_budget_tokens,
+                    ),
+                )
+            logger.exception(
+                "Opportunistic compaction failed",
+                session_id=request.session_id,
+                scope=scope.key,
+            )
+            return None
+        duration_ms = _elapsed_ms(compaction_start)
+        if outcome is None:
+            if compaction_lifecycle is not None:
+                await compaction_lifecycle.complete_failure(
+                    CompactionLifecycleFailure(
+                        notice_event_id=notice_event_id,
+                        mode="auto",
+                        session_id=request.session_id,
+                        scope=scope.key,
+                        summary_model=request.summary_model,
+                        status="failed",
+                        duration_ms=duration_ms,
+                        failure_reason="No compactable history remained.",
+                        history_budget_tokens=request.history_budget_tokens,
+                    ),
+                )
+            return None
+        outcome = replace(
+            outcome,
+            lifecycle_notice_event_id=notice_event_id,
+            duration_ms=duration_ms,
+            status="success",
+        )
+        if compaction_lifecycle is not None:
+            await compaction_lifecycle.complete_success(
+                CompactionLifecycleSuccess(
+                    notice_event_id=notice_event_id,
+                    outcome=outcome,
+                    duration_ms=duration_ms,
+                ),
+            )
+        return outcome
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
@@ -446,6 +673,7 @@ async def prepare_bound_scope_history(
     team_name: str | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
 ) -> PreparedScopeHistory:
     """Prepare one team-owned scope by compacting its persisted session before the run."""
     bound_scope = resolve_bound_team_scope_context(
@@ -497,8 +725,6 @@ async def prepare_bound_scope_history(
         active_model_name=active_model_name,
         active_context_window=active_context_window,
     )
-    available_history_budget = resolved_inputs.execution_plan.replay_budget_tokens
-
     return await prepare_scope_history(
         agent=bound_scope.owner_agent,
         agent_name=bound_scope.owner_agent_name,
@@ -513,9 +739,9 @@ async def prepare_bound_scope_history(
         active_model_name=resolved_inputs.active_model_name,
         active_context_window=resolved_inputs.active_context_window,
         static_prompt_tokens=static_prompt_tokens,
-        available_history_budget=available_history_budget,
         scope=bound_scope.scope,
         execution_plan=resolved_inputs.execution_plan,
+        compaction_lifecycle=compaction_lifecycle,
     )
 
 
@@ -922,6 +1148,23 @@ def _resolve_entity_preparation_inputs(
         active_context_window=runtime_model.context_window,
         static_prompt_tokens=static_prompt_tokens,
         execution_plan=resolved_execution_plan,
+    )
+
+
+def _history_settings_for_opportunistic_request(
+    *,
+    request: OpportunisticCompactionRequest,
+    config: Config,
+) -> ResolvedHistorySettings:
+    entity_name: str | None
+    if request.scope_kind == "team":
+        entity_name = request.scope_id if request.scope_id in config.teams else None
+    else:
+        entity_name = request.agent_name if request.agent_name in config.agents else None
+    return (
+        config.get_entity_history_settings(entity_name)
+        if entity_name is not None
+        else config.get_default_history_settings()
     )
 
 
