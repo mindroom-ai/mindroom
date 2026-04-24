@@ -726,6 +726,20 @@ class MultiAgentOrchestrator:
         )
         self._rebind_runtime_support_services()
 
+    def _configure_approval_store_transport(self) -> None:
+        """Bind approval transport hooks to the current shared runtime services."""
+        initialize_approval_store(
+            self.runtime_paths,
+            sender=self._send_approval_event,
+            editor=self._edit_approval_event,
+            event_cache=self._runtime_support.event_cache,
+            event_fetcher=self._fetch_approval_event,
+            room_event_scanner=self._scan_approval_room_events,
+            approval_room_ids=self._configured_approval_room_ids,
+            transport_sender=self._approval_transport_sender_id,
+            runtime_loop=self._runtime_loop,
+        )
+
     async def _close_runtime_support_services(self) -> None:
         """Close the shared runtime-owned cache services."""
         await close_owned_runtime_support(self._runtime_support, logger=logger)
@@ -1025,6 +1039,7 @@ class MultiAgentOrchestrator:
         )
         ensure_default_agent_workspaces(config, self.storage_path)
         await self._sync_event_cache_service(config)
+        self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
 
     async def _stop_mcp_manager(self) -> None:
@@ -1277,17 +1292,6 @@ class MultiAgentOrchestrator:
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
-        initialize_approval_store(
-            self.runtime_paths,
-            sender=self._send_approval_event,
-            editor=self._edit_approval_event,
-            event_cache=self._runtime_support.event_cache,
-            event_fetcher=self._fetch_approval_event,
-            room_event_scanner=self._scan_approval_room_events,
-            approval_room_ids=self._configured_approval_room_ids,
-            transport_sender=self._approval_transport_sender_id,
-            runtime_loop=self._runtime_loop,
-        )
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
         await self._prepare_user_account(config, update_runtime_state=True)
@@ -1295,6 +1299,7 @@ class MultiAgentOrchestrator:
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
         await self._sync_event_cache_service(config)
+        self._configure_approval_store_transport()
         for entity_name in self._configured_entity_names(config):
             self._create_managed_bot(entity_name, config)
 
@@ -1716,6 +1721,7 @@ class MultiAgentOrchestrator:
             clear_worker_validation_snapshot_cache()
         changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
         await self._sync_event_cache_service(new_config)
+        self._configure_approval_store_transport()
         logger.info(
             "updating_config_authorization",
             authorized_user_ids=new_config.authorization.global_users,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -118,6 +119,14 @@ __all__ = ["AgentBot"]
 # Constants
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
+
+
+@dataclass(frozen=True, slots=True)
+class _ApprovalResponsePayload:
+    card_event_id: str | None
+    approval_id: str | None
+    status: Literal["approved", "denied"] | None
+    reason: str | None
 
 
 def _reply_to_event_id_from_event_source(event_source: dict[str, Any] | None) -> str | None:
@@ -1412,37 +1421,48 @@ class AgentBot:
         """Handle custom Matrix events that are not part of nio's typed event set."""
         if event.type != "io.mindroom.tool_approval_response":
             return
-        approval_event_id, status, reason = self._approval_response_payload(event)
-        if approval_event_id is None or status is None:
+        payload = self._approval_response_payload(event)
+        if payload.status is None or (payload.card_event_id is None and payload.approval_id is None):
             return
         await self._handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
-            approval_event_id=approval_event_id,
-            status=status,
-            reason=reason,
+            approval_event_id=payload.card_event_id,
+            approval_id=payload.approval_id,
+            status=payload.status,
+            reason=payload.reason,
         )
 
     @staticmethod
-    def _approval_response_payload(
-        event: nio.UnknownEvent,
-    ) -> tuple[str | None, Literal["approved", "denied"] | None, str | None]:
-        """Parse one custom approval response event anchored to the approval card."""
+    def _approval_response_payload(event: nio.UnknownEvent) -> _ApprovalResponsePayload:
+        """Parse one custom approval response event into the manager command shape."""
         content = event.source.get("content", {})
         if not isinstance(content, dict):
-            return None, None, None
+            return _ApprovalResponsePayload(card_event_id=None, approval_id=None, status=None, reason=None)
 
-        approval_event_id = _reply_to_event_id_from_event_source(event.source)
-        if approval_event_id is None:
-            return None, None, None
+        card_event_id = _reply_to_event_id_from_event_source(event.source)
+        raw_approval_id = content.get("approval_id")
+        approval_id = raw_approval_id if isinstance(raw_approval_id, str) and raw_approval_id else None
 
         raw_status = content.get("status")
+        status: Literal["approved", "denied"] | None = None
         if raw_status not in {"approved", "denied"}:
-            return approval_event_id, None, None
+            raw_approved = content.get("approved")
+            if isinstance(raw_approved, bool):
+                status = "approved" if raw_approved else "denied"
+        else:
+            status = raw_status
 
         raw_reason = content.get("reason")
+        if not isinstance(raw_reason, str) or not raw_reason.strip():
+            raw_reason = content.get("denial_reason")
         reason = raw_reason.strip() if isinstance(raw_reason, str) and raw_reason.strip() else None
-        return approval_event_id, raw_status, reason
+        return _ApprovalResponsePayload(
+            card_event_id=card_event_id,
+            approval_id=approval_id,
+            status=status,
+            reason=reason,
+        )
 
     async def _maybe_handle_tool_approval_reply(
         self,
@@ -1560,11 +1580,14 @@ class AgentBot:
         *,
         room: nio.MatrixRoom,
         sender_id: str,
-        approval_event_id: str,
+        approval_event_id: str | None,
         status: Literal["approved", "denied"],
         reason: str | None,
+        approval_id: str | None = None,
     ) -> bool:
         """Resolve one approval action only when the sender still has access."""
+        if approval_event_id is None and approval_id is None:
+            return False
         approval_manager = get_approval_store()
         if approval_manager is None:
             return False
@@ -1575,10 +1598,15 @@ class AgentBot:
             room_id=room.room_id,
             sender_id=sender_id,
             card_event_id=approval_event_id,
+            approval_id=approval_id,
             status=status,
             reason=reason.strip() if isinstance(reason, str) and reason.strip() else None,
         )
-        if result.error_reason is not None and self._should_send_tool_approval_notice(room_id=room.room_id):
+        if (
+            approval_event_id is not None
+            and result.error_reason is not None
+            and self._should_send_tool_approval_notice(room_id=room.room_id)
+        ):
             orchestrator = self.orchestrator
             if orchestrator is not None:
                 await orchestrator._send_approval_notice(
@@ -1587,7 +1615,7 @@ class AgentBot:
                     thread_id=result.thread_id,
                     reason=result.error_reason,
                 )
-        return result.handled
+        return result.consumed
 
     def _should_send_tool_approval_notice(
         self,

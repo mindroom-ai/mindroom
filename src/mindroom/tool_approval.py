@@ -13,6 +13,7 @@ from mindroom.approval_manager import (
     _DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     _DEFAULT_SHUTDOWN_REASON,
     AnchoredApprovalActionResult,
+    ApprovalActionResult,
     ApprovalDecision,
     ApprovalManager,
     PendingApproval,
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
 __all__ = [
     "_DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "AnchoredApprovalActionResult",
+    "ApprovalActionResult",
     "ApprovalDecision",
     "ApprovalManager",
     "PendingApproval",

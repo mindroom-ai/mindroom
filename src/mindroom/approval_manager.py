@@ -155,12 +155,16 @@ class SentApprovalEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class AnchoredApprovalActionResult:
-    """One anchored approval-action outcome."""
+class ApprovalActionResult:
+    """One approval-action outcome parsed from a Matrix control event."""
 
-    handled: bool
+    consumed: bool
+    resolved: bool
     error_reason: str | None = None
     thread_id: str | None = None
+
+
+AnchoredApprovalActionResult = ApprovalActionResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,7 +337,13 @@ class ApprovalManager:
         )
 
         try:
-            sent_event = await self._send_event(room_id, thread_id, content)
+            waiter = await self._send_and_bind_waiter(
+                room_id=room_id,
+                thread_id=thread_id,
+                content=content,
+                requested_at=requested_at,
+                approval_id=approval_id,
+            )
         except ToolApprovalTransportError as exc:
             logger.info("Approval Matrix transport unavailable", room_id=room_id, reason=exc.reason)
             return self._new_decision(status="expired", reason=exc.reason, resolved_by=None)
@@ -343,40 +353,17 @@ class ApprovalManager:
             logger.warning("Failed to send approval Matrix event", room_id=room_id, exc_info=True)
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
 
-        if sent_event is None:
+        if waiter is None:
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
-
-        card_event = self._card_event_from_content(
-            event_id=sent_event.event_id,
-            room_id=room_id,
-            content=content,
-            requested_at=requested_at,
-        )
-        waiter = _LiveApprovalWaiter(
-            approval_id=approval_id,
-            card_event_id=sent_event.event_id,
-            room_id=room_id,
-            card_event=card_event,
-            future=Future(),
-        )
-        with self._live_lock:
-            self._pending_by_card_event[sent_event.event_id] = waiter
 
         try:
             return await self._await_waiter(waiter, expires_at=expires_at)
         except asyncio.CancelledError:
-            pending = PendingApproval.from_card_event(card_event, room_id=room_id)
-            decision = self._new_decision(status="expired", reason=_DEFAULT_CANCELLED_REASON, resolved_by=None)
-            if not await self._complete_with_terminal_resolution(
-                pending,
-                decision=decision,
-            ):
-                with suppress(Exception):
-                    await self._wait_for_competing_terminal_decision(waiter)
+            await self._settle_bound_waiter_as_cancelled(waiter)
             raise
         finally:
             with self._live_lock:
-                self._pending_by_card_event.pop(sent_event.event_id, None)
+                self._pending_by_card_event.pop(waiter.card_event_id, None)
 
     async def resolve_approval(
         self,
@@ -386,15 +373,25 @@ class ApprovalManager:
         status: ResolutionStatus,
         reason: str | None = None,
         resolved_by: str | None = None,
-    ) -> AnchoredApprovalActionResult:
+    ) -> ApprovalActionResult:
         """Emit a terminal edit for one approval card and then release any live waiter."""
-        return await self._resolve_card(
-            card_event_id=card_event_id,
-            room_id=room_id,
-            status=status,
-            reason=reason,
-            resolved_by=resolved_by,
-        )
+        pending = await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+        if pending is None:
+            return ApprovalActionResult(consumed=False, resolved=False)
+        if self._live_waiter_for_card(card_event_id) is not None:
+            return await self._resolve_live_response(
+                pending=pending,
+                status=status,
+                reason=reason,
+                resolved_by=resolved_by,
+            )
+        if status == "denied":
+            return await self._deny_matrix_only_card(
+                pending=pending,
+                reason=reason or _STARTUP_AUTO_DENY_REASON,
+                resolved_by=resolved_by,
+            )
+        return ApprovalActionResult(consumed=False, resolved=False, thread_id=pending.thread_id)
 
     async def get_pending_approval(
         self,
@@ -415,11 +412,15 @@ class ApprovalManager:
                 cached_pending = pending
                 break
 
-        history_events = await self._scan_room_messages_for_approval_events(
-            room_id,
-            since_ts_ms=_lookback_cutoff_ms(24),
-            limit=500,
-        )
+        try:
+            history_events = await self._scan_room_messages_for_approval_events(
+                room_id,
+                since_ts_ms=_lookback_cutoff_ms(24),
+                limit=500,
+            )
+        except Exception as exc:
+            logger.warning("approval.history_scan_failed", room_id=room_id, error=str(exc))
+            return cached_pending
         history_latest_edits = _latest_replacement_edits_by_card_event_id(history_events)
         history_matched = False
         for event in history_events:
@@ -452,31 +453,37 @@ class ApprovalManager:
         denied = 0
         for room_id in self._configured_approval_room_ids():
             cached_candidates = await self._scan_cached_room_cards(room_id, since_ts_ms=cutoff_ts_ms, limit=500)
-            history_candidates = await self._scan_room_messages_for_cards(room_id, since_ts_ms=cutoff_ts_ms, limit=500)
+            history_scan_failed = False
+            try:
+                history_candidates = await self._scan_room_messages_for_cards(
+                    room_id,
+                    since_ts_ms=cutoff_ts_ms,
+                    limit=500,
+                )
+            except Exception as exc:
+                logger.warning("approval.startup_scan_failed", room_id=room_id, error=str(exc))
+                history_scan_failed = True
+                history_candidates = []
             candidates_by_event_id: dict[str, dict[str, Any]] = {}
             for card_event in [*cached_candidates, *history_candidates]:
                 event_id = card_event.get("event_id")
                 if isinstance(event_id, str) and event_id:
                     candidates_by_event_id.setdefault(event_id, card_event)
             for card_event in candidates_by_event_id.values():
-                try:
-                    pending = PendingApproval.from_card_event(card_event, room_id=room_id)
-                except (TypeError, ValueError):
-                    continue
-                if pending.card_sender_id != transport_sender:
-                    continue
-                still_pending = await self.get_pending_approval(room_id, pending.approval_id)
+                still_pending = await self._startup_pending_candidate(
+                    card_event,
+                    room_id=room_id,
+                    transport_sender=transport_sender,
+                    history_scan_failed=history_scan_failed,
+                )
                 if still_pending is None:
                     continue
-                result = await self._resolve_card(
-                    card_event_id=still_pending.card_event_id,
-                    room_id=still_pending.room_id,
-                    status="denied",
+                result = await self._deny_matrix_only_card(
+                    pending=still_pending,
                     reason=_STARTUP_AUTO_DENY_REASON,
                     resolved_by=transport_sender,
-                    pending=still_pending,
                 )
-                if result.handled:
+                if result.resolved:
                     denied += 1
         return denied
 
@@ -485,21 +492,46 @@ class ApprovalManager:
         *,
         room_id: str,
         sender_id: str,
-        card_event_id: str,
         status: ResolutionStatus,
         reason: str | None,
-    ) -> AnchoredApprovalActionResult:
+        card_event_id: str | None = None,
+        approval_id: str | None = None,
+    ) -> ApprovalActionResult:
         """Resolve one typed approval response parsed by Matrix event dispatch."""
-        pending = await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
-        if pending is None or pending.approver_user_id != sender_id:
-            return AnchoredApprovalActionResult(handled=False)
-        return await self._resolve_card(
-            card_event_id=card_event_id,
+        live_card_event_id = card_event_id
+        if live_card_event_id is None and approval_id is not None:
+            live_card_event_id = self._live_card_event_id_for_approval(approval_id)
+
+        live_waiter = self._live_waiter_for_card(live_card_event_id) if live_card_event_id is not None else None
+        if live_waiter is not None:
+            pending = await self._pending_approval_for_card(
+                room_id=room_id,
+                card_event_id=live_waiter.card_event_id,
+            )
+            if pending is None:
+                return ApprovalActionResult(consumed=False, resolved=False)
+            if pending.approver_user_id != sender_id:
+                return ApprovalActionResult(consumed=True, resolved=False, thread_id=pending.thread_id)
+            return await self._resolve_live_response(
+                pending=pending,
+                status=status,
+                reason=reason,
+                resolved_by=sender_id,
+            )
+
+        pending = await self._matrix_pending_for_response(
             room_id=room_id,
-            status=status,
-            reason=reason,
-            resolved_by=sender_id,
+            card_event_id=card_event_id,
+            approval_id=approval_id,
+        )
+        if pending is None:
+            return ApprovalActionResult(consumed=False, resolved=False)
+        if pending.approver_user_id != sender_id:
+            return ApprovalActionResult(consumed=True, resolved=False, thread_id=pending.thread_id)
+        return await self._deny_matrix_only_card(
             pending=pending,
+            reason=_STARTUP_AUTO_DENY_REASON,
+            resolved_by=sender_id,
         )
 
     def _configure_transport(
@@ -528,6 +560,106 @@ class ApprovalManager:
         if transport_sender is not None:
             self._transport_sender = transport_sender
 
+    async def _send_and_bind_waiter(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        content: dict[str, Any],
+        requested_at: datetime,
+        approval_id: str,
+    ) -> _LiveApprovalWaiter | None:
+        if self._send_event is None:
+            return None
+
+        send_task = asyncio.ensure_future(self._send_event(room_id, thread_id, content))
+        try:
+            sent_event = await asyncio.shield(send_task)
+        except asyncio.CancelledError:
+            sent_event = await self._sent_event_after_send_cancellation(send_task)
+            if sent_event is not None:
+                waiter = self._bind_live_waiter(
+                    room_id=room_id,
+                    content=content,
+                    requested_at=requested_at,
+                    approval_id=approval_id,
+                    sent_event=sent_event,
+                )
+                try:
+                    await self._settle_bound_waiter_as_cancelled(waiter)
+                finally:
+                    with self._live_lock:
+                        self._pending_by_card_event.pop(waiter.card_event_id, None)
+            raise
+
+        if sent_event is None:
+            return None
+        return self._bind_live_waiter(
+            room_id=room_id,
+            content=content,
+            requested_at=requested_at,
+            approval_id=approval_id,
+            sent_event=sent_event,
+        )
+
+    async def _sent_event_after_send_cancellation(
+        self,
+        send_task: asyncio.Future[SentApprovalEvent | None],
+    ) -> SentApprovalEvent | None:
+        try:
+            return await asyncio.wait_for(asyncio.shield(send_task), timeout=1.0)
+        except TimeoutError:
+            logger.warning("Cancelled approval send did not return an event id before cleanup timeout")
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Cancelled approval send failed before returning an event id", exc_info=True)
+            return None
+
+    def _bind_live_waiter(
+        self,
+        *,
+        room_id: str,
+        content: dict[str, Any],
+        requested_at: datetime,
+        approval_id: str,
+        sent_event: SentApprovalEvent,
+    ) -> _LiveApprovalWaiter:
+        card_event = self._card_event_from_content(
+            event_id=sent_event.event_id,
+            room_id=room_id,
+            content=content,
+            requested_at=requested_at,
+        )
+        waiter = _LiveApprovalWaiter(
+            approval_id=approval_id,
+            card_event_id=sent_event.event_id,
+            room_id=room_id,
+            card_event=card_event,
+            future=Future(),
+        )
+        with self._live_lock:
+            self._pending_by_card_event[sent_event.event_id] = waiter
+        return waiter
+
+    async def _settle_bound_waiter_as_cancelled(self, waiter: _LiveApprovalWaiter) -> None:
+        decision = self._new_decision(status="expired", reason=_DEFAULT_CANCELLED_REASON, resolved_by=None)
+        claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
+        if claimed_waiter is None:
+            return
+        claim_released = False
+        try:
+            await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
+            with self._live_lock:
+                self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
+                self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+            claim_released = True
+        finally:
+            if not claim_released:
+                with self._live_lock:
+                    self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
+
     async def _await_waiter(
         self,
         waiter: _LiveApprovalWaiter,
@@ -544,27 +676,34 @@ class ApprovalManager:
             return await self._expire_waiter(waiter)
 
     async def _expire_waiter(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
-        pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
         decision = self._new_decision(status="expired", reason=_DEFAULT_TIMEOUT_REASON, resolved_by=None)
-        if await self._complete_with_terminal_resolution(pending, decision=decision):
+        claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
+        if claimed_waiter is None:
+            return await self._wait_for_competing_terminal_decision(waiter)
+        claim_released = False
+        try:
+            await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
+            with self._live_lock:
+                self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
+                self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+            claim_released = True
             return decision
-        return await self._wait_for_competing_terminal_decision(waiter)
+        finally:
+            if not claim_released:
+                with self._live_lock:
+                    self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
 
-    async def _resolve_card(
+    async def _resolve_live_response(
         self,
         *,
-        card_event_id: str,
-        room_id: str,
+        pending: PendingApproval,
         status: ResolutionStatus,
         reason: str | None,
         resolved_by: str | None,
-        pending: PendingApproval | None = None,
-    ) -> AnchoredApprovalActionResult:
-        pending = pending or await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
-        if pending is None:
-            return AnchoredApprovalActionResult(handled=False)
-        if not self._claim_resolution(card_event_id):
-            return AnchoredApprovalActionResult(handled=False, thread_id=pending.thread_id)
+    ) -> ApprovalActionResult:
+        waiter = self._claim_live_resolution(pending.card_event_id)
+        if waiter is None:
+            return ApprovalActionResult(consumed=False, resolved=False, thread_id=pending.thread_id)
         claim_released = False
         try:
             resolved_status, resolved_reason = self._normalized_resolution_request(
@@ -572,29 +711,15 @@ class ApprovalManager:
                 status=status,
                 reason=reason,
             )
-            delivered = await self._emit_resolution(
-                pending,
-                status=resolved_status,
-                reason=resolved_reason,
-                resolved_by=resolved_by,
-            )
-            if not delivered:
-                fail_closed_decision = self._new_decision(
-                    status="denied",
-                    reason=_DEFAULT_SEND_FAILURE_REASON,
-                    resolved_by=resolved_by,
-                )
-                self._complete_waiter(card_event_id, fail_closed_decision)
-                self._release_resolution_claim(card_event_id, resolved=True)
-                claim_released = True
-                return AnchoredApprovalActionResult(handled=True)
-
             decision = self._new_decision(status=resolved_status, reason=resolved_reason, resolved_by=resolved_by)
-            self._complete_waiter(card_event_id, decision)
-            self._release_resolution_claim(card_event_id, resolved=True)
+            await self._settle_waiter_with_terminal_edit(waiter, decision)
+            with self._live_lock:
+                self._resolving_card_event_ids.discard(pending.card_event_id)
+                self._resolved_card_event_ids.add(pending.card_event_id)
             claim_released = True
-            return AnchoredApprovalActionResult(
-                handled=True,
+            return ApprovalActionResult(
+                consumed=True,
+                resolved=True,
                 error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON
                 if resolved_reason == _DEFAULT_TRUNCATED_APPROVAL_REASON
                 else None,
@@ -602,7 +727,61 @@ class ApprovalManager:
             )
         finally:
             if not claim_released:
-                self._release_resolution_claim(card_event_id, resolved=False)
+                with self._live_lock:
+                    self._resolving_card_event_ids.discard(pending.card_event_id)
+
+    async def _deny_matrix_only_card(
+        self,
+        *,
+        pending: PendingApproval,
+        reason: str,
+        resolved_by: str | None,
+    ) -> ApprovalActionResult:
+        if not self._claim_matrix_cleanup(pending.card_event_id):
+            return ApprovalActionResult(consumed=True, resolved=False, thread_id=pending.thread_id)
+        claim_released = False
+        try:
+            delivered = await self._emit_resolution(
+                pending,
+                status="denied",
+                reason=reason,
+                resolved_by=resolved_by,
+            )
+            with self._live_lock:
+                self._resolving_card_event_ids.discard(pending.card_event_id)
+                if delivered:
+                    self._resolved_card_event_ids.add(pending.card_event_id)
+            claim_released = True
+            return ApprovalActionResult(consumed=True, resolved=delivered, thread_id=pending.thread_id)
+        finally:
+            if not claim_released:
+                with self._live_lock:
+                    self._resolving_card_event_ids.discard(pending.card_event_id)
+
+    async def _settle_waiter_with_terminal_edit(
+        self,
+        waiter: _LiveApprovalWaiter,
+        decision: ApprovalDecision,
+    ) -> bool:
+        pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
+        delivered = await self._emit_resolution(
+            pending,
+            status=decision.status,
+            reason=decision.reason,
+            resolved_by=decision.resolved_by,
+        )
+        if delivered:
+            self._complete_waiter(waiter.card_event_id, decision)
+            return True
+        fail_closed_decision = decision
+        if decision.status == "approved":
+            fail_closed_decision = self._new_decision(
+                status="denied",
+                reason=_DEFAULT_SEND_FAILURE_REASON,
+                resolved_by=decision.resolved_by,
+            )
+        self._complete_waiter(waiter.card_event_id, fail_closed_decision)
+        return False
 
     async def _emit_resolution(
         self,
@@ -709,11 +888,23 @@ class ApprovalManager:
         with self._live_lock:
             waiters = list(self._pending_by_card_event.values())
         for waiter in waiters:
-            pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
             decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
-            if not await self._complete_with_terminal_resolution(pending, decision=decision):
+            claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
+            if claimed_waiter is None:
                 with suppress(Exception):
                     await self._wait_for_competing_terminal_decision(waiter)
+                continue
+            claim_released = False
+            try:
+                await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
+                with self._live_lock:
+                    self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
+                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+                claim_released = True
+            finally:
+                if not claim_released:
+                    with self._live_lock:
+                        self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
 
     def _abort_pending(self, *, reason: str) -> None:
         with self._live_lock:
@@ -721,10 +912,11 @@ class ApprovalManager:
             self._pending_by_card_event.clear()
             self._resolving_card_event_ids.clear()
         for waiter in waiters:
-            self._complete_waiter(
-                waiter.card_event_id,
-                self._new_decision(status="expired", reason=reason, resolved_by=None),
-            )
+            self._complete_waiter_direct(waiter, self._new_decision(status="expired", reason=reason, resolved_by=None))
+
+    def _live_waiter_for_card(self, card_event_id: str) -> _LiveApprovalWaiter | None:
+        with self._live_lock:
+            return self._pending_by_card_event.get(card_event_id)
 
     def _live_card_event_id_for_approval(self, approval_id: str) -> str | None:
         with self._live_lock:
@@ -733,62 +925,85 @@ class ApprovalManager:
                     return card_event_id
         return None
 
+    def _claim_live_resolution(self, card_event_id: str) -> _LiveApprovalWaiter | None:
+        with self._live_lock:
+            waiter = self._pending_by_card_event.get(card_event_id)
+            if (
+                waiter is None
+                or waiter.future.done()
+                or card_event_id in self._resolving_card_event_ids
+                or card_event_id in self._resolved_card_event_ids
+            ):
+                return None
+            self._resolving_card_event_ids.add(card_event_id)
+            return waiter
+
+    def _claim_matrix_cleanup(self, card_event_id: str) -> bool:
+        with self._live_lock:
+            if (
+                card_event_id in self._pending_by_card_event
+                or card_event_id in self._resolving_card_event_ids
+                or card_event_id in self._resolved_card_event_ids
+            ):
+                return False
+            self._resolving_card_event_ids.add(card_event_id)
+            return True
+
     def _complete_waiter(self, card_event_id: str, decision: ApprovalDecision) -> None:
         with self._live_lock:
             waiter = self._pending_by_card_event.get(card_event_id)
-        if waiter is None or waiter.future.done():
+        if waiter is None:
+            return
+        self._complete_waiter_direct(waiter, decision)
+
+    @staticmethod
+    def _complete_waiter_direct(waiter: _LiveApprovalWaiter, decision: ApprovalDecision) -> None:
+        if waiter.future.done():
             return
         try:
             waiter.future.set_result(decision)
         except InvalidStateError:
             return
 
-    async def _complete_with_terminal_resolution(
+    async def _matrix_pending_for_response(
         self,
-        pending: PendingApproval,
         *,
-        decision: ApprovalDecision,
-    ) -> bool:
-        if not self._claim_resolution(pending.card_event_id):
-            return False
-        claim_released = False
+        room_id: str,
+        card_event_id: str | None,
+        approval_id: str | None,
+    ) -> PendingApproval | None:
+        if card_event_id is not None:
+            return await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+        if approval_id is not None:
+            return await self.get_pending_approval(room_id, approval_id)
+        return None
+
+    async def _startup_pending_candidate(
+        self,
+        event: dict[str, Any],
+        *,
+        room_id: str,
+        transport_sender: str,
+        history_scan_failed: bool,
+    ) -> PendingApproval | None:
         try:
-            await self._emit_resolution(
-                pending,
-                status=decision.status,
-                reason=decision.reason,
-                resolved_by=decision.resolved_by,
+            pending = PendingApproval.from_card_event(event, room_id=room_id)
+        except (TypeError, ValueError):
+            return None
+        if pending.card_sender_id != transport_sender:
+            return None
+        if history_scan_failed:
+            return await self._pending_from_event_if_matching(
+                event,
+                room_id=room_id,
+                approval_id=pending.approval_id,
             )
-            self._complete_waiter(pending.card_event_id, decision)
-            self._release_resolution_claim(pending.card_event_id, resolved=True)
-            claim_released = True
-            return True
-        finally:
-            if not claim_released:
-                self._release_resolution_claim(pending.card_event_id, resolved=False)
+        return await self.get_pending_approval(room_id, pending.approval_id)
 
     async def _wait_for_competing_terminal_decision(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
         if waiter.future.done():
             return waiter.future.result()
         return await asyncio.shield(asyncio.wrap_future(waiter.future))
-
-    def _claim_resolution(self, card_event_id: str) -> bool:
-        with self._live_lock:
-            waiter = self._pending_by_card_event.get(card_event_id)
-            if (
-                card_event_id in self._resolving_card_event_ids
-                or card_event_id in self._resolved_card_event_ids
-                or (waiter is not None and waiter.future.done())
-            ):
-                return False
-            self._resolving_card_event_ids.add(card_event_id)
-            return True
-
-    def _release_resolution_claim(self, card_event_id: str, *, resolved: bool) -> None:
-        with self._live_lock:
-            self._resolving_card_event_ids.discard(card_event_id)
-            if resolved:
-                self._resolved_card_event_ids.add(card_event_id)
 
     async def _pending_from_event_if_matching(
         self,
@@ -1053,11 +1268,9 @@ def initialize_approval_store(
     approval_room_ids: ApprovalRoomProvider | None = None,
     transport_sender: TransportSenderProvider | None = None,
     runtime_loop: asyncio.AbstractEventLoop | None = None,
-    recoverer: object | None = None,
-    on_room_drained: object | None = None,
 ) -> ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
-    del runtime_loop, recoverer, on_room_drained
+    del runtime_loop
     global _MANAGER
 
     if _MANAGER is not None and _MANAGER._runtime_storage_root == runtime_paths.storage_root:
