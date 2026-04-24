@@ -12342,6 +12342,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
 
         event_order: list[str] = []
+        approval_ids: list[str] = []
 
         async def _router_room_send(
             *,
@@ -12355,6 +12356,9 @@ class TestMultiAgentOrchestrator:
                 event_order.append("edit")
                 return nio.RoomSendResponse(event_id="$approval-edit", room_id=room_id)
             event_order.append("send")
+            approval_id = content.get("approval_id")
+            assert isinstance(approval_id, str)
+            approval_ids.append(approval_id)
             return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 
         router_bot = _mock_approval_reload_bot(
@@ -12394,8 +12398,7 @@ class TestMultiAgentOrchestrator:
 
         async with asyncio.timeout(1):
             while True:
-                pending = store.list_pending()
-                if pending and pending[0].event_id is not None:
+                if approval_ids and await store.get_pending_approval("!room:localhost", approval_ids[0]) is not None:
                     break
                 await asyncio.sleep(0)
 
@@ -12417,10 +12420,15 @@ class TestMultiAgentOrchestrator:
             assert updated is True
             assert task.done() is False
             assert event_order == ["send", "cleanup"]
-            pending = store.list_pending()
-            assert len(pending) == 1
+            pending = await store.get_pending_approval("!room:localhost", approval_ids[0])
+            assert pending is not None
 
-            await store.approve(pending[0].id, resolved_by="@user:localhost")
+            await store.resolve_approval(
+                card_event_id=pending.card_event_id,
+                room_id=pending.room_id,
+                status="approved",
+                resolved_by="@user:localhost",
+            )
             decision = await task
 
             assert decision.status == "approved"
@@ -12431,7 +12439,10 @@ class TestMultiAgentOrchestrator:
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
-    async def test_requesting_bot_room_reconcile_keeps_router_owned_approval_pending(self, tmp_path: Path) -> None:
+    async def test_requesting_bot_room_reconcile_keeps_router_owned_approval_pending(  # noqa: PLR0915
+        self,
+        tmp_path: Path,
+    ) -> None:
         """Leaving the requesting bot's room should not force-expire a router-owned approval."""
         runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
@@ -12467,6 +12478,7 @@ class TestMultiAgentOrchestrator:
         )
 
         event_order: list[str] = []
+        approval_ids: list[str] = []
 
         async def _router_room_send(
             *,
@@ -12480,6 +12492,9 @@ class TestMultiAgentOrchestrator:
                 event_order.append("edit")
                 return nio.RoomSendResponse(event_id="$approval-edit", room_id=room_id)
             event_order.append("send")
+            approval_id = content.get("approval_id")
+            assert isinstance(approval_id, str)
+            approval_ids.append(approval_id)
             return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 
         router_bot = _mock_approval_reload_bot(
@@ -12535,8 +12550,7 @@ class TestMultiAgentOrchestrator:
 
         async with asyncio.timeout(1):
             while True:
-                pending = store.list_pending()
-                if pending and pending[0].event_id is not None:
+                if approval_ids and await store.get_pending_approval("!room:localhost", approval_ids[0]) is not None:
                     break
                 await asyncio.sleep(0)
 
@@ -12552,12 +12566,17 @@ class TestMultiAgentOrchestrator:
                 await code_bot.leave_unconfigured_rooms()
 
             assert task.done() is False
-            pending = store.list_pending()
-            assert len(pending) == 1
+            pending = await store.get_pending_approval("!room:localhost", approval_ids[0])
+            assert pending is not None
             assert event_order == ["send", "leave"]
             leave_non_dm_rooms.assert_awaited_once()
 
-            await store.approve(pending[0].id, resolved_by="@user:localhost")
+            await store.resolve_approval(
+                card_event_id=pending.card_event_id,
+                room_id=pending.room_id,
+                status="approved",
+                resolved_by="@user:localhost",
+            )
             decision = await task
 
             assert decision.status == "approved"

@@ -127,12 +127,19 @@ def _approval_card(
     }
 
 
-async def _wait_for_pending(store: ApprovalManager) -> PendingApproval:
+async def _wait_for_pending(
+    store: ApprovalManager,
+    sender: AsyncMock,
+    *,
+    room_id: str = "!room:localhost",
+) -> PendingApproval:
     async with asyncio.timeout(1):
         while True:
-            pending = store.list_pending()
-            if pending:
-                return pending[0]
+            if sender.await_args is not None:
+                approval_id = sender.await_args.args[2]["approval_id"]
+                pending = await store.get_pending_approval(room_id, approval_id)
+                if pending is not None:
+                    return pending
             await asyncio.sleep(0)
 
 
@@ -160,7 +167,7 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store)
+    pending = await _wait_for_pending(store, sender)
 
     assert sender.await_args.args[2]["approver_user_id"] == "@user:localhost"
     handled = await store.handle_response_event(
@@ -195,7 +202,7 @@ async def test_handle_response_event_wrong_clicker_noops(tmp_path: Path) -> None
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store)
+    pending = await _wait_for_pending(store, sender)
 
     handled = await store.handle_response_event(
         room_id="!room:localhost",
@@ -235,7 +242,7 @@ async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) 
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store)
+    pending = await _wait_for_pending(store, sender)
 
     await store.resolve_approval(
         card_event_id=pending.card_event_id,
@@ -266,7 +273,7 @@ async def test_request_approval_cleans_up_on_cancellation_after_send(tmp_path: P
             timeout_seconds=30,
         ),
     )
-    await _wait_for_pending(store)
+    pending = await _wait_for_pending(store, sender)
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -274,7 +281,7 @@ async def test_request_approval_cleans_up_on_cancellation_after_send(tmp_path: P
 
     assert editor.await_args.args[2]["status"] == "expired"
     assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request was cancelled."
-    assert store.list_pending() == []
+    assert await store.get_pending_approval("!room:localhost", pending.approval_id) is None
 
 
 @pytest.mark.asyncio
