@@ -35,10 +35,9 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
-    DeliveryResult,
     FinalizeStreamedResponseRequest,
 )
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
@@ -2153,10 +2152,16 @@ class TestStreamingBehavior:
             )
             yield "stream chunk"
 
-        async def fake_send_streaming_response(*args: object, **_kwargs: object) -> tuple[str, str]:
+        async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
             response_stream = args[7]
             chunks = [str(chunk) async for chunk in response_stream]
-            return "$response", "".join(chunks)
+            body = "".join(chunks)
+            return StreamTransportOutcome(
+                last_physical_stream_event_id="$response",
+                terminal_status="completed",
+                rendered_body=body,
+                visible_body_state="visible_body",
+            )
 
         try:
             with (
@@ -2216,9 +2221,11 @@ class TestStreamingBehavior:
             patch(
                 "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
                         event_id="$response",
-                        response_text="handled",
+                        final_visible_body="handled",
+                        is_visible_response=True,
                         delivery_kind="sent",
                     ),
                 ),
@@ -2885,7 +2892,7 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
-        )
+            )
 
         assert outcome.last_physical_stream_event_id == "$event123"
         assert outcome.terminal_status == "completed"
