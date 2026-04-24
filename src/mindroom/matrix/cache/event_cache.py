@@ -364,6 +364,10 @@ EventCacheRuntime = _EventCacheRuntime
 class ConversationEventCache(Protocol):
     """Storage-agnostic cache API for Matrix event and thread lookups."""
 
+    @property
+    def durable_writes_available(self) -> bool:
+        """Return whether cache writes can durably persist data."""
+
     async def initialize(self) -> None:
         """Initialize any backing storage."""
 
@@ -482,6 +486,11 @@ class _EventCache:
     def is_initialized(self) -> bool:
         """Return whether the SQLite connection is currently open."""
         return self._runtime.is_initialized
+
+    @property
+    def durable_writes_available(self) -> bool:
+        """Return whether cache writes can durably persist data."""
+        return self._runtime.is_initialized and not self._runtime.is_disabled
 
     async def initialize(self) -> None:
         """Open the SQLite database and create the cache schema."""

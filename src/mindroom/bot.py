@@ -175,7 +175,11 @@ def _classify_joined_timeline_cache_trust(response: nio.SyncResponse) -> _Joined
             try:
                 timeline = room_info.timeline
                 limited = timeline.limited if timeline is not None else None
+                events = timeline.events if timeline is not None else None
             except AttributeError:
+                valid = False
+                break
+            if not isinstance(events, list):
                 valid = False
                 break
             if not isinstance(limited, bool):
@@ -1049,13 +1053,25 @@ class AgentBot:
     def _restored_first_sync_catchup_safe(
         joined_timeline_classification: _JoinedTimelineTrustClassification,
         sync_cache_errors: list[BaseException],
+        *,
+        durable_cache_available: bool,
     ) -> bool:
         """Return whether restored-token catch-up can trust pre-runtime cache."""
         return (
-            not sync_cache_errors
+            durable_cache_available
+            and not sync_cache_errors
             and joined_timeline_classification.valid
             and joined_timeline_classification.joined_room_count > 0
             and not joined_timeline_classification.limited_room_ids
+        )
+
+    def _durable_event_cache_catchup_available(self) -> bool:
+        """Return whether restored-token catch-up can durably write sync events."""
+        runtime = self._runtime_view
+        return (
+            runtime.event_cache is not None
+            and runtime.event_cache_write_coordinator is not None
+            and runtime.event_cache.durable_writes_available
         )
 
     def _mark_restored_first_sync_unsafe(
@@ -1063,13 +1079,19 @@ class AgentBot:
         *,
         joined_timeline_classification: _JoinedTimelineTrustClassification,
         sync_cache_errors: list[BaseException],
+        durable_cache_available: bool,
     ) -> None:
         """Clear restored-token trust and log why first-sync catch-up was unsafe."""
         limited_room_ids = joined_timeline_classification.limited_room_ids
         self._runtime_view.mark_restored_sync_token_invalid()
         self._runtime_view.suppress_sync_token_persistence()
         self._clear_sync_token_state()
-        if sync_cache_errors:
+        if not durable_cache_available:
+            self.logger.warning(
+                "matrix_sync_cache_catchup_unavailable",
+                reason="durable_event_cache_unavailable",
+            )
+        elif sync_cache_errors:
             self.logger.warning(
                 "matrix_sync_cache_catchup_untrusted",
                 reason="cache_task_failed",
@@ -1098,13 +1120,19 @@ class AgentBot:
             return not sync_cache_errors
 
         joined_timeline_classification = _classify_joined_timeline_cache_trust(response)
-        if self._restored_first_sync_catchup_safe(joined_timeline_classification, sync_cache_errors):
+        durable_cache_available = self._durable_event_cache_catchup_available()
+        if self._restored_first_sync_catchup_safe(
+            joined_timeline_classification,
+            sync_cache_errors,
+            durable_cache_available=durable_cache_available,
+        ):
             self._runtime_view.mark_sync_catchup_applied()
             return True
 
         self._mark_restored_first_sync_unsafe(
             joined_timeline_classification=joined_timeline_classification,
             sync_cache_errors=sync_cache_errors,
+            durable_cache_available=durable_cache_available,
         )
         return False
 

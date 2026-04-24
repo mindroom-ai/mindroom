@@ -204,6 +204,7 @@ def delivered_matrix_side_effect(event_id: str) -> Callable[..., Awaitable[Deliv
 def make_event_cache_mock() -> AsyncMock:
     """Return an async mock shaped like the event cache protocol."""
     event_cache = AsyncMock(spec=_EventCache)
+    event_cache.durable_writes_available = True
     event_cache.get_event.return_value = None
     event_cache.get_latest_edit.return_value = None
     event_cache.get_mxc_text.return_value = None

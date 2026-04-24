@@ -1859,6 +1859,50 @@ class TestThreadingBehavior:
         assert load_sync_token(bot.storage_path, bot.agent_name) is None
 
     @pytest.mark.asyncio
+    async def test_restored_first_sync_disabled_event_cache_fails_closed(
+        self,
+        bot: AgentBot,
+        tmp_path: Path,
+    ) -> None:
+        """Restored-token catch-up must fail closed when durable cache writes are disabled."""
+        event_cache = _EventCache(tmp_path / "disabled-event-cache.db")
+        await event_cache.initialize()
+        event_cache.disable("test_disabled")
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_disabled_cache"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_disabled_cache")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(
+                        events=[
+                            _text_event(
+                                event_id="$thread_msg:localhost",
+                                body="Thread reply",
+                                sender="@user:localhost",
+                                server_timestamp=1234567890,
+                                thread_id="$thread_root:localhost",
+                            ),
+                        ],
+                        limited=False,
+                    ),
+                ),
+            },
+        )
+
+        try:
+            await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+        finally:
+            await event_cache.close()
+
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
     async def test_unsafe_restored_first_sync_suppresses_later_saved_token_for_restart(
         self,
         bot: AgentBot,
@@ -1971,6 +2015,28 @@ class TestThreadingBehavior:
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=None)),
+            },
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert bot._first_sync_done is True
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_timeline_events_first_sync_does_not_trust_cache(self, bot: AgentBot) -> None:
+        """Malformed restored-token timeline events must not certify cache catch-up."""
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_malformed_events"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_malformed_events")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(events={"event_id": "$not-a-list:localhost"}, limited=False),
+                ),
             },
         )
 
