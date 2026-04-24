@@ -1516,6 +1516,96 @@ async def test_initialize_shared_knowledge_managers_maintains_registry(
 
 
 @pytest.mark.asyncio
+async def test_ensure_shared_knowledge_manager_skips_publish_when_guard_is_stale(tmp_path: Path) -> None:
+    """A stale refresh candidate must not replace the published shared manager."""
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(tmp_path / "docs"), watch=False)},
+        ),
+        _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    manager = MagicMock(spec=KnowledgeManager)
+    manager.stop_watcher = AsyncMock()
+    publish_allowed = True
+
+    async def create_stale_candidate(*_: object, **__: object) -> KnowledgeManager:
+        nonlocal publish_allowed
+        publish_allowed = False
+        return manager
+
+    try:
+        with patch(
+            "mindroom.knowledge.shared_managers._create_knowledge_manager_for_target",
+            new=AsyncMock(side_effect=create_stale_candidate),
+        ):
+            result = await ensure_shared_knowledge_manager(
+                "docs",
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                publish_guard=lambda: publish_allowed,
+            )
+
+        assert result is None
+        assert _get_shared_knowledge_manager("docs") is None
+        manager.stop_watcher.assert_awaited_once()
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_ensure_shared_knowledge_manager_restores_existing_runtime_when_stale(tmp_path: Path) -> None:
+    """A stale replacement refresh must not leave the published manager stopped."""
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(tmp_path / "docs"), watch=True)},
+        ),
+        _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    existing = MagicMock(spec=KnowledgeManager)
+    watch_task = asyncio.create_task(asyncio.sleep(60))
+    existing._watch_task = watch_task
+    existing._git_sync_task = None
+    existing._load_persisted_indexing_state.return_value = None
+    existing.needs_full_reindex.return_value = True
+    existing.stop_watcher = AsyncMock(side_effect=lambda: setattr(existing, "_watch_task", None))
+    existing.start_watcher = AsyncMock()
+    candidate = MagicMock(spec=KnowledgeManager)
+    candidate.stop_watcher = AsyncMock()
+    publish_allowed = True
+    _shared_knowledge_managers["docs"] = existing
+
+    async def create_stale_candidate(*_: object, **__: object) -> KnowledgeManager:
+        nonlocal publish_allowed
+        publish_allowed = False
+        return candidate
+
+    try:
+        with patch(
+            "mindroom.knowledge.shared_managers._create_knowledge_manager_for_target",
+            new=AsyncMock(side_effect=create_stale_candidate),
+        ):
+            result = await ensure_shared_knowledge_manager(
+                "docs",
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                publish_guard=lambda: publish_allowed,
+            )
+
+        assert result is None
+        assert _get_shared_knowledge_manager("docs") is existing
+        existing.stop_watcher.assert_awaited_once()
+        existing.start_watcher.assert_awaited_once()
+        candidate.stop_watcher.assert_awaited_once()
+    finally:
+        watch_task.cancel()
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_initialize_shared_knowledge_managers_full_reindex_on_settings_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

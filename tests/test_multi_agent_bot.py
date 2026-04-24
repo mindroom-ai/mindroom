@@ -3169,8 +3169,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(event.event_id)
-            .with_response_event_id("$cancelled"),
+            HandledTurnState.from_source_event_id(event.event_id).with_response_event_id("$cancelled"),
         )
 
     @pytest.mark.asyncio
@@ -10568,6 +10567,7 @@ class TestMultiAgentOrchestrator:
         """Background knowledge refresh should keep retrying until it succeeds."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         config = MagicMock()
+        orchestrator.config = config
         attempts = 0
 
         async def _configure(*_: object, **__: object) -> None:
@@ -10589,6 +10589,149 @@ class TestMultiAgentOrchestrator:
 
         assert orchestrator._knowledge_refresh_task is None
         assert attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_knowledge_refresh_owner_schedules_one_base_without_global_refresh(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A knowledge refresh request should not replace all shared-base refreshes."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room1:localhost"],
+                        knowledge_bases=["research"],
+                    ),
+                },
+                knowledge_bases={
+                    "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+                    "unused": KnowledgeBaseConfig(path=str(tmp_path / "unused"), watch=False),
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+        orchestrator.running = True
+        started = asyncio.Event()
+        unblock = asyncio.Event()
+        manager = MagicMock(spec=KnowledgeManager)
+
+        async def slow_refresh(base_id: str, **_kwargs: object) -> KnowledgeManager:
+            assert base_id == "research"
+            started.set()
+            await unblock.wait()
+            return manager
+
+        with (
+            patch(
+                "mindroom.orchestrator.ensure_shared_knowledge_manager",
+                new=AsyncMock(side_effect=slow_refresh),
+            ) as mock_ensure,
+            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()) as mock_global_refresh,
+        ):
+            orchestrator.knowledge_refresh_owner.schedule_refresh("research")
+            task = orchestrator._knowledge_base_refresh_tasks["research"]
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+
+            assert orchestrator.knowledge_refresh_owner.is_refreshing("research")
+            assert not orchestrator.knowledge_refresh_owner.is_refreshing("unused")
+            assert "unused" not in orchestrator._knowledge_base_refresh_tasks
+
+            orchestrator.knowledge_refresh_owner.schedule_refresh("research")
+            assert mock_ensure.await_count == 1
+
+            unblock.set()
+            await asyncio.wait_for(task, timeout=1.0)
+
+        mock_global_refresh.assert_not_called()
+        mock_ensure.assert_awaited_once()
+        assert orchestrator.knowledge_managers == {"research": manager}
+        assert "research" not in orchestrator._knowledge_base_refresh_tasks
+
+    @pytest.mark.asyncio
+    async def test_stale_knowledge_base_refresh_does_not_publish_after_generation_advances(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A stale per-base refresh result should not replace the current manager."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room1:localhost"],
+                        knowledge_bases=["research"],
+                    ),
+                },
+                knowledge_bases={"research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False)},
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+        stale_generation = orchestrator._knowledge_refresh_generation
+        started = asyncio.Event()
+        unblock = asyncio.Event()
+        stale_manager = MagicMock(spec=KnowledgeManager)
+
+        async def stale_refresh(base_id: str, **kwargs: object) -> KnowledgeManager | None:
+            assert base_id == "research"
+            publish_guard = cast("Callable[[], bool]", kwargs["publish_guard"])
+            started.set()
+            await unblock.wait()
+            return stale_manager if publish_guard() else None
+
+        with patch("mindroom.orchestrator.ensure_shared_knowledge_manager", new=AsyncMock(side_effect=stale_refresh)):
+            task = asyncio.create_task(
+                orchestrator._run_knowledge_base_refresh(
+                    "research",
+                    config,
+                    start_watcher=True,
+                    generation=stale_generation,
+                ),
+            )
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+
+            orchestrator._advance_knowledge_refresh_generation()
+            unblock.set()
+            await asyncio.wait_for(task, timeout=1.0)
+
+        assert orchestrator.knowledge_managers == {}
+
+    @pytest.mark.asyncio
+    async def test_configure_knowledge_initializes_only_referenced_shared_bases(self, tmp_path: Path) -> None:
+        """Runtime startup should not initialize unused top-level shared knowledge bases."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room1:localhost"],
+                        knowledge_bases=["research"],
+                    ),
+                },
+                knowledge_bases={
+                    "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+                    "unused": KnowledgeBaseConfig(path=str(tmp_path / "unused"), watch=False),
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        manager = MagicMock(spec=KnowledgeManager)
+
+        with patch(
+            "mindroom.orchestrator.initialize_shared_knowledge_managers",
+            new=AsyncMock(return_value={"research": manager}),
+        ) as mock_initialize:
+            await orchestrator._configure_knowledge(config, start_watcher=True)
+
+        mock_initialize.assert_awaited_once()
+        assert mock_initialize.await_args.kwargs["base_ids"] == {"research"}
+        assert orchestrator.knowledge_managers == {"research": manager}
 
     @pytest.mark.asyncio
     async def test_orchestrator_start_schedules_retry_for_failed_agents(self, tmp_path: Path) -> None:

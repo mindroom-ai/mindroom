@@ -17,6 +17,8 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import ResolvedKnowledgeBinding, resolve_knowledge_binding
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -104,6 +106,23 @@ async def _stop_and_remove_shared_manager(base_id: str) -> None:
     if manager is None:
         return
     await manager.stop_watcher()
+
+
+def _publish_allowed(publish_guard: Callable[[], bool] | None) -> bool:
+    return publish_guard is None or publish_guard()
+
+
+async def _publish_shared_manager_if_current(
+    base_id: str,
+    manager: KnowledgeManager,
+    *,
+    publish_guard: Callable[[], bool] | None,
+) -> KnowledgeManager | None:
+    if not _publish_allowed(publish_guard):
+        await manager.stop_watcher()
+        return None
+    _shared_knowledge_managers[base_id] = manager
+    return manager
 
 
 def _shared_knowledge_manager_init_lock(base_id: str) -> asyncio.Lock:
@@ -271,12 +290,15 @@ async def _ensure_shared_knowledge_manager_for_target(
     reindex_on_create: bool,
     reconcile_existing_runtime: bool,
     initialize_on_create: bool = True,
-) -> KnowledgeManager:
+    publish_guard: Callable[[], bool] | None = None,
+) -> KnowledgeManager | None:
     if target.binding.request_scoped:
         msg = f"Shared knowledge manager target '{target.key.base_id}' must not be request-scoped"
         raise ValueError(msg)
 
     async with _shared_knowledge_manager_init_lock(target.key.base_id):
+        if not _publish_allowed(publish_guard):
+            return None
         existing = _shared_knowledge_managers.get(target.key.base_id)
         if existing is not None:
             persisted_state = existing._load_persisted_indexing_state()
@@ -285,24 +307,15 @@ async def _ensure_shared_knowledge_manager_for_target(
                 target.binding.storage_root,
                 target.binding.knowledge_path,
             ) or (persisted_state is not None and persisted_state.availability == "refresh_failed"):
-                preserved_runtime_mode = (
-                    _shared_manager_background_runtime_mode(existing) if not reconcile_existing_runtime else None
-                )
-                await existing.stop_watcher()
-                manager = await _create_knowledge_manager_for_target(
+                return await _replace_shared_manager_after_full_reindex(
+                    existing=existing,
                     target=target,
                     config=config,
                     runtime_paths=runtime_paths,
-                    reindex_on_create=True,
+                    reconcile_existing_runtime=reconcile_existing_runtime,
                     initialize_on_create=initialize_on_create,
-                    start_runtime=reconcile_existing_runtime and initialize_on_create,
+                    publish_guard=publish_guard,
                 )
-                if initialize_on_create:
-                    await _start_shared_manager_runtime_mode(manager, preserved_runtime_mode)
-                else:
-                    manager.defer_shared_runtime_restore(preserved_runtime_mode)
-                _shared_knowledge_managers[target.key.base_id] = manager
-                return manager
 
             existing._refresh_settings(
                 config,
@@ -327,8 +340,11 @@ async def _ensure_shared_knowledge_manager_for_target(
             initialize_on_create=initialize_on_create,
             start_runtime=initialize_on_create,
         )
-        _shared_knowledge_managers[target.key.base_id] = manager
-        return manager
+        return await _publish_shared_manager_if_current(
+            target.key.base_id,
+            manager,
+            publish_guard=publish_guard,
+        )
 
 
 async def _create_request_knowledge_manager_for_target(
@@ -349,6 +365,45 @@ async def _create_request_knowledge_manager_for_target(
             runtime_paths=runtime_paths,
             reindex_on_create=reindex_on_create,
         )
+
+
+async def _replace_shared_manager_after_full_reindex(
+    *,
+    existing: KnowledgeManager,
+    target: _ResolvedKnowledgeManagerTarget,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    reconcile_existing_runtime: bool,
+    initialize_on_create: bool,
+    publish_guard: Callable[[], bool] | None,
+) -> KnowledgeManager | None:
+    stopped_runtime_mode = _shared_manager_background_runtime_mode(existing)
+    preserved_runtime_mode = stopped_runtime_mode if not reconcile_existing_runtime else None
+    await existing.stop_watcher()
+    published = False
+    try:
+        manager = await _create_knowledge_manager_for_target(
+            target=target,
+            config=config,
+            runtime_paths=runtime_paths,
+            reindex_on_create=True,
+            initialize_on_create=initialize_on_create,
+            start_runtime=reconcile_existing_runtime and initialize_on_create,
+        )
+        if initialize_on_create:
+            await _start_shared_manager_runtime_mode(manager, preserved_runtime_mode)
+        else:
+            manager.defer_shared_runtime_restore(preserved_runtime_mode)
+        published_manager = await _publish_shared_manager_if_current(
+            target.key.base_id,
+            manager,
+            publish_guard=publish_guard,
+        )
+        published = published_manager is not None
+        return published_manager
+    finally:
+        if not published and _shared_knowledge_managers.get(target.key.base_id) is existing:
+            await _start_shared_manager_runtime_mode(existing, stopped_runtime_mode)
 
 
 async def ensure_agent_knowledge_managers(
@@ -393,9 +448,11 @@ async def initialize_shared_knowledge_managers(
     start_watchers: bool = False,
     reindex_on_create: bool = True,
     reconcile_existing_runtime: bool = False,
+    base_ids: Iterable[str] | None = None,
+    publish_guard: Callable[[], bool] | None = None,
 ) -> dict[str, KnowledgeManager]:
     """Initialize process-global shared knowledge managers for configured shared bases only."""
-    configured_base_ids = set(config.knowledge_bases)
+    configured_base_ids = set(config.knowledge_bases) if base_ids is None else set(base_ids)
     managers: dict[str, KnowledgeManager] = {}
 
     for base_id in sorted(configured_base_ids):
@@ -406,15 +463,27 @@ async def initialize_shared_knowledge_managers(
             start_watchers=start_watchers,
             reindex_on_create=reindex_on_create,
             reconcile_existing_runtime=reconcile_existing_runtime,
+            publish_guard=publish_guard,
         )
         if manager is None:
             continue
         managers[base_id] = manager
 
-    for base_id in [candidate for candidate in list(_shared_knowledge_managers) if candidate not in managers]:
-        await _stop_and_remove_shared_manager(base_id)
+    if _publish_allowed(publish_guard):
+        for base_id in [candidate for candidate in list(_shared_knowledge_managers) if candidate not in managers]:
+            await _stop_and_remove_shared_manager(base_id)
 
     return managers
+
+
+def referenced_shared_knowledge_base_ids(config: Config) -> set[str]:
+    """Return configured shared knowledge bases referenced by active agents."""
+    referenced_base_ids: set[str] = set()
+    for agent_name in config.agents:
+        for base_id in config.get_agent_knowledge_base_ids(agent_name):
+            if base_id in config.knowledge_bases and config.get_private_knowledge_base_agent(base_id) is None:
+                referenced_base_ids.add(base_id)
+    return referenced_base_ids
 
 
 async def ensure_shared_knowledge_manager(
@@ -426,6 +495,7 @@ async def ensure_shared_knowledge_manager(
     reindex_on_create: bool = True,
     reconcile_existing_runtime: bool = False,
     initialize_on_create: bool = True,
+    publish_guard: Callable[[], bool] | None = None,
 ) -> KnowledgeManager | None:
     """Ensure one process-global shared knowledge manager exists for the given base."""
     target = _resolve_knowledge_manager_target(
@@ -444,6 +514,7 @@ async def ensure_shared_knowledge_manager(
         reindex_on_create=reindex_on_create,
         reconcile_existing_runtime=reconcile_existing_runtime,
         initialize_on_create=initialize_on_create,
+        publish_guard=publish_guard,
     )
 
 
