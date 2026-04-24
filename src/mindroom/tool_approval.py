@@ -1158,16 +1158,6 @@ def get_approval_store() -> ApprovalManager | None:
     return _MANAGER
 
 
-async def sync_unsynced_approval_event_resolutions() -> list[PendingApproval]:
-    """Compatibility no-op: Matrix room history is now the source of truth."""
-    return []
-
-
-async def recover_unconfirmed_approval_event_deliveries() -> list[PendingApproval]:
-    """Compatibility no-op: approval delivery recovery no longer uses local files."""
-    return []
-
-
 def initialize_approval_store(
     runtime_paths: RuntimePaths,
     *,

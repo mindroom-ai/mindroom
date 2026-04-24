@@ -11642,11 +11642,11 @@ class TestMultiAgentOrchestrator:
         sync_runtime_support_services.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_start_recovers_and_replays_tool_approval_resolutions_on_bot_ready(
+    async def test_orchestrator_start_auto_denies_tool_approval_cards_on_router_ready(
         self,
         tmp_path: Path,
     ) -> None:
-        """Approval-card reconciliation should recover missing event ids before replaying edits."""
+        """Router readiness should trigger Matrix-backed startup auto-deny after room setup."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
 
@@ -11654,7 +11654,6 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = False
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-        bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
 
         async def _start_bot() -> bool:
             bot.running = True
@@ -11677,14 +11676,16 @@ class TestMultiAgentOrchestrator:
         async def _setup_rooms(_: list[Any]) -> None:
             call_order.append("setup_rooms")
 
-        async def _recover_approval_deliveries() -> None:
-            call_order.append("recover_approval_deliveries")
-
-        async def _sync_approval_resolutions() -> None:
-            call_order.append("sync_approval_resolutions")
-
         async def _sync_runtime_support_services(*_: object, **__: object) -> None:
             call_order.append("support_services")
+
+        async def _auto_deny_pending_on_startup(*, lookback_hours: int) -> int:
+            assert lookback_hours == 24
+            call_order.append("auto_deny")
+            return 2
+
+        approval_manager = MagicMock()
+        approval_manager.auto_deny_pending_on_startup = AsyncMock(side_effect=_auto_deny_pending_on_startup)
 
         async def _sync_forever_with_restart(started_bot: object) -> None:
             await cast("Any", started_bot)._on_sync_response(MagicMock(spec=nio.SyncResponse))
@@ -11692,99 +11693,42 @@ class TestMultiAgentOrchestrator:
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
-            patch(
-                "mindroom.orchestrator.recover_unconfirmed_approval_event_deliveries",
-                side_effect=_recover_approval_deliveries,
-            ),
-            patch(
-                "mindroom.orchestrator.sync_unsynced_approval_event_resolutions",
-                side_effect=_sync_approval_resolutions,
-            ),
+            patch("mindroom.orchestrator.get_approval_store", return_value=approval_manager),
             patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch("mindroom.orchestrator.sync_forever_with_restart", side_effect=_sync_forever_with_restart),
         ):
-            await orchestrator.start()
-            await asyncio.sleep(0)
+            await _run_orchestrator_start_until_ready(orchestrator)
 
         assert call_order == [
             "wait_for_homeserver",
             "setup_rooms",
             "support_services",
-            "recover_approval_deliveries",
-            "sync_approval_resolutions",
+            "auto_deny",
         ]
+        approval_manager.auto_deny_pending_on_startup.assert_awaited_once_with(lookback_hours=24)
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_retries_unsynced_tool_approval_resolution_after_background_start_bot_ready(
+    async def test_handle_bot_ready_skips_startup_auto_deny_for_non_router_bots(
         self,
         tmp_path: Path,
     ) -> None:
-        """A replay missed during startup should be retried when the recovered bot reaches first sync."""
+        """Only the router owns startup approval cleanup."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        orchestrator.config = MagicMock()
 
         bot = MagicMock()
         bot.agent_name = "code"
-        bot.running = False
+        bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
-        bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
 
-        async def _start_bot() -> bool:
-            bot.running = True
-            return True
+        approval_manager = MagicMock()
+        approval_manager.auto_deny_pending_on_startup = AsyncMock()
 
-        bot.try_start = AsyncMock(side_effect=_start_bot)
-
-        async def _emit_bot_ready(_response: object) -> None:
+        with patch("mindroom.orchestrator.get_approval_store", return_value=approval_manager):
             await orchestrator._handle_bot_ready(bot)
 
-        bot._on_sync_response = AsyncMock(side_effect=_emit_bot_ready)
-        orchestrator.agent_bots = {"code": bot}
-
-        replay_attempts: list[str] = []
-        call_order: list[str] = []
-
-        async def _recover_approval_deliveries() -> None:
-            call_order.append("recover_approval_deliveries")
-
-        async def _sync_approval_resolutions() -> None:
-            replay_attempts.append("replay")
-            if len(replay_attempts) == 1:
-                msg = "bot unavailable"
-                raise RuntimeError(msg)
-
-        async def _setup_rooms(_: list[Any]) -> None:
-            call_order.append("setup_rooms")
-
-        async def _sync_forever_with_restart(started_bot: object) -> None:
-            await cast("Any", started_bot)._on_sync_response(MagicMock(spec=nio.SyncResponse))
-
-        with (
-            patch(
-                "mindroom.orchestrator.recover_unconfirmed_approval_event_deliveries",
-                side_effect=_recover_approval_deliveries,
-            ),
-            patch(
-                "mindroom.orchestrator.sync_unsynced_approval_event_resolutions",
-                side_effect=_sync_approval_resolutions,
-            ),
-            patch.object(orchestrator, "_retry_blocked_mcp_entities", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
-            patch("mindroom.orchestrator.sync_forever_with_restart", side_effect=_sync_forever_with_restart),
-        ):
-            await orchestrator._sync_unsynced_approval_resolutions()
-            await orchestrator._run_bot_start_retry("code")
-            await asyncio.sleep(0)
-
-        assert replay_attempts == ["replay", "replay"]
-        assert call_order == [
-            "recover_approval_deliveries",
-            "setup_rooms",
-            "recover_approval_deliveries",
-        ]
-        bot.try_start.assert_awaited_once()
+        approval_manager.auto_deny_pending_on_startup.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_orchestrator_waits_for_homeserver_before_initialize(self, tmp_path: Path) -> None:

@@ -58,13 +58,11 @@ from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_approval import (
     _DEFAULT_ROUTER_MANAGED_ROOM_REASON,
-    PendingApproval,
     SentApprovalEvent,
     ToolApprovalTransportError,
+    get_approval_store,
     initialize_approval_store,
-    recover_unconfirmed_approval_event_deliveries,
     shutdown_approval_store,
-    sync_unsynced_approval_event_resolutions,
 )
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
@@ -289,7 +287,6 @@ class MultiAgentOrchestrator:
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
-    _approval_known_joined_room_ids: set[str] | None = field(default=None, init=False, repr=False)
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -488,9 +485,7 @@ class MultiAgentOrchestrator:
         """Return whether one bot can safely post into an approval room."""
         if bot.client is None:
             return False
-        return room_id in tuple(bot.client.rooms) or (
-            self._approval_known_joined_room_ids is not None and room_id in self._approval_known_joined_room_ids
-        )
+        return room_id in tuple(bot.client.rooms)
 
     def _approval_transport_bot(
         self,
@@ -518,8 +513,6 @@ class MultiAgentOrchestrator:
         room_ids: set[str] = set()
         if bot is not None and bot.client is not None:
             room_ids.update(bot.client.rooms)
-        if self._approval_known_joined_room_ids is not None:
-            room_ids.update(self._approval_known_joined_room_ids)
         return room_ids
 
     async def _fetch_approval_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
@@ -579,68 +572,6 @@ class MultiAgentOrchestrator:
                 return events
             from_token = response.end
         return events
-
-    @staticmethod
-    def _matches_pending_approval_event(
-        event: nio.Event,
-        *,
-        approval_id: str,
-        sender_user_id: str,
-    ) -> bool:
-        """Return whether one historical event is the original approval card for this approval id."""
-        if not isinstance(event, nio.UnknownEvent):
-            return False
-        if event.type != "io.mindroom.tool_approval" or event.sender != sender_user_id:
-            return False
-        content = event.source.get("content")
-        if not isinstance(content, dict):
-            return False
-        if content.get("approval_id") != approval_id or content.get("status") != "pending":
-            return False
-        relates_to = content.get("m.relates_to")
-        return not (isinstance(relates_to, dict) and relates_to.get("rel_type") == "m.replace")
-
-    async def _recover_approval_event_id(
-        self,
-        pending: PendingApproval,
-    ) -> str | None:
-        """Recover a missing approval event id by scanning recent room history for the original card."""
-        room_id = pending.room_id
-        if room_id is None:
-            return None
-        bot = self._approval_transport_bot(room_id)
-        if bot is None or bot.client is None:
-            msg = "Router approval transport unavailable for delivery recovery."
-            raise RuntimeError(msg)
-        sender_user_id = bot.client.user_id
-        if not isinstance(sender_user_id, str) or not sender_user_id:
-            msg = "Router approval transport is missing its Matrix user id."
-            raise RuntimeError(msg)
-
-        from_token: str | None = None
-        while True:
-            response = await bot.client.room_messages(
-                room_id,
-                start=from_token,
-                limit=100,
-                message_filter={"types": ["io.mindroom.tool_approval"]},
-                direction=nio.MessageDirection.back,
-            )
-            if not isinstance(response, nio.RoomMessagesResponse):
-                msg = f"Failed to scan approval room history for {pending.id}: {response}"
-                raise TypeError(msg)
-            if not response.chunk:
-                return None
-            for event in response.chunk:
-                if self._matches_pending_approval_event(
-                    event,
-                    approval_id=pending.id,
-                    sender_user_id=sender_user_id,
-                ):
-                    return event.event_id
-            if not response.end or response.end == from_token:
-                return None
-            from_token = response.end
 
     async def _edit_approval_event_now(
         self,
@@ -752,13 +683,6 @@ class MultiAgentOrchestrator:
             response=str(response),
         )
         return False
-
-    async def _force_finalize_pending_approvals_for_rooms(
-        self,
-        room_ids: set[str],
-    ) -> set[str]:
-        """Return rooms eligible for leave; startup auto-deny owns approval cleanup."""
-        return set(room_ids)
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
@@ -1497,27 +1421,20 @@ class MultiAgentOrchestrator:
         except Exception as exc:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
 
-    async def _sync_unsynced_approval_resolutions(self) -> None:
-        """Recover orphaned approval cards and replay any missed resolved edits."""
-        previous_known_joined_room_ids = self._approval_known_joined_room_ids
-        try:
-            router_bot = self._router_bot()
-            if router_bot is not None and router_bot.client is not None:
-                joined_rooms = await get_joined_rooms(router_bot.client)
-                if joined_rooms is not None:
-                    self._approval_known_joined_room_ids = set(joined_rooms)
-            await recover_unconfirmed_approval_event_deliveries()
-            await sync_unsynced_approval_event_resolutions()
-        except Exception as exc:
-            logger.warning("tool_approval_resolution_replay_failed", error=str(exc))
-        finally:
-            self._approval_known_joined_room_ids = previous_known_joined_room_ids
-
     async def _handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
-        """Replay any unsynced approval edits once one bot is fully synced and room-ready."""
-        if not bot.running or bot.client is None:
+        """Auto-deny orphaned approval cards once the router finishes first sync."""
+        if bot.agent_name != ROUTER_AGENT_NAME or not bot.running or bot.client is None:
             return
-        await self._sync_unsynced_approval_resolutions()
+        approval_manager = get_approval_store()
+        if approval_manager is None:
+            return
+        try:
+            denied_count = await approval_manager.auto_deny_pending_on_startup(lookback_hours=24)
+        except Exception as exc:
+            logger.warning("tool_approval_startup_auto_deny_failed", error=str(exc))
+            return
+        if denied_count > 0:
+            logger.info("approval.auto_deny.startup", denied_count=denied_count)
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
