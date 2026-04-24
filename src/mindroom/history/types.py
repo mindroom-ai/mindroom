@@ -116,11 +116,6 @@ class PostResponseCompactionCheck:
         """Return the typed history scope for this request."""
         return HistoryScope(kind=self.scope_kind, scope_id=self.scope_id)
 
-    @property
-    def dedupe_key(self) -> tuple[str, str, str]:
-        """Return the in-process dedupe key for one compaction check."""
-        return (self.agent_name, self.scope.key, self.session_id)
-
 
 @dataclass(frozen=True)
 class CompactionLifecycleStart:

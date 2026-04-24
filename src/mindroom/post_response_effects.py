@@ -16,8 +16,6 @@ from mindroom.thread_summary import (
 )
 from mindroom.timing import timed
 
-_active_post_response_compaction_jobs: set[tuple[str, str, str]] = set()
-
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from typing import Protocol
@@ -81,7 +79,7 @@ class PostResponseEffectsDeps:
         | None
     ) = None
     queue_memory_persistence: Callable[[], None] | None = None
-    start_post_response_compaction: Callable[[Sequence[PostResponseCompactionCheck], str], None] | None = None
+    run_post_response_compaction: Callable[[Sequence[PostResponseCompactionCheck], str], Awaitable[None]] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
@@ -177,7 +175,7 @@ class PostResponseEffectsSupport:
             owner=self.runtime,
         )
 
-    def start_post_response_compactions(
+    async def run_post_response_compactions(
         self,
         checks: Sequence[PostResponseCompactionCheck],
         *,
@@ -186,37 +184,13 @@ class PostResponseEffectsSupport:
         reply_to_event_id: str,
         run_compaction: PostResponseCompactionRunner,
     ) -> None:
-        """Start immediate post-response compaction tasks."""
+        """Run immediate post-response compaction checks before the turn fully completes."""
         for check in checks:
-            dedupe_key = check.dedupe_key
-            if dedupe_key in _active_post_response_compaction_jobs:
-                continue
-            _active_post_response_compaction_jobs.add(dedupe_key)
             compaction_lifecycle = MatrixCompactionLifecycle(
                 delivery_gateway=self.delivery_gateway,
                 target=target,
                 reply_to_event_id=reply_to_event_id,
             )
-            create_background_task(
-                self._run_post_response_compaction(
-                    check=check,
-                    execution_identity=execution_identity,
-                    compaction_lifecycle=compaction_lifecycle,
-                    run_compaction=run_compaction,
-                ),
-                name=f"history_compaction_{check.agent_name}_{check.session_id}",
-                owner=self.runtime,
-            )
-
-    async def _run_post_response_compaction(
-        self,
-        *,
-        check: PostResponseCompactionCheck,
-        execution_identity: ToolExecutionIdentity | None,
-        compaction_lifecycle: MatrixCompactionLifecycle,
-        run_compaction: PostResponseCompactionRunner,
-    ) -> None:
-        try:
             await run_compaction(
                 check=check,
                 runtime_paths=self.runtime_paths,
@@ -224,8 +198,6 @@ class PostResponseEffectsSupport:
                 execution_identity=execution_identity,
                 compaction_lifecycle=compaction_lifecycle,
             )
-        finally:
-            _active_post_response_compaction_jobs.discard(check.dedupe_key)
 
     def build_deps(
         self,
@@ -259,9 +231,9 @@ class PostResponseEffectsSupport:
             logger=self.logger,
             register_interactive=register_interactive,
             queue_memory_persistence=queue_memory_persistence,
-            start_post_response_compaction=(
+            run_post_response_compaction=(
                 (
-                    lambda checks, response_event_id: self.start_post_response_compactions(
+                    lambda checks, response_event_id: self.run_post_response_compactions(
                         checks,
                         execution_identity=execution_identity,
                         target=MessageTarget.resolve(
@@ -339,13 +311,13 @@ async def apply_post_response_effects(
         and final_delivery_outcome.terminal_status == "completed"
         and not final_delivery_outcome.suppressed
         and outcome.post_response_compaction_checks
-        and deps.start_post_response_compaction is not None
+        and deps.run_post_response_compaction is not None
     ):
         try:
-            deps.start_post_response_compaction(outcome.post_response_compaction_checks, response_event_id)
+            await deps.run_post_response_compaction(outcome.post_response_compaction_checks, response_event_id)
         except Exception:
             deps.logger.exception(
-                "Failed to start post-response compaction",
+                "Failed to run post-response compaction",
                 session_id=outcome.session_id,
                 room_id=outcome.interactive_target.room_id if outcome.interactive_target is not None else None,
                 thread_id=(

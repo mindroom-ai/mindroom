@@ -45,6 +45,7 @@ from mindroom.history.runtime import (
     ScopeSessionContext,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
+    run_post_response_compaction_check,
 )
 from mindroom.knowledge import (
     KnowledgeAvailability,
@@ -92,6 +93,7 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.config.main import Config
+    from mindroom.history.types import PostResponseCompactionCheck
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
 logger = get_logger(__name__)
 
@@ -896,6 +898,7 @@ async def _non_stream_completion(
     refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     response_text = await ai_response(
         agent_name=agent_name,
         prompt=prompt,
@@ -910,6 +913,7 @@ async def _non_stream_completion(
         include_openai_compat_guidance=True,
         active_event_ids=set(),
         execution_identity=execution_identity,
+        post_response_compaction_checks_collector=post_response_compaction_checks,
         refresh_owner=refresh_owner,
     )
 
@@ -919,6 +923,12 @@ async def _non_stream_completion(
         return _error_response(500, "Agent execution failed", error_type="server_error")
 
     logger.info("Chat completion sent", model=agent_name, stream=False, session_id=session_id)
+    await _run_openai_post_response_compaction_checks(
+        post_response_compaction_checks,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+    )
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     response = _ChatCompletionResponse(
         id=completion_id,
@@ -1084,6 +1094,7 @@ async def _stream_completion(  # noqa: C901
     refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     stream = cast(
         "AsyncGenerator[AIStreamChunk, None]",
         stream_with_tool_execution_identity(
@@ -1102,6 +1113,7 @@ async def _stream_completion(  # noqa: C901
                 include_openai_compat_guidance=True,
                 active_event_ids=set(),
                 execution_identity=execution_identity,
+                post_response_compaction_checks_collector=post_response_compaction_checks,
                 refresh_owner=refresh_owner,
             ),
         ),
@@ -1161,10 +1173,41 @@ async def _stream_completion(  # noqa: C901
 
             # 5. Stream terminator
             yield "data: [DONE]\n\n"
+            await _run_openai_post_response_compaction_checks(
+                post_response_compaction_checks,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+            )
         finally:
             await stream.aclose()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+async def _run_openai_post_response_compaction_checks(
+    checks: Sequence[PostResponseCompactionCheck],
+    *,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> None:
+    """Run post-response compaction for OpenAI-compatible sessions without Matrix notices."""
+    for check in checks:
+        try:
+            await run_post_response_compaction_check(
+                check=check,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                compaction_lifecycle=None,
+            )
+        except Exception:
+            logger.exception(
+                "OpenAI-compatible post-response compaction failed",
+                session_id=check.session_id,
+                scope=check.scope.key,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1256,6 +1299,7 @@ async def _prepare_openai_team_run_input(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
+    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
 ) -> str:
     """Prepare the canonical prompt text for one OpenAI-compatible team run."""
     prepared_execution = await prepare_bound_team_run_context(
@@ -1275,6 +1319,8 @@ async def _prepare_openai_team_run_input(
         current_sender_id=None,
         compaction_outcomes_collector=None,
     )
+    if post_response_compaction_checks_collector is not None:
+        post_response_compaction_checks_collector.extend(prepared_execution.post_response_compaction_checks or [])
     return render_prepared_team_messages_text(prepared_execution.messages)
 
 
@@ -1295,6 +1341,7 @@ async def _non_stream_team_completion(
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     unavailable_bases: dict[str, KnowledgeAvailability] = {}
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     try:
         with open_bound_scope_session_context(
             agents=[],
@@ -1338,6 +1385,7 @@ async def _non_stream_team_completion(
                     config=config,
                     runtime_paths=runtime_paths,
                     thread_history=thread_history,
+                    post_response_compaction_checks_collector=post_response_compaction_checks,
                 )
             except Exception:
                 logger.exception("Team member preparation failed", team=team_name)
@@ -1363,6 +1411,12 @@ async def _non_stream_team_completion(
                 return _error_response(500, "Team execution failed", error_type="server_error")
 
             logger.info("Team completion sent", team=team_name, stream=False)
+            await _run_openai_post_response_compaction_checks(
+                post_response_compaction_checks,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+            )
             completion_id = f"chatcmpl-{uuid4().hex[:12]}"
             result = _ChatCompletionResponse(
                 id=completion_id,
@@ -1383,7 +1437,7 @@ async def _non_stream_team_completion(
         )
 
 
-async def _stream_team_completion(  # noqa: C901
+async def _stream_team_completion(  # noqa: C901, PLR0915
     team_name: str,
     model_id: str,
     prompt: str,
@@ -1402,6 +1456,7 @@ async def _stream_team_completion(  # noqa: C901
     scope_context: ScopeSessionContext | None = None
     stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
     unavailable_bases: dict[str, KnowledgeAvailability] = {}
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
 
     async def _cleanup() -> None:
         if stream is not None:
@@ -1459,6 +1514,7 @@ async def _stream_team_completion(  # noqa: C901
                 config=config,
                 runtime_paths=runtime_paths,
                 thread_history=thread_history,
+                post_response_compaction_checks_collector=post_response_compaction_checks,
             )
         except Exception:
             logger.exception("Team member preparation failed", team=team_name)
@@ -1510,6 +1566,12 @@ async def _stream_team_completion(  # noqa: C901
                     team_name=team_name,
                 ):
                     yield chunk
+                await _run_openai_post_response_compaction_checks(
+                    post_response_compaction_checks,
+                    runtime_paths=runtime_paths,
+                    config=config,
+                    execution_identity=execution_identity,
+                )
             finally:
                 await _cleanup()
 

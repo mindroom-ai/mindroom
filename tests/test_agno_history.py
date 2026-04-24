@@ -187,6 +187,16 @@ class RecordingCompactionLifecycle:
         self.events.append(event)
 
 
+@dataclass
+class FailingStartCompactionLifecycle(RecordingCompactionLifecycle):
+    """Lifecycle test double whose initial notice delivery fails."""
+
+    async def start(self, event: CompactionLifecycleStart) -> str | None:
+        self.events.append(event)
+        message = "matrix unavailable"
+        raise RuntimeError(message)
+
+
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -769,6 +779,37 @@ async def test_prepare_history_for_run_records_post_response_compaction_check_wi
 
 
 @pytest.mark.asyncio
+async def test_prepare_history_for_run_records_post_response_compaction_check_for_missing_first_session(
+    tmp_path: Path,
+) -> None:
+    """The first successful reply should still be eligible for immediate post-response compaction."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=None,
+        static_prompt_tokens=0,
+    )
+
+    assert prepared.compaction_outcomes == []
+    assert len(prepared.post_response_compaction_checks) == 1
+    assert prepared.post_response_compaction_checks[0].session_id == "session-1"
+    assert prepared.post_response_compaction_checks[0].scope.key == "agent:test_agent"
+
+
+@pytest.mark.asyncio
 async def test_run_post_response_compaction_check_uses_updated_persisted_session(
     tmp_path: Path,
 ) -> None:
@@ -893,6 +934,70 @@ async def test_run_post_response_compaction_check_edits_failure_when_model_load_
     assert isinstance(lifecycle.events[1], CompactionLifecycleFailure)
     assert lifecycle.events[1].notice_event_id == "$compaction"
     assert lifecycle.events[1].failure_reason == "bad summary model"
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_continues_when_lifecycle_start_fails(
+    tmp_path: Path,
+) -> None:
+    """Matrix lifecycle delivery should be best-effort and not abort compaction."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "assistant-run",
+                messages=[
+                    Message(role="user", content="u" * 120),
+                    Message(role="assistant", content="a" * 120),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+    lifecycle = FailingStartCompactionLifecycle()
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=lifecycle,
+        )
+
+    assert outcome is not None
+    assert outcome.lifecycle_notice_event_id is None
+    assert outcome.compacted_run_count == 1
+    assert len(lifecycle.events) == 1
+    assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
 
 
 @pytest.mark.asyncio

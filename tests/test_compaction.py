@@ -130,6 +130,8 @@ def test_compaction_lifecycle_uses_one_matrix_adapter() -> None:
     """Foreground and post-response compaction should share one Matrix lifecycle adapter."""
     assert hasattr(delivery_gateway, "MatrixCompactionLifecycle")
     assert "_PostResponseCompactionLifecycle" not in inspect.getsource(post_response_effects)
+    assert "_active_post_response_compaction_jobs" not in inspect.getsource(post_response_effects)
+    assert "history_compaction_" not in inspect.getsource(post_response_effects)
 
 
 def test_compaction_policy_has_no_legacy_passthrough_wrappers() -> None:
@@ -303,7 +305,11 @@ async def test_post_response_effects_start_compaction_check_after_response_link_
     check = _make_post_response_check()
     events: list[str] = []
     persist_response_event_id = MagicMock(side_effect=lambda *_args: events.append("persist_response_event_id"))
-    start_compaction = MagicMock(side_effect=lambda *_args: events.append("start_compaction"))
+
+    async def _start_compaction(*_args: object) -> None:
+        events.append("start_compaction")
+
+    start_compaction = AsyncMock(side_effect=_start_compaction)
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
@@ -320,12 +326,12 @@ async def test_post_response_effects_start_compaction_check_after_response_link_
         PostResponseEffectsDeps(
             logger=MagicMock(),
             persist_response_event_id=persist_response_event_id,
-            start_post_response_compaction=start_compaction,
+            run_post_response_compaction=start_compaction,
         ),
     )
 
     persist_response_event_id.assert_called_once_with("run-1", "$response")
-    start_compaction.assert_called_once_with((check,), "$response")
+    start_compaction.assert_awaited_once_with((check,), "$response")
     assert events == ["persist_response_event_id", "start_compaction"]
 
 

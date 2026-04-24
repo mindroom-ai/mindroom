@@ -89,7 +89,6 @@ describe("TeamEditor", () => {
         enabled: false,
         reserve_tokens: 16384,
         threshold_percent: 0.8,
-        notify: false,
       },
     },
   };
@@ -487,7 +486,6 @@ describe("TeamEditor", () => {
             enabled: false,
             reserve_tokens: 16384,
             threshold_percent: 0.8,
-            notify: false,
           },
         },
         teams: { dev_team: compactionTeam },
@@ -543,7 +541,6 @@ describe("TeamEditor", () => {
             enabled: false,
             reserve_tokens: 16384,
             threshold_percent: 0.8,
-            notify: false,
           },
         },
         teams: { dev_team: compactionTeam },

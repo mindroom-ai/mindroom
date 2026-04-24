@@ -40,7 +40,12 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
-from mindroom.history.types import HistoryScope, ResolvedReplayPlan
+from mindroom.history.types import (
+    HistoryScope,
+    PostResponseCompactionCheck,
+    ResolvedHistoryExecutionPlan,
+    ResolvedReplayPlan,
+)
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.tool_system.worker_routing import (
@@ -69,12 +74,38 @@ def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
     return resolve_runtime_paths(config_path=Path(__file__), process_env=process_env or {})
 
 
+def _make_post_response_compaction_check() -> PostResponseCompactionCheck:
+    return PostResponseCompactionCheck(
+        agent_name="general",
+        session_id="session-1",
+        scope_kind="agent",
+        scope_id="general",
+        execution_plan=ResolvedHistoryExecutionPlan(
+            authored_compaction_config=True,
+            authored_compaction_enabled=True,
+            destructive_compaction_available=True,
+            explicit_compaction_model=False,
+            compaction_model_name="default",
+            compaction_context_window=64_000,
+            replay_window_tokens=64_000,
+            trigger_threshold_tokens=12_000,
+            reserve_tokens=4_096,
+            static_prompt_tokens=0,
+            replay_budget_tokens=10_000,
+            summary_input_budget_tokens=20_000,
+            hard_replay_budget_tokens=59_904,
+        ),
+        active_context_window=64_000,
+    )
+
+
 def _prepared_team_execution_context(
     *,
     final_prompt: str,
     replay_plan: ResolvedReplayPlan | None = None,
     replays_persisted_history: bool = False,
     messages: list[Message] | None = None,
+    post_response_compaction_checks: list[PostResponseCompactionCheck] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         prepared_prompt=final_prompt,
@@ -84,6 +115,7 @@ def _prepared_team_execution_context(
         unseen_event_ids=[],
         replays_persisted_history=replays_persisted_history,
         compaction_outcomes=[],
+        post_response_compaction_checks=post_response_compaction_checks or [],
     )
 
 
@@ -703,6 +735,37 @@ class TestChatCompletions:
         assert data["choices"][0]["finish_reason"] == "stop"
         assert data["usage"]["prompt_tokens"] == 0
 
+    def test_non_stream_completion_runs_post_response_compaction_checks(self, app_client: TestClient) -> None:
+        """OpenAI-compatible non-streaming replies should compact after the run is persisted."""
+        check = _make_post_response_compaction_check()
+
+        async def fake_ai_response(**kwargs: object) -> str:
+            collector = kwargs.get("post_response_compaction_checks_collector")
+            if isinstance(collector, list):
+                collector.append(check)
+            return "Response"
+
+        with (
+            patch("mindroom.api.openai_compat.ai_response", side_effect=fake_ai_response),
+            patch(
+                "mindroom.api.openai_compat.run_post_response_compaction_check",
+                new_callable=AsyncMock,
+                create=True,
+            ) as mock_compact,
+        ):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 200
+        mock_compact.assert_awaited_once()
+        assert mock_compact.await_args.kwargs["check"] is check
+        assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
+
     def test_does_not_pass_include_default_tools_flag(self, app_client: TestClient) -> None:
         """Default tool behavior is now resolved from agent config, not a runtime flag."""
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
@@ -1200,6 +1263,41 @@ class TestStreamingCompletion:
 
         # [DONE] terminator
         assert lines[4] == "data: [DONE]"
+
+    def test_streaming_completion_runs_post_response_compaction_checks(self, app_client: TestClient) -> None:
+        """OpenAI-compatible streaming replies should compact after the stream completes."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        check = _make_post_response_compaction_check()
+
+        async def mock_stream(**kwargs: object) -> AsyncIterator[RunContentEvent]:
+            collector = kwargs.get("post_response_compaction_checks_collector")
+            if isinstance(collector, list):
+                collector.append(check)
+            yield RunContentEvent(content="ok")
+
+        with (
+            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
+            patch(
+                "mindroom.api.openai_compat.run_post_response_compaction_check",
+                new_callable=AsyncMock,
+                create=True,
+            ) as mock_compact,
+        ):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.text.strip().endswith("data: [DONE]")
+        mock_compact.assert_awaited_once()
+        assert mock_compact.await_args.kwargs["check"] is check
+        assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
 
     def test_streaming_passes_include_interactive_questions_false(self, app_client: TestClient) -> None:
         """Streaming disables interactive question prompting for OpenAI compatibility."""
@@ -2276,6 +2374,49 @@ class TestTeamCompletion:
         run_input = mock_team.arun.call_args.args[0]
         assert run_input == "Build a feature"
 
+    def test_team_non_streaming_runs_post_response_compaction_checks(self, team_app_client: TestClient) -> None:
+        """OpenAI-compatible non-streaming team replies should compact after completion."""
+        from agno.run.team import TeamRunOutput  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        check = _make_post_response_compaction_check()
+        mock_team = _make_test_team()
+        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team consensus result"))
+        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+            patch(
+                "mindroom.api.openai_compat.run_post_response_compaction_check",
+                new_callable=AsyncMock,
+                create=True,
+            ) as mock_compact,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="Build a feature",
+                post_response_compaction_checks=[check],
+            )
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build a feature"}],
+                },
+            )
+
+        assert response.status_code == 200
+        mock_compact.assert_awaited_once()
+        assert mock_compact.await_args.kwargs["check"] is check
+        assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
+
     def test_team_non_streaming_unready_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
         """Non-streaming team completions should prepend the degraded knowledge notice."""
         from agno.run.team import TeamRunOutput  # noqa: PLC0415
@@ -2500,6 +2641,55 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["team"] is mock_team
         run_input = mock_team.arun.call_args.args[0]
         assert run_input == "Build it"
+
+    def test_team_streaming_runs_post_response_compaction_checks(self, team_app_client: TestClient) -> None:
+        """OpenAI-compatible streaming team replies should compact after the stream completes."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        check = _make_post_response_compaction_check()
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="ok")
+
+        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+            patch(
+                "mindroom.api.openai_compat.run_post_response_compaction_check",
+                new_callable=AsyncMock,
+                create=True,
+            ) as mock_compact,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="Build it",
+                post_response_compaction_checks=[check],
+            )
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.text.strip().endswith("data: [DONE]")
+        mock_compact.assert_awaited_once()
+        assert mock_compact.await_args.kwargs["check"] is check
+        assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
 
     def test_team_streaming_config_mismatch_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
         """Streaming team completions should prepend the stale-knowledge notice."""
