@@ -823,6 +823,7 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
     assert sender.await_args.args[:2] == ("!room:localhost", "$thread")
     assert sender.await_args.args[2]["msgtype"] == "io.mindroom.tool_approval"
     assert sender.await_args.args[2]["status"] == "pending"
+    assert sender.await_args.args[2]["approver_user_id"] == "@user:localhost"
 
     resolved = await approval_store.approve(pending.id, resolved_by="@user:localhost")
     decision = await task
@@ -832,6 +833,7 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
     assert decision.resolved_by == "@user:localhost"
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
     assert editor.await_args.args[2]["status"] == "approved"
+    assert editor.await_args.args[2]["approver_user_id"] == "@user:localhost"
     assert editor.await_args.args[2]["thread_id"] == "$thread"
     assert approval_store.list_pending() == []
 

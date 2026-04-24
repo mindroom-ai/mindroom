@@ -1630,6 +1630,7 @@ class ApprovalManager:
             "agent_name": pending.agent_name,
             "status": pending.status,
             "approval_id": pending.id,
+            "approver_user_id": pending.approver_user_id,
             "requested_at": pending.requested_at.isoformat(),
             "expires_at": pending.expires_at.isoformat(),
             "thread_id": pending.thread_id,
