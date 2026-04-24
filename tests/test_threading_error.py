@@ -58,6 +58,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
+from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
@@ -1430,6 +1431,26 @@ class TestThreadingBehavior:
 
         # No cleanup needed since we're using mocks
 
+    @staticmethod
+    def _sync_response(joined_rooms: object) -> MagicMock:
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock()
+        sync_response.rooms.join = joined_rooms
+        return sync_response
+
+    async def _run_sync_response_without_startup_side_effects(
+        self,
+        bot: AgentBot,
+        sync_response: nio.SyncResponse,
+    ) -> None:
+        with (
+            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+            patch.object(bot, "_maybe_start_startup_thread_prewarm"),
+            patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+        ):
+            await bot._on_sync_response(sync_response)
+
     @pytest.mark.asyncio
     async def test_start_and_stop_manage_persistent_event_cache(self, bot: AgentBot) -> None:
         """Startup and stop should leave injected runtime support owned by its external lifecycle."""
@@ -1658,50 +1679,131 @@ class TestThreadingBehavior:
         assert cached_event["content"]["body"] == "Thread reply"
 
     @pytest.mark.asyncio
-    async def test_limited_first_sync_rejects_restored_thread_cache_trust(self, bot: AgentBot) -> None:
-        """Limited restored-token catch-up must not permit pre-runtime thread snapshots."""
+    async def test_first_sync_cache_task_cancelled_does_not_trust_cache(self, bot: AgentBot) -> None:
+        """Cancelled first-sync cache writes must fail closed for restored tokens."""
         bot._runtime_view.mark_runtime_started(restored_sync_token=True)
-        bot.client.next_batch = "s_after_limited"
-        sync_response = MagicMock()
-        sync_response.__class__ = nio.SyncResponse
-        sync_response.rooms = MagicMock()
-        sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True)),
-        }
+        bot.client.next_batch = "s_after_cancelled"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_cancelled")
+        cache_task = asyncio.create_task(asyncio.sleep(60))
+        cache_task.cancel()
+        await asyncio.gather(cache_task, return_exceptions=True)
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=False)),
+            },
+        )
 
-        with (
-            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-            patch.object(bot, "_maybe_start_startup_thread_prewarm"),
-            patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
-        ):
-            await bot._on_sync_response(sync_response)
+        with patch.object(bot._conversation_cache, "cache_sync_timeline", MagicMock(return_value=[cache_task])):
+            await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
         assert bot._first_sync_done is True
         assert bot._runtime_view.restored_sync_token is False
         assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
+    async def test_first_sync_cache_error_skips_token_persist_and_clears_saved_token(self, bot: AgentBot) -> None:
+        """Failed first-sync cache writes must not advance a restored saved token."""
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_cache_error"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_cache_error")
+
+        async def fail_cache_write() -> None:
+            msg = "cache boom"
+            raise RuntimeError(msg)
+
+        cache_task = asyncio.create_task(fail_cache_write())
+        await asyncio.sleep(0)
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=False)),
+            },
+        )
+
+        with patch.object(bot._conversation_cache, "cache_sync_timeline", MagicMock(return_value=[cache_task])):
+            await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert bot._first_sync_done is True
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
+    async def test_limited_first_sync_skips_token_persist_and_clears_saved_token(self, bot: AgentBot) -> None:
+        """Limited restored-token catch-up must not persist the advanced token."""
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_limited"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_limited")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True)),
+            },
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert bot._first_sync_done is True
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
+    async def test_empty_joined_rooms_first_sync_does_not_trust_cache(self, bot: AgentBot) -> None:
+        """Empty restored-token joined-room data is indeterminate, not safe catch-up proof."""
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_empty"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_empty")
+        sync_response = self._sync_response({})
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert bot._first_sync_done is True
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_joined_rooms_first_sync_does_not_trust_cache(self, bot: AgentBot) -> None:
+        """Malformed restored-token joined-room data should fail closed."""
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_invalid"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_invalid")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=None)),
+            },
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert bot._first_sync_done is True
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
 
     @pytest.mark.asyncio
     async def test_complete_first_sync_trusts_restored_thread_cache(self, bot: AgentBot) -> None:
         """A non-limited restored-token catch-up may reuse pre-runtime thread snapshots."""
         bot._runtime_view.mark_runtime_started(restored_sync_token=True)
         bot.client.next_batch = "s_after_complete"
-        sync_response = MagicMock()
-        sync_response.__class__ = nio.SyncResponse
-        sync_response.rooms = MagicMock()
-        sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=False)),
-        }
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_complete")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=False)),
+            },
+        )
 
-        with (
-            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-            patch.object(bot, "_maybe_start_startup_thread_prewarm"),
-            patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
-        ):
-            await bot._on_sync_response(sync_response)
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
         assert bot._first_sync_done is True
         assert bot._runtime_view.restored_sync_token is True
         assert bot._runtime_view.pre_runtime_thread_cache_trusted is True
+        assert load_sync_token(bot.storage_path, bot.agent_name) == "s_after_complete"
 
     @pytest.mark.asyncio
     async def test_sync_error_keeps_watchdog_clock_on_latest_activity(self, bot: AgentBot) -> None:

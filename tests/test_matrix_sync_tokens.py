@@ -13,7 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
+from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -84,6 +84,23 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
     assert load_sync_token(tmp_path, "code") == "s12345"
 
 
+def test_clear_sync_token_removes_saved_token(tmp_path: Path) -> None:
+    """Clearing should remove an existing persisted token."""
+    save_sync_token(tmp_path, "code", "s12345")
+
+    clear_sync_token(tmp_path, "code")
+
+    assert load_sync_token(tmp_path, "code") is None
+    assert not _token_path(tmp_path).exists()
+
+
+def test_clear_sync_token_is_idempotent(tmp_path: Path) -> None:
+    """Clearing a missing token should be a no-op."""
+    clear_sync_token(tmp_path, "code")
+
+    assert load_sync_token(tmp_path, "code") is None
+
+
 @pytest.mark.asyncio
 async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
     """Startup should hydrate the nio client from the previously saved token."""
@@ -118,6 +135,25 @@ def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
     bot._restore_saved_sync_token()
 
     assert bot.client.next_batch is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Path) -> None:
+    """Rejected first-sync saved tokens should be removed before nio retries."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_rejected"
+    bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+    save_sync_token(tmp_path, bot.agent_name, "s_rejected")
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    await bot._on_sync_error(sync_error)
+
+    assert bot.client.next_batch is None
+    assert load_sync_token(tmp_path, bot.agent_name) is None
+    assert bot._runtime_view.restored_sync_token is False
+    assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
 
 
 @pytest.mark.asyncio

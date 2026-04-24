@@ -20,6 +20,12 @@ def save_sync_token(storage_path: Path, agent_name: str, token: str) -> None:
     token_path.write_text(token, encoding="utf-8")
 
 
+def clear_sync_token(storage_path: Path, agent_name: str) -> None:
+    """Remove one persisted sync token when present."""
+    token_path = _sync_token_path(storage_path, agent_name)
+    token_path.unlink(missing_ok=True)
+
+
 def load_sync_token(storage_path: Path, agent_name: str) -> str | None:
     """Load one persisted sync token, or ``None`` on first run."""
     token_path = _sync_token_path(storage_path, agent_name)
