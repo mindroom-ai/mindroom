@@ -21,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.runtime import (
+    EntityStartResults,
     MatrixSyncStalledError,
     _SyncIteration,
     cancel_sync_task,
@@ -701,6 +702,72 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         assert len(orchestrator._sync_tasks) == 2
         assert "test_agent" in orchestrator._sync_tasks
         assert "router" in orchestrator._sync_tasks
+
+
+@pytest.mark.asyncio
+async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_exits(tmp_path: Path) -> None:
+    """A hot-reload restart of the first sync task generation must not end the service."""
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+
+    config = MagicMock(spec=Config)
+    config.agents = {"general": MagicMock()}
+    config.teams = {}
+    config.mcp_servers = {}
+    config.cache = MagicMock()
+    config.cache.resolve_db_path.return_value = tmp_path / "event_cache.db"
+    orchestrator.config = config
+
+    router_bot = AsyncMock()
+    router_bot.agent_name = "router"
+    router_bot.running = True
+    router_bot.stop = AsyncMock()
+
+    general_bot = AsyncMock()
+    general_bot.agent_name = "general"
+    general_bot.running = True
+    general_bot.stop = AsyncMock()
+
+    orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
+
+    async def completed_sync_supervisor() -> None:
+        return None
+
+    def start_completed_sync_task(entity_name: str, _bot: object) -> None:
+        orchestrator._sync_tasks[entity_name] = asyncio.create_task(completed_sync_supervisor())
+
+    with (
+        patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
+        patch.object(orchestrator, "_start_router_bot", new=AsyncMock(return_value=router_bot)),
+        patch.object(
+            orchestrator,
+            "_start_entities_once",
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
+        ),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+        patch.object(orchestrator, "_cleanup_stale_streams_after_restart", new=AsyncMock(return_value=[])),
+        patch.object(orchestrator, "_auto_resume_after_restart", new=AsyncMock()),
+        patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+        patch.object(orchestrator, "_start_sync_task", side_effect=start_completed_sync_task),
+    ):
+        runtime_task = asyncio.create_task(orchestrator._start_runtime())
+        try:
+            for _ in range(50):
+                if set(orchestrator._sync_tasks) == {"router", "general"}:
+                    break
+                await asyncio.sleep(0.01)
+
+            assert set(orchestrator._sync_tasks) == {"router", "general"}
+            await asyncio.sleep(0)
+            assert not runtime_task.done()
+
+            await orchestrator.stop()
+            await asyncio.wait_for(runtime_task, timeout=1.0)
+        finally:
+            if not runtime_task.done():
+                runtime_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await runtime_task
 
 
 @pytest.mark.asyncio

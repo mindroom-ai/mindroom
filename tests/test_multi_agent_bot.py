@@ -7,7 +7,7 @@ import itertools
 import os
 import signal
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import SimpleNamespace
@@ -220,6 +220,26 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> st
     if isinstance(outcome, str) or outcome is None:
         return outcome
     return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
+
+
+async def _run_orchestrator_start_until_ready(orchestrator: MultiAgentOrchestrator) -> None:
+    """Run start() until readiness, then explicitly shut the runtime down."""
+    ready = asyncio.Event()
+
+    def mark_ready() -> None:
+        ready.set()
+
+    with patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready):
+        runtime_task = asyncio.create_task(orchestrator.start())
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=1.0)
+            await orchestrator.stop()
+            await asyncio.wait_for(runtime_task, timeout=1.0)
+        finally:
+            if not runtime_task.done():
+                runtime_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await runtime_task
 
 
 def _make_matrix_client_mock() -> AsyncMock:
@@ -10448,6 +10468,7 @@ class TestMultiAgentOrchestrator:
         bot = MagicMock()
         bot.agent_name = "router"
         bot.try_start = AsyncMock(return_value=True)
+        bot.stop = AsyncMock()
         orchestrator.agent_bots = {"router": bot}
 
         call_order: list[str] = []
@@ -10468,7 +10489,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         ):
-            await orchestrator.start()
+            await _run_orchestrator_start_until_ready(orchestrator)
 
         assert call_order == ["wait_for_homeserver", "setup_rooms", "schedule_knowledge"]
         bot.try_start.assert_awaited_once()
@@ -10488,6 +10509,7 @@ class TestMultiAgentOrchestrator:
             bot = MagicMock()
             bot.agent_name = "router"
             bot.try_start = AsyncMock(return_value=True)
+            bot.stop = AsyncMock()
             orchestrator.agent_bots = {"router": bot}
 
         with (
@@ -10498,7 +10520,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         ):
-            await orchestrator.start()
+            await _run_orchestrator_start_until_ready(orchestrator)
 
         assert call_order[:2] == ["wait_for_homeserver", "initialize"]
 
@@ -10713,10 +10735,12 @@ class TestMultiAgentOrchestrator:
         router_bot = MagicMock()
         router_bot.agent_name = "router"
         router_bot.try_start = AsyncMock(return_value=True)
+        router_bot.stop = AsyncMock()
 
         failing_bot = MagicMock()
         failing_bot.agent_name = "general"
         failing_bot.try_start = AsyncMock(return_value=False)
+        failing_bot.stop = AsyncMock()
 
         orchestrator.agent_bots = {"router": router_bot, "general": failing_bot}
 
@@ -10728,7 +10752,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         ):
-            await orchestrator.start()
+            await _run_orchestrator_start_until_ready(orchestrator)
 
         assert "general" in orchestrator.agent_bots
         mock_schedule_retry.assert_awaited_once_with("general")
@@ -10742,10 +10766,12 @@ class TestMultiAgentOrchestrator:
         router_bot = MagicMock()
         router_bot.agent_name = "router"
         router_bot.try_start = AsyncMock(return_value=True)
+        router_bot.stop = AsyncMock()
 
         failing_bot = MagicMock()
         failing_bot.agent_name = "general"
         failing_bot.try_start = AsyncMock(side_effect=PermanentMatrixStartupError("boom"))
+        failing_bot.stop = AsyncMock()
 
         orchestrator.agent_bots = {"router": router_bot, "general": failing_bot}
 
@@ -10757,7 +10783,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         ):
-            await orchestrator.start()
+            await _run_orchestrator_start_until_ready(orchestrator)
 
         assert "general" in orchestrator.agent_bots
         mock_schedule_retry.assert_not_awaited()

@@ -233,6 +233,7 @@ class MultiAgentOrchestrator:
     _plugin_watch_state_revision: int = field(default=0, init=False)
     _knowledge_refresh_owner: OrchestratorKnowledgeRefreshOwner = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
+    _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -284,6 +285,12 @@ class MultiAgentOrchestrator:
         )
         self._memory_auto_flush_worker = worker
         self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
+
+    def _reset_runtime_shutdown_event(self) -> asyncio.Event:
+        """Create the shutdown event for the current orchestrator run."""
+        shutdown_event = asyncio.Event()
+        self._runtime_shutdown_event = shutdown_event
+        return shutdown_event
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
@@ -1065,6 +1072,7 @@ class MultiAgentOrchestrator:
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
+        runtime_shutdown_event = self._reset_runtime_shutdown_event()
         await wait_for_matrix_homeserver(runtime_paths=self.runtime_paths)
         if not self.agent_bots:
             await self.initialize()
@@ -1110,8 +1118,10 @@ class MultiAgentOrchestrator:
             await self._schedule_bot_start_retry(entity_name)
 
         set_runtime_ready()
-        # Run all sync tasks until shutdown.
-        await asyncio.gather(*tuple(self._sync_tasks.values()))
+        # Stay alive until explicit shutdown. Hot reload replaces sync tasks in
+        # self._sync_tasks, so awaiting the initial task generation would let a
+        # config-triggered restart look like normal orchestrator completion.
+        await runtime_shutdown_event.wait()
 
     async def _load_initial_config(self, new_config: Config, hook_registry: HookRegistry) -> bool:
         """Handle config loading before the runtime has an active config."""
@@ -1624,6 +1634,8 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+        if self._runtime_shutdown_event is not None:
+            self._runtime_shutdown_event.set()
         await self._cancel_config_reload_task()
         await self._stop_memory_auto_flush_worker()
         await self._cancel_knowledge_refresh_task()
