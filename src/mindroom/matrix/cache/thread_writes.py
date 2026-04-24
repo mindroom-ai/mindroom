@@ -14,6 +14,7 @@ from mindroom.matrix.cache.event_cache_events import (
     normalize_nio_event_for_cache,
 )
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
     MutationThreadImpact,
@@ -917,3 +918,84 @@ class ThreadSyncWritePolicy:
                 ),
             )
         return tasks
+
+    @staticmethod
+    def _limited_sync_timeline_room_ids(
+        response: nio.SyncResponse,
+    ) -> tuple[tuple[str, ...], tuple[BaseException, ...]]:
+        """Return limited joined-room IDs or validation errors for one sync response."""
+        try:
+            joined_rooms = response.rooms.join
+        except AttributeError as exc:
+            return (), (exc,)
+        if not isinstance(joined_rooms, dict):
+            return (), (TypeError("sync response joined rooms must be a dict"),)
+
+        limited_room_ids: list[str] = []
+        for room_id, room_info in joined_rooms.items():
+            if not isinstance(room_id, str) or room_info is None:
+                return (), (TypeError("sync response contains an invalid joined room"),)
+            try:
+                timeline = room_info.timeline
+                limited = False if timeline is None else timeline.limited
+                events = [] if timeline is None else timeline.events
+            except AttributeError as exc:
+                return (), (exc,)
+            if not isinstance(limited, bool) or not isinstance(events, list):
+                return (), (TypeError("sync response contains an invalid joined-room timeline"),)
+            if limited:
+                limited_room_ids.append(room_id)
+        return tuple(limited_room_ids), ()
+
+    @staticmethod
+    def _cache_task_errors(results: list[object | BaseException]) -> tuple[BaseException, ...]:
+        """Return task outcomes that prevent cache certification."""
+        errors: list[BaseException] = []
+        current_task = asyncio.current_task()
+        for result in results:
+            if isinstance(result, (KeyboardInterrupt, SystemExit)):
+                raise result
+            if isinstance(result, asyncio.CancelledError):
+                if current_task is not None and current_task.cancelling():
+                    raise result
+                errors.append(result)
+                continue
+            if isinstance(result, BaseException):
+                errors.append(result)
+        return tuple(errors)
+
+    async def cache_sync_timeline_for_certification(
+        self,
+        response: nio.SyncResponse,
+    ) -> SyncCacheWriteResult:
+        """Persist sync timeline data and report whether it certifies the sync token."""
+        if not self._cache_ops.cache_runtime_available():
+            return SyncCacheWriteResult(complete=False)
+
+        limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
+        if validation_errors:
+            return SyncCacheWriteResult(complete=False, errors=validation_errors)
+
+        try:
+            tasks = self.cache_sync_timeline(response, raise_on_cache_write_failure=True)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return SyncCacheWriteResult(
+                complete=False,
+                limited_room_ids=limited_room_ids,
+                errors=(exc,),
+            )
+
+        results: list[object | BaseException] = []
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        errors = self._cache_task_errors(results)
+        complete = self._cache_ops.cache_runtime_available() and not errors and not limited_room_ids
+        return SyncCacheWriteResult(
+            complete=complete,
+            limited_room_ids=limited_room_ids,
+            errors=errors,
+        )

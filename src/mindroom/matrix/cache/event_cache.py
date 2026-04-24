@@ -232,7 +232,6 @@ class _EventCacheRuntime:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
         self._disabled_reason: str | None = None
-        self._guarded_thread_write_valid_after = 0.0
         self._db_lock = asyncio.Lock()
         self._room_locks: OrderedDict[str, _RoomLockEntry] = OrderedDict()
 
@@ -271,22 +270,6 @@ class _EventCacheRuntime:
             db_path=str(self._db_path),
             reason=reason,
         )
-
-    def reject_guarded_thread_writes_started_before(self, boundary: float, *, reason: str) -> None:
-        """Reject guarded thread replacements whose fetch began before a runtime boundary."""
-        if boundary <= self._guarded_thread_write_valid_after:
-            return
-        self._guarded_thread_write_valid_after = boundary
-        logger.warning(
-            "Rejecting older guarded Matrix thread-cache writes",
-            db_path=str(self._db_path),
-            boundary=boundary,
-            reason=reason,
-        )
-
-    def guarded_thread_write_rejected(self, fetch_started_at: float) -> bool:
-        """Return whether one guarded thread replacement started before the safe boundary."""
-        return fetch_started_at < self._guarded_thread_write_valid_after
 
     async def initialize(self) -> None:
         """Open the SQLite database and create the cache schema."""
@@ -487,9 +470,6 @@ class ConversationEventCache(Protocol):
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
 
-    def reject_guarded_thread_writes_started_before(self, boundary: float, *, reason: str) -> None:
-        """Reject guarded thread replacements whose fetch began before a runtime boundary."""
-
 
 class _EventCache:
     """SQLite-backed ConversationEventCache implementation."""
@@ -519,10 +499,6 @@ class _EventCache:
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
         self._runtime.disable(reason)
-
-    def reject_guarded_thread_writes_started_before(self, boundary: float, *, reason: str) -> None:
-        """Reject guarded thread replacements whose fetch began before a runtime boundary."""
-        self._runtime.reject_guarded_thread_writes_started_before(boundary, reason=reason)
 
     async def close(self) -> None:
         """Close the SQLite connection when the cache is no longer needed."""
@@ -733,13 +709,9 @@ class _EventCache:
         validated_at: float | None = None,
     ) -> bool:
         """Replace one cached thread snapshot only when nothing newer touched it after fetch start."""
-        if self._runtime.guarded_thread_write_rejected(fetch_started_at):
-            return False
         replacement_validated_at = fetch_started_at if validated_at is None else min(validated_at, fetch_started_at)
 
         async def replace_if_still_safe(db: aiosqlite.Connection) -> bool:
-            if self._runtime.guarded_thread_write_rejected(fetch_started_at):
-                return False
             return await event_cache_threads.replace_thread_locked_if_not_newer(
                 db,
                 room_id=room_id,

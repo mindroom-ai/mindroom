@@ -1,26 +1,38 @@
-"""Persist Matrix sync tokens across bot restarts."""
+"""Persist Matrix sync-token checkpoints across bot restarts."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindroom.matrix.sync_certification import SyncCheckpoint
+
 if TYPE_CHECKING:
     from pathlib import Path
 
-_CERTIFICATION_MARKER_VERSION = "mindroom-sync-token-cache-certified-v2"
+_SYNC_TOKEN_RECORD_VERSION = "mindroom-sync-token-v1"  # noqa: S105
 
 
 @dataclass(frozen=True)
 class SyncTokenRecord:
-    """Loaded sync token plus whether it was saved after cache certification."""
+    """Loaded sync token plus optional durable cache checkpoint."""
 
     token: str
-    certified: bool
-    thread_cache_valid_after: float | None = None
+    checkpoint: SyncCheckpoint | None = None
+
+    @property
+    def certified(self) -> bool:
+        """Return whether this token carries cache-trust certification."""
+        return self.checkpoint is not None
+
+    @property
+    def thread_cache_valid_after(self) -> float | None:
+        """Return the certified thread-cache boundary when present."""
+        if self.checkpoint is None:
+            return None
+        return self.checkpoint.thread_cache_valid_after
 
 
 def _sync_token_path(storage_path: Path, agent_name: str) -> Path:
@@ -29,27 +41,12 @@ def _sync_token_path(storage_path: Path, agent_name: str) -> Path:
 
 
 def _sync_token_certification_path(storage_path: Path, agent_name: str) -> Path:
-    """Return the marker path proving one token came from certified persistence."""
+    """Return the legacy marker path removed during cleanup."""
     return storage_path / "sync_tokens" / f"{agent_name}.token.certified"
 
 
-def _sync_token_certification_digest(token: str) -> str:
-    """Return the stable certification digest for a token value."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def _sync_token_certification_contents(token: str, *, thread_cache_valid_after: float) -> str:
-    """Return the marker contents for one certified token."""
-    payload = {
-        "thread_cache_valid_after": thread_cache_valid_after,
-        "token_sha256": _sync_token_certification_digest(token),
-        "version": _CERTIFICATION_MARKER_VERSION,
-    }
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
-
-
 def _normalized_thread_cache_valid_after(value: object) -> float | None:
-    """Return a safe cache-validity boundary parsed from certification metadata."""
+    """Return a safe cache-validity boundary parsed from checkpoint metadata."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     boundary = float(value)
@@ -58,19 +55,38 @@ def _normalized_thread_cache_valid_after(value: object) -> float | None:
     return boundary
 
 
-def _sync_token_certification_valid_after(marker_text: str, token: str) -> float | None:
-    """Return the cache boundary if a marker certifies the loaded token value."""
+def _normalized_token(value: object) -> str | None:
+    """Return a safe sync token string parsed from disk."""
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    return token or None
+
+
+def _record_from_json(text: str) -> SyncTokenRecord | None:
+    """Return a token record from the JSON checkpoint format."""
     try:
-        payload = json.loads(marker_text)
+        payload = json.loads(text)
     except json.JSONDecodeError:
         return None
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or payload.get("version") != _SYNC_TOKEN_RECORD_VERSION:
         return None
-    if payload.get("version") != _CERTIFICATION_MARKER_VERSION:
+    token = _normalized_token(payload.get("token"))
+    valid_after = _normalized_thread_cache_valid_after(payload.get("thread_cache_valid_after"))
+    if token is None or valid_after is None:
         return None
-    if payload.get("token_sha256") != _sync_token_certification_digest(token):
-        return None
-    return _normalized_thread_cache_valid_after(payload.get("thread_cache_valid_after"))
+    checkpoint = SyncCheckpoint(token=token, thread_cache_valid_after=valid_after)
+    return SyncTokenRecord(token=token, checkpoint=checkpoint)
+
+
+def _record_json(checkpoint: SyncCheckpoint) -> str:
+    """Return the durable JSON token record for one certified checkpoint."""
+    payload = {
+        "thread_cache_valid_after": checkpoint.thread_cache_valid_after,
+        "token": checkpoint.token,
+        "version": _SYNC_TOKEN_RECORD_VERSION,
+    }
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
 
 
 def save_sync_token(
@@ -80,19 +96,20 @@ def save_sync_token(
     *,
     thread_cache_valid_after: float,
 ) -> None:
-    """Persist one sync token."""
+    """Persist one cache-certified sync token checkpoint."""
     token_path = _sync_token_path(storage_path, agent_name)
-    certification_path = _sync_token_certification_path(storage_path, agent_name)
+    token_value = _normalized_token(token)
+    if token_value is None:
+        msg = "Certified sync tokens require a non-empty token"
+        raise ValueError(msg)
     valid_after = _normalized_thread_cache_valid_after(thread_cache_valid_after)
     if valid_after is None:
         msg = "Certified sync tokens require a finite thread-cache valid-after boundary"
         raise ValueError(msg)
+    checkpoint = SyncCheckpoint(token=token_value, thread_cache_valid_after=valid_after)
     token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(token, encoding="utf-8")
-    certification_path.write_text(
-        _sync_token_certification_contents(token, thread_cache_valid_after=valid_after),
-        encoding="utf-8",
-    )
+    token_path.write_text(_record_json(checkpoint), encoding="utf-8")
+    _sync_token_certification_path(storage_path, agent_name).unlink(missing_ok=True)
 
 
 def clear_sync_token(storage_path: Path, agent_name: str) -> None:
@@ -116,20 +133,17 @@ def load_sync_token_record(storage_path: Path, agent_name: str) -> SyncTokenReco
     token_path = _sync_token_path(storage_path, agent_name)
     if not token_path.is_file():
         return None
-    token = token_path.read_text(encoding="utf-8").strip()
-    if not token:
+    try:
+        token_text = token_path.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    if not token_text:
         return None
 
-    certification_path = _sync_token_certification_path(storage_path, agent_name)
-    thread_cache_valid_after: float | None = None
-    if certification_path.is_file():
-        try:
-            marker_text = certification_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            marker_text = ""
-        thread_cache_valid_after = _sync_token_certification_valid_after(marker_text, token)
-    return SyncTokenRecord(
-        token=token,
-        certified=thread_cache_valid_after is not None,
-        thread_cache_valid_after=thread_cache_valid_after,
-    )
+    if token_text.lstrip().startswith("{"):
+        return _record_from_json(token_text)
+
+    token = _normalized_token(token_text)
+    if token is None:
+        return None
+    return SyncTokenRecord(token=token)

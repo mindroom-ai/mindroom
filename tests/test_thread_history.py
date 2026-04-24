@@ -2171,8 +2171,6 @@ class TestThreadHistoryCache:
         client: nio.AsyncClient,
         event_cache: _EventCache,
         runtime_started_at: float,
-        restored_sync_token: bool,
-        first_sync_catchup_applied: bool,
         thread_cache_valid_after: float | None = None,
     ) -> tuple[MatrixConversationCache, _EventCacheWriteCoordinator]:
         runtime_paths = test_runtime_paths(tmp_path)
@@ -2191,9 +2189,9 @@ class TestThreadHistoryCache:
             event_cache_write_coordinator=coordinator,
         )
         runtime.runtime_started_at = runtime_started_at
-        runtime.restored_sync_token = restored_sync_token
-        runtime.sync_token_thread_cache_valid_after = thread_cache_valid_after if restored_sync_token else None
-        runtime.sync_catchup_applied_at = runtime_started_at if first_sync_catchup_applied else None
+        runtime.thread_cache_read_boundary = (
+            runtime_started_at if thread_cache_valid_after is None else thread_cache_valid_after
+        )
         return MatrixConversationCache(logger=MagicMock(), runtime=runtime), coordinator
 
     @staticmethod
@@ -2616,8 +2614,6 @@ class TestThreadHistoryCache:
             client=client,
             event_cache=cache,
             runtime_started_at=runtime_started_at,
-            restored_sync_token=True,
-            first_sync_catchup_applied=True,
             thread_cache_valid_after=thread_cache_valid_after,
         )
 
@@ -2636,16 +2632,9 @@ class TestThreadHistoryCache:
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("restored_sync_token", "first_sync_catchup_applied"),
-        [(False, False), (True, False)],
-        ids=["no_restored_token", "before_first_sync"],
-    )
     async def test_untrusted_restart_rejects_pre_runtime_thread_cache(
         self,
         tmp_path: Path,
-        restored_sync_token: bool,
-        first_sync_catchup_applied: bool,
     ) -> None:
         """Cold starts and pre-catch-up restarts must reject pre-runtime thread snapshots."""
         cache = _EventCache(tmp_path / "event_cache.db")
@@ -2686,8 +2675,6 @@ class TestThreadHistoryCache:
             client=client,
             event_cache=cache,
             runtime_started_at=runtime_started_at,
-            restored_sync_token=restored_sync_token,
-            first_sync_catchup_applied=first_sync_catchup_applied,
         )
 
         try:

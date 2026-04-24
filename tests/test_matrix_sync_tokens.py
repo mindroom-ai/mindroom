@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,6 +14,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
@@ -29,7 +30,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _THREAD_CACHE_VALID_AFTER = 1234.5
-_V1_CERTIFICATION_MARKER_VERSION = "mindroom-sync-token-cache-certified-v1"
 
 
 def _config(tmp_path: Path) -> Config:
@@ -93,7 +93,12 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
     )
 
     token_path = _token_path(tmp_path)
-    assert token_path.read_text(encoding="utf-8") == "s12345"
+    assert json.loads(token_path.read_text(encoding="utf-8")) == {
+        "thread_cache_valid_after": _THREAD_CACHE_VALID_AFTER,
+        "token": "s12345",
+        "version": "mindroom-sync-token-v1",
+    }
+    assert not _certification_path(tmp_path).exists()
     assert load_sync_token(tmp_path, "code") == "s12345"
     token_record = load_sync_token_record(tmp_path, "code")
     assert token_record is not None
@@ -108,11 +113,7 @@ def test_marker_without_thread_cache_boundary_is_not_certified(tmp_path: Path) -
     certification_path = _certification_path(tmp_path)
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(saved_batch, encoding="utf-8")
-    token_digest = hashlib.sha256(saved_batch.encode("utf-8")).hexdigest()
-    certification_path.write_text(
-        f"{_V1_CERTIFICATION_MARKER_VERSION}\n{token_digest}\n",
-        encoding="utf-8",
-    )
+    certification_path.write_text("legacy-marker\n", encoding="utf-8")
 
     token_record = load_sync_token_record(tmp_path, "code")
 
@@ -192,20 +193,20 @@ async def test_legacy_plaintext_sync_token_restores_without_cache_trust(tmp_path
         await bot.start()
 
     assert client.next_batch == "s_legacy"
-    assert bot._runtime_view.restored_sync_token is False
-    assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
-    assert bot._runtime_view.sync_token_persistence_suppressed is True
+    assert bot._sync_trust_state is SyncTrustState.COLD
+    assert bot._runtime_view.thread_cache_read_boundary == bot._runtime_view.runtime_started_at
 
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_after_legacy"
-    response.rooms = MagicMock(join={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=False))})
+    response.rooms = MagicMock(join={})
 
     await bot._on_sync_response(response)
 
     token_record = load_sync_token_record(tmp_path, bot.agent_name)
     assert token_record is not None
-    assert token_record.token == token_path.read_text(encoding="utf-8")
-    assert token_record.certified is False
+    assert token_record.token == "s_after_legacy"  # noqa: S105
+    assert token_record.certified is True
+    assert token_record.thread_cache_valid_after == bot._runtime_view.runtime_started_at
 
 
 def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
@@ -229,10 +230,8 @@ async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Pa
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_rejected"
-    bot._runtime_view.mark_runtime_started(
-        restored_sync_token=True,
-        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
-    )
+    bot._runtime_view.mark_runtime_started()
+    original_boundary = bot._runtime_view.thread_cache_read_boundary
     save_sync_token(
         tmp_path,
         bot.agent_name,
@@ -246,20 +245,17 @@ async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Pa
 
     assert bot.client.next_batch is None
     assert load_sync_token(tmp_path, bot.agent_name) is None
-    assert bot._runtime_view.restored_sync_token is False
-    assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._runtime_view.thread_cache_read_boundary >= original_boundary
 
 
 @pytest.mark.asyncio
-async def test_unknown_pos_restored_first_sync_suppresses_later_token_persistence(tmp_path: Path) -> None:
-    """A rejected restored token must not be replaced by a later same-runtime token."""
+async def test_unknown_pos_restored_first_sync_advances_boundary_before_later_checkpoint(tmp_path: Path) -> None:
+    """After M_UNKNOWN_POS, later tokens may save only with the advanced safe boundary."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_rejected"
-    bot._runtime_view.mark_runtime_started(
-        restored_sync_token=True,
-        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
-    )
+    bot._runtime_view.mark_runtime_started()
     save_sync_token(
         tmp_path,
         bot.agent_name,
@@ -272,13 +268,15 @@ async def test_unknown_pos_restored_first_sync_suppresses_later_token_persistenc
     await bot._on_sync_error(sync_error)
 
     bot._first_sync_done = True
-    bot.client.next_batch = "s_later"
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_later"
     response.rooms = MagicMock(join={})
     await bot._on_sync_response(response)
 
-    assert load_sync_token(tmp_path, bot.agent_name) is None
+    token_record = load_sync_token_record(tmp_path, bot.agent_name)
+    assert token_record is not None
+    assert token_record.token == "s_later"  # noqa: S105
+    assert token_record.thread_cache_valid_after == bot._runtime_view.thread_cache_read_boundary
 
 
 @pytest.mark.asyncio
@@ -288,11 +286,7 @@ async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_pa
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_rejected_after_start"
     bot._first_sync_done = True
-    bot._runtime_view.mark_runtime_started(
-        restored_sync_token=True,
-        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
-    )
-    bot._runtime_view.mark_sync_catchup_applied()
+    bot._runtime_view.mark_runtime_started()
     save_sync_token(
         tmp_path,
         bot.agent_name,
@@ -306,18 +300,17 @@ async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_pa
 
     assert bot.client.next_batch is None
     assert load_sync_token(tmp_path, bot.agent_name) is None
-    assert bot._runtime_view.restored_sync_token is False
-    assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
 
 
 @pytest.mark.asyncio
-async def test_unknown_pos_non_restored_runtime_suppresses_later_token_persistence(tmp_path: Path) -> None:
-    """Any M_UNKNOWN_POS poisons later token saves, even without restored-token startup."""
+async def test_unknown_pos_non_restored_runtime_advances_later_checkpoint_boundary(tmp_path: Path) -> None:
+    """M_UNKNOWN_POS should fail closed, then allow later certified tokens with the new boundary."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_rejected_cold"
     bot._first_sync_done = True
-    bot._runtime_view.mark_runtime_started(restored_sync_token=False)
+    bot._runtime_view.mark_runtime_started()
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
@@ -329,8 +322,10 @@ async def test_unknown_pos_non_restored_runtime_suppresses_later_token_persisten
     response.rooms = MagicMock(join={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=False))})
     await bot._on_sync_response(response)
 
-    assert bot._runtime_view.sync_token_persistence_suppressed is True
-    assert load_sync_token(tmp_path, bot.agent_name) is None
+    token_record = load_sync_token_record(tmp_path, bot.agent_name)
+    assert token_record is not None
+    assert token_record.token == "s_later_after_unknown_pos"  # noqa: S105
+    assert token_record.thread_cache_valid_after == bot._runtime_view.thread_cache_read_boundary
 
 
 @pytest.mark.asyncio
@@ -349,7 +344,7 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
     assert load_sync_token(tmp_path, bot.agent_name) == "s_latest"
     token_record = load_sync_token_record(tmp_path, bot.agent_name)
     assert token_record is not None
-    assert token_record.thread_cache_valid_after == bot._runtime_view.runtime_started_at
+    assert token_record.thread_cache_valid_after == bot._runtime_view.thread_cache_read_boundary
 
 
 @pytest.mark.asyncio
@@ -358,9 +353,8 @@ async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Pat
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_shutdown"
-    response = MagicMock()
-    response.next_batch = "s_shutdown"
-    assert bot._certify_sync_response_token(response)
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_shutdown", bot._runtime_view.thread_cache_read_boundary)
     bot._coalescing_gate.drain_all = AsyncMock()
 
     await bot.prepare_for_sync_shutdown()
@@ -368,7 +362,7 @@ async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Pat
     assert load_sync_token(tmp_path, bot.agent_name) == "s_shutdown"
     token_record = load_sync_token_record(tmp_path, bot.agent_name)
     assert token_record is not None
-    assert token_record.thread_cache_valid_after == bot._runtime_view.runtime_started_at
+    assert token_record.thread_cache_valid_after == bot._runtime_view.thread_cache_read_boundary
 
 
 @pytest.mark.asyncio
@@ -383,11 +377,8 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
         "s_before_precallback",
         thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
     )
-    restored_sync_token = bot._restore_saved_sync_token()
-    bot._runtime_view.mark_runtime_started(
-        restored_sync_token=restored_sync_token,
-        thread_cache_valid_after=bot._certified_sync_token_thread_cache_valid_after,
-    )
+    bot._runtime_view.mark_runtime_started()
+    bot._restore_saved_sync_token()
 
     bot.client.next_batch = "s_after_precallback"
 

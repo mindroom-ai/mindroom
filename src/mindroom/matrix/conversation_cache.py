@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.matrix.sync_certification import SyncCacheWriteResult
 
 
 type ThreadReadResult = ThreadHistoryResult
@@ -410,11 +411,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     def _effective_thread_cache_runtime_started_at(self) -> float | None:
         """Return the active restart freshness boundary for durable thread-cache reads."""
-        if self.runtime.pre_runtime_thread_cache_trusted:
-            valid_after = self.runtime.pre_runtime_thread_cache_valid_after
-            if valid_after is not None:
-                return valid_after
-        return self.runtime.runtime_started_at
+        return self.runtime.thread_cache_read_boundary
 
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:
@@ -906,3 +903,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
             response,
             raise_on_cache_write_failure=raise_on_cache_write_failure,
         )
+
+    async def cache_sync_timeline_for_certification(
+        self,
+        response: nio.SyncResponse,
+    ) -> SyncCacheWriteResult:
+        """Durably persist sync timeline events and report cache-certification status."""
+        return await self._sync.cache_sync_timeline_for_certification(response)
