@@ -33,7 +33,6 @@ from mindroom.tool_system.runtime_context import (
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -52,7 +51,6 @@ class DelegateTools(Toolkit):
         config: Config,
         execution_identity: ToolExecutionIdentity | None = None,
         delegation_depth: int = 0,
-        refresh_owner: KnowledgeRefreshOwner | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = delegate_to
@@ -60,7 +58,6 @@ class DelegateTools(Toolkit):
         self._config = config
         self._execution_identity = execution_identity
         self._delegation_depth = delegation_depth
-        self._refresh_owner = refresh_owner
 
         super().__init__(
             name="delegate",
@@ -116,7 +113,6 @@ class DelegateTools(Toolkit):
                 self._runtime_paths,
                 request_knowledge_managers=request_knowledge_managers,
                 on_unavailable_bases=unavailable_bases.update,
-                refresh_owner=self._refresh_owner,
             )
             system_enrichment_items: tuple[EnrichmentItem, ...] = ()
             notice = format_knowledge_availability_notice(unavailable_bases)
@@ -162,7 +158,6 @@ class DelegateTools(Toolkit):
                     execution_identity=execution_identity,
                     delegation_depth=self._delegation_depth + 1,
                     system_enrichment_items=system_enrichment_items,
-                    refresh_owner=self._refresh_owner,
                 )
         except Exception as e:
             logger.exception(

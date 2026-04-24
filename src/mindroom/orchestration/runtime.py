@@ -13,9 +13,10 @@ import httpx
 
 from mindroom import constants
 from mindroom.cancellation import (
-    CancelSource,
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
+    CancelSource,
+    cancel_failure_reason,
     request_task_cancel,
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
@@ -46,6 +47,17 @@ STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
 _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
+
+__all__ = [
+    "SYNC_RESTART_CANCEL_MSG",
+    "USER_STOP_CANCEL_MSG",
+    "CancelSource",
+    "cancel_failure_reason",
+    "classify_cancel_source",
+    "is_sync_restart_cancel",
+    "matrix_sync_startup_timeout_seconds",
+    "request_task_cancel",
+]
 
 
 def classify_cancel_source(exc: asyncio.CancelledError) -> CancelSource:

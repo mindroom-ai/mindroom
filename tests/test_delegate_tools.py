@@ -286,27 +286,15 @@ class TestDelegateKnowledge:
 
     @pytest.mark.asyncio
     @patch("mindroom.agents.SqliteDb")
-    async def test_delegation_schedules_initial_load_for_unready_shared_base(
+    async def test_delegation_injects_notice_for_unready_shared_base(
         self,
         mock_storage: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """Delegation should trigger the shared-base initial load when the snapshot is still initializing."""
+        """Delegation should include the degraded knowledge notice when the snapshot is still initializing."""
         from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
 
         assert mock_storage is not None
-        scheduled_base_ids: list[str] = []
-
-        class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str) -> None:
-                scheduled_base_ids.append(base_id)
-
-            def is_refreshing(self, base_id: str) -> bool:
-                _ = base_id
-                return False
 
         def fake_get_knowledge_for_base(
             base_id: str,
@@ -341,7 +329,6 @@ class TestDelegateKnowledge:
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
             include_interactive_questions=False,
-            refresh_owner=_FakeRefreshOwner(),
         )
         delegate_tool = next(tool for tool in agent.tools if tool.name == "delegate")
 
@@ -355,12 +342,19 @@ class TestDelegateKnowledge:
                 "mindroom.custom_tools.delegate.ai_response",
                 new_callable=AsyncMock,
                 return_value="Found relevant docs",
-            ),
+            ) as mock_ai_response,
         ):
             result = await delegate_tool.delegate_task("researcher", "Find info about X")
 
         assert result == "Found relevant docs"
-        assert scheduled_base_ids == ["docs"]
+        ai_kwargs = mock_ai_response.await_args.kwargs
+        notice_items = ai_kwargs["system_enrichment_items"]
+        assert len(notice_items) == 1
+        assert notice_items[0].key == "knowledge_availability"
+        assert (
+            "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
+            in notice_items[0].text
+        )
 
     @pytest.mark.asyncio
     async def test_delegation_without_knowledge_passes_none(self, tmp_path: Path) -> None:

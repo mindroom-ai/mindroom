@@ -394,6 +394,7 @@ async def emit_final_response_transform(
             copy_on_write=True,
             preserve_failed_draft=False,
             continue_on_cancelled=True,
+            return_original_on_failure=True,
         ),
     )
 
@@ -428,6 +429,7 @@ async def _emit_serial_transform(
     copy_on_write: bool,
     preserve_failed_draft: bool,
     continue_on_cancelled: bool,
+    return_original_on_failure: bool = False,
 ) -> TransformDraft:
     current_draft = context.draft
     for hook in _eligible_hooks(registry, event_name, context):
@@ -445,7 +447,11 @@ async def _emit_serial_transform(
                 "Hook execution cancelled during best-effort response transform",
                 correlation_id=context.correlation_id,
             )
+            if return_original_on_failure:
+                return context.draft
             continue
+        if return_original_on_failure and not invocation.succeeded:
+            return context.draft
         current_draft = _next_transform_draft(
             current_draft,
             hook_context,

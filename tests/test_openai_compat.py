@@ -2283,19 +2283,6 @@ class TestTeamCompletion:
         from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
         from mindroom.team_exact_members import ResolvedExactTeamMembers  # noqa: PLC0415
 
-        scheduled_base_ids: list[str] = []
-
-        class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str) -> None:
-                scheduled_base_ids.append(base_id)
-
-            def is_refreshing(self, base_id: str) -> bool:
-                _ = base_id
-                return False
-
         mock_team = _make_test_team()
         mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team consensus result"))
         mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
@@ -2305,11 +2292,9 @@ class TestTeamCompletion:
             **kwargs: object,
         ) -> ResolvedExactTeamMembers:
             unavailable_bases = cast("dict[str, KnowledgeAvailability] | None", kwargs["unavailable_bases"])
-            refresh_owner = kwargs["refresh_owner"]
             assert unavailable_bases is not None
-            assert refresh_owner is team_app_client.app.state.knowledge_refresh_owner
+            assert "refresh_owner" not in kwargs
             unavailable_bases["docs"] = KnowledgeAvailability.INITIALIZING
-            refresh_owner.schedule_initial_load("docs")
             return ResolvedExactTeamMembers(
                 requested_agent_names=requested_agent_names,
                 agents=mock_agents,
@@ -2318,7 +2303,6 @@ class TestTeamCompletion:
                 failed_agent_names=[],
             )
 
-        team_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
         with (
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
@@ -2341,7 +2325,6 @@ class TestTeamCompletion:
             "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
             in mock_prepare.await_args.kwargs["prompt"]
         )
-        assert scheduled_base_ids == ["docs"]
 
     def test_team_non_streaming_formats_plain_run_output_fallback(self, team_app_client: TestClient) -> None:
         """Non-streaming team completions should format plain RunOutput fallbacks like the main runtime."""
@@ -2508,19 +2491,6 @@ class TestTeamCompletion:
         from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
         from mindroom.team_exact_members import ResolvedExactTeamMembers  # noqa: PLC0415
 
-        scheduled_base_ids: list[str] = []
-
-        class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str) -> None:
-                scheduled_base_ids.append(base_id)
-
-            def is_refreshing(self, base_id: str) -> bool:
-                _ = base_id
-                return False
-
         mock_team = _make_test_team()
         mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
 
@@ -2534,11 +2504,9 @@ class TestTeamCompletion:
             **kwargs: object,
         ) -> ResolvedExactTeamMembers:
             unavailable_bases = cast("dict[str, KnowledgeAvailability] | None", kwargs["unavailable_bases"])
-            refresh_owner = kwargs["refresh_owner"]
             assert unavailable_bases is not None
-            assert refresh_owner is team_app_client.app.state.knowledge_refresh_owner
+            assert "refresh_owner" not in kwargs
             unavailable_bases["docs"] = KnowledgeAvailability.CONFIG_MISMATCH
-            refresh_owner.schedule_refresh("docs")
             return ResolvedExactTeamMembers(
                 requested_agent_names=requested_agent_names,
                 agents=mock_agents,
@@ -2547,7 +2515,6 @@ class TestTeamCompletion:
                 failed_agent_names=[],
             )
 
-        team_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
         with (
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
@@ -2571,7 +2538,6 @@ class TestTeamCompletion:
             "Knowledge base `docs` is refreshing against newer config and may be stale this turn."
             in mock_prepare.await_args.kwargs["prompt"]
         )
-        assert scheduled_base_ids == ["refresh:docs"]
 
     def test_team_streaming_falls_back_to_final_team_run_output(self, team_app_client: TestClient) -> None:
         """Providers that yield a final TeamRunOutput in stream mode should still emit content."""
@@ -4081,19 +4047,6 @@ class TestKnowledgeIntegration:
         """Missing published knowledge should inject a system-style degraded hint."""
         from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
 
-        scheduled_base_ids: list[str] = []
-
-        class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str) -> None:
-                scheduled_base_ids.append(base_id)
-
-            def is_refreshing(self, base_id: str) -> bool:
-                _ = base_id
-                return False
-
         def fake_get_knowledge_for_base(
             base_id: str,
             *,
@@ -4107,7 +4060,6 @@ class TestKnowledgeIntegration:
             if on_availability is not None:
                 on_availability(KnowledgeAvailability.INITIALIZING)
 
-        knowledge_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
@@ -4128,7 +4080,6 @@ class TestKnowledgeIntegration:
             "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
             in mock_ai.call_args.kwargs["prompt"]
         )
-        assert scheduled_base_ids == ["docs"]
 
     def test_streaming_with_knowledge(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is passed through in streaming mode too."""

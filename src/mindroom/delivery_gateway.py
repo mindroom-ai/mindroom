@@ -34,7 +34,15 @@ from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_me
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
-from mindroom.streaming import StreamingResponse, build_cancelled_response_update, send_streaming_response
+from mindroom.streaming import (
+    SYNC_RESTART_CANCEL_MSG,
+    USER_STOP_CANCEL_MSG,
+    CancelSource,
+    StreamingResponse,
+    build_cancelled_response_update,
+    cancel_failure_reason,
+    send_streaming_response,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -277,25 +285,6 @@ class DeliveryGateway:
             raise RuntimeError(msg)
         return client
 
-    def _cancelled_note_update(
-        self,
-        *,
-        cancel_source: Literal["user_stop", "sync_restart", "interrupted"],
-    ) -> tuple[str, dict[str, str], str]:
-        """Return the terminal note body, content metadata, and failure reason."""
-        cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=cancel_source)
-        if cancel_source == "sync_restart":
-            failure_reason = "sync_restart_cancelled"
-        elif cancel_source == "user_stop":
-            failure_reason = "cancelled_by_user"
-        else:
-            failure_reason = "interrupted"
-        return (
-            cancelled_text,
-            {constants.STREAM_STATUS_KEY: stream_status},
-            failure_reason,
-        )
-
     def _current_stream_body(self, outcome: StreamTransportOutcome) -> str:
         """Return the current streamed body snapshot used for hook and outcome decisions."""
         return outcome.rendered_body or ""
@@ -309,13 +298,12 @@ class DeliveryGateway:
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
         """Normalize CancelledError values to the canonical cancellation reason strings."""
-        if not error.args:
-            return "interrupted"
-        if error.args[0] == "user_stop":
-            return "cancelled_by_user"
-        if error.args[0] == "sync_restart":
-            return "sync_restart_cancelled"
-        return "interrupted"
+        cancel_source: CancelSource = "interrupted"
+        if error.args and error.args[0] == USER_STOP_CANCEL_MSG:
+            cancel_source = "user_stop"
+        elif error.args and error.args[0] == SYNC_RESTART_CANCEL_MSG:
+            cancel_source = "sync_restart"
+        return cancel_failure_reason(cancel_source)
 
     async def _cleanup_completed_placeholder_only_stream(
         self,
@@ -739,7 +727,9 @@ class DeliveryGateway:
         request: CancelledVisibleNoteRequest,
     ) -> FinalDeliveryOutcome:
         """Edit the in-flight visible response into a terminal cancellation note."""
-        cancelled_text, extra_content, failure_reason = self._cancelled_note_update(cancel_source=request.cancel_source)
+        cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
+        extra_content = {constants.STREAM_STATUS_KEY: stream_status}
+        failure_reason = cancel_failure_reason(request.cancel_source)
         edited = await self.edit_text(
             EditTextRequest(
                 target=request.target,
@@ -1049,10 +1039,10 @@ class DeliveryGateway:
                     extra_content=request.extra_content,
                 )
 
-            if (
-                stream_outcome.canonical_final_body_candidate is not None
-                and stream_outcome.visible_body_state in {"none", "placeholder_only"}
-            ):
+            if stream_outcome.canonical_final_body_candidate is not None and stream_outcome.visible_body_state in {
+                "none",
+                "placeholder_only",
+            }:
                 existing_event_id = request.existing_event_id
                 existing_event_is_placeholder = request.existing_event_is_placeholder
                 if stream_outcome.visible_body_state == "placeholder_only":
@@ -1225,6 +1215,7 @@ class DeliveryGateway:
                 is_visible_response=True,
                 final_visible_body=streamed_text or interactive_response.formatted_text,
                 delivery_kind=request.initial_delivery_kind,
+                failure_reason=stream_outcome.failure_reason,
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
                 option_map=interactive_response.option_map,
@@ -1235,11 +1226,7 @@ class DeliveryGateway:
         except asyncio.CancelledError:
             visible_event_id = self._visible_stream_event_id(stream_outcome)
             event_id = visible_event_id
-            if (
-                event_id is None
-                and request.existing_event_id is not None
-                and not request.existing_event_is_placeholder
-            ):
+            if event_id is None and request.existing_event_id is not None and not request.existing_event_is_placeholder:
                 event_id = request.existing_event_id
             final_visible_body = self._current_stream_body(stream_outcome) if visible_event_id is not None else None
             return FinalDeliveryOutcome(
@@ -1258,11 +1245,7 @@ class DeliveryGateway:
             )
             visible_event_id = self._visible_stream_event_id(stream_outcome)
             event_id = visible_event_id
-            if (
-                event_id is None
-                and request.existing_event_id is not None
-                and not request.existing_event_is_placeholder
-            ):
+            if event_id is None and request.existing_event_id is not None and not request.existing_event_is_placeholder:
                 event_id = request.existing_event_id
             final_visible_body = self._current_stream_body(stream_outcome) if visible_event_id is not None else None
             return FinalDeliveryOutcome(

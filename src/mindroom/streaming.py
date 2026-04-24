@@ -24,7 +24,13 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.runtime import classify_cancel_source
+from mindroom.orchestration.runtime import (
+    SYNC_RESTART_CANCEL_MSG,
+    USER_STOP_CANCEL_MSG,
+    CancelSource,
+    cancel_failure_reason,
+    classify_cancel_source,
+)
 from mindroom.streaming_delivery import (
     StreamInputChunk,
     _consume_stream_with_progress_supervision,
@@ -53,6 +59,13 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import WorkerProgressEvent
 
 logger = get_logger(__name__)
+
+__all__ = [
+    "SYNC_RESTART_CANCEL_MSG",
+    "USER_STOP_CANCEL_MSG",
+    "CancelSource",
+    "cancel_failure_reason",
+]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
@@ -473,7 +486,7 @@ class StreamingResponse:
             return stream_status
         return STREAM_STATUS_COMPLETED
 
-    async def finalize(  # noqa: C901, PLR0911
+    async def finalize(  # noqa: C901, PLR0911, PLR0912
         self,
         client: nio.AsyncClient,
         *,
@@ -501,13 +514,9 @@ class StreamingResponse:
             error=error,
         )
         terminal_status = "cancelled" if resolved_cancel_source is not None else final_stream_status
-        cancellation_failure_reason = None
-        if resolved_cancel_source == "sync_restart":
-            cancellation_failure_reason = "sync_restart_cancelled"
-        elif resolved_cancel_source == "user_stop":
-            cancellation_failure_reason = "cancelled_by_user"
-        elif resolved_cancel_source == "interrupted":
-            cancellation_failure_reason = "interrupted"
+        cancellation_failure_reason = (
+            cancel_failure_reason(resolved_cancel_source) if resolved_cancel_source is not None else None
+        )
         # When a placeholder message exists but no real text arrived,
         # still edit the message to finalize the stream status.
         has_placeholder = (
@@ -531,11 +540,7 @@ class StreamingResponse:
             )
         if not text_to_send.strip() and final_stream_status == STREAM_STATUS_COMPLETED:
             text_to_send = canonical_final_body_candidate or ""
-        if (
-            not text_to_send.strip()
-            and final_stream_status == STREAM_STATUS_COMPLETED
-            and not has_placeholder
-        ):
+        if not text_to_send.strip() and final_stream_status == STREAM_STATUS_COMPLETED and not has_placeholder:
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
                 terminal_status=terminal_status,
@@ -1088,15 +1093,10 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 )
                 if isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
                     streaming.restore_last_delivered_state()
-                    failure_reason = "interrupted"
-                    if cancel_source == "sync_restart":
-                        failure_reason = "sync_restart_cancelled"
-                    elif cancel_source == "user_stop":
-                        failure_reason = "cancelled_by_user"
                     raise _build_streaming_delivery_error(
                         streaming,
                         delivery_cleanup_error,
-                        failure_reason=failure_reason,
+                        failure_reason=cancel_failure_reason(cancel_source),
                         terminal_status="cancelled",
                         tool_trace_collector=tool_trace_collector,
                     ) from delivery_cleanup_error

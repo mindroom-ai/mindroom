@@ -38,7 +38,12 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.ingress import is_automation_source_kind
 from mindroom.hooks.types import EVENT_SESSION_STARTED
-from mindroom.knowledge import KnowledgeAccessSupport, ensure_request_knowledge_managers
+from mindroom.knowledge import (
+    KnowledgeAccessSupport,
+    KnowledgeAvailability,
+    ensure_request_knowledge_managers,
+    format_knowledge_availability_notice,
+)
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
@@ -50,7 +55,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.orchestration.runtime import classify_cancel_source
+from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,
     ResponseOutcome,
@@ -113,12 +118,6 @@ if TYPE_CHECKING:
         ToolRuntimeSupport,
     )
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-_CANCEL_FAILURE_REASON_BY_SOURCE = {
-    "user_stop": "cancelled_by_user",
-    "sync_restart": "sync_restart_cancelled",
-    "interrupted": "interrupted",
-}
 
 type MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
@@ -1418,7 +1417,7 @@ class ResponseRunner:
                             ),
                         )
                     else:
-                        failure_reason = _CANCEL_FAILURE_REASON_BY_SOURCE[classify_cancel_source(exc)]
+                        failure_reason = cancel_failure_reason(classify_cancel_source(exc))
                         final_delivery_outcome = FinalDeliveryOutcome(
                             terminal_status="cancelled",
                             event_id=None,
@@ -1681,7 +1680,7 @@ class ResponseRunner:
                 try:
                     await task
                 except asyncio.CancelledError as exc:
-                    failure_reason = _CANCEL_FAILURE_REASON_BY_SOURCE[classify_cancel_source(exc)]
+                    failure_reason = cancel_failure_reason(classify_cancel_source(exc))
                     if on_cancelled is not None:
                         on_cancelled(failure_reason)
                     self._log_cancelled_response(
@@ -1814,10 +1813,19 @@ class ResponseRunner:
             turn_recorder.set_run_id(current_run_id)
 
         async def build_response_text() -> str:
+            unavailable_bases: dict[str, KnowledgeAvailability] = {}
             knowledge = self.deps.knowledge_access.for_agent(
                 self.deps.agent_name,
                 request_knowledge_managers=runtime.request_knowledge_managers,
+                on_unavailable_bases=unavailable_bases.update,
             )
+            system_enrichment_items = request.system_enrichment_items
+            notice = format_knowledge_availability_notice(unavailable_bases)
+            if notice is not None:
+                system_enrichment_items = (
+                    *system_enrichment_items,
+                    EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
+                )
             matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
             return await ai_response(
                 agent_name=self.deps.agent_name,
@@ -1842,7 +1850,7 @@ class ResponseRunner:
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 compaction_outcomes_collector=compaction_outcomes,
                 matrix_run_metadata=matrix_run_metadata,
-                system_enrichment_items=request.system_enrichment_items,
+                system_enrichment_items=system_enrichment_items,
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
             )
@@ -1888,10 +1896,19 @@ class ResponseRunner:
         def note_visible_response_event_id(response_event_id: str) -> None:
             turn_recorder.set_response_event_id(response_event_id)
 
+        unavailable_bases: dict[str, KnowledgeAvailability] = {}
         knowledge = self.deps.knowledge_access.for_agent(
             self.deps.agent_name,
             request_knowledge_managers=runtime.request_knowledge_managers,
+            on_unavailable_bases=unavailable_bases.update,
         )
+        system_enrichment_items = request.system_enrichment_items
+        notice = format_knowledge_availability_notice(unavailable_bases)
+        if notice is not None:
+            system_enrichment_items = (
+                *system_enrichment_items,
+                EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
+            )
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         response_stream = stream_agent_response(
             agent_name=self.deps.agent_name,
@@ -1915,7 +1932,7 @@ class ResponseRunner:
             execution_identity=runtime.tool_dispatch.execution_identity,
             compaction_outcomes_collector=compaction_outcomes,
             matrix_run_metadata=matrix_run_metadata,
-            system_enrichment_items=request.system_enrichment_items,
+            system_enrichment_items=system_enrichment_items,
             turn_recorder=turn_recorder,
             pipeline_timing=pipeline_timing,
         )
@@ -2047,7 +2064,7 @@ class ResponseRunner:
                         correlation_id=correlation_id,
                     ),
                 )
-            failure_reason = _CANCEL_FAILURE_REASON_BY_SOURCE[cancel_source]
+            failure_reason = cancel_failure_reason(cancel_source)
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id=None,
@@ -2289,7 +2306,7 @@ class ResponseRunner:
             ),
         )
 
-    async def generate_response_locked(  # noqa: C901, PLR0915
+    async def generate_response_locked(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2456,7 +2473,7 @@ class ResponseRunner:
             tracked_event_id = tracked_event_id or run_message_id
         except asyncio.CancelledError as error:
             if not delivery_stage_started:
-                delivery_failure_reason = _CANCEL_FAILURE_REASON_BY_SOURCE[classify_cancel_source(error)]
+                delivery_failure_reason = cancel_failure_reason(classify_cancel_source(error))
                 delivery_cancelled = True
                 tracked_event_id = tracked_event_id or run_message_id
                 event_id = tracked_event_id or (
@@ -2597,7 +2614,7 @@ class ResponseRunner:
                 post_response_deps=post_response_deps,
             )
         except asyncio.CancelledError as exc:
-            failure_reason = _CANCEL_FAILURE_REASON_BY_SOURCE[classify_cancel_source(exc)]
+            failure_reason = cancel_failure_reason(classify_cancel_source(exc))
             cancelled_outcome = FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id=final_delivery_outcome.final_visible_event_id,
