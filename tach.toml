@@ -87,7 +87,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_storage"
-depends_on = []
+depends_on = ["mindroom.runtime_resolution"]
 visibility = [
     "mindroom.agents",
     "mindroom.history.runtime",
@@ -564,7 +564,6 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
-    "mindroom.agents",
     "mindroom.agent_storage",
     "mindroom.history.compaction",
     "mindroom.history.policy",
@@ -2233,8 +2232,10 @@ expose = [
     "CompactionOutcome",
     "HistoryPolicy",
     "HistoryScope",
+    "HistoryScopeState",
     "PreparedHistoryState",
     "PreparedScopeHistory",
+    "ResolvedHistoryExecutionPlan",
     "ResolvedHistorySettings",
     "ResolvedReplayPlan",
     "ScopeSessionContext",

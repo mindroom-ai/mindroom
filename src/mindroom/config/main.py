@@ -47,7 +47,7 @@ from mindroom.constants import (
     safe_replace,
 )
 
-# config.main is loaded before runtime; use the leaf types to avoid eager history facade imports.
+# config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
@@ -915,7 +915,7 @@ class Config(BaseModel):
     ) -> Config:
         """Validate config data against one explicit runtime context."""
         config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
-        # why-lazy: config.main is a foundation module; tool catalog validation loads hook/runtime helpers.
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
 
         try:
@@ -1257,7 +1257,7 @@ class Config(BaseModel):
         tool_validation_snapshot: dict[str, ToolValidationInfo],
     ) -> None:
         """Validate one authored tool entry against the resolved validation snapshot."""
-        # why-lazy: tool catalog validation loads hook/runtime helpers.
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import (  # noqa: PLC0415
             ToolConfigOverrideError,
             validate_authored_tool_entry_overrides,
@@ -1281,7 +1281,7 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool = False,
     ) -> None:
         """Validate authored tool references against one resolved validation snapshot."""
-        # why-lazy: resolving tool validation metadata loads hook/runtime helpers.
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import resolved_tool_validation_snapshot_for_runtime  # noqa: PLC0415
 
         tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
