@@ -265,7 +265,7 @@ class TestThreadHistory:
             room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[{"event_id": "$thread_root"}],
-            fetch_started_at=None,
+            fetch_started_at=ANY,
         )
 
     @pytest.mark.asyncio
@@ -2987,10 +2987,10 @@ class TestThreadHistoryCache:
             ),
         )
         broken_cache.get_thread_events = AsyncMock(side_effect=cached_events_side_effect, return_value=[])
-        broken_cache.replace_thread = AsyncMock(side_effect=RuntimeError("db broken"))
+        broken_cache.replace_thread_if_not_newer = AsyncMock(side_effect=RuntimeError("db broken"))
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
-        broken_cache.replace_thread.assert_awaited_once()
+        broken_cache.replace_thread_if_not_newer.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_incremental_thread_revalidation_does_not_bypass_runtime_or_room_staleness(

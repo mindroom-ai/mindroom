@@ -735,6 +735,7 @@ class _EventCache:
         """Replace one cached thread snapshot only when nothing newer touched it after fetch start."""
         if self._runtime.guarded_thread_write_rejected(fetch_started_at):
             return False
+        replacement_validated_at = fetch_started_at if validated_at is None else min(validated_at, fetch_started_at)
 
         async def replace_if_still_safe(db: aiosqlite.Connection) -> bool:
             if self._runtime.guarded_thread_write_rejected(fetch_started_at):
@@ -745,7 +746,7 @@ class _EventCache:
                 thread_id=thread_id,
                 events=events,
                 fetch_started_at=fetch_started_at,
-                validated_at=time.time() if validated_at is None else validated_at,
+                validated_at=replacement_validated_at,
             )
 
         return bool(

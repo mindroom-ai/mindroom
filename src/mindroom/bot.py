@@ -1447,7 +1447,7 @@ class AgentBot:
         self._last_sync_monotonic = time.monotonic()
         if _response.status_code == "M_UNKNOWN_POS":
             restored_sync_token = self._runtime_view.restored_sync_token
-            self._runtime_view.mark_restored_sync_token_invalid()
+            self._runtime_view.revoke_current_thread_cache_trust()
             self._runtime_view.suppress_sync_token_persistence()
             self._clear_sync_token_state()
             self.logger.warning(

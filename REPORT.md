@@ -35,6 +35,9 @@
 - Round 8 fix: parent cancellation during restored first-sync certification now clears restored-token trust, `client.next_batch`, and the saved token before re-raising, so a same-bot sync-loop restart cannot certify a skipped batch.
 - Round 9 fix: parent cancellation during any sync-cache certification now revokes current-runtime thread-cache trust before re-raising and rewinds `client.next_batch` to the last cache-certified token when available.
 - Round 9 fix: runtime trust revocation now installs a guarded thread-write boundary, so prewarm fetches that started before revocation cannot later write snapshots that look fresh.
+- Round 10 fix: post-start `M_UNKNOWN_POS` now revokes current-runtime thread-cache trust before clearing token state, forcing strict thread reads to refetch same-runtime rows validated before the rejected sync position.
+- Round 10 fix: all homeserver thread-history refill writes now carry a fetch-start guard, including ordinary dispatch/full-history paths rather than only startup prewarm.
+- Round 10 fix: guarded thread replacements stamp validation no later than fetch start, so a replacement that commits after trust revocation cannot look fresh.
 
 ## Tests Run
 
@@ -204,6 +207,31 @@ nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.ni
 
 Result: pytest summary reported 5135 passed, 28 skipped, 49 warnings in 490.53s.
 The wrapper process stayed alive after printing the passing summary and was terminated afterward.
+
+```bash
+nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix --run 'uv run pytest tests/test_threading_error.py::TestThreadingBehavior::test_unknown_pos_after_first_sync_revokes_current_runtime_thread_cache tests/test_threading_error.py::TestThreadingBehavior::test_dispatch_refill_started_before_trust_revocation_does_not_seed_fresh_cache tests/test_threading_error.py::TestThreadingBehavior::test_guarded_refill_commit_after_trust_revocation_does_not_look_fresh tests/test_thread_history.py::TestThreadHistory::test_fetch_thread_history_delegates_to_room_scan_helper tests/test_thread_history.py::TestThreadHistoryCache::test_fetch_thread_history_gracefully_degrades_when_cache_read_fails -x -n 0 --no-cov -v'
+```
+
+Result: 6 passed, 1 existing Pydantic deprecation warning.
+
+```bash
+nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix --run 'uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py -x -n 0 --no-cov -v'
+```
+
+Result: 255 passed, 1 existing Pydantic deprecation warning.
+
+```bash
+git --no-pager diff --check
+```
+
+Result: passed.
+
+```bash
+uv sync --all-extras
+uv run pre-commit run --files src/mindroom/bot.py src/mindroom/matrix/client_thread_history.py src/mindroom/matrix/cache/event_cache.py tests/test_thread_history.py tests/test_threading_error.py REPORT.md
+```
+
+Result: passed.
 
 ## Deviations
 
