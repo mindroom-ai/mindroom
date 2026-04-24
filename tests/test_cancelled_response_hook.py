@@ -353,7 +353,9 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
 
     with (
         patch.object(
-            bot._delivery_gateway.deps.response_hooks, "emit_cancelled_response", new=AsyncMock()
+            bot._delivery_gateway.deps.response_hooks,
+            "emit_cancelled_response",
+            new=AsyncMock(),
         ) as mock_emit,
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
@@ -395,7 +397,9 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
 
     with (
         patch.object(
-            bot._delivery_gateway.deps.response_hooks, "emit_cancelled_response", new=AsyncMock()
+            bot._delivery_gateway.deps.response_hooks,
+            "emit_cancelled_response",
+            new=AsyncMock(),
         ) as mock_emit,
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
         patch(
