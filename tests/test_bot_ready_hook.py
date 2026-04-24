@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -537,7 +538,7 @@ async def test_bot_ready_starts_background_startup_thread_prewarm(tmp_path: Path
     mock_get_room_threads_page.assert_awaited_once_with(
         bot.client,
         "!room:localhost",
-        limit=20,
+        limit=32,
     )
     assert [
         call.args
@@ -586,11 +587,11 @@ async def test_bot_ready_prefers_locally_recent_threads_for_startup_prewarm(tmp_
         await bot._on_sync_response(MagicMock())
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-    bot.event_cache.get_recent_room_thread_ids.assert_awaited_once_with("!room:localhost", limit=20)
+    bot.event_cache.get_recent_room_thread_ids.assert_awaited_once_with("!room:localhost", limit=32)
     mock_get_room_threads_page.assert_awaited_once_with(
         bot.client,
         "!room:localhost",
-        limit=20,
+        limit=32,
     )
     assert [
         call.args
@@ -649,7 +650,7 @@ async def test_bot_ready_skips_threads_api_when_local_recent_cache_is_sufficient
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
     bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
-    local_thread_ids = [f"$thread-{index}:localhost" for index in range(20)]
+    local_thread_ids = [f"$thread-{index}:localhost" for index in range(32)]
     bot.event_cache.get_recent_room_thread_ids.return_value = local_thread_ids
     bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
@@ -665,11 +666,69 @@ async def test_bot_ready_skips_threads_api_when_local_recent_cache_is_sufficient
         await bot._on_sync_response(MagicMock())
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-    bot.event_cache.get_recent_room_thread_ids.assert_awaited_once_with("!room:localhost", limit=20)
+    bot.event_cache.get_recent_room_thread_ids.assert_awaited_once_with("!room:localhost", limit=32)
     assert [
         call.args[1]
         for call in bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm.await_args_list
     ] == local_thread_ids
+
+
+@pytest.mark.asyncio
+async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: Path) -> None:
+    """Startup prewarm should refresh thread snapshots concurrently up to the configured bound."""
+    bot = _agent_bot(tmp_path)
+    bot._conversation_cache.logger = MagicMock()
+    thread_ids = [f"$thread-{index}:localhost" for index in range(40)]
+    all_concurrent_refreshes_started = asyncio.Event()
+    release_refreshes = asyncio.Event()
+    started_thread_ids: list[str] = []
+    active_refreshes = 0
+    max_active_refreshes = 0
+
+    async def refresh_thread(room_id: str, thread_id: str) -> ThreadHistoryResult:
+        nonlocal active_refreshes, max_active_refreshes
+        assert room_id == "!room:localhost"
+        active_refreshes += 1
+        max_active_refreshes = max(max_active_refreshes, active_refreshes)
+        started_thread_ids.append(thread_id)
+        if len(started_thread_ids) == 32:
+            all_concurrent_refreshes_started.set()
+        await release_refreshes.wait()
+        active_refreshes -= 1
+        return thread_history_result([], is_full_history=False)
+
+    with patch.object(
+        bot._conversation_cache,
+        "_startup_thread_prewarm_ids",
+        new=AsyncMock(return_value=thread_ids),
+    ):
+        bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm = AsyncMock(
+            side_effect=refresh_thread,
+        )
+        prewarm_task = asyncio.create_task(
+            bot._conversation_cache.prewarm_recent_room_threads(
+                "!room:localhost",
+                is_shutting_down=lambda: False,
+            ),
+        )
+        try:
+            await asyncio.wait_for(all_concurrent_refreshes_started.wait(), timeout=1.0)
+            assert started_thread_ids == thread_ids[:32]
+            release_refreshes.set()
+            assert await prewarm_task
+        finally:
+            release_refreshes.set()
+            await asyncio.gather(prewarm_task, return_exceptions=True)
+
+    assert started_thread_ids == thread_ids
+    assert max_active_refreshes == 32
+    bot._conversation_cache.logger.info.assert_any_call(
+        "startup_thread_prewarm_complete",
+        room_id="!room:localhost",
+        threads_warmed=40,
+        threads_failed=0,
+        elapsed_ms=ANY,
+    )
 
 
 @pytest.mark.asyncio
@@ -781,7 +840,7 @@ async def test_agent_only_ad_hoc_room_still_prewarms_when_router_exists(tmp_path
     mock_get_room_threads_page.assert_awaited_once_with(
         agent_bot.client,
         "!adhoc:localhost",
-        limit=20,
+        limit=32,
     )
 
 
@@ -823,7 +882,7 @@ async def test_first_syncing_bot_wins_shared_room_startup_prewarm_claim(tmp_path
     mock_get_room_threads_page.assert_awaited_once_with(
         agent_bot.client,
         "!room:localhost",
-        limit=20,
+        limit=32,
     )
 
 
@@ -954,7 +1013,7 @@ async def test_later_started_bot_does_not_rewarm_room_after_startup_wave(tmp_pat
 
     assert mock_get_room_threads_page.await_count == 1
     assert mock_get_room_threads_page.await_args_list[0].args == (first_bot.client, "!room:localhost")
-    assert mock_get_room_threads_page.await_args_list[0].kwargs == {"limit": 20}
+    assert mock_get_room_threads_page.await_args_list[0].kwargs == {"limit": 32}
     assert "!room:localhost" in later_bot.startup_thread_prewarm_registry._claimed_room_ids
 
 
@@ -1030,7 +1089,7 @@ async def test_disabled_bot_does_not_block_enabled_bot_from_claiming_room(tmp_pa
     mock_get_room_threads_page.assert_awaited_once_with(
         enabled_bot.client,
         "!room:localhost",
-        limit=20,
+        limit=32,
     )
 
 
