@@ -17,6 +17,8 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ORIGINAL_SENDER_KEY,
     STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
 )
@@ -44,6 +46,9 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
         STREAM_VISIBLE_BODY_KEY,
     },
 )
+_NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
+_NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
+_MATRIX_EVENT_HARD_LIMIT = 64000
 
 
 def _is_passthrough_preview_key(key: object) -> bool:
@@ -94,6 +99,39 @@ def _is_edit_message(content: dict[str, Any]) -> bool:
     return "m.new_content" in content or (
         "m.relates_to" in content and content.get("m.relates_to", {}).get("rel_type") == "m.replace"
     )
+
+
+def _is_nonterminal_stream_content(content: dict[str, Any]) -> bool:
+    """Return whether content is an in-progress streaming payload."""
+    return content.get(STREAM_STATUS_KEY) in _NONTERMINAL_STREAM_STATUSES
+
+
+def _build_nonterminal_streaming_edit_preview(
+    content: dict[str, Any],
+    source_content: dict[str, Any],
+    preview_text: str,
+) -> dict[str, Any] | None:
+    """Build an in-progress edit preview without uploading an obsolete sidecar."""
+    preview_limit = _NONTERMINAL_STREAM_PREVIEW_BYTES
+    while True:
+        preview = _create_preview(preview_text, preview_limit)
+        preview_content: dict[str, Any] = {
+            "msgtype": source_content.get("msgtype", "m.text"),
+            "body": preview,
+        }
+        _copy_preview_metadata(source_content, preview_content)
+        modified_content: dict[str, Any] = {
+            "msgtype": "m.text",
+            "body": f"* {preview}",
+            "m.new_content": preview_content,
+            "m.relates_to": content.get("m.relates_to", {}),
+        }
+        _copy_edit_wrapper_metadata(source_content, modified_content)
+        if _calculate_event_size(modified_content) <= _MATRIX_EVENT_HARD_LIMIT:
+            return modified_content
+        if preview_limit == 0:
+            return None
+        preview_limit = max(0, preview_limit // 2)
 
 
 def _prefix_by_bytes(text: str, max_bytes: int) -> str:
@@ -291,6 +329,19 @@ async def prepare_large_message(
 
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     preview_text = source_content["body"]
+    if is_edit and _is_nonterminal_stream_content(source_content):
+        modified_content = _build_nonterminal_streaming_edit_preview(content, source_content, preview_text)
+        if modified_content is not None:
+            inner: dict[str, Any] = modified_content["m.new_content"]
+            logger.info(
+                "large_streaming_edit_preview_prepared",
+                room_id=room_id,
+                original_size_bytes=current_size,
+                preview_length=len(inner["body"]),
+                final_size_bytes=_calculate_event_size(modified_content),
+            )
+            return modified_content
+
     logger.info(
         "large_message_sidecar_upload_started",
         room_id=room_id,
