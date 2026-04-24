@@ -449,9 +449,9 @@ class ConversationEventCache(Protocol):
         room_id: str,
         thread_id: str,
         *,
-        runtime_started_at: float,
+        runtime_started_at: float | None,
     ) -> bool:
-        """Refresh thread validation after a safe incremental update in the current runtime."""
+        """Refresh thread validation after a safe incremental update."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Return the cached thread ID for one event."""
@@ -790,7 +790,7 @@ class _EventCache:
         room_id: str,
         thread_id: str,
         *,
-        runtime_started_at: float,
+        runtime_started_at: float | None,
     ) -> bool:
         """Refresh one thread's validated timestamp after a safe incremental update."""
         return bool(

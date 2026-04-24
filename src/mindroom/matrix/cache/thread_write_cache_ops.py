@@ -36,6 +36,12 @@ class ThreadMutationCacheOps:
         """Return whether event-cache writes can safely proceed."""
         return self.runtime.event_cache is not None and self.runtime.event_cache_write_coordinator is not None
 
+    def _effective_thread_cache_runtime_started_at(self) -> float | None:
+        """Return the restart freshness boundary for incremental thread revalidation."""
+        if self.runtime.pre_runtime_thread_cache_trusted:
+            return None
+        return self.runtime.runtime_started_at
+
     def queue_room_cache_update(
         self,
         room_id: str,
@@ -192,7 +198,7 @@ class ThreadMutationCacheOps:
             await self.runtime.event_cache.revalidate_thread_after_incremental_update(
                 room_id,
                 thread_id,
-                runtime_started_at=self.runtime.runtime_started_at,
+                runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             )
         except Exception as exc:
             self.logger.warning(

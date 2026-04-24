@@ -1658,6 +1658,52 @@ class TestThreadingBehavior:
         assert cached_event["content"]["body"] == "Thread reply"
 
     @pytest.mark.asyncio
+    async def test_limited_first_sync_rejects_restored_thread_cache_trust(self, bot: AgentBot) -> None:
+        """Limited restored-token catch-up must not permit pre-runtime thread snapshots."""
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_limited"
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock()
+        sync_response.rooms.join = {
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True)),
+        }
+
+        with (
+            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+            patch.object(bot, "_maybe_start_startup_thread_prewarm"),
+            patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+        ):
+            await bot._on_sync_response(sync_response)
+
+        assert bot._first_sync_done is True
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+
+    @pytest.mark.asyncio
+    async def test_complete_first_sync_trusts_restored_thread_cache(self, bot: AgentBot) -> None:
+        """A non-limited restored-token catch-up may reuse pre-runtime thread snapshots."""
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_complete"
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock()
+        sync_response.rooms.join = {
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=False)),
+        }
+
+        with (
+            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+            patch.object(bot, "_maybe_start_startup_thread_prewarm"),
+            patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+        ):
+            await bot._on_sync_response(sync_response)
+
+        assert bot._first_sync_done is True
+        assert bot._runtime_view.restored_sync_token is True
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is True
+
+    @pytest.mark.asyncio
     async def test_sync_error_keeps_watchdog_clock_on_latest_activity(self, bot: AgentBot) -> None:
         """Sync errors should keep the watchdog alive using the latest observed sync activity."""
         sync_response = MagicMock()

@@ -868,24 +868,28 @@ class ThreadSyncWritePolicy:
                 )
         return room_plain_events, room_threaded_events, room_redactions
 
-    def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
+    def cache_sync_timeline(self, response: nio.SyncResponse) -> list[asyncio.Task[object]]:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
         if not self._cache_ops.cache_runtime_available():
-            return
+            return []
         room_plain_events, room_threaded_events, room_redactions = self._group_sync_timeline_updates(response)
+        tasks: list[asyncio.Task[object]] = []
         for room_id in set(room_plain_events) | set(room_threaded_events) | set(room_redactions):
             plain_events = room_plain_events.get(room_id, ())
             threaded_events = room_threaded_events.get(room_id, ())
             redacted_event_ids = room_redactions.get(room_id, ())
-            self._cache_ops.queue_room_cache_update(
-                room_id,
-                lambda room_id=room_id, plain_events=plain_events, threaded_events=threaded_events, redacted_event_ids=redacted_event_ids: (
-                    self._persist_room_sync_timeline_updates(
-                        room_id,
-                        plain_events,
-                        threaded_events,
-                        redacted_event_ids,
-                    )
+            tasks.append(
+                self._cache_ops.queue_room_cache_update(
+                    room_id,
+                    lambda room_id=room_id, plain_events=plain_events, threaded_events=threaded_events, redacted_event_ids=redacted_event_ids: (
+                        self._persist_room_sync_timeline_updates(
+                            room_id,
+                            plain_events,
+                            threaded_events,
+                            redacted_event_ids,
+                        )
+                    ),
+                    name="matrix_cache_sync_timeline",
                 ),
-                name="matrix_cache_sync_timeline",
             )
+        return tasks

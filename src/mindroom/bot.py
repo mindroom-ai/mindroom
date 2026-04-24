@@ -150,6 +150,17 @@ _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 
 
+def _limited_joined_timeline_room_ids(response: nio.SyncResponse) -> list[str]:
+    """Return joined rooms whose sync timeline was server-limited."""
+    joined_rooms = response.rooms.join if isinstance(response.rooms.join, dict) else {}
+    limited_room_ids: list[str] = []
+    for room_id, room_info in joined_rooms.items():
+        timeline = room_info.timeline if room_info is not None else None
+        if timeline is not None and timeline.limited is True:
+            limited_room_ids.append(room_id)
+    return limited_room_ids
+
+
 def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
@@ -934,20 +945,21 @@ class AgentBot:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
 
-    def _restore_saved_sync_token(self) -> None:
+    def _restore_saved_sync_token(self) -> bool:
         """Restore the saved Matrix sync token onto the current client."""
         assert self.client is not None
         try:
             token = load_sync_token(self.storage_path, self.agent_name)
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
-            return
+            return False
 
         if token is None:
-            return
+            return False
 
         self.client.next_batch = token
         self.logger.info("matrix_sync_token_restored")
+        return True
 
     def _persist_sync_token(self) -> None:
         """Persist the current Matrix sync token."""
@@ -980,7 +992,29 @@ class AgentBot:
         if isinstance(_response, nio.SyncResponse):
             # Cache before persisting so a crash prefers replaying one batch over
             # skipping events whose timeline metadata never reached local state.
-            self._conversation_cache.cache_sync_timeline(_response)
+            limited_first_sync_room_ids = _limited_joined_timeline_room_ids(_response) if first_sync_response else []
+            sync_cache_tasks = self._conversation_cache.cache_sync_timeline(_response)
+            if first_sync_response:
+                sync_cache_results: list[object | BaseException] = []
+                if sync_cache_tasks:
+                    sync_cache_results = await asyncio.gather(*sync_cache_tasks, return_exceptions=True)
+                sync_cache_errors = [result for result in sync_cache_results if isinstance(result, Exception)]
+                if sync_cache_errors:
+                    self.logger.warning(
+                        "matrix_sync_cache_catchup_failed",
+                        error_count=len(sync_cache_errors),
+                    )
+                elif limited_first_sync_room_ids:
+                    restored_sync_token = self._runtime_view.restored_sync_token
+                    self._runtime_view.mark_restored_sync_token_invalid()
+                    if restored_sync_token:
+                        self.logger.warning(
+                            "matrix_sync_cache_catchup_limited",
+                            room_count=len(limited_first_sync_room_ids),
+                            room_ids=limited_first_sync_room_ids,
+                        )
+                else:
+                    self._runtime_view.mark_sync_catchup_applied()
 
         # Event callbacks run fire-and-forget in background tasks. A crash after
         # persisting `next_batch` but before all callback tasks finish can still
@@ -1000,6 +1034,13 @@ class AgentBot:
         """Update the watchdog clock on sync errors without marking cache state fresh."""
         logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
+        if not self._first_sync_done and _response.status_code == "M_UNKNOWN_POS":
+            self._runtime_view.mark_restored_sync_token_invalid()
+            self.logger.warning(
+                "matrix_sync_token_rejected",
+                status_code=_response.status_code,
+                error=str(_response),
+            )
 
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
@@ -1040,8 +1081,8 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
         )
         try:
-            self._restore_saved_sync_token()
-            self._runtime_view.mark_runtime_started()
+            restored_sync_token = self._restore_saved_sync_token()
+            self._runtime_view.mark_runtime_started(restored_sync_token=restored_sync_token)
             await self._set_avatar_if_available()
             await self._set_presence_with_model_info()
             interactive.init_persistence(self.runtime_paths.storage_root)

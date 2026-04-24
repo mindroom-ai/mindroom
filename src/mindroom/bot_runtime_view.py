@@ -46,6 +46,9 @@ class BotRuntimeView(Protocol):
     @property
     def runtime_started_at(self) -> float: ...  # noqa: D102
 
+    @property
+    def pre_runtime_thread_cache_trusted(self) -> bool: ...  # noqa: D102
+
 
 @dataclass
 class BotRuntimeState:
@@ -60,7 +63,30 @@ class BotRuntimeState:
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry | None = None
     runtime_started_at: float = field(default_factory=time.time)
+    restored_sync_token: bool = False
+    sync_catchup_applied_at: float | None = None
 
-    def mark_runtime_started(self) -> None:
+    @property
+    def pre_runtime_thread_cache_trusted(self) -> bool:
+        """Return whether pre-start thread snapshots passed Matrix sync catch-up."""
+        return (
+            self.restored_sync_token
+            and self.sync_catchup_applied_at is not None
+            and self.sync_catchup_applied_at >= self.runtime_started_at
+        )
+
+    def mark_runtime_started(self, *, restored_sync_token: bool = False) -> None:
         """Advance the runtime freshness boundary for one bot start or restart."""
         self.runtime_started_at = time.time()
+        self.restored_sync_token = restored_sync_token
+        self.sync_catchup_applied_at = None
+
+    def mark_sync_catchup_applied(self) -> None:
+        """Record that the first post-start Matrix sync has applied cache catch-up."""
+        if self.restored_sync_token:
+            self.sync_catchup_applied_at = time.time()
+
+    def mark_restored_sync_token_invalid(self) -> None:
+        """Fail closed for pre-runtime cache reuse after a bad persisted sync token."""
+        self.restored_sync_token = False
+        self.sync_catchup_applied_at = None
