@@ -15,6 +15,7 @@ from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 
+from mindroom.codex_model import CodexResponses, normalize_codex_model_id
 from mindroom.constants import RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
@@ -48,7 +49,10 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
     """Create a model instance for one provider."""
     canonical_provider = _canonical_provider(provider)
 
-    if canonical_provider not in {"ollama", "vertexai_claude"} and "api_key" not in extra_kwargs:
+    if (
+        canonical_provider not in {"ollama", "vertexai_claude", "codex", "openai_codex"}
+        and "api_key" not in extra_kwargs
+    ):
         api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
         if api_key:
             extra_kwargs["api_key"] = api_key
@@ -96,6 +100,10 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
         return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
+
+    if canonical_provider in {"codex", "openai_codex"}:
+        extra_kwargs.pop("api_key", None)
+        return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
 
     provider_map: dict[str, type[Any]] = {
         "openai": OpenAIChat,

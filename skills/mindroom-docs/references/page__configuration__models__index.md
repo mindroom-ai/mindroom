@@ -6,6 +6,7 @@ Models define the AI providers and model IDs used by agents.
 
 - `anthropic` - Claude models (Anthropic)
 - `openai` - GPT models and OpenAI-compatible endpoints
+- `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT subscription login
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
@@ -46,6 +47,11 @@ models:
   gpt:
     provider: openai
     id: gpt-5.4
+
+  # OpenAI via Codex CLI subscription
+  codex:
+    provider: codex
+    id: gpt-5.5
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
@@ -92,6 +98,17 @@ models:
     id: my-model
     extra_kwargs:
       base_url: http://localhost:8080/v1
+```
+
+## Codex Subscription Models
+
+Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API. Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens. MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint. The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-plugin-style form `openai-codex/gpt-5.5`. If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`.
+
+```
+models:
+  default:
+    provider: codex
+    id: gpt-5.5
 ```
 
 ## Context Window
