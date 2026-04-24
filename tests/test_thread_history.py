@@ -2173,6 +2173,7 @@ class TestThreadHistoryCache:
         runtime_started_at: float,
         restored_sync_token: bool,
         first_sync_catchup_applied: bool,
+        thread_cache_valid_after: float | None = None,
     ) -> tuple[MatrixConversationCache, _EventCacheWriteCoordinator]:
         runtime_paths = test_runtime_paths(tmp_path)
         config = bind_runtime_paths(
@@ -2191,6 +2192,7 @@ class TestThreadHistoryCache:
         )
         runtime.runtime_started_at = runtime_started_at
         runtime.restored_sync_token = restored_sync_token
+        runtime.sync_token_thread_cache_valid_after = thread_cache_valid_after if restored_sync_token else None
         runtime.sync_catchup_applied_at = runtime_started_at if first_sync_catchup_applied else None
         return MatrixConversationCache(logger=MagicMock(), runtime=runtime), coordinator
 
@@ -2577,10 +2579,11 @@ class TestThreadHistoryCache:
 
     @pytest.mark.asyncio
     async def test_restored_token_post_sync_reuses_pre_runtime_thread_cache(self, tmp_path: Path) -> None:
-        """A restored next_batch plus applied first sync permits otherwise fresh pre-runtime snapshots."""
+        """Restored-token catch-up may reuse pre-runtime snapshots inside the token cache window."""
         cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
         runtime_started_at = time.time()
+        thread_cache_valid_after = runtime_started_at - 20.0
 
         root_event = self._make_text_event(
             event_id="$thread_root",
@@ -2615,6 +2618,7 @@ class TestThreadHistoryCache:
             runtime_started_at=runtime_started_at,
             restored_sync_token=True,
             first_sync_catchup_applied=True,
+            thread_cache_valid_after=thread_cache_valid_after,
         )
 
         try:

@@ -411,7 +411,9 @@ class MatrixConversationCache(ConversationCacheProtocol):
     def _effective_thread_cache_runtime_started_at(self) -> float | None:
         """Return the active restart freshness boundary for durable thread-cache reads."""
         if self.runtime.pre_runtime_thread_cache_trusted:
-            return None
+            valid_after = self.runtime.pre_runtime_thread_cache_valid_after
+            if valid_after is not None:
+                return valid_after
         return self.runtime.runtime_started_at
 
     @asynccontextmanager

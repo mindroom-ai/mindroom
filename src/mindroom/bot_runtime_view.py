@@ -50,6 +50,9 @@ class BotRuntimeView(Protocol):
     def pre_runtime_thread_cache_trusted(self) -> bool: ...  # noqa: D102
 
     @property
+    def pre_runtime_thread_cache_valid_after(self) -> float | None: ...  # noqa: D102
+
+    @property
     def sync_token_persistence_suppressed(self) -> bool: ...  # noqa: D102
 
     def suppress_sync_token_persistence(self) -> None: ...  # noqa: D102
@@ -69,6 +72,7 @@ class BotRuntimeState:
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry | None = None
     runtime_started_at: float = field(default_factory=time.time)
     restored_sync_token: bool = False
+    sync_token_thread_cache_valid_after: float | None = None
     sync_catchup_applied_at: float | None = None
     sync_token_persistence_suppressed: bool = False
     sync_token_cache_catchup_pending: bool = False
@@ -78,14 +82,34 @@ class BotRuntimeState:
         """Return whether pre-start thread snapshots passed Matrix sync catch-up."""
         return (
             self.restored_sync_token
+            and self.sync_token_thread_cache_valid_after is not None
             and self.sync_catchup_applied_at is not None
             and self.sync_catchup_applied_at >= self.runtime_started_at
         )
 
-    def mark_runtime_started(self, *, restored_sync_token: bool = False) -> None:
+    @property
+    def pre_runtime_thread_cache_valid_after(self) -> float | None:
+        """Return the lower bound for restored-token durable thread-cache reuse."""
+        if not self.pre_runtime_thread_cache_trusted:
+            return None
+        return self.sync_token_thread_cache_valid_after
+
+    def thread_cache_valid_after_for_sync_token(self) -> float:
+        """Return the durable cache boundary to carry into the next certified sync token."""
+        if self.pre_runtime_thread_cache_trusted and self.sync_token_thread_cache_valid_after is not None:
+            return self.sync_token_thread_cache_valid_after
+        return self.runtime_started_at
+
+    def mark_runtime_started(
+        self,
+        *,
+        restored_sync_token: bool = False,
+        thread_cache_valid_after: float | None = None,
+    ) -> None:
         """Advance the runtime freshness boundary for one bot start or restart."""
         self.runtime_started_at = time.time()
         self.restored_sync_token = restored_sync_token
+        self.sync_token_thread_cache_valid_after = thread_cache_valid_after if restored_sync_token else None
         self.sync_catchup_applied_at = None
         self.sync_token_persistence_suppressed = False
         self.sync_token_cache_catchup_pending = False
@@ -98,6 +122,7 @@ class BotRuntimeState:
     def mark_restored_sync_token_invalid(self) -> None:
         """Fail closed for pre-runtime cache reuse after a bad persisted sync token."""
         self.restored_sync_token = False
+        self.sync_token_thread_cache_valid_after = None
         self.sync_catchup_applied_at = None
 
     def suppress_sync_token_persistence(self) -> None:

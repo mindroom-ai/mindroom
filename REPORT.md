@@ -26,6 +26,9 @@
 - Round 5 fix: certified sync tokens now carry a hash-backed provenance marker, while legacy plaintext tokens restore only for Matrix continuity and suppress same-runtime token persistence.
 - Round 5 fix: every `M_UNKNOWN_POS` now poisons later token persistence, including non-restored runtimes.
 - Round 5 fix: later sync cache certification failures revoke current in-memory pre-runtime thread-cache trust before strict thread reads can reuse old rows.
+- Round 6 fix: certified sync-token markers now persist `thread_cache_valid_after` with the token digest, while marker-only and plaintext tokens remain cache-trust fail-closed.
+- Round 6 fix: restored-token thread-cache reuse now uses the persisted valid-after boundary instead of removing the restart freshness boundary.
+- Round 6 fix: tokens certified by cold runtimes use that runtime start as the cache boundary, and later restored-token certifications carry the boundary forward.
 
 ## Tests Run
 
@@ -90,6 +93,30 @@ uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tes
 Result: 245 passed, 1 existing Pydantic deprecation warning.
 
 ```bash
+uv run python -m py_compile src/mindroom/matrix/sync_tokens.py src/mindroom/bot_runtime_view.py src/mindroom/bot.py tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py
+```
+
+Result: passed.
+
+```bash
+uv run pytest tests/test_threading_error.py::TestThreadingBehavior::test_restored_cold_certified_token_rejects_cache_before_valid_after tests/test_thread_history.py::TestThreadHistoryCache::test_restored_token_post_sync_reuses_pre_runtime_thread_cache tests/test_matrix_sync_tokens.py::test_marker_without_thread_cache_boundary_is_not_certified tests/test_matrix_sync_tokens.py::test_on_sync_response_persists_latest_sync_token -x -n 0 --no-cov -v
+```
+
+Result: 4 passed, 1 existing Pydantic deprecation warning.
+
+```bash
+uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py -k "sync_token or first_sync or restored_token or untrusted_restart or valid_after" -x -n 0 --no-cov -v
+```
+
+Result: 39 passed, 208 deselected, 1 existing Pydantic deprecation warning.
+
+```bash
+uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py -x -n 0 --no-cov -v
+```
+
+Result: 247 passed, 1 existing Pydantic deprecation warning.
+
+```bash
 git --no-pager diff --check origin/main
 ```
 
@@ -97,7 +124,7 @@ Result: passed.
 
 ```bash
 uv sync --all-extras
-uv run pre-commit run --files src/mindroom/bot.py src/mindroom/matrix/sync_tokens.py tests/test_matrix_sync_tokens.py tests/test_threading_error.py REPORT.md
+uv run pre-commit run --files src/mindroom/bot.py src/mindroom/bot_runtime_view.py src/mindroom/matrix/sync_tokens.py src/mindroom/matrix/conversation_cache.py src/mindroom/matrix/cache/thread_write_cache_ops.py tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py REPORT.md
 ```
 
 Result: passed.

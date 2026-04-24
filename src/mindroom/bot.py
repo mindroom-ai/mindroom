@@ -430,6 +430,7 @@ class AgentBot:
         self._first_sync_done = False
         self._sync_shutting_down = False
         self._certified_sync_token: str | None = None
+        self._certified_sync_token_thread_cache_valid_after: float | None = None
         self._restored_sync_token_uncertified = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._runtime_view = BotRuntimeState(
@@ -1041,16 +1042,25 @@ class AgentBot:
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
             self._certified_sync_token = None
+            self._certified_sync_token_thread_cache_valid_after = None
             return False
 
         if token_record is None:
             self._certified_sync_token = None
+            self._certified_sync_token_thread_cache_valid_after = None
             return False
 
         self.client.next_batch = token_record.token
         self._certified_sync_token = token_record.token if token_record.certified else None
+        self._certified_sync_token_thread_cache_valid_after = (
+            token_record.thread_cache_valid_after if token_record.certified else None
+        )
         self._restored_sync_token_uncertified = not token_record.certified
-        self.logger.info("matrix_sync_token_restored", certified=token_record.certified)
+        self.logger.info(
+            "matrix_sync_token_restored",
+            certified=token_record.certified,
+            thread_cache_valid_after=token_record.thread_cache_valid_after,
+        )
         return token_record.certified
 
     def _certify_sync_response_token(self, response: nio.SyncResponse) -> bool:
@@ -1059,6 +1069,9 @@ class AgentBot:
         if not isinstance(token, str) or not token:
             return False
         self._certified_sync_token = token
+        self._certified_sync_token_thread_cache_valid_after = (
+            self._runtime_view.thread_cache_valid_after_for_sync_token()
+        )
         return True
 
     def _persist_sync_token(self) -> None:
@@ -1068,15 +1081,24 @@ class AgentBot:
         token = self._certified_sync_token
         if not isinstance(token, str) or not token:
             return
+        thread_cache_valid_after = self._certified_sync_token_thread_cache_valid_after
+        if thread_cache_valid_after is None:
+            return
 
         try:
-            save_sync_token(self.storage_path, self.agent_name, token)
+            save_sync_token(
+                self.storage_path,
+                self.agent_name,
+                token,
+                thread_cache_valid_after=thread_cache_valid_after,
+            )
         except OSError as exc:
             self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
 
     def _clear_sync_token_state(self) -> None:
         """Clear in-memory and persisted Matrix sync token state."""
         self._certified_sync_token = None
+        self._certified_sync_token_thread_cache_valid_after = None
         self._restored_sync_token_uncertified = False
         if self.client is not None:
             self.client.next_batch = None
@@ -1454,7 +1476,10 @@ class AgentBot:
         )
         try:
             restored_sync_token = self._restore_saved_sync_token()
-            self._runtime_view.mark_runtime_started(restored_sync_token=restored_sync_token)
+            self._runtime_view.mark_runtime_started(
+                restored_sync_token=restored_sync_token,
+                thread_cache_valid_after=self._certified_sync_token_thread_cache_valid_after,
+            )
             if self._restored_sync_token_uncertified:
                 self._runtime_view.suppress_sync_token_persistence()
                 self.logger.warning("matrix_sync_token_uncertified_legacy")

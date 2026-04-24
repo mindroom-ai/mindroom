@@ -59,7 +59,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
-from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
+from mindroom.matrix.sync_tokens import load_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
@@ -379,6 +379,33 @@ async def _bind_owned_runtime_support(
 async def _close_bound_runtime_support(bot: AgentBot, support: OwnedRuntimeSupport) -> None:
     """Close one test-owned runtime-support bundle."""
     await close_owned_runtime_support(support, logger=bot.logger)
+
+
+def _save_certified_sync_token(
+    bot: AgentBot,
+    token: str,
+    *,
+    thread_cache_valid_after: float = 1.0,
+) -> None:
+    """Persist one cache-bound certified sync token for bot lifecycle tests."""
+    save_sync_token(
+        bot.storage_path,
+        bot.agent_name,
+        token,
+        thread_cache_valid_after=thread_cache_valid_after,
+    )
+
+
+def _mark_restored_sync_token_runtime(
+    bot: AgentBot,
+    *,
+    thread_cache_valid_after: float = 1.0,
+) -> None:
+    """Start one test runtime as if a cache-bound certified sync token restored."""
+    bot._runtime_view.mark_runtime_started(
+        restored_sync_token=True,
+        thread_cache_valid_after=thread_cache_valid_after,
+    )
 
 
 def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
@@ -1746,10 +1773,10 @@ class TestThreadingBehavior:
             await allow_cache_finish.wait()
 
         cache_task = asyncio.create_task(slow_cache_write())
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_pending_first_sync"
         bot._coalescing_gate.drain_all = AsyncMock()
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_pending_first_sync")
+        _save_certified_sync_token(bot, "s_before_pending_first_sync")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=False)),
@@ -1782,7 +1809,7 @@ class TestThreadingBehavior:
         """A failed incremental cache write makes later same-runtime sync tokens unsafe too."""
         bot._first_sync_done = True
         bot.client.next_batch = "s_after_cache_failure"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_cache_failure")
+        _save_certified_sync_token(bot, "s_before_cache_failure")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(
@@ -1847,13 +1874,13 @@ class TestThreadingBehavior:
                 [root_event.source, reply_event.source],
                 validated_at=1.0,
             )
-            bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+            _mark_restored_sync_token_runtime(bot)
             bot._runtime_view.mark_sync_catchup_applied()
             assert bot._runtime_view.pre_runtime_thread_cache_trusted is True
 
             bot._first_sync_done = True
             bot.client.next_batch = "s_after_cache_failure"
-            save_sync_token(bot.storage_path, bot.agent_name, "s_before_cache_failure")
+            _save_certified_sync_token(bot, "s_before_cache_failure")
             sync_response = self._sync_response(
                 {
                     room_id: MagicMock(
@@ -1910,7 +1937,7 @@ class TestThreadingBehavior:
         _install_runtime_write_coordinator(bot)
         bot._first_sync_done = True
         bot.client.next_batch = "s_after_unavailable_cache"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_unavailable_cache")
+        _save_certified_sync_token(bot, "s_before_unavailable_cache")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(
@@ -1937,9 +1964,9 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_first_sync_cache_task_cancelled_does_not_trust_cache(self, bot: AgentBot) -> None:
         """Cancelled first-sync cache writes must fail closed for restored tokens."""
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_cancelled"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_cancelled")
+        _save_certified_sync_token(bot, "s_before_cancelled")
         cache_task = asyncio.create_task(asyncio.sleep(60))
         cache_task.cancel()
         await asyncio.gather(cache_task, return_exceptions=True)
@@ -1961,9 +1988,9 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_first_sync_cache_error_skips_token_persist_and_clears_saved_token(self, bot: AgentBot) -> None:
         """Failed first-sync cache writes must not advance a restored saved token."""
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_cache_error"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_cache_error")
+        _save_certified_sync_token(bot, "s_before_cache_error")
 
         async def fail_cache_write() -> None:
             msg = "cache boom"
@@ -1994,9 +2021,9 @@ class TestThreadingBehavior:
         event_cache.append_event = AsyncMock(return_value=True)
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_store_failure"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_store_failure")
+        _save_certified_sync_token(bot, "s_before_store_failure")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(
@@ -2036,9 +2063,9 @@ class TestThreadingBehavior:
         )
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_revalidation_failure"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_revalidation_failure")
+        _save_certified_sync_token(bot, "s_before_revalidation_failure")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(
@@ -2079,9 +2106,9 @@ class TestThreadingBehavior:
         bot.event_cache = event_cache
         bot.client = _make_client_mock()
         _install_runtime_write_coordinator(bot)
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_stale_marker_failure"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_stale_marker_failure")
+        _save_certified_sync_token(bot, "s_before_stale_marker_failure")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(
@@ -2126,9 +2153,9 @@ class TestThreadingBehavior:
         event_cache.disable("test_disabled")
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_disabled_cache"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_disabled_cache")
+        _save_certified_sync_token(bot, "s_before_disabled_cache")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(
@@ -2184,9 +2211,9 @@ class TestThreadingBehavior:
         )
         await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
 
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_midflight_disable"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_midflight_disable")
+        _save_certified_sync_token(bot, "s_before_midflight_disable")
         sync_response = self._sync_response(
             {
                 room_id: MagicMock(
@@ -2273,9 +2300,9 @@ class TestThreadingBehavior:
                 ],
                 validated_at=1.0,
             )
-            bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+            _mark_restored_sync_token_runtime(bot)
             bot.client.next_batch = "s_after_unsafe"
-            save_sync_token(bot.storage_path, bot.agent_name, "s_before_unsafe")
+            _save_certified_sync_token(bot, "s_before_unsafe")
             unsafe_response = self._sync_response(
                 {
                     room_id: MagicMock(timeline=MagicMock(events=[], limited=True)),
@@ -2296,7 +2323,10 @@ class TestThreadingBehavior:
 
             bot.client.next_batch = None
             restored_on_restart = bot._restore_saved_sync_token()
-            bot._runtime_view.mark_runtime_started(restored_sync_token=restored_on_restart)
+            bot._runtime_view.mark_runtime_started(
+                restored_sync_token=restored_on_restart,
+                thread_cache_valid_after=bot._certified_sync_token_thread_cache_valid_after,
+            )
             cache_state = await bot.event_cache.get_thread_cache_state(room_id, thread_id)
         finally:
             await _close_bound_runtime_support(bot, support)
@@ -2312,11 +2342,91 @@ class TestThreadingBehavior:
         )
 
     @pytest.mark.asyncio
+    async def test_restored_cold_certified_token_rejects_cache_before_valid_after(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A cold-certified token must not later trust rows older than its cache boundary."""
+        support = await _bind_owned_runtime_support(bot)
+        room_id = "!test:localhost"
+        thread_id = "$thread_root:localhost"
+        cold_runtime_started_at = time.time() - 1.0
+        stale_validated_at = cold_runtime_started_at - 0.5
+        cold_batch = "s_cold_certified"
+        restored_batch = "s_after_restored_catchup"
+        root_event = _text_event(
+            event_id=thread_id,
+            body="Old root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        reply_event = _text_event(
+            event_id="$old_reply:localhost",
+            body="Old reply",
+            sender="@agent:localhost",
+            server_timestamp=2000,
+            thread_id=thread_id,
+        )
+        try:
+            await bot.event_cache.replace_thread(
+                room_id,
+                thread_id,
+                [root_event.source, reply_event.source],
+                validated_at=stale_validated_at,
+            )
+            bot._runtime_view.mark_runtime_started(restored_sync_token=False)
+            bot._runtime_view.runtime_started_at = cold_runtime_started_at
+            bot.client.next_batch = cold_batch
+            await self._run_sync_response_without_startup_side_effects(
+                bot,
+                self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=False))}),
+            )
+
+            cold_token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
+            assert cold_token_record is not None
+            assert cold_token_record.token == cold_batch
+            assert cold_token_record.thread_cache_valid_after == cold_runtime_started_at
+
+            bot._first_sync_done = False
+            bot.client.next_batch = None
+            restored_on_restart = bot._restore_saved_sync_token()
+            bot._runtime_view.mark_runtime_started(
+                restored_sync_token=restored_on_restart,
+                thread_cache_valid_after=bot._certified_sync_token_thread_cache_valid_after,
+            )
+            bot.client.next_batch = restored_batch
+            await self._run_sync_response_without_startup_side_effects(
+                bot,
+                self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=False))}),
+            )
+
+            restored_token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
+            page = MagicMock(spec=nio.RoomMessagesResponse)
+            page.chunk = [reply_event, root_event]
+            page.end = None
+            bot.client.room_messages = AsyncMock(return_value=page)
+
+            history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
+        finally:
+            await _close_bound_runtime_support(bot, support)
+
+        assert restored_on_restart is True
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is True
+        assert bot._runtime_view.pre_runtime_thread_cache_valid_after == cold_runtime_started_at
+        assert restored_token_record is not None
+        assert restored_token_record.token == restored_batch
+        assert restored_token_record.thread_cache_valid_after == cold_runtime_started_at
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "validated_before_runtime_start"
+        assert history.diagnostics["cache_runtime_started_at"] == cold_runtime_started_at
+        bot.client.room_messages.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_limited_first_sync_skips_token_persist_and_clears_saved_token(self, bot: AgentBot) -> None:
         """Limited restored-token catch-up must not persist the advanced token."""
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_limited"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_limited")
+        _save_certified_sync_token(bot, "s_before_limited")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True)),
@@ -2334,9 +2444,9 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_empty_joined_rooms_first_sync_does_not_trust_cache(self, bot: AgentBot) -> None:
         """Empty restored-token joined-room data is indeterminate, not safe catch-up proof."""
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_empty"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_empty")
+        _save_certified_sync_token(bot, "s_before_empty")
         sync_response = self._sync_response({})
 
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
@@ -2350,9 +2460,9 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_invalid_joined_rooms_first_sync_does_not_trust_cache(self, bot: AgentBot) -> None:
         """Malformed restored-token joined-room data should fail closed."""
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_invalid"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_invalid")
+        _save_certified_sync_token(bot, "s_before_invalid")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=None)),
@@ -2370,9 +2480,9 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_malformed_timeline_events_first_sync_does_not_trust_cache(self, bot: AgentBot) -> None:
         """Malformed restored-token timeline events must not certify cache catch-up."""
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_malformed_events"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_malformed_events")
+        _save_certified_sync_token(bot, "s_before_malformed_events")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(
@@ -2392,9 +2502,9 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_malformed_timeline_event_entry_first_sync_does_not_trust_cache(self, bot: AgentBot) -> None:
         """Malformed entries inside timeline.events must fail closed before token persistence."""
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_malformed_event_entry"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_malformed_event_entry")
+        _save_certified_sync_token(bot, "s_before_malformed_event_entry")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(
@@ -2414,9 +2524,9 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_complete_first_sync_trusts_restored_thread_cache(self, bot: AgentBot) -> None:
         """A non-limited restored-token catch-up may reuse pre-runtime thread snapshots."""
-        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        _mark_restored_sync_token_runtime(bot)
         bot.client.next_batch = "s_after_complete"
-        save_sync_token(bot.storage_path, bot.agent_name, "s_before_complete")
+        _save_certified_sync_token(bot, "s_before_complete")
         sync_response = self._sync_response(
             {
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=False)),

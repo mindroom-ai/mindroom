@@ -43,7 +43,9 @@ class ThreadMutationCacheOps:
     def _effective_thread_cache_runtime_started_at(self) -> float | None:
         """Return the restart freshness boundary for incremental thread revalidation."""
         if self.runtime.pre_runtime_thread_cache_trusted:
-            return None
+            valid_after = self.runtime.pre_runtime_thread_cache_valid_after
+            if valid_after is not None:
+                return valid_after
         return self.runtime.runtime_started_at
 
     def queue_room_cache_update(

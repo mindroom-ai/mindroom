@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,6 +27,9 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+_THREAD_CACHE_VALID_AFTER = 1234.5
+_V1_CERTIFICATION_MARKER_VERSION = "mindroom-sync-token-cache-certified-v1"
 
 
 def _config(tmp_path: Path) -> Config:
@@ -81,7 +85,12 @@ def test_load_sync_token_returns_none_for_whitespace_only_file(tmp_path: Path) -
 
 def test_save_sync_token_round_trip(tmp_path: Path) -> None:
     """Saving and loading should round-trip the token value."""
-    save_sync_token(tmp_path, "code", "s12345")
+    save_sync_token(
+        tmp_path,
+        "code",
+        "s12345",
+        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
+    )
 
     token_path = _token_path(tmp_path)
     assert token_path.read_text(encoding="utf-8") == "s12345"
@@ -89,11 +98,38 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
     token_record = load_sync_token_record(tmp_path, "code")
     assert token_record is not None
     assert token_record.certified is True
+    assert token_record.thread_cache_valid_after == _THREAD_CACHE_VALID_AFTER
+
+
+def test_marker_without_thread_cache_boundary_is_not_certified(tmp_path: Path) -> None:
+    """Older marker-only tokens restore for sync continuity but cannot trust durable cache rows."""
+    saved_batch = "s_marker_only"
+    token_path = _token_path(tmp_path)
+    certification_path = _certification_path(tmp_path)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(saved_batch, encoding="utf-8")
+    token_digest = hashlib.sha256(saved_batch.encode("utf-8")).hexdigest()
+    certification_path.write_text(
+        f"{_V1_CERTIFICATION_MARKER_VERSION}\n{token_digest}\n",
+        encoding="utf-8",
+    )
+
+    token_record = load_sync_token_record(tmp_path, "code")
+
+    assert token_record is not None
+    assert token_record.token == saved_batch
+    assert token_record.certified is False
+    assert token_record.thread_cache_valid_after is None
 
 
 def test_clear_sync_token_removes_saved_token(tmp_path: Path) -> None:
     """Clearing should remove an existing persisted token."""
-    save_sync_token(tmp_path, "code", "s12345")
+    save_sync_token(
+        tmp_path,
+        "code",
+        "s12345",
+        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
+    )
 
     clear_sync_token(tmp_path, "code")
 
@@ -113,7 +149,12 @@ def test_clear_sync_token_is_idempotent(tmp_path: Path) -> None:
 async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
     """Startup should hydrate the nio client from the previously saved token."""
     bot = _agent_bot(tmp_path)
-    save_sync_token(tmp_path, bot.agent_name, "s_saved")
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_saved",
+        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
+    )
 
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.next_batch = None
@@ -188,8 +229,16 @@ async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Pa
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_rejected"
-    bot._runtime_view.mark_runtime_started(restored_sync_token=True)
-    save_sync_token(tmp_path, bot.agent_name, "s_rejected")
+    bot._runtime_view.mark_runtime_started(
+        restored_sync_token=True,
+        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
+    )
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_rejected",
+        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
+    )
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
@@ -207,8 +256,16 @@ async def test_unknown_pos_restored_first_sync_suppresses_later_token_persistenc
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_rejected"
-    bot._runtime_view.mark_runtime_started(restored_sync_token=True)
-    save_sync_token(tmp_path, bot.agent_name, "s_rejected")
+    bot._runtime_view.mark_runtime_started(
+        restored_sync_token=True,
+        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
+    )
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_rejected",
+        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
+    )
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
@@ -231,9 +288,17 @@ async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_pa
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_rejected_after_start"
     bot._first_sync_done = True
-    bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+    bot._runtime_view.mark_runtime_started(
+        restored_sync_token=True,
+        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
+    )
     bot._runtime_view.mark_sync_catchup_applied()
-    save_sync_token(tmp_path, bot.agent_name, "s_rejected_after_start")
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_rejected_after_start",
+        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
+    )
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
@@ -282,6 +347,9 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
         await bot._on_sync_response(response)
 
     assert load_sync_token(tmp_path, bot.agent_name) == "s_latest"
+    token_record = load_sync_token_record(tmp_path, bot.agent_name)
+    assert token_record is not None
+    assert token_record.thread_cache_valid_after == bot._runtime_view.runtime_started_at
 
 
 @pytest.mark.asyncio
@@ -298,6 +366,9 @@ async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Pat
     await bot.prepare_for_sync_shutdown()
 
     assert load_sync_token(tmp_path, bot.agent_name) == "s_shutdown"
+    token_record = load_sync_token_record(tmp_path, bot.agent_name)
+    assert token_record is not None
+    assert token_record.thread_cache_valid_after == bot._runtime_view.runtime_started_at
 
 
 @pytest.mark.asyncio
@@ -306,9 +377,17 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot._coalescing_gate.drain_all = AsyncMock()
-    save_sync_token(tmp_path, bot.agent_name, "s_before_precallback")
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_precallback",
+        thread_cache_valid_after=_THREAD_CACHE_VALID_AFTER,
+    )
     restored_sync_token = bot._restore_saved_sync_token()
-    bot._runtime_view.mark_runtime_started(restored_sync_token=restored_sync_token)
+    bot._runtime_view.mark_runtime_started(
+        restored_sync_token=restored_sync_token,
+        thread_cache_valid_after=bot._certified_sync_token_thread_cache_valid_after,
+    )
 
     bot.client.next_batch = "s_after_precallback"
 
