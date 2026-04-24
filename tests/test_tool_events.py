@@ -14,6 +14,7 @@ from mindroom.tool_system.events import (
     _format_tool_started,
     build_tool_trace_content,
     complete_pending_tool_block,
+    ensure_visible_tool_marker_spacing,
     extract_tool_completed_info,
     format_tool_combined,
     format_tool_completed_event,
@@ -102,7 +103,7 @@ def test_format_tool_started_uses_plain_marker_and_truncates() -> None:
     )
 
     assert text.startswith("\n\n🔧 `save_file` [1]")
-    assert text.endswith("\n")
+    assert text.endswith("\n\n")
     assert "🔧" in text
     assert "`save_file`" in text
     assert "[1]" in text
@@ -120,7 +121,7 @@ def test_format_tool_combined_with_result() -> None:
     text, trace = format_tool_combined("run_shell_command", {"cmd": "pwd"}, "/app", tool_index=2)
 
     assert text.startswith("\n\n🔧 `run_shell_command` [2]")
-    assert text.endswith("\n")
+    assert text.endswith("\n\n")
     assert "<validation>" not in text
     assert "`run_shell_command`" in text
     assert "[2]" in text
@@ -138,7 +139,7 @@ def test_format_tool_combined_truncates_long_result() -> None:
     text, trace = format_tool_combined("run_shell_command", {}, "done " + ("y" * 5000))
 
     assert text.startswith("\n\n🔧 `run_shell_command`")
-    assert text.endswith("\n")
+    assert text.endswith("\n\n")
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is not None
     assert trace.truncated is True
@@ -243,7 +244,7 @@ def test_format_tool_combined_with_none_result() -> None:
     """Combined formatting should handle missing results."""
     text, trace = format_tool_combined("save_file", {}, None, tool_index=1)
 
-    assert text == "\n\n🔧 `save_file` [1]\n"
+    assert text == "\n\n🔧 `save_file` [1]\n\n"
     assert trace.type == "tool_call_completed"
     assert trace.tool_name == "save_file"
     assert trace.result_preview is None
@@ -254,7 +255,7 @@ def test_format_tool_combined_with_empty_string_result() -> None:
     """Combined formatting should treat empty results as no-result."""
     text, trace = format_tool_combined("save_file", {"file": "a.py"}, "", tool_index=1)
 
-    assert text == "\n\n🔧 `save_file` [1]\n"
+    assert text == "\n\n🔧 `save_file` [1]\n\n"
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is None
     assert trace.truncated is False
@@ -372,7 +373,7 @@ def test_render_tool_trace_for_context_omits_missing_optional_fields() -> None:
 def test_format_tool_started_with_empty_args() -> None:
     """Tool start formatting should handle empty argument maps."""
     text, trace = _format_tool_started("save_file", {}, tool_index=1)
-    assert text == "\n\n🔧 `save_file` [1] ⏳\n"
+    assert text == "\n\n🔧 `save_file` [1] ⏳\n\n"
     assert trace.type == "tool_call_started"
     assert trace.tool_name == "save_file"
     assert trace.args_preview is None
@@ -467,7 +468,7 @@ def test_format_tool_completed_event_formats_combined_block() -> None:
     """Completion event helper should render canonical plain marker."""
     tool = ToolExecution(tool_name="run_shell", tool_args={"cmd": "pwd"}, result="/app")
     text, trace = format_tool_completed_event(tool, tool_index=1)
-    assert text == "\n\n🔧 `run_shell` [1]\n"
+    assert text == "\n\n🔧 `run_shell` [1]\n\n"
     assert trace is not None
     assert trace.type == "tool_call_completed"
     assert trace.tool_name == "run_shell"
@@ -539,3 +540,28 @@ def test_markdown_to_html_plain_tool_marker_renders_code_span() -> None:
     assert "<code>search_web</code>" in html
     assert "🔧" in html
     assert "⏳" in html
+
+
+def test_visible_tool_marker_spacing_inserts_blank_line_before_following_content() -> None:
+    """Visible tool markers should be isolated from immediately following markdown."""
+    body = ensure_visible_tool_marker_spacing("🔧 `tool` [1]\n---\n## Recap\n")
+
+    assert body == "🔧 `tool` [1]\n\n---\n## Recap\n"
+
+
+def test_visible_tool_marker_spacing_preserves_existing_blank_line() -> None:
+    """Already isolated visible tool markers should not gain extra blank lines."""
+    body = ensure_visible_tool_marker_spacing("🔧 `tool` [1]\n\n---\n")
+
+    assert body == "🔧 `tool` [1]\n\n---\n"
+
+
+def test_tool_marker_thematic_break_and_heading_render_in_order() -> None:
+    """A tool marker followed by a rule and ATX heading should render in order."""
+    body = ensure_visible_tool_marker_spacing("🔧 `tool` [1]\n---\n## Recap\n")
+    html = markdown_to_html(body)
+
+    marker_index = html.index("<p>🔧 <code>tool</code> [1]</p>")
+    hr_index = html.index("<hr>")
+    heading_index = html.index("<h2>Recap</h2>")
+    assert marker_index < hr_index < heading_index

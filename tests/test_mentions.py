@@ -211,6 +211,23 @@ class TestMentionParsing:
         assert content["m.relates_to"]["event_id"] == "$thread123"
         assert content["m.relates_to"]["rel_type"] == "m.thread"
 
+    def test_tool_marker_followed_by_thematic_break_renders_as_paragraph_hr_heading_via_format_message_with_mentions(
+        self,
+    ) -> None:
+        """Visible tool markers should stay paragraphs through the Matrix message formatter."""
+        config = _make_config(_default_runtime_paths())
+        text = "Some intro text.\n\n🔧 `run_shell_command` [1]\n---\n\n## Heading after"
+
+        content = _format_message_with_mentions(config, text, sender_domain="matrix.org")
+
+        assert "🔧 `run_shell_command` [1]\n\n---" in content["body"]
+        formatted_body = content["formatted_body"]
+        assert "<h2>🔧" not in formatted_body
+        marker_index = formatted_body.index("<p>🔧 <code>run_shell_command</code> [1]</p>")
+        hr_index = formatted_body.index("<hr>")
+        heading_index = formatted_body.index("<h2>Heading after</h2>")
+        assert marker_index < hr_index < heading_index
+
     def test_format_message_with_mentions_includes_tool_trace(self) -> None:
         """Structured tool traces should be attached to message content when provided."""
         config = _make_config(_default_runtime_paths())

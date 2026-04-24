@@ -9,7 +9,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.matrix.identity import MatrixID, mindroom_namespace
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
-from mindroom.tool_system.events import build_tool_trace_content
+from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
@@ -443,7 +443,13 @@ def format_message_with_mentions(
         Properly formatted content dict for room_send
 
     """
-    plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(text, sender_domain, config, runtime_paths)
+    spaced_text = ensure_visible_tool_marker_spacing(text)
+    plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(
+        spaced_text,
+        sender_domain,
+        config,
+        runtime_paths,
+    )
 
     # Convert markdown (with links) to HTML
     # The markdown converter will properly handle the [@DisplayName](url) format

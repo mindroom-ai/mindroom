@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.tool_system.events import ensure_visible_tool_marker_spacing
 
 # --- Core bug fix: tables without blank lines ---
 
@@ -429,6 +430,26 @@ def test_tool_marker_emoji_code_span() -> None:
     html = markdown_to_html("\n\n\U0001f527 `search_web` [1] \u23f3\n")
     assert "<code>search_web</code>" in html
     assert "\U0001f527" in html
+
+
+def test_tool_marker_followed_by_thematic_break_does_not_render_as_setext_heading() -> None:
+    """ISSUE-195: tool placeholder + `---` must render as <p>+<hr>, NOT <h2>."""
+    html = markdown_to_html(ensure_visible_tool_marker_spacing("🔧 `tool` [1]\n---\n"))
+    assert "<p>🔧 <code>tool</code> [1]</p>" in html
+    assert "<hr>" in html
+    assert "<h2>" not in html
+
+
+def test_setext_h1_is_preserved_for_normal_markdown() -> None:
+    """Normal CommonMark setext h1 syntax should keep rendering as a heading."""
+    html = markdown_to_html("Heading\n===\n")
+    assert "<h1>Heading</h1>" in html
+
+
+def test_setext_h2_is_preserved_for_normal_markdown() -> None:
+    """Normal CommonMark setext h2 syntax should keep rendering as a heading."""
+    html = markdown_to_html("Heading\n---\n")
+    assert "<h2>Heading</h2>" in html
 
 
 @pytest.mark.parametrize(
