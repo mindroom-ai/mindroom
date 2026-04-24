@@ -1643,6 +1643,7 @@ expose = [
     "initialize_shared_knowledge_managers",
     "KnowledgeAvailability",
     "OrchestratorKnowledgeRefreshOwner",
+    "referenced_shared_knowledge_base_ids",
     "StandaloneKnowledgeRefreshOwner",
     "shutdown_shared_knowledge_managers",
 ]
