@@ -58,11 +58,9 @@ from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_approval import (
     _DEFAULT_ROUTER_MANAGED_ROOM_REASON,
-    ApprovalManager,
     PendingApproval,
     SentApprovalEvent,
     ToolApprovalTransportError,
-    get_approval_store,
     initialize_approval_store,
     recover_unconfirmed_approval_event_deliveries,
     shutdown_approval_store,
@@ -125,7 +123,6 @@ if TYPE_CHECKING:
 
     from .constants import RuntimePaths
 logger = get_logger(__name__)
-_REMOVED_APPROVAL_ROOM_REASON = "Router left the room before approval completed."
 
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
@@ -250,6 +247,21 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         self.should_exit = True
 
 
+def _normalize_approval_nio_event(event: nio.Event, *, event_id: str | None = None) -> dict[str, Any]:
+    """Normalize one Matrix event source for approval cache and lookup paths."""
+    source = dict(event.source) if isinstance(event.source, dict) else {}
+    if "event_id" not in source and isinstance(event.event_id, str):
+        source["event_id"] = event.event_id
+    if "event_id" not in source and isinstance(event_id, str):
+        source["event_id"] = event_id
+    if "sender" not in source and isinstance(event.sender, str):
+        source["sender"] = event.sender
+    timestamp = event.server_timestamp
+    if "origin_server_ts" not in source and isinstance(timestamp, int) and not isinstance(timestamp, bool):
+        source["origin_server_ts"] = timestamp
+    return source
+
+
 @dataclass
 class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
@@ -278,7 +290,6 @@ class MultiAgentOrchestrator:
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _approval_known_joined_room_ids: set[str] | None = field(default=None, init=False, repr=False)
-    _pending_room_leaves: set[str] = field(default_factory=set, init=False, repr=False)
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -443,6 +454,7 @@ class MultiAgentOrchestrator:
                     agent_name=bot.agent_name,
                 )
                 return None
+            await self._cache_approval_event_now(bot, room_id, str(response.event_id))
             return SentApprovalEvent(event_id=str(response.event_id))
         logger.warning(
             "Failed to send approval Matrix event",
@@ -491,6 +503,82 @@ class MultiAgentOrchestrator:
         if not self._bot_has_approval_room(bot, room_id):
             return None
         return bot
+
+    def _approval_transport_sender_id(self) -> str | None:
+        """Return the Matrix user id that owns approval cards for this runtime."""
+        bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if bot is None or bot.client is None:
+            return None
+        user_id = bot.client.user_id
+        return user_id if isinstance(user_id, str) and user_id else None
+
+    def _configured_approval_room_ids(self) -> set[str]:
+        """Return rooms currently served by the router approval transport."""
+        bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        room_ids: set[str] = set()
+        if bot is not None and bot.client is not None:
+            room_ids.update(bot.client.rooms)
+        if self._approval_known_joined_room_ids is not None:
+            room_ids.update(self._approval_known_joined_room_ids)
+        return room_ids
+
+    async def _fetch_approval_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
+        """Fetch one approval event source from Matrix via the router transport."""
+        return await self._run_on_runtime_loop(lambda: self._fetch_approval_event_now(room_id, event_id))
+
+    async def _fetch_approval_event_now(self, room_id: str, event_id: str) -> dict[str, Any] | None:
+        bot = self._approval_transport_bot(room_id)
+        if bot is None or bot.client is None:
+            return None
+        response = await bot.client.room_get_event(room_id, event_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return None
+        return _normalize_approval_nio_event(response.event, event_id=event_id)
+
+    async def _scan_approval_room_events(
+        self,
+        room_id: str,
+        since_ts_ms: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Scan recent Matrix history for approval cards."""
+        return await self._run_on_runtime_loop(
+            lambda: self._scan_approval_room_events_now(room_id, since_ts_ms, limit),
+        )
+
+    async def _scan_approval_room_events_now(
+        self,
+        room_id: str,
+        since_ts_ms: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        bot = self._approval_transport_bot(room_id)
+        if bot is None or bot.client is None:
+            return []
+        events: list[dict[str, Any]] = []
+        from_token: str | None = None
+        while len(events) < limit:
+            response = await bot.client.room_messages(
+                room_id,
+                start=from_token,
+                limit=min(100, limit - len(events)),
+                message_filter={"types": ["io.mindroom.tool_approval"]},
+                direction=nio.MessageDirection.back,
+            )
+            if not isinstance(response, nio.RoomMessagesResponse) or not response.chunk:
+                return events
+            for event in response.chunk:
+                source = _normalize_approval_nio_event(event)
+                timestamp = source.get("origin_server_ts")
+                if isinstance(timestamp, int) and timestamp < since_ts_ms:
+                    return events
+                events.append(source)
+                if len(events) >= limit:
+                    return events
+            if not response.end or response.end == from_token:
+                return events
+            from_token = response.end
+        return events
 
     @staticmethod
     def _matches_pending_approval_event(
@@ -595,7 +683,34 @@ class MultiAgentOrchestrator:
                 response=str(response),
             )
             return False
+        await self._cache_approval_event_now(bot, room_id, str(response.event_id))
         return True
+
+    async def _cache_approval_event_now(
+        self,
+        bot: AgentBot | TeamBot,
+        room_id: str,
+        event_id: str,
+    ) -> None:
+        """Store a freshly sent approval event after Matrix assigns canonical event fields."""
+        if bot.client is None:
+            return
+        try:
+            response = await bot.client.room_get_event(room_id, event_id)
+            if not isinstance(response, nio.RoomGetEventResponse):
+                return
+            await bot.event_cache.store_event(
+                event_id,
+                room_id,
+                _normalize_approval_nio_event(response.event, event_id=event_id),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to cache outbound approval event",
+                room_id=room_id,
+                event_id=event_id,
+                error=str(exc),
+            )
 
     async def _send_approval_notice(
         self,
@@ -642,78 +757,8 @@ class MultiAgentOrchestrator:
         self,
         room_ids: set[str],
     ) -> set[str]:
-        """Finalize approvals before the router leaves their anchor rooms."""
-        if not room_ids:
-            return set()
-        approval_store = get_approval_store()
-        if approval_store is None:
-            return set(room_ids)
-
-        return await self._drain_approval_state_for_rooms(room_ids, approval_store=approval_store)
-
-    async def _on_approval_room_drained(self, room_id: str) -> None:
-        """Retry one deferred router leave after approval replay catches up."""
-        if room_id not in self._pending_room_leaves:
-            return
-
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or not router_bot.running or router_bot.client is None:
-            return
-
-        rooms_to_leave = await router_bot._room_lifecycle.rooms_to_actually_leave()
-        if room_id not in rooms_to_leave:
-            self._pending_room_leaves.discard(room_id)
-            return
-        approval_store = get_approval_store()
-        if approval_store is not None:
-            finalized_room_ids = await self._drain_approval_state_for_rooms(
-                {room_id},
-                approval_store=approval_store,
-            )
-            if room_id not in finalized_room_ids:
-                return
-        else:
-            self._pending_room_leaves.discard(room_id)
-        await router_bot._room_lifecycle.leave_unconfigured_rooms(room_ids=[room_id])
-
-    async def _drain_approval_state_for_rooms(
-        self,
-        room_ids: set[str],
-        *,
-        approval_store: ApprovalManager,
-    ) -> set[str]:
-        """Wait until approvals in the given rooms are either synced or deferred to a later pass."""
-        for _ in range(3):
-            await approval_store.wait_for_pending_sends_in_rooms(room_ids, timeout=None)
-
-            for pending in approval_store.list_pending():
-                if pending.room_id not in room_ids:
-                    continue
-                with suppress(LookupError, ValueError):
-                    await approval_store.expire(
-                        pending.id,
-                        reason=_REMOVED_APPROVAL_ROOM_REASON,
-                    )
-            fully_reconciled = await approval_store.reconcile_unsynced_approvals(
-                room_ids=room_ids,
-                max_attempts=3,
-                backoff="exponential",
-            )
-            pending_after = [pending for pending in approval_store.list_pending() if pending.room_id in room_ids]
-            if fully_reconciled and not pending_after:
-                self._pending_room_leaves.difference_update(room_ids)
-                return set(room_ids)
-            if not pending_after:
-                break
-
-        blocked_room_ids = approval_store._room_ids_with_unsynced_resolution_work() & room_ids
-        blocked_room_ids.update(
-            pending.room_id for pending in approval_store.list_pending() if pending.room_id in room_ids
-        )
-        finalized_room_ids = set(room_ids) - blocked_room_ids
-        self._pending_room_leaves.difference_update(finalized_room_ids)
-        self._pending_room_leaves.update(blocked_room_ids)
-        return finalized_room_ids
+        """Return rooms eligible for leave; startup auto-deny owns approval cleanup."""
+        return set(room_ids)
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
@@ -1294,8 +1339,11 @@ class MultiAgentOrchestrator:
             self.runtime_paths,
             sender=self._send_approval_event,
             editor=self._edit_approval_event,
-            recoverer=self._recover_approval_event_id,
-            on_room_drained=self._on_approval_room_drained,
+            event_cache=self._runtime_support.event_cache,
+            event_fetcher=self._fetch_approval_event,
+            room_event_scanner=self._scan_approval_room_events,
+            approval_room_ids=self._configured_approval_room_ids,
+            transport_sender=self._approval_transport_sender_id,
             runtime_loop=self._runtime_loop,
         )
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)

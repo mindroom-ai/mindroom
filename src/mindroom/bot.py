@@ -52,7 +52,7 @@ from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
-from mindroom.tool_approval import AnchoredApprovalActionResult, ApprovalManager, PendingApproval, get_approval_store
+from mindroom.tool_approval import get_approval_store
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -106,7 +106,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
-    from mindroom.tool_approval import ApprovalManager
     from mindroom.tool_system.events import ToolTraceEntry
 
 type MatrixEventId = str
@@ -877,11 +876,6 @@ class AgentBot:
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
         rooms_to_leave = await self._room_lifecycle.rooms_to_actually_leave()
-        if rooms_to_leave and self.agent_name == ROUTER_AGENT_NAME and self.orchestrator is not None:
-            finalized_room_ids = await self.orchestrator._force_finalize_pending_approvals_for_rooms(
-                set(rooms_to_leave),
-            )
-            rooms_to_leave = [room_id for room_id in rooms_to_leave if room_id in finalized_room_ids]
         if not rooms_to_leave:
             return
         await self._room_lifecycle.leave_unconfigured_rooms(room_ids=rooms_to_leave)
@@ -1414,63 +1408,20 @@ class AgentBot:
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._handle_reaction_inner(room, event)
 
-    async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:  # noqa: PLR0911
+    async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""
         if event.type != "io.mindroom.tool_approval_response":
             return
         approval_event_id, status, reason = self._approval_response_payload(event)
         if approval_event_id is None or status is None:
             return
-        approval_manager = get_approval_store()
-        if approval_manager is None:
-            return
-        pending = approval_manager.anchored_request_for_event(
-            approval_event_id=approval_event_id,
-            room_id=room.room_id,
-        )
-        if pending is None:
-            return
-        should_restate_pending = self._should_send_tool_approval_notice(room_id=room.room_id)
-        if pending.status != "pending" and pending.resolution_synced_at is None:
-            await approval_manager.replay_resolved_card_for_room(
-                approval_event_id=approval_event_id,
-                room_id=room.room_id,
-            )
-            return
-        pending_is_open = pending.status == "pending"
-        sender_is_requester = pending.approver_user_id == event.sender
-        sender_can_resolve = self._sender_can_resolve_tool_approval(room, event.sender)
-
-        if await self._deny_tool_approval_for_lost_authorization_if_needed(
+        await self._handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
             approval_event_id=approval_event_id,
-            approval_manager=approval_manager,
-            sender_can_resolve=sender_can_resolve,
-            pending=pending,
-        ):
-            return
-
-        if not sender_can_resolve:
-            if pending_is_open and should_restate_pending:
-                await approval_manager.restate_pending_anchored_request(
-                    approval_event_id=approval_event_id,
-                    room_id=room.room_id,
-                )
-            return
-
-        result = await approval_manager.handle_custom_response(
-            approval_event_id=approval_event_id,
-            room_id=room.room_id,
             status=status,
             reason=reason,
-            resolved_by=event.sender,
         )
-        if not result.handled and pending_is_open and not sender_is_requester and should_restate_pending:
-            await approval_manager.restate_pending_anchored_request(
-                approval_event_id=approval_event_id,
-                room_id=room.room_id,
-            )
 
     @staticmethod
     def _approval_response_payload(
@@ -1506,40 +1457,25 @@ class AgentBot:
         reply_to_event_id = _reply_to_event_id_from_event_source(event.source)
         if reply_to_event_id is None:
             return False
-        pending = approval_manager.anchored_request_for_event(
-            approval_event_id=reply_to_event_id,
-            room_id=room.room_id,
-        )
-        if pending is None:
-            return False
 
-        await self._handle_tool_approval_action(
+        return await self._handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
             approval_event_id=reply_to_event_id,
-            action=lambda resolved_approval_manager: resolved_approval_manager.handle_reply(
-                approval_event_id=reply_to_event_id,
-                room_id=room.room_id,
-                reason=_strip_matrix_rich_reply_fallback(event.body),
-                resolved_by=event.sender,
-            ),
+            status="denied",
+            reason=_strip_matrix_rich_reply_fallback(event.body),
         )
-        return True
 
     async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle one reaction inside the per-turn thread-history cache scope."""
         assert self.client is not None
 
-        if await self._handle_tool_approval_action(
+        if event.key == "✅" and await self._handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
             approval_event_id=event.reacts_to,
-            action=lambda approval_manager: approval_manager.handle_reaction(
-                approval_event_id=event.reacts_to,
-                room_id=room.room_id,
-                reaction_key=event.key,
-                resolved_by=event.sender,
-            ),
+            status="approved",
+            reason=None,
         ):
             return
 
@@ -1619,75 +1555,29 @@ class AgentBot:
 
         return True
 
-    async def _deny_tool_approval_for_lost_authorization_if_needed(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        sender_id: str,
-        approval_event_id: str,
-        approval_manager: ApprovalManager,
-        sender_can_resolve: bool,
-        pending: PendingApproval | None = None,
-    ) -> bool:
-        """Fail closed when the stored requester can no longer resolve the anchored approval."""
-        if sender_can_resolve:
-            return False
-        anchored_pending = pending or approval_manager.anchored_request_for_event(
-            approval_event_id=approval_event_id,
-            room_id=room.room_id,
-        )
-        if anchored_pending is None or anchored_pending.approver_user_id != sender_id:
-            return False
-        if anchored_pending.status != "pending" and anchored_pending.resolution_synced_at is None:
-            await approval_manager.replay_resolved_card_for_room(
-                approval_event_id=approval_event_id,
-                room_id=room.room_id,
-            )
-            return True
-        result = await approval_manager.deny_anchored_request_for_lost_authorization(
-            approval_event_id=approval_event_id,
-            room_id=room.room_id,
-            resolved_by=sender_id,
-        )
-        return result.handled
-
     async def _handle_tool_approval_action(
         self,
         *,
         room: nio.MatrixRoom,
         sender_id: str,
         approval_event_id: str,
-        action: Callable[[ApprovalManager], Awaitable[AnchoredApprovalActionResult]],
+        status: Literal["approved", "denied"],
+        reason: str | None,
     ) -> bool:
         """Resolve one approval action only when the sender still has access."""
         approval_manager = get_approval_store()
         if approval_manager is None:
             return False
         sender_can_resolve = self._sender_can_resolve_tool_approval(room, sender_id)
-        if await self._deny_tool_approval_for_lost_authorization_if_needed(
-            room=room,
-            sender_id=sender_id,
-            approval_event_id=approval_event_id,
-            approval_manager=approval_manager,
-            sender_can_resolve=sender_can_resolve,
-        ):
-            return True
         if not sender_can_resolve:
             return False
-        result = await action(approval_manager)
-        orchestrator = self.orchestrator
-        if (
-            result.error_reason is not None
-            and orchestrator is not None
-            and self._should_send_tool_approval_notice(room_id=room.room_id)
-        ):
-            await orchestrator._send_approval_notice(
-                room_id=room.room_id,
-                approval_event_id=approval_event_id,
-                thread_id=result.thread_id,
-                reason=result.error_reason,
-            )
-        return result.handled
+        return await approval_manager.handle_response_event(
+            room_id=room.room_id,
+            sender_id=sender_id,
+            card_event_id=approval_event_id,
+            status=status,
+            reason=reason.strip() if isinstance(reason, str) and reason.strip() else None,
+        )
 
     def _should_send_tool_approval_notice(
         self,

@@ -1,9 +1,4 @@
-"""Tool-call approval evaluation and Matrix-only approval management.
-
-ApprovalManager is accessed from multiple event loops and threads.
-All reads and writes touching the in-memory approval indexes must go through
-``self._state_lock`` so approval resolution stays consistent across runtimes.
-"""
+"""Tool-call approval evaluation and Matrix-only approval management."""
 
 from __future__ import annotations
 
@@ -11,56 +6,58 @@ import asyncio
 import importlib.util
 import inspect
 import json
-import tempfile
 import threading
-from collections.abc import Awaitable, Callable, Coroutine
+import time
+from collections.abc import Awaitable, Callable
 from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
-from mindroom.constants import RuntimePaths, resolve_config_relative_path, safe_replace
+from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import is_agent_id
 from mindroom.tool_system.tool_failures import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from types import ModuleType
 
     from mindroom.config.main import Config
+    from mindroom.matrix.cache.event_cache import ConversationEventCache
 
 ApprovalStatus = Literal["approved", "denied", "expired"]
 PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
+ResolutionStatus = Literal["approved", "denied"]
 MatrixEventSender = Callable[[str, str | None, dict[str, Any]], Awaitable["SentApprovalEvent | None"]]
 MatrixEventEditor = Callable[[str, str, dict[str, Any]], Awaitable[bool]]
+MatrixEventFetcher = Callable[[str, str], Awaitable[dict[str, Any] | None]]
+MatrixRoomEventScanner = Callable[[str, int, int], Awaitable[list[dict[str, Any]]]]
+ApprovalRoomProvider = Callable[[], set[str]]
+TransportSenderProvider = Callable[[], str | None]
 
 _APPROVALS_DIRNAME = "approvals"
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
 _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
-_DEFAULT_RESTART_REASON = "MindRoom restarted before approval completed."
 _DEFAULT_REINITIALIZE_REASON = "MindRoom reinitialized before approval completed."
 _DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
     "Tool approval requires the router to be joined to the Matrix room. "
     "In ad-hoc invited rooms accepted via accept_invites, approval only works if the router "
     "is already joined there; otherwise retry from a managed room."
 )
-_DEFAULT_APPROVER_LOST_AUTHORIZATION_REASON = "Approver lost authorization."
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 _DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
-_DEFAULT_UNCONFIRMED_DELIVERY_RESTART_REASON = "MindRoom restarted before approval delivery could be confirmed."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the displayed arguments are truncated. "
     "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
 )
-_APPROVE_REACTION_KEYS = frozenset({"✅"})
+_STARTUP_AUTO_DENY_REASON = "Bot restarted before approval — original request was cancelled."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
-_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS = 30.0
 _MANAGER: ApprovalManager | None = None
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
 _SCRIPT_CACHE_LOCK = threading.Lock()
@@ -86,7 +83,8 @@ def _utcnow() -> datetime:
 def _parse_datetime(value: str | None) -> datetime | None:
     if value is None:
         return None
-    return datetime.fromisoformat(value)
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _compact_preview_text(value: object) -> str:
@@ -100,22 +98,6 @@ def _compact_preview_text(value: object) -> str:
 
 def _json_preview_length(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, sort_keys=True))
-
-
-def _build_arguments_preview(arguments: dict[str, Any]) -> tuple[object, bool]:
-    sanitized = sanitize_failure_value(arguments)
-    preview_text = _compact_preview_text(sanitized)
-    if len(preview_text) <= _MAX_ARGUMENTS_PREVIEW_CHARS:
-        return sanitized, False
-    preview = sanitize_failure_text(preview_text, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS)
-    while len(json.dumps(preview, ensure_ascii=False, sort_keys=True)) > _MAX_ARGUMENTS_PREVIEW_CHARS:
-        overflow = len(json.dumps(preview, ensure_ascii=False, sort_keys=True)) - _MAX_ARGUMENTS_PREVIEW_CHARS
-        next_max_length = max(len(preview) - overflow - 8, 1)
-        next_preview = sanitize_failure_text(preview_text, max_length=next_max_length)
-        if next_preview == preview:
-            break
-        preview = next_preview
-    return preview, True
 
 
 def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
@@ -167,28 +149,6 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
     return preview, True
 
 
-def _event_arguments_payload(pending: PendingApproval) -> tuple[dict[str, Any], bool]:
-    return pending.event_arguments_payload, pending.event_arguments_truncated
-
-
-def _load_event_arguments_payload(
-    payload: dict[str, Any],
-    *,
-    arguments_preview_payload: object,
-    arguments_preview_truncated: bool,
-) -> tuple[dict[str, Any], bool]:
-    event_arguments_payload = payload.get("event_arguments_payload")
-    if isinstance(event_arguments_payload, dict):
-        return cast("dict[str, Any]", event_arguments_payload), bool(payload.get("event_arguments_truncated"))
-
-    legacy_arguments = payload.get("arguments")
-    if isinstance(legacy_arguments, dict):
-        return _build_event_arguments_preview(cast("dict[str, Any]", legacy_arguments))
-    if isinstance(arguments_preview_payload, dict):
-        return cast("dict[str, Any]", arguments_preview_payload), arguments_preview_truncated
-    return {"value": arguments_preview_payload}, True
-
-
 @dataclass(frozen=True, slots=True)
 class ApprovalDecision:
     """One resolved approval outcome."""
@@ -215,115 +175,116 @@ class AnchoredApprovalActionResult:
     thread_id: str | None = None
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class PendingApproval:
-    """One approval request plus any live wait state."""
+    """Typed projection of one Matrix `io.mindroom.tool_approval` card."""
 
-    id: str
-    tool_name: str
-    arguments: dict[str, Any]
-    arguments_preview: object
-    arguments_preview_truncated: bool
-    event_arguments_payload: dict[str, Any]
-    event_arguments_truncated: bool
-    agent_name: str
-    room_id: str | None
-    thread_id: str | None
-    requester_id: str | None
+    approval_id: str
+    card_event_id: str
+    room_id: str
+    card_sender_id: str
+    requester_id: str
     approver_user_id: str
-    matched_rule: str
-    script_path: str | None
-    requested_at: datetime
-    expires_at: datetime
-    future: Future[ApprovalDecision] | None = field(default=None, repr=False)
-    status: PendingApprovalStatus = "pending"
-    resolution_reason: str | None = None
-    resolved_at: datetime | None = None
-    resolved_by: str | None = None
-    event_id: str | None = None
-    resolution_synced_at: datetime | None = None
+    tool_name: str
+    arguments_preview: dict[str, Any]
+    arguments_preview_truncated: bool
+    timeout_seconds: int
+    created_at_ms: int
+    thread_id: str | None = None
+    agent_name: str | None = None
+    requested_at: str | None = None
+    expires_at: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return the persisted approval payload."""
-        return {
-            "id": self.id,
-            "tool_name": self.tool_name,
-            "arguments_preview": self.arguments_preview,
-            "arguments_preview_truncated": self.arguments_preview_truncated,
-            "event_arguments_payload": self.event_arguments_payload,
-            "event_arguments_truncated": self.event_arguments_truncated,
-            "agent_name": self.agent_name,
-            "room_id": self.room_id,
-            "thread_id": self.thread_id,
-            "requester_id": self.requester_id,
-            "approver_user_id": self.approver_user_id,
-            "matched_rule": self.matched_rule,
-            "script_path": self.script_path,
-            "requested_at": self.requested_at.isoformat(),
-            "expires_at": self.expires_at.isoformat(),
-            "status": self.status,
-            "resolution_reason": self.resolution_reason,
-            "resolved_at": self.resolved_at.isoformat() if self.resolved_at is not None else None,
-            "resolved_by": self.resolved_by,
-            "event_id": self.event_id,
-            "resolution_synced_at": (
-                self.resolution_synced_at.isoformat() if self.resolution_synced_at is not None else None
-            ),
-        }
+    @property
+    def id(self) -> str:
+        """Return the stable approval id used in Matrix card content."""
+        return self.approval_id
+
+    @property
+    def event_id(self) -> str:
+        """Return the Matrix event id for compatibility with old callers."""
+        return self.card_event_id
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> PendingApproval:
-        """Rebuild one approval payload from disk."""
-        arguments_preview_payload = payload.get("arguments_preview")
-        if arguments_preview_payload is None:
-            legacy_arguments = payload.get("arguments")
-            if isinstance(legacy_arguments, dict):
-                arguments_preview_payload, arguments_preview_truncated = _build_arguments_preview(
-                    cast("dict[str, Any]", legacy_arguments),
-                )
-            else:
-                arguments_preview_payload = sanitize_failure_text(str(legacy_arguments or ""))
-                arguments_preview_truncated = False
-        else:
-            arguments_preview_truncated = bool(payload.get("arguments_preview_truncated"))
-        event_arguments_payload, event_arguments_truncated = _load_event_arguments_payload(
-            payload,
-            arguments_preview_payload=arguments_preview_payload,
-            arguments_preview_truncated=arguments_preview_truncated,
-        )
-        event_id = cast("str | None", payload.get("event_id"))
+    def from_card_event(cls, event: dict[str, Any], *, room_id: str) -> PendingApproval:
+        """Parse one Matrix approval card event into a typed read-only view."""
+        if event.get("type") != "io.mindroom.tool_approval":
+            msg = "Approval card event has the wrong event type."
+            raise ValueError(msg)
+        content = event.get("content")
+        if not isinstance(content, dict):
+            msg = "Approval card event is missing content."
+            raise TypeError(msg)
+        if _is_replace_content(content):
+            msg = "Approval card event is a replacement edit, not an original card."
+            raise ValueError(msg)
+
+        event_id = _required_str(event, "event_id")
+        sender = _required_str(event, "sender")
+        approval_id = _content_str(content, "approval_id") or _content_str(content, "tool_call_id")
+        tool_name = _content_str(content, "tool_name")
+        approver_user_id = _content_str(content, "approver_user_id")
+        if approval_id is None or tool_name is None or approver_user_id is None:
+            msg = "Approval card event is missing required approval fields."
+            raise ValueError(msg)
+
+        arguments = content.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {"value": arguments}
+
+        requested_at = _content_str(content, "requested_at")
+        expires_at = _content_str(content, "expires_at")
+        created_at_ms = _created_at_ms(event, requested_at)
+        timeout_seconds = _timeout_seconds(requested_at, expires_at)
+        requester_id = _content_str(content, "requester_id") or ""
+        thread_id = _content_str(content, "thread_id")
+        agent_name = _content_str(content, "agent_name")
+
         return cls(
-            id=cast("str", payload["id"]),
-            tool_name=cast("str", payload["tool_name"]),
-            arguments={},
-            arguments_preview=arguments_preview_payload,
-            arguments_preview_truncated=arguments_preview_truncated,
-            event_arguments_payload=event_arguments_payload,
-            event_arguments_truncated=event_arguments_truncated,
-            agent_name=cast("str", payload["agent_name"]),
-            room_id=cast("str | None", payload.get("room_id")),
-            thread_id=cast("str | None", payload.get("thread_id")),
-            requester_id=cast("str | None", payload.get("requester_id")),
-            approver_user_id=cast("str", payload["approver_user_id"]),
-            matched_rule=cast("str", payload["matched_rule"]),
-            script_path=cast("str | None", payload.get("script_path")),
-            requested_at=cast("datetime", _parse_datetime(cast("str", payload["requested_at"]))),
-            expires_at=cast("datetime", _parse_datetime(cast("str", payload["expires_at"]))),
-            status=cast("PendingApprovalStatus", payload["status"]),
-            resolution_reason=cast("str | None", payload.get("resolution_reason")),
-            resolved_at=_parse_datetime(cast("str | None", payload.get("resolved_at"))),
-            resolved_by=cast("str | None", payload.get("resolved_by")),
-            event_id=event_id,
-            resolution_synced_at=_parse_datetime(cast("str | None", payload.get("resolution_synced_at"))),
+            approval_id=approval_id,
+            card_event_id=event_id,
+            room_id=room_id,
+            card_sender_id=sender,
+            requester_id=requester_id,
+            approver_user_id=approver_user_id,
+            tool_name=tool_name,
+            arguments_preview=cast("dict[str, Any]", arguments),
+            arguments_preview_truncated=bool(content.get("arguments_truncated")),
+            timeout_seconds=timeout_seconds,
+            created_at_ms=created_at_ms,
+            thread_id=thread_id,
+            agent_name=agent_name,
+            requested_at=requested_at,
+            expires_at=expires_at,
         )
 
+    def latest_status(self, latest_edit: dict[str, Any] | None) -> PendingApprovalStatus:
+        """Return the visible approval status after applying the latest cached edit."""
+        if latest_edit is None:
+            return "pending"
+        content = latest_edit.get("content")
+        if not isinstance(content, dict):
+            return "pending"
+        new_content = content.get("m.new_content")
+        if not isinstance(new_content, dict):
+            return "pending"
+        status = new_content.get("status")
+        if status in {"pending", "approved", "denied", "expired"}:
+            return cast("PendingApprovalStatus", status)
+        return "pending"
 
-MatrixApprovalEventRecoverer = Callable[[PendingApproval], Awaitable[str | None]]
-ApprovalRoomDrainedCallback = Callable[[str], Awaitable[None]]
+
+@dataclass(slots=True)
+class _LiveApprovalWaiter:
+    approval_id: str
+    card_event_id: str
+    room_id: str
+    card_event: dict[str, Any]
+    future: Future[ApprovalDecision]
 
 
 class ApprovalManager:
-    """Track live approvals, persist them, and reconcile Matrix cards."""
+    """Coordinate live approval waiters against Matrix approval cards."""
 
     def __init__(
         self,
@@ -331,845 +292,259 @@ class ApprovalManager:
         *,
         sender: MatrixEventSender | None = None,
         editor: MatrixEventEditor | None = None,
-        recoverer: MatrixApprovalEventRecoverer | None = None,
-        on_room_drained: ApprovalRoomDrainedCallback | None = None,
+        event_cache: ConversationEventCache | None = None,
+        event_fetcher: MatrixEventFetcher | None = None,
+        room_event_scanner: MatrixRoomEventScanner | None = None,
+        approval_room_ids: ApprovalRoomProvider | None = None,
+        transport_sender: TransportSenderProvider | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
-        self._storage_dir = runtime_paths.storage_root / _APPROVALS_DIRNAME
-        self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._send_event = sender
         self._edit_event = editor
-        self._recover_event_id = recoverer
-        self._on_room_drained = on_room_drained
-        self._state_lock = threading.Lock()
-        self._requests_by_id: dict[str, PendingApproval] = {}
-        self._pending_by_id: dict[str, PendingApproval] = {}
-        self._approval_id_by_event_id: dict[str, str] = {}
-        self._pending_send_completion: dict[str, asyncio.Event] = {}
-        self._pending_send_room_index: dict[str, set[str]] = {}
-        self._replay_in_progress: set[str] = set()
-        self._runtime_loop: asyncio.AbstractEventLoop | None = None
-        self._unsynced_resolution_retry_task: asyncio.Task[None] | Future[None] | None = None
-        self._room_drained_callback_tasks: set[asyncio.Task[None]] = set()
-        self._allow_unsynced_resolution_retries = True
-        self._load_existing()
+        self._event_cache = event_cache
+        self._event_fetcher = event_fetcher
+        self._room_event_scanner = room_event_scanner
+        self._approval_room_ids = approval_room_ids
+        self._transport_sender = transport_sender
+        self._live_lock = threading.Lock()
+        self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
+        _purge_legacy_approval_files(runtime_paths.storage_root)
 
-    @property
-    def runtime_storage_root(self) -> Path:
-        """Return the runtime storage root bound to this manager."""
-        return self._runtime_storage_root
-
-    @property
-    def storage_dir(self) -> Path:
-        """Return the approvals persistence directory."""
-        return self._storage_dir
-
-    def configure_transport(
+    async def request_approval(  # noqa: PLR0911
         self,
         *,
-        sender: MatrixEventSender | None = None,
-        editor: MatrixEventEditor | None = None,
-        recoverer: MatrixApprovalEventRecoverer | None = None,
-        on_room_drained: ApprovalRoomDrainedCallback | None = None,
-    ) -> None:
-        """Update the Matrix transport callbacks."""
-        if sender is not None:
-            self._send_event = sender
-        if editor is not None:
-            self._edit_event = editor
-        if recoverer is not None:
-            self._recover_event_id = recoverer
-        if on_room_drained is not None:
-            self._on_room_drained = on_room_drained
-
-    def _request_path(self, approval_id: str) -> Path:
-        return self._storage_dir / f"{approval_id}.json"
-
-    def _persist_request(self, pending: PendingApproval) -> None:
-        target_path = self._request_path(pending.id)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=self._storage_dir,
-            prefix=f"{pending.id}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            json.dump(pending.to_dict(), handle, sort_keys=True)
-            handle.write("\n")
-            tmp_path = Path(handle.name)
-        safe_replace(tmp_path, target_path)
-
-    def _delete_request_file(self, approval_id: str) -> None:
-        self._request_path(approval_id).unlink(missing_ok=True)
-
-    def _store_request(self, pending: PendingApproval) -> None:
-        with self._state_lock:
-            self._requests_by_id[pending.id] = pending
-            if pending.status == "pending":
-                self._pending_by_id[pending.id] = pending
-            if pending.event_id is not None:
-                self._approval_id_by_event_id[pending.event_id] = pending.id
-
-    def _pending_request(self, approval_id: str) -> PendingApproval | None:
-        with self._state_lock:
-            return self._pending_by_id.get(approval_id)
-
-    def anchored_request_for_event(
-        self,
-        *,
-        approval_event_id: str,
-        room_id: str,
-    ) -> PendingApproval | None:
-        """Return one approval card anchored to the given room event."""
-        return self._anchored_request(approval_event_id=approval_event_id, room_id=room_id)
-
-    def _anchored_request(
-        self,
-        *,
-        approval_event_id: str,
-        room_id: str,
-    ) -> PendingApproval | None:
-        with self._state_lock:
-            approval_id = self._approval_id_by_event_id.get(approval_event_id)
-            if approval_id is None:
-                return None
-            pending = self._requests_by_id.get(approval_id)
-            if pending is None or pending.event_id != approval_event_id or pending.room_id != room_id:
-                return None
-            if pending.status != "pending" and pending.resolution_synced_at is not None:
-                return None
-            return pending
-
-    def _pending_ids_snapshot(self) -> list[str]:
-        with self._state_lock:
-            return list(self._pending_by_id)
-
-    def _pending_requests_snapshot(self) -> list[PendingApproval]:
-        with self._state_lock:
-            return list(self._pending_by_id.values())
-
-    def _start_pending_send(self, approval_id: str, room_id: str) -> None:
-        with self._state_lock:
-            self._pending_send_completion[approval_id] = asyncio.Event()
-            self._pending_send_room_index.setdefault(room_id, set()).add(approval_id)
-
-    def _complete_pending_send(self, approval_id: str) -> None:
-        completion_event: asyncio.Event | None = None
-        with self._state_lock:
-            completion_event = self._pending_send_completion.pop(approval_id, None)
-            for room_id in tuple(self._pending_send_room_index):
-                approval_ids = self._pending_send_room_index[room_id]
-                approval_ids.discard(approval_id)
-                if not approval_ids:
-                    self._pending_send_room_index.pop(room_id, None)
-        if completion_event is not None:
-            completion_event.set()
-
-    def _pending_send_events_for_rooms(self, room_ids: set[str]) -> tuple[asyncio.Event, ...]:
-        with self._state_lock:
-            pending_send_ids: set[str] = set()
-            for room_id in room_ids:
-                pending_send_ids.update(self._pending_send_room_index.get(room_id, set()))
-            return tuple(
-                completion_event
-                for approval_id, completion_event in self._pending_send_completion.items()
-                if approval_id in pending_send_ids
-            )
-
-    def pending_send_room_ids(self) -> set[str]:
-        """Return rooms that still have approval sends completing their delivery lifecycle."""
-        with self._state_lock:
-            return set(self._pending_send_room_index)
-
-    async def _wait_for_all_pending_sends(self) -> bool:
-        while True:
-            room_ids = self.pending_send_room_ids()
-            if not room_ids:
-                return True
-            await self.wait_for_pending_sends_in_rooms(room_ids, timeout=None)
-            if not self.pending_send_room_ids():
-                return True
-
-    def _set_event_delivery(self, approval_id: str, event_id: str) -> None:
-        with self._state_lock:
-            pending = self._requests_by_id.get(approval_id)
-            if pending is None:
-                return
-            if pending.event_id is not None:
-                self._approval_id_by_event_id.pop(pending.event_id, None)
-            pending.event_id = event_id
-            self._approval_id_by_event_id[event_id] = approval_id
-
-    def _load_existing(self) -> None:
-        loaded_requests: dict[str, PendingApproval] = {}
-        for request_path in sorted(self._storage_dir.glob("*.json")):
-            try:
-                payload = json.loads(request_path.read_text(encoding="utf-8"))
-                pending = PendingApproval.from_dict(cast("dict[str, Any]", payload))
-            except Exception:
-                logger.exception("Failed to load persisted approval request", path=str(request_path))
-                continue
-            loaded_requests[pending.id] = pending
-
-        for pending in loaded_requests.values():
-            if pending.status == "pending":
-                pending.status = "expired"
-                pending.resolution_reason = (
-                    _DEFAULT_RESTART_REASON
-                    if pending.event_id is not None
-                    else _DEFAULT_UNCONFIRMED_DELIVERY_RESTART_REASON
-                )
-                pending.resolved_at = _utcnow()
-                pending.resolved_by = None
-                pending.resolution_synced_at = None
-                self._persist_request(pending)
-
-        with self._state_lock:
-            self._requests_by_id = loaded_requests
-            self._pending_by_id = {
-                approval_id: pending for approval_id, pending in loaded_requests.items() if pending.status == "pending"
-            }
-            self._approval_id_by_event_id = {
-                pending.event_id: pending.id for pending in loaded_requests.values() if pending.event_id is not None
-            }
-
-    def get_request(self, approval_id: str) -> PendingApproval | None:
-        """Return one pending approval by ID."""
-        return self._pending_request(approval_id)
-
-    def list_pending(self) -> list[PendingApproval]:
-        """Return pending approvals ordered by request time."""
-        with self._state_lock:
-            pending = [approval for approval in self._pending_by_id.values() if approval.status == "pending"]
-        return sorted(pending, key=lambda approval: approval.requested_at)
-
-    def _has_pending_in_room(self, room_id: str) -> bool:
-        with self._state_lock:
-            return any(
-                approval.room_id == room_id and approval.status == "pending"
-                for approval in self._pending_by_id.values()
-            )
-
-    def list_unsynced_resolved(self) -> list[PendingApproval]:
-        """Return resolved approvals whose Matrix cards still need one edit."""
-        with self._state_lock:
-            requests = [
-                approval
-                for approval in self._requests_by_id.values()
-                if (
-                    approval.status != "pending"
-                    and approval.room_id is not None
-                    and approval.event_id is not None
-                    and approval.resolution_synced_at is None
-                )
-            ]
-        return sorted(requests, key=lambda approval: approval.resolved_at or approval.requested_at)
-
-    def _has_unsynced_resolved(self) -> bool:
-        with self._state_lock:
-            return any(
-                approval.status != "pending"
-                and approval.room_id is not None
-                and approval.event_id is not None
-                and approval.resolution_synced_at is None
-                for approval in self._requests_by_id.values()
-            )
-
-    def _has_unconfirmed_deliveries(self) -> bool:
-        with self._state_lock:
-            return any(
-                approval.status != "pending"
-                and approval.room_id is not None
-                and approval.event_id is None
-                and approval.resolution_synced_at is None
-                for approval in self._requests_by_id.values()
-            )
-
-    def _has_unsynced_resolution_work(self) -> bool:
-        return self._has_unsynced_resolved() or self._has_unconfirmed_deliveries()
-
-    def _has_unsynced_resolution_work_in_rooms(self, room_ids: set[str]) -> bool:
-        with self._state_lock:
-            return any(
-                approval.status != "pending"
-                and approval.room_id is not None
-                and approval.room_id in room_ids
-                and approval.resolution_synced_at is None
-                for approval in self._requests_by_id.values()
-            )
-
-    def _room_ids_with_unsynced_resolution_work(self) -> set[str]:
-        room_ids = {pending.room_id for pending in self.list_unsynced_resolved() if pending.room_id is not None}
-        room_ids.update(
-            pending.room_id for pending in self.list_unconfirmed_deliveries() if pending.room_id is not None
-        )
-        return room_ids
-
-    def list_unsynced_resolved_in_rooms(self, room_ids: set[str]) -> list[PendingApproval]:
-        """Return resolved approvals in the given rooms whose Matrix cards still need one edit."""
-        return [approval for approval in self.list_unsynced_resolved() if approval.room_id in room_ids]
-
-    def _ensure_unsynced_resolution_retry_task(self) -> None:
-        if not self._has_unsynced_resolution_work():
-            return
-        runtime_loop = self._runtime_loop
-        if runtime_loop is None or runtime_loop.is_closed():
-            return
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            current_loop = None
-
-        with self._state_lock:
-            if not self._allow_unsynced_resolution_retries:
-                return
-            existing_task = self._unsynced_resolution_retry_task
-            if existing_task is not None and not existing_task.done():
-                return
-            if current_loop is runtime_loop:
-                self._unsynced_resolution_retry_task = runtime_loop.create_task(
-                    self._run_unsynced_resolution_retry_loop(),
-                )
-            else:
-                self._unsynced_resolution_retry_task = asyncio.run_coroutine_threadsafe(
-                    self._run_unsynced_resolution_retry_loop(),
-                    runtime_loop,
-                )
-
-    async def _run_unsynced_resolution_retry_loop(self) -> None:
-        current_task = asyncio.current_task()
-        with self._state_lock:
-            if isinstance(self._unsynced_resolution_retry_task, Future):
-                self._unsynced_resolution_retry_task = current_task
-        try:
-            while self._has_unsynced_resolution_work():
-                await asyncio.sleep(_UNSYNCED_RESOLUTION_RETRY_INTERVAL_SECONDS)
-                room_ids_before_retry = self._room_ids_with_unsynced_resolution_work()
-                if not room_ids_before_retry:
-                    return
-                await self.reconcile_unsynced_approvals(
-                    room_ids=room_ids_before_retry,
-                    max_attempts=1,
-                    backoff="fixed",
-                )
-                for room_id in room_ids_before_retry - self._room_ids_with_unsynced_resolution_work():
-                    await self._check_and_notify_room_drained(room_id)
-        finally:
-            with self._state_lock:
-                if self._unsynced_resolution_retry_task is current_task:
-                    self._unsynced_resolution_retry_task = None
-            if self._has_unsynced_resolution_work():
-                self._ensure_unsynced_resolution_retry_task()
-
-    async def _check_and_notify_room_drained(self, room_id: str) -> None:
-        on_room_drained = self._on_room_drained
-        if on_room_drained is None:
-            return
-        if self._has_pending_in_room(room_id) or self._has_unsynced_resolution_work_in_rooms({room_id}):
-            return
-        runtime_loop = self._runtime_loop
-        if runtime_loop is not None and runtime_loop.is_running():
-
-            def _schedule_callback() -> None:
-                task = asyncio.create_task(cast("Coroutine[Any, Any, None]", on_room_drained(room_id)))
-                self._room_drained_callback_tasks.add(task)
-                task.add_done_callback(self._room_drained_callback_tasks.discard)
-
-            runtime_loop.call_soon_threadsafe(
-                _schedule_callback,
-            )
-            return
-        task = asyncio.create_task(cast("Coroutine[Any, Any, None]", on_room_drained(room_id)))
-        self._room_drained_callback_tasks.add(task)
-        task.add_done_callback(self._room_drained_callback_tasks.discard)
-
-    async def cancel_unsynced_resolution_retry_task(self) -> None:
-        """Stop the runtime retry loop for unsynced approval resolution edits."""
-        with self._state_lock:
-            self._allow_unsynced_resolution_retries = False
-            retry_task = self._unsynced_resolution_retry_task
-            self._unsynced_resolution_retry_task = None
-        if retry_task is None:
-            return
-        if retry_task.done():
-            with suppress(asyncio.CancelledError):
-                if isinstance(retry_task, asyncio.Task):
-                    await retry_task
-                else:
-                    await asyncio.wrap_future(retry_task)
-            return
-        if isinstance(retry_task, asyncio.Task):
-            retry_task_loop = retry_task.get_loop()
-            if retry_task_loop.is_closed():
-                return
-            current_loop = asyncio.get_running_loop()
-            if retry_task_loop is not current_loop:
-                retry_task_loop.call_soon_threadsafe(retry_task.cancel)
-                return
-            retry_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await retry_task
-            return
-        retry_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await asyncio.wrap_future(retry_task)
-
-    def list_unconfirmed_deliveries(self) -> list[PendingApproval]:
-        """Return resolved approvals that still need their original event ids recovered."""
-        with self._state_lock:
-            requests = [
-                approval
-                for approval in self._requests_by_id.values()
-                if (
-                    approval.status != "pending"
-                    and approval.room_id is not None
-                    and approval.event_id is None
-                    and approval.resolution_synced_at is None
-                )
-            ]
-        return sorted(requests, key=lambda approval: approval.resolved_at or approval.requested_at)
-
-    def _claim_unsynced_resolved_replay(self, approval_id: str) -> PendingApproval | None:
-        with self._state_lock:
-            pending = self._requests_by_id.get(approval_id)
-            if (
-                pending is None
-                or pending.status == "pending"
-                or pending.event_id is None
-                or pending.resolution_synced_at is not None
-                or approval_id in self._replay_in_progress
-            ):
-                return None
-            self._replay_in_progress.add(approval_id)
-            return pending
-
-    def _finish_unsynced_resolved_replay(self, approval_id: str) -> None:
-        with self._state_lock:
-            self._replay_in_progress.discard(approval_id)
-
-    def _preflight_request_decision(
-        self,
-        *,
+        tool_name: str,
+        arguments: dict[str, Any],
         room_id: str | None,
-        thread_id: str | None,
+        requester_id: str | None,
         approver_user_id: str | None,
-    ) -> ApprovalDecision | None:
-        del thread_id
+        timeout_seconds: float,
+        agent_name: str | None = None,
+        thread_id: str | None = None,
+        matched_rule: str | None = None,
+        script_path: str | None = None,
+    ) -> ApprovalDecision:
+        """Send one Matrix approval card and wait for the Matrix-backed resolution."""
+        del matched_rule, script_path
         if room_id is None:
             return self._new_decision(status="denied", reason=_DEFAULT_MISSING_CONTEXT_REASON, resolved_by=None)
         if approver_user_id is None:
             return self._new_decision(status="denied", reason=_DEFAULT_MISSING_REQUESTER_REASON, resolved_by=None)
         if self._send_event is None:
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
-        return None
 
-    async def request_approval(  # noqa: PLR0915
-        self,
-        *,
-        tool_name: str,
-        arguments: dict[str, Any],
-        agent_name: str,
-        room_id: str | None,
-        thread_id: str | None,
-        requester_id: str | None,
-        approver_user_id: str | None,
-        matched_rule: str,
-        script_path: str | None,
-        timeout_seconds: float,
-    ) -> ApprovalDecision:
-        """Send one Matrix approval card and wait for a decision."""
-        preflight_decision = self._preflight_request_decision(
-            room_id=room_id,
-            thread_id=thread_id,
-            approver_user_id=approver_user_id,
-        )
-        if preflight_decision is not None:
-            return preflight_decision
-        assert approver_user_id is not None
-        assert room_id is not None
-        assert self._send_event is not None
-
+        approval_id = uuid4().hex
         requested_at = _utcnow()
-        arguments_preview, arguments_preview_truncated = _build_arguments_preview(arguments)
-        event_arguments_payload, event_arguments_truncated = _build_event_arguments_preview(arguments)
-        pending = PendingApproval(
-            id=uuid4().hex,
+        expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
+        event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
+        content = self._pending_event_content(
+            approval_id=approval_id,
             tool_name=tool_name,
-            arguments=arguments,
-            arguments_preview=arguments_preview,
-            arguments_preview_truncated=arguments_preview_truncated,
-            event_arguments_payload=event_arguments_payload,
-            event_arguments_truncated=event_arguments_truncated,
+            arguments=event_arguments,
+            arguments_truncated=arguments_truncated,
             agent_name=agent_name,
             room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
             approver_user_id=approver_user_id,
-            matched_rule=matched_rule,
-            script_path=script_path,
             requested_at=requested_at,
-            expires_at=requested_at + timedelta(seconds=max(timeout_seconds, 0.0)),
+            expires_at=expires_at,
+            status="pending",
+        )
+
+        try:
+            sent_event = await self._send_event(room_id, thread_id, content)
+        except ToolApprovalTransportError as exc:
+            logger.info("Approval Matrix transport unavailable", room_id=room_id, reason=exc.reason)
+            return self._new_decision(status="expired", reason=exc.reason, resolved_by=None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Failed to send approval Matrix event", room_id=room_id, exc_info=True)
+            return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
+
+        if sent_event is None:
+            return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
+
+        card_event = self._card_event_from_content(
+            event_id=sent_event.event_id,
+            room_id=room_id,
+            content=content,
+            requested_at=requested_at,
+        )
+        waiter = _LiveApprovalWaiter(
+            approval_id=approval_id,
+            card_event_id=sent_event.event_id,
+            room_id=room_id,
+            card_event=card_event,
             future=Future(),
         )
-        self._store_request(pending)
-        self._persist_request(pending)
-        self._start_pending_send(pending.id, room_id)
+        with self._live_lock:
+            self._pending_by_card_event[sent_event.event_id] = waiter
 
-        sent_event: SentApprovalEvent | None = None
-        preserve_for_recovery = False
-        send_failure_reason = _DEFAULT_SEND_FAILURE_REASON
         try:
-            try:
-                sent_event = await self._send_event(
-                    room_id,
-                    thread_id,
-                    self._pending_event_content(pending),
-                )
-            except asyncio.CancelledError:
-                applied_decision = self._apply_decision(
-                    pending.id,
-                    status="expired",
-                    reason=_DEFAULT_CANCELLED_REASON,
-                    resolved_by=None,
-                )
-                if applied_decision is not None:
-                    self._persist_request(applied_decision[0])
-                    with self._state_lock:
-                        self._pending_by_id.pop(pending.id, None)
-                self._complete_pending_send(pending.id)
-                self._ensure_unsynced_resolution_retry_task()
-                raise
-        except Exception as exc:
-            if isinstance(exc, ToolApprovalTransportError):
-                send_failure_reason = exc.reason
-                logger.info(
-                    "Approval Matrix transport unavailable",
-                    approval_id=pending.id,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    agent_name=agent_name,
-                    reason=send_failure_reason,
-                )
-            else:
-                preserve_for_recovery = True
-                logger.warning(
-                    "Failed to send approval Matrix event",
-                    approval_id=pending.id,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    agent_name=agent_name,
-                    exc_info=True,
-                )
-        if sent_event is None:
-            logger.warning(
-                "Approval Matrix event was not delivered",
-                approval_id=pending.id,
-                room_id=room_id,
-                thread_id=thread_id,
-                agent_name=agent_name,
-            )
-            if preserve_for_recovery:
-                applied_decision = self._apply_decision(
-                    pending.id,
-                    status="expired",
-                    reason=send_failure_reason,
-                    resolved_by=None,
-                )
-                if applied_decision is not None:
-                    self._persist_request(applied_decision[0])
-                    with self._state_lock:
-                        self._pending_by_id.pop(pending.id, None)
-                    decision = applied_decision[1]
-                else:
-                    decision = self._decision_from_pending(pending)
-                self._complete_pending_send(pending.id)
-                self._ensure_unsynced_resolution_retry_task()
-                return decision
-            decision = await self._resolve_pending(
-                pending.id,
+            return await self._await_waiter(waiter, expires_at=expires_at)
+        except asyncio.CancelledError:
+            pending = PendingApproval.from_card_event(card_event, room_id=room_id)
+            await self._emit_resolution(
+                pending,
                 status="expired",
-                reason=send_failure_reason,
+                reason=_DEFAULT_CANCELLED_REASON,
                 resolved_by=None,
             )
-            self._discard(pending.id)
-            self._complete_pending_send(pending.id)
-            return decision or self._decision_from_pending(pending)
-
-        self._set_event_delivery(pending.id, sent_event.event_id)
-        self._persist_request(pending)
-        if pending.status != "pending" and pending.resolution_synced_at is None:
-            await self._edit_resolved_event(pending)
-        self._complete_pending_send(pending.id)
-
-        try:
-            return await self._await_approval_decision(pending)
+            self._complete_waiter(
+                sent_event.event_id,
+                self._new_decision(status="expired", reason=_DEFAULT_CANCELLED_REASON, resolved_by=None),
+            )
+            raise
         finally:
-            self._discard(pending.id)
+            with self._live_lock:
+                self._pending_by_card_event.pop(sent_event.event_id, None)
+
+    async def resolve_approval(
+        self,
+        *,
+        card_event_id: str,
+        room_id: str,
+        status: ResolutionStatus,
+        reason: str | None = None,
+        resolved_by: str | None = None,
+    ) -> AnchoredApprovalActionResult:
+        """Emit a terminal edit for one approval card and then release any live waiter."""
+        return await self._resolve_card(
+            card_event_id=card_event_id,
+            room_id=room_id,
+            status=status,
+            reason=reason,
+            resolved_by=resolved_by,
+        )
+
+    async def get_pending_approval(
+        self,
+        room_id: str,
+        approval_id: str,
+    ) -> PendingApproval | None:
+        """Return a pending approval by id from cache, live memory, or bounded Matrix history."""
+        card_event_id = self._live_card_event_id_for_approval(approval_id)
+        if card_event_id is not None:
+            pending = await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+            if pending is not None:
+                return pending
+
+        for event in await self._scan_cached_room_cards(room_id, since_ts_ms=_lookback_cutoff_ms(24), limit=500):
+            pending = await self._pending_from_event_if_matching(event, room_id=room_id, approval_id=approval_id)
+            if pending is not None:
+                return pending
+
+        for event in await self._scan_room_messages_for_cards(room_id, since_ts_ms=_lookback_cutoff_ms(24), limit=500):
+            pending = await self._pending_from_event_if_matching(event, room_id=room_id, approval_id=approval_id)
+            if pending is not None:
+                return pending
+        return None
+
+    async def auto_deny_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
+        """Auto-deny unresolved approval cards after startup using Matrix as source of truth."""
+        transport_sender = self._transport_sender_id()
+        if transport_sender is None:
+            return 0
+
+        cutoff_ts_ms = _lookback_cutoff_ms(lookback_hours)
+        denied = 0
+        for room_id in self._configured_approval_room_ids():
+            candidates = await self._scan_cached_room_cards(room_id, since_ts_ms=cutoff_ts_ms, limit=500)
+            if not candidates:
+                candidates = await self._scan_room_messages_for_cards(room_id, since_ts_ms=cutoff_ts_ms, limit=500)
+            for card_event in candidates:
+                try:
+                    pending = PendingApproval.from_card_event(card_event, room_id=room_id)
+                except ValueError:
+                    continue
+                if pending.card_sender_id != transport_sender:
+                    continue
+                still_pending = await self.get_pending_approval(room_id, pending.approval_id)
+                if still_pending is None:
+                    continue
+                result = await self._resolve_card(
+                    card_event_id=pending.card_event_id,
+                    room_id=room_id,
+                    status="denied",
+                    reason=_STARTUP_AUTO_DENY_REASON,
+                    resolved_by=transport_sender,
+                )
+                if result.handled:
+                    denied += 1
+        return denied
+
+    async def handle_response_event(
+        self,
+        *,
+        room_id: str,
+        sender_id: str,
+        card_event_id: str,
+        status: ResolutionStatus,
+        reason: str | None,
+    ) -> bool:
+        """Resolve one typed approval response parsed by Matrix event dispatch."""
+        pending = await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+        if pending is None or pending.approver_user_id != sender_id:
+            return False
+        result = await self._resolve_card(
+            card_event_id=card_event_id,
+            room_id=room_id,
+            status=status,
+            reason=reason,
+            resolved_by=sender_id,
+            pending=pending,
+        )
+        return result.handled
+
+    def list_pending(self) -> list[PendingApproval]:
+        """Return live pending approvals."""
+        with self._live_lock:
+            waiters = list(self._pending_by_card_event.values())
+        pending: list[PendingApproval] = []
+        for waiter in waiters:
+            with suppress(ValueError):
+                pending.append(PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id))
+        return pending
 
     async def handle_approval_resolution(
         self,
         *,
         approval_id: str,
-        status: Literal["approved", "denied"],
+        status: ResolutionStatus,
         reason: str | None,
         resolved_by: str,
     ) -> bool:
-        """Resolve one approval from a Matrix reaction, reply, or custom event."""
-        pending = self._pending_request(approval_id)
+        """Compatibility path for resolving live approvals by approval id."""
+        pending = await self._live_pending_by_approval_id(approval_id)
         if pending is None or pending.approver_user_id != resolved_by:
             return False
-        resolved_status, resolved_reason = self._normalized_resolution_request(
-            pending,
+        result = await self.resolve_approval(
+            card_event_id=pending.card_event_id,
+            room_id=pending.room_id,
             status=status,
             reason=reason,
+            resolved_by=resolved_by,
         )
-        return (
-            await self._resolve_pending(
-                approval_id,
-                status=resolved_status,
-                reason=resolved_reason,
-                resolved_by=resolved_by,
-            )
-            is not None
-        )
+        return result.handled
 
-    async def _handle_anchored_resolution(  # noqa: PLR0911
-        self,
-        *,
-        approval_event_id: str,
-        room_id: str,
-        status: Literal["approved", "denied"],
-        reason: str | None,
-        resolved_by: str,
-        handled_on_truncated_approval: bool = True,
-        resolve_truncated_approval: bool = False,
-    ) -> AnchoredApprovalActionResult:
-        """Resolve one Matrix-anchored approval action against the original approval card."""
-        pending = self._anchored_request(
-            approval_event_id=approval_event_id,
-            room_id=room_id,
-        )
+    async def approve(self, approval_id: str, *, resolved_by: str) -> PendingApproval:
+        """Compatibility path for approving a live approval by id."""
+        pending = await self._live_pending_by_approval_id(approval_id)
         if pending is None:
-            return AnchoredApprovalActionResult(handled=False)
-        if pending.status != "pending":
-            if pending.resolution_synced_at is None:
-                await self.replay_resolved_card_for_room(
-                    approval_event_id=approval_event_id,
-                    room_id=room_id,
-                )
-                return AnchoredApprovalActionResult(handled=True)
-            return AnchoredApprovalActionResult(handled=False)
+            msg = f"Approval request '{approval_id}' was not found."
+            raise LookupError(msg)
         if pending.approver_user_id != resolved_by:
-            return AnchoredApprovalActionResult(handled=False)
-        truncated_reason = self._truncated_approval_reason(pending, status=status)
-        if truncated_reason is not None:
-            if resolve_truncated_approval:
-                if (
-                    await self._resolve_pending(
-                        pending.id,
-                        status="denied",
-                        reason=truncated_reason,
-                        resolved_by=resolved_by,
-                    )
-                    is not None
-                ):
-                    return AnchoredApprovalActionResult(handled=True)
-                refreshed = self._anchored_request(
-                    approval_event_id=approval_event_id,
-                    room_id=room_id,
-                )
-                return AnchoredApprovalActionResult(
-                    handled=refreshed is not None
-                    and refreshed.status != "pending"
-                    and refreshed.resolution_synced_at is None,
-                )
-            return AnchoredApprovalActionResult(
-                handled=handled_on_truncated_approval,
-                error_reason=truncated_reason,
-                thread_id=pending.thread_id,
-            )
-
-        if (
-            await self._resolve_pending(
-                pending.id,
-                status=status,
-                reason=reason,
-                resolved_by=resolved_by,
-            )
-            is not None
-        ):
-            return AnchoredApprovalActionResult(handled=True)
-        refreshed = self._anchored_request(
-            approval_event_id=approval_event_id,
-            room_id=room_id,
-        )
-        return AnchoredApprovalActionResult(
-            handled=refreshed is not None and refreshed.status != "pending" and refreshed.resolution_synced_at is None,
-        )
-
-    async def handle_reaction(
-        self,
-        *,
-        approval_event_id: str,
-        room_id: str,
-        reaction_key: str,
-        resolved_by: str,
-    ) -> AnchoredApprovalActionResult:
-        """Approve one request from a reaction on the approval card."""
-        if reaction_key not in _APPROVE_REACTION_KEYS:
-            return AnchoredApprovalActionResult(handled=False)
-        return await self._handle_anchored_resolution(
-            approval_event_id=approval_event_id,
-            room_id=room_id,
+            msg = f"Approval request '{approval_id}' can only be resolved by the original requester."
+            raise PermissionError(msg)
+        await self.resolve_approval(
+            card_event_id=pending.card_event_id,
+            room_id=pending.room_id,
             status="approved",
-            reason=None,
             resolved_by=resolved_by,
         )
-
-    async def handle_reply(
-        self,
-        *,
-        approval_event_id: str,
-        room_id: str,
-        reason: str | None,
-        resolved_by: str,
-    ) -> AnchoredApprovalActionResult:
-        """Deny one request from a reply to the approval card."""
-        trimmed_reason = reason.strip() if isinstance(reason, str) else ""
-        return await self._handle_anchored_resolution(
-            approval_event_id=approval_event_id,
-            room_id=room_id,
-            status="denied",
-            reason=trimmed_reason or None,
-            resolved_by=resolved_by,
-        )
-
-    async def handle_custom_response(
-        self,
-        *,
-        approval_event_id: str,
-        room_id: str,
-        status: Literal["approved", "denied"],
-        reason: str | None,
-        resolved_by: str,
-    ) -> AnchoredApprovalActionResult:
-        """Resolve one custom approval response anchored to the original approval card."""
-        trimmed_reason = reason.strip() if isinstance(reason, str) else ""
-        return await self._handle_anchored_resolution(
-            approval_event_id=approval_event_id,
-            room_id=room_id,
-            status=status,
-            reason=trimmed_reason or None,
-            resolved_by=resolved_by,
-            resolve_truncated_approval=True,
-        )
-
-    async def deny_anchored_request_for_lost_authorization(
-        self,
-        *,
-        approval_event_id: str,
-        room_id: str,
-        resolved_by: str,
-    ) -> AnchoredApprovalActionResult:
-        """Fail closed when the stored approver can no longer resolve the request."""
-        pending = self._anchored_request(
-            approval_event_id=approval_event_id,
-            room_id=room_id,
-        )
-        if pending is None:
-            return AnchoredApprovalActionResult(handled=False)
-        if pending.status != "pending":
-            return AnchoredApprovalActionResult(
-                handled=pending.resolution_synced_at is None and pending.approver_user_id == resolved_by,
-            )
-        if pending.approver_user_id != resolved_by:
-            return AnchoredApprovalActionResult(handled=False)
-        if (
-            await self._resolve_pending(
-                pending.id,
-                status="denied",
-                reason=_DEFAULT_APPROVER_LOST_AUTHORIZATION_REASON,
-                resolved_by=resolved_by,
-            )
-            is not None
-        ):
-            return AnchoredApprovalActionResult(handled=True)
-        refreshed = self._anchored_request(
-            approval_event_id=approval_event_id,
-            room_id=room_id,
-        )
-        return AnchoredApprovalActionResult(
-            handled=refreshed is not None and refreshed.status != "pending" and refreshed.resolution_synced_at is None,
-        )
-
-    async def restate_pending_anchored_request(
-        self,
-        *,
-        approval_event_id: str,
-        room_id: str,
-    ) -> bool:
-        """Re-emit one unchanged pending approval card so the viewer can reconcile local UI state."""
-        pending = self._anchored_request(
-            approval_event_id=approval_event_id,
-            room_id=room_id,
-        )
-        if pending is None or pending.status != "pending" or pending.room_id is None or pending.event_id is None:
-            return False
-        if self._edit_event is None:
-            return False
-        try:
-            return await self._edit_event(
-                pending.room_id,
-                pending.event_id,
-                self._pending_event_content(pending),
-            )
-        except Exception:
-            logger.warning(
-                "Failed to edit approval Matrix event",
-                approval_id=pending.id,
-                room_id=pending.room_id,
-                event_id=pending.event_id,
-                exc_info=True,
-            )
-            return False
-
-    async def replay_resolved_card_for_room(
-        self,
-        *,
-        approval_event_id: str,
-        room_id: str,
-    ) -> bool:
-        """Re-emit one resolved approval card that never synced its terminal edit."""
-        pending = self._anchored_request(
-            approval_event_id=approval_event_id,
-            room_id=room_id,
-        )
-        if pending is None or pending.status == "pending" or pending.resolution_synced_at is not None:
-            return False
-        claimed_pending = self._claim_unsynced_resolved_replay(pending.id)
-        if claimed_pending is None:
-            return False
-        try:
-            previous_synced_at = claimed_pending.resolution_synced_at
-            await self._edit_resolved_event(claimed_pending)
-            return claimed_pending.resolution_synced_at != previous_synced_at
-        finally:
-            self._finish_unsynced_resolved_replay(pending.id)
-
-    async def approve(
-        self,
-        approval_id: str,
-        *,
-        resolved_by: str,
-    ) -> PendingApproval:
-        """Approve one pending request directly."""
-        return await self._resolve_for_callsite(
-            approval_id,
-            status="approved",
-            reason=None,
-            resolved_by=resolved_by,
-        )
+        return pending
 
     async def deny(
         self,
@@ -1178,405 +553,389 @@ class ApprovalManager:
         reason: str | None = None,
         resolved_by: str,
     ) -> PendingApproval:
-        """Deny one pending request directly."""
-        return await self._resolve_for_callsite(
-            approval_id,
+        """Compatibility path for denying a live approval by id."""
+        pending = await self._live_pending_by_approval_id(approval_id)
+        if pending is None:
+            msg = f"Approval request '{approval_id}' was not found."
+            raise LookupError(msg)
+        if pending.approver_user_id != resolved_by:
+            msg = f"Approval request '{approval_id}' can only be resolved by the original requester."
+            raise PermissionError(msg)
+        await self.resolve_approval(
+            card_event_id=pending.card_event_id,
+            room_id=pending.room_id,
             status="denied",
             reason=reason,
             resolved_by=resolved_by,
         )
+        return pending
 
-    async def expire(
+    def _configure_transport(
         self,
-        approval_id: str,
         *,
-        reason: str | None = None,
-    ) -> PendingApproval:
-        """Expire one pending request directly."""
-        return await self._resolve_for_callsite(
-            approval_id,
-            status="expired",
-            reason=reason,
-            resolved_by=None,
-        )
+        sender: MatrixEventSender | None = None,
+        editor: MatrixEventEditor | None = None,
+        event_cache: ConversationEventCache | None = None,
+        event_fetcher: MatrixEventFetcher | None = None,
+        room_event_scanner: MatrixRoomEventScanner | None = None,
+        approval_room_ids: ApprovalRoomProvider | None = None,
+        transport_sender: TransportSenderProvider | None = None,
+    ) -> None:
+        if sender is not None:
+            self._send_event = sender
+        if editor is not None:
+            self._edit_event = editor
+        if event_cache is not None:
+            self._event_cache = event_cache
+        if event_fetcher is not None:
+            self._event_fetcher = event_fetcher
+        if room_event_scanner is not None:
+            self._room_event_scanner = room_event_scanner
+        if approval_room_ids is not None:
+            self._approval_room_ids = approval_room_ids
+        if transport_sender is not None:
+            self._transport_sender = transport_sender
 
-    async def shutdown(self, *, reason: str = _DEFAULT_SHUTDOWN_REASON) -> None:
-        """Expire every live approval and update the corresponding Matrix cards."""
-        for approval_id in self._pending_ids_snapshot():
-            await self._resolve_pending(
-                approval_id,
-                status="expired",
-                reason=reason,
-                resolved_by=None,
-            )
-            self._discard(approval_id)
-
-    def abort_pending(self, *, reason: str) -> None:
-        """Expire every live approval without awaiting Matrix edits."""
-        for pending in self._pending_requests_snapshot():
-            decision = self._apply_decision(
-                pending.id,
-                status="expired",
-                reason=reason,
-                resolved_by=None,
-            )
-            if decision is not None:
-                self._persist_request(pending)
-            self._discard(pending.id)
-
-    async def _resolve_for_callsite(
+    async def _await_waiter(
         self,
-        approval_id: str,
+        waiter: _LiveApprovalWaiter,
         *,
-        status: ApprovalStatus,
+        expires_at: datetime,
+    ) -> ApprovalDecision:
+        try:
+            remaining_seconds = max(0.0, (expires_at - _utcnow()).total_seconds())
+            if remaining_seconds <= 0:
+                return await self._expire_waiter(waiter)
+            wrapped_future = asyncio.wrap_future(waiter.future)
+            return await asyncio.wait_for(asyncio.shield(wrapped_future), timeout=remaining_seconds)
+        except TimeoutError:
+            return await self._expire_waiter(waiter)
+
+    async def _expire_waiter(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
+        pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
+        decision = self._new_decision(status="expired", reason=_DEFAULT_TIMEOUT_REASON, resolved_by=None)
+        await self._emit_resolution(pending, status="expired", reason=decision.reason, resolved_by=None)
+        self._complete_waiter(waiter.card_event_id, decision)
+        return decision
+
+    async def _resolve_card(
+        self,
+        *,
+        card_event_id: str,
+        room_id: str,
+        status: ResolutionStatus,
         reason: str | None,
         resolved_by: str | None,
-    ) -> PendingApproval:
-        pending = self._pending_request(approval_id)
+        pending: PendingApproval | None = None,
+    ) -> AnchoredApprovalActionResult:
+        pending = pending or await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
         if pending is None:
-            msg = f"Approval request '{approval_id}' was not found."
-            raise LookupError(msg)
-        if pending.status != "pending":
-            msg = f"Approval request '{approval_id}' is already {pending.status}."
-            raise ValueError(msg)
-        if status in {"approved", "denied"}:
-            if not resolved_by:
-                msg = f"Approval request '{approval_id}' requires the original requester to resolve it."
-                raise PermissionError(msg)
-            if resolved_by != pending.approver_user_id:
-                msg = f"Approval request '{approval_id}' can only be resolved by the original requester."
-                raise PermissionError(msg)
-        resolved_status, resolved_reason = self._normalized_resolution_request(
+            return AnchoredApprovalActionResult(handled=False)
+        resolved_status, resolved_reason = self._normalized_resolution_request(pending, status=status, reason=reason)
+        delivered = await self._emit_resolution(
             pending,
-            status=status,
-            reason=reason,
-        )
-        await self._resolve_pending(
-            approval_id,
             status=resolved_status,
             reason=resolved_reason,
             resolved_by=resolved_by,
         )
-        return pending
+        if not delivered:
+            fail_closed_decision = self._new_decision(
+                status="denied",
+                reason=_DEFAULT_SEND_FAILURE_REASON,
+                resolved_by=resolved_by,
+            )
+            self._complete_waiter(card_event_id, fail_closed_decision)
+            return AnchoredApprovalActionResult(handled=True)
 
-    async def _resolve_pending(
-        self,
-        approval_id: str,
-        *,
-        status: ApprovalStatus,
-        reason: str | None,
-        resolved_by: str | None,
-    ) -> ApprovalDecision | None:
-        applied_decision = self._apply_decision(
-            approval_id,
-            status=status,
-            reason=reason,
-            resolved_by=resolved_by,
+        decision = self._new_decision(status=resolved_status, reason=resolved_reason, resolved_by=resolved_by)
+        self._complete_waiter(card_event_id, decision)
+        return AnchoredApprovalActionResult(
+            handled=True,
+            error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON
+            if resolved_reason == _DEFAULT_TRUNCATED_APPROVAL_REASON
+            else None,
+            thread_id=pending.thread_id,
         )
-        if applied_decision is None:
-            return None
-        pending, decision = applied_decision
 
-        self._persist_request(pending)
-        await self._edit_resolved_event(pending)
-        return decision
-
-    def _apply_decision(
-        self,
-        approval_id: str,
-        *,
-        status: ApprovalStatus,
-        reason: str | None,
-        resolved_by: str | None,
-    ) -> tuple[PendingApproval, ApprovalDecision] | None:
-        with self._state_lock:
-            pending = self._pending_by_id.get(approval_id)
-            if pending is None:
-                return None
-            future = pending.future
-            if pending.status != "pending" or (future is not None and future.done()):
-                return None
-
-            decision = self._new_decision(status=status, reason=reason, resolved_by=resolved_by)
-            if future is not None:
-                try:
-                    future.set_result(decision)
-                except InvalidStateError:
-                    return None
-            pending.status = status
-            pending.resolution_reason = reason
-            pending.resolved_at = decision.resolved_at
-            pending.resolved_by = resolved_by
-            pending.resolution_synced_at = None
-            pending.arguments = {}
-            return pending, decision
-
-    async def _edit_resolved_event(
+    async def _emit_resolution(
         self,
         pending: PendingApproval,
         *,
-        edit_event: MatrixEventEditor | None = None,
-        schedule_retry: bool = True,
-    ) -> None:
-        event_editor = edit_event or self._edit_event
-        should_retry = pending.status != "pending" and pending.room_id is not None and pending.event_id is not None
-        if event_editor is None or pending.room_id is None or pending.event_id is None:
-            if schedule_retry and should_retry:
-                self._ensure_unsynced_resolution_retry_task()
-            return
+        status: ApprovalStatus,
+        reason: str | None,
+        resolved_by: str | None,
+    ) -> bool:
+        if self._edit_event is None:
+            return False
         try:
-            delivered = await event_editor(
+            return await self._edit_event(
                 pending.room_id,
-                pending.event_id,
-                self._resolved_event_content(pending),
+                pending.card_event_id,
+                self._resolved_event_content(
+                    pending,
+                    status=status,
+                    reason=reason,
+                    resolved_by=resolved_by,
+                    resolved_at=_utcnow(),
+                ),
             )
         except Exception:
             logger.warning(
                 "Failed to edit approval Matrix event",
-                approval_id=pending.id,
+                approval_id=pending.approval_id,
                 room_id=pending.room_id,
-                event_id=pending.event_id,
+                event_id=pending.card_event_id,
                 exc_info=True,
             )
-            if schedule_retry:
-                self._ensure_unsynced_resolution_retry_task()
-            return
-        if not delivered:
-            if schedule_retry:
-                self._ensure_unsynced_resolution_retry_task()
-            return
-        pending.resolution_synced_at = _utcnow()
-        self._persist_request(pending)
-        self._discard(pending.id)
-        if schedule_retry and pending.room_id is not None:
-            await self._check_and_notify_room_drained(pending.room_id)
+            return False
 
-    async def _await_approval_decision(self, pending: PendingApproval) -> ApprovalDecision:
-        """Wait for one approval result using the already-advertised absolute expiry."""
+    async def _pending_approval_for_card(self, *, room_id: str, card_event_id: str) -> PendingApproval | None:
+        card_event = await self._card_event(room_id=room_id, card_event_id=card_event_id)
+        if card_event is None:
+            return None
         try:
-            assert pending.future is not None
-            if pending.future.done():
-                return pending.future.result()
-            remaining_seconds = self._remaining_timeout_seconds(pending)
-            if remaining_seconds <= 0:
-                decision = await self._resolve_pending(
-                    pending.id,
-                    status="expired",
-                    reason=_DEFAULT_TIMEOUT_REASON,
-                    resolved_by=None,
-                )
-                return decision or self._decision_from_pending(pending)
-            wrapped_future = asyncio.wrap_future(pending.future)
-            return await asyncio.wait_for(asyncio.shield(wrapped_future), timeout=remaining_seconds)
-        except TimeoutError:
-            decision = await self._resolve_pending(
-                pending.id,
-                status="expired",
-                reason=_DEFAULT_TIMEOUT_REASON,
-                resolved_by=None,
-            )
-            return decision or self._decision_from_pending(pending)
-        except asyncio.CancelledError:
-            await self._resolve_pending(
-                pending.id,
-                status="expired",
-                reason=_DEFAULT_CANCELLED_REASON,
-                resolved_by=None,
-            )
-            raise
+            pending = PendingApproval.from_card_event(card_event, room_id=room_id)
+        except ValueError:
+            return None
+        latest_edit = await self._latest_edit(room_id=room_id, card_event_id=card_event_id)
+        if pending.latest_status(latest_edit) != "pending":
+            return None
+        return pending
 
-    def _discard(self, approval_id: str) -> None:
-        delete_request_file = False
-        with self._state_lock:
-            pending = self._pending_by_id.pop(approval_id, None)
-            if pending is None:
-                pending = self._requests_by_id.get(approval_id)
-            if pending is None:
-                return
-            if pending.status == "pending":
-                self._pending_by_id[approval_id] = pending
-                if pending.event_id is not None:
-                    self._approval_id_by_event_id[pending.event_id] = approval_id
-                return
-            if pending.event_id is None:
-                self._requests_by_id.pop(approval_id, None)
-                delete_request_file = True
-            elif pending.resolution_synced_at is None:
-                self._approval_id_by_event_id[pending.event_id] = approval_id
-                return
-            else:
-                self._approval_id_by_event_id.pop(pending.event_id, None)
-                self._requests_by_id.pop(approval_id, None)
-                delete_request_file = True
-        if delete_request_file:
-            self._delete_request_file(approval_id)
+    async def _card_event(self, *, room_id: str, card_event_id: str) -> dict[str, Any] | None:
+        with self._live_lock:
+            live = self._pending_by_card_event.get(card_event_id)
+            if live is not None:
+                return live.card_event
+        if self._event_cache is not None:
+            cached_event = await self._event_cache.get_event(room_id, card_event_id)
+            if cached_event is not None:
+                return cached_event
+        if self._event_fetcher is not None:
+            return await self._event_fetcher(room_id, card_event_id)
+        return None
 
-    async def sync_unsynced_resolved(
+    async def _latest_edit(self, *, room_id: str, card_event_id: str) -> dict[str, Any] | None:
+        if self._event_cache is None:
+            return None
+        return await self._event_cache.get_latest_edit(room_id, card_event_id)
+
+    async def _scan_cached_room_cards(
         self,
+        room_id: str,
         *,
-        room_ids: set[str] | None = None,
-    ) -> list[PendingApproval]:
-        """Replay any resolved approval cards that were never edited in Matrix."""
-        synced_requests: list[PendingApproval] = []
-        for pending in self.list_unsynced_resolved():
-            if room_ids is not None and pending.room_id not in room_ids:
-                continue
-            claimed_pending = self._claim_unsynced_resolved_replay(pending.id)
-            if claimed_pending is None:
-                continue
-            try:
-                previous_synced_at = claimed_pending.resolution_synced_at
-                await self._edit_resolved_event(claimed_pending, schedule_retry=False)
-                if claimed_pending.resolution_synced_at != previous_synced_at:
-                    synced_requests.append(claimed_pending)
-            finally:
-                self._finish_unsynced_resolved_replay(pending.id)
-        return synced_requests
-
-    async def wait_for_pending_sends_in_rooms(
-        self,
-        room_ids: set[str],
-        *,
-        timeout: float | None = None,  # noqa: ASYNC109
-    ) -> bool:
-        """Wait for approval sends in the given rooms to finish delivery registration."""
-        if not room_ids:
-            return True
-
-        deadline: float | None = None
-        if timeout is not None:
-            deadline = asyncio.get_running_loop().time() + max(timeout, 0.0)
-
-        while True:
-            pending_events = self._pending_send_events_for_rooms(room_ids)
-            if not pending_events or all(event.is_set() for event in pending_events):
-                return True
-            if deadline is None:
-                await asyncio.sleep(0.05)
-                continue
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                return False
-            await asyncio.sleep(min(0.05, remaining))
-        return True
-
-    async def recover_unconfirmed_deliveries(self) -> list[PendingApproval]:
-        """Recover missing event ids for resolved approvals before replaying their edits."""
-        recover_event_id = self._recover_event_id
-        if recover_event_id is None:
+        since_ts_ms: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if self._event_cache is None:
             return []
+        events = await self._event_cache.get_recent_room_events(
+            room_id,
+            event_type="io.mindroom.tool_approval",
+            since_ts_ms=since_ts_ms,
+            limit=limit,
+        )
+        return [event for event in events if _is_original_approval_card(event)]
 
-        recovered_requests: list[PendingApproval] = []
-        for pending in self.list_unconfirmed_deliveries():
-            try:
-                recovered_event_id = await recover_event_id(pending)
-            except Exception:
-                logger.warning(
-                    "Failed to recover approval Matrix event id",
-                    approval_id=pending.id,
-                    room_id=pending.room_id,
-                    exc_info=True,
-                )
-                continue
-            if isinstance(recovered_event_id, str) and recovered_event_id:
-                self._set_event_delivery(pending.id, recovered_event_id)
-                self._persist_request(pending)
-                recovered_requests.append(pending)
-                continue
-            self._discard(pending.id)
-        return recovered_requests
-
-    async def recover_unconfirmed_deliveries_in_rooms(self, room_ids: set[str]) -> list[PendingApproval]:
-        """Recover missing event ids for resolved approvals anchored in the given rooms."""
-        recover_event_id = self._recover_event_id
-        if recover_event_id is None:
+    async def _scan_room_messages_for_cards(
+        self,
+        room_id: str,
+        *,
+        since_ts_ms: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if self._room_event_scanner is None:
             return []
+        events = await self._room_event_scanner(room_id, since_ts_ms, limit)
+        return [event for event in events if _is_original_approval_card(event)]
 
-        recovered_requests: list[PendingApproval] = []
-        for pending in self.list_unconfirmed_deliveries():
-            if pending.room_id not in room_ids:
-                continue
-            try:
-                recovered_event_id = await recover_event_id(pending)
-            except Exception:
-                logger.warning(
-                    "Failed to recover approval Matrix event id",
-                    approval_id=pending.id,
-                    room_id=pending.room_id,
-                    exc_info=True,
-                )
-                continue
-            if isinstance(recovered_event_id, str) and recovered_event_id:
-                self._set_event_delivery(pending.id, recovered_event_id)
-                self._persist_request(pending)
-                recovered_requests.append(pending)
-                continue
-            self._discard(pending.id)
-        return recovered_requests
+    async def _shutdown(self, *, reason: str) -> None:
+        with self._live_lock:
+            waiters = list(self._pending_by_card_event.values())
+        for waiter in waiters:
+            pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
+            await self._emit_resolution(pending, status="expired", reason=reason, resolved_by=None)
+            self._complete_waiter(
+                waiter.card_event_id,
+                self._new_decision(status="expired", reason=reason, resolved_by=None),
+            )
 
-    async def reconcile_unsynced_approvals(
+    def _abort_pending(self, *, reason: str) -> None:
+        with self._live_lock:
+            waiters = list(self._pending_by_card_event.values())
+            self._pending_by_card_event.clear()
+        for waiter in waiters:
+            self._complete_waiter(
+                waiter.card_event_id,
+                self._new_decision(status="expired", reason=reason, resolved_by=None),
+            )
+
+    def _live_card_event_id_for_approval(self, approval_id: str) -> str | None:
+        with self._live_lock:
+            for card_event_id, waiter in self._pending_by_card_event.items():
+                if waiter.approval_id == approval_id:
+                    return card_event_id
+        return None
+
+    async def _live_pending_by_approval_id(self, approval_id: str) -> PendingApproval | None:
+        card_event_id = self._live_card_event_id_for_approval(approval_id)
+        if card_event_id is None:
+            return None
+        with self._live_lock:
+            waiter = self._pending_by_card_event.get(card_event_id)
+        if waiter is None:
+            return None
+        return await self._pending_approval_for_card(room_id=waiter.room_id, card_event_id=card_event_id)
+
+    def _complete_waiter(self, card_event_id: str, decision: ApprovalDecision) -> None:
+        with self._live_lock:
+            waiter = self._pending_by_card_event.get(card_event_id)
+        if waiter is None or waiter.future.done():
+            return
+        try:
+            waiter.future.set_result(decision)
+        except InvalidStateError:
+            return
+
+    async def _pending_from_event_if_matching(
+        self,
+        event: dict[str, Any],
+        *,
+        room_id: str,
+        approval_id: str,
+    ) -> PendingApproval | None:
+        try:
+            pending = PendingApproval.from_card_event(event, room_id=room_id)
+        except ValueError:
+            return None
+        if pending.approval_id != approval_id:
+            return None
+        latest_edit = await self._latest_edit(room_id=room_id, card_event_id=pending.card_event_id)
+        if pending.latest_status(latest_edit) != "pending":
+            return None
+        return pending
+
+    def _configured_approval_room_ids(self) -> set[str]:
+        if self._approval_room_ids is None:
+            return set()
+        return self._approval_room_ids()
+
+    def _transport_sender_id(self) -> str | None:
+        if self._transport_sender is None:
+            return None
+        return self._transport_sender()
+
+    def _card_event_from_content(
         self,
         *,
-        room_ids: set[str] | None = None,
-        max_attempts: int = 3,
-        backoff: Literal["exponential", "fixed"] = "exponential",
-        fixed_backoff_seconds: float = 1.0,
-    ) -> bool:
-        """Run approval reconciliation until the selected scope is clear or attempts run out."""
-        if max_attempts <= 0:
-            return not (
-                self._has_unsynced_resolution_work()
-                if room_ids is None
-                else self._has_unsynced_resolution_work_in_rooms(room_ids)
-            )
-
-        for attempt in range(max_attempts):
-            if room_ids is None:
-                await self._wait_for_all_pending_sends()
-            else:
-                await self.wait_for_pending_sends_in_rooms(room_ids, timeout=None)
-            with suppress(Exception):
-                if room_ids is None:
-                    await self.recover_unconfirmed_deliveries()
-                else:
-                    await self.recover_unconfirmed_deliveries_in_rooms(room_ids)
-            with suppress(Exception):
-                await self.sync_unsynced_resolved(room_ids=room_ids)
-            has_work = (
-                self._has_unsynced_resolution_work()
-                if room_ids is None
-                else self._has_unsynced_resolution_work_in_rooms(room_ids)
-            )
-            if not has_work:
-                return True
-            if attempt + 1 < max_attempts:
-                delay = 2**attempt if backoff == "exponential" else fixed_backoff_seconds
-                await asyncio.sleep(delay)
-        return False
+        event_id: str,
+        room_id: str,
+        content: dict[str, Any],
+        requested_at: datetime,
+    ) -> dict[str, Any]:
+        del room_id
+        sender = self._transport_sender_id() or content.get("approver_user_id")
+        return {
+            "event_id": event_id,
+            "sender": sender,
+            "type": "io.mindroom.tool_approval",
+            "origin_server_ts": int(requested_at.timestamp() * 1000),
+            "content": content,
+        }
 
     @staticmethod
-    def _truncated_approval_reason(
+    def _pending_event_content(
+        *,
+        approval_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        arguments_truncated: bool,
+        agent_name: str | None,
+        room_id: str,
+        thread_id: str | None,
+        requester_id: str | None,
+        approver_user_id: str,
+        requested_at: datetime,
+        expires_at: datetime,
+        status: PendingApprovalStatus,
+    ) -> dict[str, Any]:
+        del room_id
+        content: dict[str, Any] = {
+            "msgtype": "io.mindroom.tool_approval",
+            "body": ApprovalManager._event_body(tool_name, status),
+            "tool_name": tool_name,
+            "tool_call_id": approval_id,
+            "arguments": arguments,
+            "status": status,
+            "approval_id": approval_id,
+            "approver_user_id": approver_user_id,
+            "requested_at": requested_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "thread_id": thread_id,
+        }
+        if agent_name is not None:
+            content["agent_name"] = agent_name
+        if arguments_truncated:
+            content["arguments_truncated"] = True
+        if requester_id is not None:
+            content["requester_id"] = requester_id
+        return content
+
+    @staticmethod
+    def _resolved_event_content(
         pending: PendingApproval,
         *,
         status: ApprovalStatus,
-    ) -> str | None:
-        """Return the fail-closed reason when an approval would bypass a truncated preview."""
-        if status == "approved" and pending.event_arguments_truncated:
-            return _DEFAULT_TRUNCATED_APPROVAL_REASON
-        return None
+        reason: str | None,
+        resolved_by: str | None,
+        resolved_at: datetime,
+    ) -> dict[str, Any]:
+        requested_at = _parse_datetime(pending.requested_at) or datetime.fromtimestamp(
+            pending.created_at_ms / 1000,
+            tz=UTC,
+        )
+        expires_at = _parse_datetime(pending.expires_at) or requested_at + timedelta(seconds=pending.timeout_seconds)
+        content = ApprovalManager._pending_event_content(
+            approval_id=pending.approval_id,
+            tool_name=pending.tool_name,
+            arguments=pending.arguments_preview,
+            arguments_truncated=pending.arguments_preview_truncated,
+            agent_name=pending.agent_name,
+            room_id=pending.room_id,
+            thread_id=pending.thread_id,
+            requester_id=pending.requester_id or None,
+            approver_user_id=pending.approver_user_id,
+            requested_at=requested_at,
+            expires_at=expires_at,
+            status=status,
+        )
+        content["body"] = ApprovalManager._event_body(pending.tool_name, status)
+        content["resolved_at"] = resolved_at.isoformat()
+        content["resolved_by"] = resolved_by
+        if reason:
+            content["resolution_reason"] = reason
+        return content
+
+    @staticmethod
+    def _event_body(tool_name: str, status: PendingApprovalStatus) -> str:
+        if status == "approved":
+            return f"Approved: {tool_name}"
+        if status == "denied":
+            return f"Denied: {tool_name}"
+        if status == "expired":
+            return f"Expired: {tool_name}"
+        return f"🔒 Approval required: {tool_name}"
 
     @classmethod
     def _normalized_resolution_request(
         cls,
         pending: PendingApproval,
         *,
-        status: ApprovalStatus,
+        status: ResolutionStatus,
         reason: str | None,
     ) -> tuple[ApprovalStatus, str | None]:
-        """Normalize one requested resolution against approval safety invariants."""
-        truncated_reason = cls._truncated_approval_reason(pending, status=status)
-        if truncated_reason is not None:
-            return "denied", truncated_reason
+        if status == "approved" and pending.arguments_preview_truncated:
+            return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON
         return status, reason
 
     @staticmethod
@@ -1593,68 +952,68 @@ class ApprovalManager:
             resolved_at=_utcnow(),
         )
 
-    @staticmethod
-    def _decision_from_pending(pending: PendingApproval) -> ApprovalDecision:
-        resolved_at = pending.resolved_at or _utcnow()
-        status: ApprovalStatus = pending.status if pending.status != "pending" else "expired"
-        return ApprovalDecision(
-            status=status,
-            reason=pending.resolution_reason,
-            resolved_by=pending.resolved_by,
-            resolved_at=resolved_at,
-        )
 
-    @staticmethod
-    def _remaining_timeout_seconds(pending: PendingApproval) -> float:
-        """Return the remaining time before the advertised approval deadline."""
-        return max(0.0, (pending.expires_at - _utcnow()).total_seconds())
+def _required_str(event: dict[str, Any], key: str) -> str:
+    value = event.get(key)
+    if isinstance(value, str) and value:
+        return value
+    msg = f"Approval card event is missing {key}."
+    raise ValueError(msg)
 
-    @staticmethod
-    def _event_body(tool_name: str, status: PendingApprovalStatus) -> str:
-        if status == "approved":
-            return f"Approved: {tool_name}"
-        if status == "denied":
-            return f"Denied: {tool_name}"
-        if status == "expired":
-            return f"Expired: {tool_name}"
-        return f"🔒 Approval required: {tool_name}"
 
-    def _pending_event_content(self, pending: PendingApproval) -> dict[str, Any]:
-        event_arguments, arguments_truncated = _event_arguments_payload(pending)
-        content: dict[str, Any] = {
-            "msgtype": "io.mindroom.tool_approval",
-            "body": self._event_body(pending.tool_name, pending.status),
-            "tool_name": pending.tool_name,
-            "tool_call_id": pending.id,
-            "arguments": event_arguments,
-            "agent_name": pending.agent_name,
-            "status": pending.status,
-            "approval_id": pending.id,
-            "approver_user_id": pending.approver_user_id,
-            "requested_at": pending.requested_at.isoformat(),
-            "expires_at": pending.expires_at.isoformat(),
-            "thread_id": pending.thread_id,
-        }
-        if arguments_truncated:
-            content["arguments_truncated"] = True
-        if pending.requester_id is not None:
-            content["requester_id"] = pending.requester_id
-        return content
+def _content_str(content: dict[str, Any], key: str) -> str | None:
+    value = content.get(key)
+    return value if isinstance(value, str) and value else None
 
-    def _resolved_event_content(
-        self,
-        pending: PendingApproval,
-    ) -> dict[str, Any]:
-        content = self._pending_event_content(pending)
-        content["body"] = self._event_body(pending.tool_name, pending.status)
-        content["status"] = pending.status
-        content["resolved_at"] = pending.resolved_at.isoformat() if pending.resolved_at is not None else None
-        content["resolved_by"] = pending.resolved_by
-        if pending.resolution_reason:
-            content["resolution_reason"] = pending.resolution_reason
-        else:
-            content.pop("resolution_reason", None)
-        return content
+
+def _created_at_ms(event: dict[str, Any], requested_at: str | None) -> int:
+    parsed = _parse_datetime(requested_at)
+    if parsed is not None:
+        return int(parsed.timestamp() * 1000)
+    timestamp = event.get("origin_server_ts")
+    return timestamp if isinstance(timestamp, int) and not isinstance(timestamp, bool) else 0
+
+
+def _timeout_seconds(requested_at: str | None, expires_at: str | None) -> int:
+    requested = _parse_datetime(requested_at)
+    expires = _parse_datetime(expires_at)
+    if requested is None or expires is None:
+        return 0
+    return max(0, int((expires - requested).total_seconds()))
+
+
+def _is_replace_content(content: dict[str, Any]) -> bool:
+    relates_to = content.get("m.relates_to")
+    return isinstance(relates_to, dict) and relates_to.get("rel_type") == "m.replace"
+
+
+def _is_original_approval_card(event: dict[str, Any]) -> bool:
+    if event.get("type") != "io.mindroom.tool_approval":
+        return False
+    content = event.get("content")
+    return isinstance(content, dict) and not _is_replace_content(content)
+
+
+def _lookback_cutoff_ms(lookback_hours: int) -> int:
+    return int((time.time() - max(lookback_hours, 0) * 3600) * 1000)
+
+
+def _purge_legacy_approval_files(storage_root: Path) -> int:
+    legacy_dir = storage_root / _APPROVALS_DIRNAME
+    if not legacy_dir.exists():
+        return 0
+    purged = 0
+    for json_file in legacy_dir.glob("*.json"):
+        try:
+            json_file.unlink()
+            purged += 1
+        except OSError as exc:
+            logger.warning("approval.legacy_purge.failed", path=str(json_file), error=str(exc))
+    with suppress(OSError):
+        legacy_dir.rmdir()
+    if purged:
+        logger.info("approval.legacy_purge", purged_count=purged)
+    return purged
 
 
 def _check_callable_from_module(
@@ -1720,13 +1079,7 @@ def tool_requires_approval_for_openai_compat(
     config: Config,
     tool_name: str,
 ) -> bool:
-    """Return whether one `/v1` tool must be hidden because approval may be required.
-
-    This is a conservative static check used while constructing OpenAI-compatible
-    agent tool schemas. Script-based rules are treated as requiring approval
-    because `/v1` has no Matrix approval transport and cannot safely defer that
-    decision to request-time arguments.
-    """
+    """Return whether one `/v1` tool must be hidden because approval may be required."""
     approval_config = config.tool_approval
     require_approval = approval_config.default == "require_approval"
 
@@ -1806,19 +1159,13 @@ def get_approval_store() -> ApprovalManager | None:
 
 
 async def sync_unsynced_approval_event_resolutions() -> list[PendingApproval]:
-    """Replay any resolved approval cards that were not edited before restart."""
-    manager = get_approval_store()
-    if manager is None:
-        return []
-    return await manager.sync_unsynced_resolved()
+    """Compatibility no-op: Matrix room history is now the source of truth."""
+    return []
 
 
 async def recover_unconfirmed_approval_event_deliveries() -> list[PendingApproval]:
-    """Recover missing approval event ids before replaying resolved approval edits."""
-    manager = get_approval_store()
-    if manager is None:
-        return []
-    return await manager.recover_unconfirmed_deliveries()
+    """Compatibility no-op: approval delivery recovery no longer uses local files."""
+    return []
 
 
 def initialize_approval_store(
@@ -1826,42 +1173,44 @@ def initialize_approval_store(
     *,
     sender: MatrixEventSender | None = None,
     editor: MatrixEventEditor | None = None,
-    recoverer: MatrixApprovalEventRecoverer | None = None,
-    on_room_drained: ApprovalRoomDrainedCallback | None = None,
+    event_cache: ConversationEventCache | None = None,
+    event_fetcher: MatrixEventFetcher | None = None,
+    room_event_scanner: MatrixRoomEventScanner | None = None,
+    approval_room_ids: ApprovalRoomProvider | None = None,
+    transport_sender: TransportSenderProvider | None = None,
     runtime_loop: asyncio.AbstractEventLoop | None = None,
+    recoverer: object | None = None,
+    on_room_drained: object | None = None,
 ) -> ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
+    del runtime_loop, recoverer, on_room_drained
     global _MANAGER
 
-    if runtime_loop is None:
-        with suppress(RuntimeError):
-            runtime_loop = asyncio.get_running_loop()
-
-    storage_dir = runtime_paths.storage_root / _APPROVALS_DIRNAME
-    if _MANAGER is not None and _MANAGER.storage_dir == storage_dir:
-        _MANAGER.configure_transport(
+    if _MANAGER is not None and _MANAGER._runtime_storage_root == runtime_paths.storage_root:
+        _MANAGER._configure_transport(
             sender=sender,
             editor=editor,
-            recoverer=recoverer,
-            on_room_drained=on_room_drained,
+            event_cache=event_cache,
+            event_fetcher=event_fetcher,
+            room_event_scanner=room_event_scanner,
+            approval_room_ids=approval_room_ids,
+            transport_sender=transport_sender,
         )
-        if runtime_loop is not None:
-            _MANAGER._runtime_loop = runtime_loop
-        _MANAGER._ensure_unsynced_resolution_retry_task()
         return _MANAGER
 
     if _MANAGER is not None:
-        _MANAGER.abort_pending(reason=_DEFAULT_REINITIALIZE_REASON)
+        _MANAGER._abort_pending(reason=_DEFAULT_REINITIALIZE_REASON)
 
     _MANAGER = ApprovalManager(
         runtime_paths,
         sender=sender,
         editor=editor,
-        recoverer=recoverer,
-        on_room_drained=on_room_drained,
+        event_cache=event_cache,
+        event_fetcher=event_fetcher,
+        room_event_scanner=room_event_scanner,
+        approval_room_ids=approval_room_ids,
+        transport_sender=transport_sender,
     )
-    _MANAGER._runtime_loop = runtime_loop
-    _MANAGER._ensure_unsynced_resolution_retry_task()
     return _MANAGER
 
 
@@ -1872,18 +1221,7 @@ async def shutdown_approval_store(
     global _MANAGER
 
     manager = _MANAGER
-    if manager is None:
-        _clear_script_cache()
-        return
-
-    await manager.wait_for_pending_sends_in_rooms(manager.pending_send_room_ids(), timeout=None)
-    await manager.shutdown(reason=reason)
-    with suppress(Exception):
-        await manager.reconcile_unsynced_approvals(
-            room_ids=None,
-            max_attempts=3,
-            backoff="exponential",
-        )
-    await manager.cancel_unsynced_resolution_retry_task()
-    _MANAGER = None
+    if manager is not None:
+        await manager._shutdown(reason=reason)
+        _MANAGER = None
     _clear_script_cache()
