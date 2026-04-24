@@ -203,7 +203,7 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
     pending = await _wait_for_pending(store, sender)
 
     assert sender.await_args.args[2]["approver_user_id"] == "@user:localhost"
-    result = await store.handle_response_event(
+    result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id=pending.card_event_id,
@@ -220,7 +220,7 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_handle_response_event_wrong_clicker_noops(tmp_path: Path) -> None:
+async def test_handle_card_response_wrong_clicker_noops(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
@@ -237,7 +237,7 @@ async def test_handle_response_event_wrong_clicker_noops(tmp_path: Path) -> None
     )
     pending = await _wait_for_pending(store, sender)
 
-    result = await store.handle_response_event(
+    result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@other:localhost",
         card_event_id=pending.card_event_id,
@@ -261,7 +261,7 @@ async def test_handle_response_event_wrong_clicker_noops(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_handle_response_event_rejects_live_card_from_wrong_room(tmp_path: Path) -> None:
+async def test_handle_card_response_rejects_live_card_from_wrong_room(tmp_path: Path) -> None:
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
     store = initialize_approval_store(
@@ -282,7 +282,7 @@ async def test_handle_response_event_rejects_live_card_from_wrong_room(tmp_path:
     )
     pending = await _wait_for_pending(store, sender, room_id="!room-a:localhost")
 
-    result = await store.handle_response_event(
+    result = await store.handle_card_response(
         room_id="!room-b:localhost",
         sender_id="@user:localhost",
         card_event_id=pending.card_event_id,
@@ -306,7 +306,7 @@ async def test_handle_response_event_rejects_live_card_from_wrong_room(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_handle_response_event_approval_id_rejects_live_waiter_from_wrong_room(tmp_path: Path) -> None:
+async def test_handle_live_approval_id_response_resolves_same_room_waiter(tmp_path: Path) -> None:
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
     store = initialize_approval_store(
@@ -327,7 +327,43 @@ async def test_handle_response_event_approval_id_rejects_live_waiter_from_wrong_
     )
     pending = await _wait_for_pending(store, sender, room_id="!room-a:localhost")
 
-    result = await store.handle_response_event(
+    result = await store.handle_live_approval_id_response(
+        room_id="!room-a:localhost",
+        sender_id="@user:localhost",
+        approval_id=pending.approval_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await task
+
+    assert result.resolved is True
+    assert decision.status == "approved"
+    assert editor.await_args.args[:2] == ("!room-a:localhost", "$approval")
+
+
+@pytest.mark.asyncio
+async def test_handle_live_approval_id_response_rejects_waiter_from_wrong_room(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room-a:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender, room_id="!room-a:localhost")
+
+    result = await store.handle_live_approval_id_response(
         room_id="!room-b:localhost",
         sender_id="@user:localhost",
         approval_id=pending.approval_id,
@@ -351,7 +387,7 @@ async def test_handle_response_event_approval_id_rejects_live_waiter_from_wrong_
 
 
 @pytest.mark.asyncio
-async def test_handle_response_event_orphan_approval_falls_through_until_startup_cleanup(tmp_path: Path) -> None:
+async def test_handle_card_response_orphan_approval_falls_through_until_startup_cleanup(tmp_path: Path) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
@@ -363,7 +399,7 @@ async def test_handle_response_event_orphan_approval_falls_through_until_startup
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    result = await store.handle_response_event(
+    result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id="$approval",
@@ -704,7 +740,7 @@ async def test_request_approval_cancel_during_click_resolution_leaves_expired_te
     )
     pending = await _wait_for_pending(store, sender)
     click_task = asyncio.create_task(
-        store.handle_response_event(
+        store.handle_card_response(
             room_id="!room:localhost",
             sender_id="@user:localhost",
             card_event_id=pending.card_event_id,
@@ -751,7 +787,7 @@ async def test_request_approval_cancel_during_click_resolution_emits_expired_not
     )
     pending = await _wait_for_pending(store, sender)
     click_task = asyncio.create_task(
-        store.handle_response_event(
+        store.handle_card_response(
             room_id="!room:localhost",
             sender_id="@user:localhost",
             card_event_id=pending.card_event_id,
@@ -807,7 +843,7 @@ async def test_duplicate_live_response_from_approver_is_consumed_while_resolutio
     )
     pending = await _wait_for_pending(store, sender)
     first = asyncio.create_task(
-        store.handle_response_event(
+        store.handle_card_response(
             room_id="!room:localhost",
             sender_id="@user:localhost",
             card_event_id=pending.card_event_id,
@@ -817,7 +853,7 @@ async def test_duplicate_live_response_from_approver_is_consumed_while_resolutio
     )
     await asyncio.wait_for(edit_started.wait(), timeout=1)
 
-    second_result = await store.handle_response_event(
+    second_result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id=pending.card_event_id,
@@ -877,7 +913,7 @@ async def test_card_response_for_cached_approval_does_not_scan_history(tmp_path:
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    result = await store.handle_response_event(
+    result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id="$approval",
@@ -1020,7 +1056,7 @@ async def test_response_for_unknown_card_does_not_fetch_or_scan_matrix(tmp_path:
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    result = await store.handle_response_event(
+    result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id="$approval",
@@ -1051,7 +1087,7 @@ async def test_response_for_unknown_card_does_not_scan_history(tmp_path: Path) -
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    result = await store.handle_response_event(
+    result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id="$approval",
@@ -1081,7 +1117,7 @@ async def test_card_response_ignores_same_router_cached_pending_without_history_
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    result = await store.handle_response_event(
+    result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id="$approval",
@@ -1107,7 +1143,7 @@ async def test_card_response_ignores_cross_router_matrix_only_card(tmp_path: Pat
         transport_sender=lambda: "@router_b:localhost",
     )
 
-    result = await store.handle_response_event(
+    result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id="$approval",
@@ -1139,7 +1175,7 @@ async def test_concurrent_cached_response_events_fall_through_without_terminal_e
         transport_sender=lambda: "@mindroom_router:localhost",
     )
     first = asyncio.create_task(
-        store.handle_response_event(
+        store.handle_card_response(
             room_id="!room:localhost",
             sender_id="@user:localhost",
             card_event_id="$approval",
@@ -1148,7 +1184,7 @@ async def test_concurrent_cached_response_events_fall_through_without_terminal_e
         ),
     )
     second = asyncio.create_task(
-        store.handle_response_event(
+        store.handle_card_response(
             room_id="!room:localhost",
             sender_id="@user:localhost",
             card_event_id="$approval",
@@ -1205,7 +1241,7 @@ async def test_failed_terminal_edit_keeps_card_terminal_in_process(tmp_path: Pat
     )
     pending = await _wait_for_pending(store, sender_mock)
 
-    first_result = await store.handle_response_event(
+    first_result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id=pending.card_event_id,
@@ -1213,7 +1249,7 @@ async def test_failed_terminal_edit_keeps_card_terminal_in_process(tmp_path: Pat
         reason=None,
     )
     decision = await task
-    second_result = await store.handle_response_event(
+    second_result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id=pending.card_event_id,
@@ -1257,7 +1293,7 @@ async def test_wrong_clicker_response_is_not_consumed_and_leaves_card_pending(tm
     )
     pending = await _wait_for_pending(store, sender)
 
-    result = await store.handle_response_event(
+    result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@other:localhost",
         card_event_id=pending.card_event_id,
@@ -1269,7 +1305,7 @@ async def test_wrong_clicker_response_is_not_consumed_and_leaves_card_pending(tm
     assert result.resolved is False
     editor.assert_not_awaited()
 
-    approver_result = await store.handle_response_event(
+    approver_result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
         card_event_id=pending.card_event_id,

@@ -3968,6 +3968,40 @@ class TestAgentBot:
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
+    async def test_unknown_tool_approval_response_with_approval_id_uses_live_id_entrypoint(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Approval-id-only custom events should use the live-id manager API."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        event = SimpleNamespace(
+            type="io.mindroom.tool_approval_response",
+            sender="@user:localhost",
+            source={"content": {"approval_id": "approval-1", "status": "approved"}},
+        )
+        store = MagicMock()
+        store.handle_card_response = AsyncMock()
+        store.handle_live_approval_id_response = AsyncMock(
+            return_value=ApprovalActionResult(consumed=True, resolved=True, card_event_id="$approval"),
+        )
+
+        with patch("mindroom.bot.get_approval_store", return_value=store):
+            await bot._on_unknown_event(room, event)
+
+        store.handle_live_approval_id_response.assert_awaited_once_with(
+            room_id="!test:localhost",
+            sender_id="@user:localhost",
+            approval_id="approval-1",
+            status="approved",
+            reason=None,
+        )
+        store.handle_card_response.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_unknown_tool_approval_response_with_legacy_approved_payload_resolves_live_waiter(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -4128,7 +4162,7 @@ class TestAgentBot:
             editor.assert_not_awaited()
             assert task.done() is False
 
-            await store.handle_response_event(
+            await store.handle_card_response(
                 room_id="!test:localhost",
                 sender_id="@approver:localhost",
                 card_event_id=pending.card_event_id,
@@ -4210,7 +4244,7 @@ class TestAgentBot:
             editor=AsyncMock(side_effect=slow_editor),
         )
         first_resolution = asyncio.create_task(
-            store.handle_response_event(
+            store.handle_card_response(
                 room_id="!test:localhost",
                 sender_id="@user:localhost",
                 card_event_id=pending.card_event_id,
@@ -4269,19 +4303,20 @@ class TestAgentBot:
         event.sender = "@user:localhost"
         event.event_id = "$reaction"
         store = MagicMock()
-        store.handle_response_event = AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True))
+        store.handle_card_response = AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True))
+        store.handle_live_approval_id_response = AsyncMock()
 
         with patch("mindroom.bot.get_approval_store", return_value=store):
             await bot._on_reaction(room, event)
 
-        store.handle_response_event.assert_awaited_once_with(
+        store.handle_card_response.assert_awaited_once_with(
             room_id="!test:localhost",
             sender_id="@user:localhost",
             card_event_id="$approval",
-            approval_id=None,
             status="approved",
             reason=None,
         )
+        store.handle_live_approval_id_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_inherit_thread_for_promoted_plain_reply_target(

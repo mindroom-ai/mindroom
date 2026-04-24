@@ -587,47 +587,83 @@ class ApprovalManager:
             return _StartupTerminalState.UNKNOWN
         return _StartupTerminalState.PENDING_CONFIRMED
 
-    async def handle_response_event(
+    async def handle_card_response(
         self,
         *,
         room_id: str,
         sender_id: str,
+        card_event_id: str,
         status: ResolutionStatus,
         reason: str | None,
-        card_event_id: str | None = None,
-        approval_id: str | None = None,
     ) -> ApprovalActionResult:
-        """Resolve one typed approval response parsed by Matrix event dispatch."""
-        live_card_event_id = card_event_id
-        if live_card_event_id is None and approval_id is not None:
-            live_card_event_id = self._live_card_event_id_for_approval(approval_id)
-
-        live_waiter = self._live_waiter_for_card(live_card_event_id) if live_card_event_id is not None else None
+        """Resolve one approval action anchored to a Matrix approval-card event id."""
+        live_waiter = self._live_waiter_for_card(card_event_id)
         if live_waiter is not None:
-            if live_waiter.room_id != room_id:
-                return ApprovalActionResult(consumed=False, resolved=False, card_event_id=live_waiter.card_event_id)
-            pending = await self._pending_approval_for_card(
-                room_id=live_waiter.room_id,
-                card_event_id=live_waiter.card_event_id,
-            )
-            if pending is None:
-                return ApprovalActionResult(consumed=False, resolved=False)
-            if pending.approver_user_id != sender_id:
-                return ApprovalActionResult(
-                    consumed=False,
-                    resolved=False,
-                    thread_id=pending.thread_id,
-                    card_event_id=pending.card_event_id,
-                )
-            return await self._resolve_live_response(
-                pending=pending,
+            return await self._handle_live_waiter_response(
+                live_waiter=live_waiter,
+                room_id=room_id,
+                sender_id=sender_id,
                 status=status,
                 reason=reason,
-                resolved_by=sender_id,
             )
 
-        consumed = card_event_id is not None and self._known_in_memory_approval_card(card_event_id)
+        consumed = self._known_in_memory_approval_card(card_event_id)
         return ApprovalActionResult(consumed=consumed, resolved=False, card_event_id=card_event_id)
+
+    async def handle_live_approval_id_response(
+        self,
+        *,
+        room_id: str,
+        sender_id: str,
+        approval_id: str,
+        status: ResolutionStatus,
+        reason: str | None,
+    ) -> ApprovalActionResult:
+        """Resolve one custom client action by in-memory approval id only."""
+        live_card_event_id = self._live_card_event_id_for_approval(approval_id)
+        if live_card_event_id is None:
+            return ApprovalActionResult(consumed=False, resolved=False)
+        live_waiter = self._live_waiter_for_card(live_card_event_id)
+        if live_waiter is None:
+            return ApprovalActionResult(consumed=False, resolved=False, card_event_id=live_card_event_id)
+        return await self._handle_live_waiter_response(
+            live_waiter=live_waiter,
+            room_id=room_id,
+            sender_id=sender_id,
+            status=status,
+            reason=reason,
+        )
+
+    async def _handle_live_waiter_response(
+        self,
+        *,
+        live_waiter: _LiveApprovalWaiter,
+        room_id: str,
+        sender_id: str,
+        status: ResolutionStatus,
+        reason: str | None,
+    ) -> ApprovalActionResult:
+        if live_waiter.room_id != room_id:
+            return ApprovalActionResult(consumed=False, resolved=False, card_event_id=live_waiter.card_event_id)
+        pending = await self._pending_approval_for_card(
+            room_id=live_waiter.room_id,
+            card_event_id=live_waiter.card_event_id,
+        )
+        if pending is None:
+            return ApprovalActionResult(consumed=False, resolved=False)
+        if pending.approver_user_id != sender_id:
+            return ApprovalActionResult(
+                consumed=False,
+                resolved=False,
+                thread_id=pending.thread_id,
+                card_event_id=pending.card_event_id,
+            )
+        return await self._resolve_live_response(
+            pending=pending,
+            status=status,
+            reason=reason,
+            resolved_by=sender_id,
+        )
 
     def _configure_transport(
         self,
