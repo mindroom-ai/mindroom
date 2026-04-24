@@ -9,8 +9,7 @@ from importlib import util
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
-from mindroom.hooks.decorators import iter_module_hooks
-from mindroom.hooks.registry import HookRegistry
+from mindroom.hooks import HookRegistry, iter_module_hooks
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.registry_state import (
@@ -31,7 +30,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.hooks.types import HookCallback
+    from mindroom.hooks import HookCallback
     from mindroom.tool_system.metadata import ToolMetadata
 
 logger = get_logger(__name__)

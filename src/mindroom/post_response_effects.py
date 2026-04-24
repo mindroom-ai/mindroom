@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.history.types import CompactionOutcome, PostResponseCompactionCheck
+    from mindroom.history import CompactionOutcome, PostResponseCompactionCheck
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity

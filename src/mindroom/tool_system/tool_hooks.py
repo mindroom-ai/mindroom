@@ -17,12 +17,13 @@ from weakref import WeakKeyDictionary
 from agno.tools.function import FunctionCall
 
 from mindroom.hooks import (
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
     ToolAfterCallContext,
     ToolBeforeCallContext,
     emit,
     emit_gate,
 )
-from mindroom.hooks.types import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -42,8 +43,13 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.hooks.registry import HookRegistry
-    from mindroom.hooks.types import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.hooks import (
+        HookMatrixAdmin,
+        HookMessageSender,
+        HookRegistry,
+        HookRoomStatePutter,
+        HookRoomStateQuerier,
+    )
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 _DECLINED_RESULT_TEMPLATE = (
     "[TOOL CALL DECLINED]\n"

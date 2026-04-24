@@ -5,16 +5,26 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.hooks.types import HookMessageSender  # noqa: TC001
-from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.mentions import format_message_with_mentions
 
 if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+
+
+async def send_message_result(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+) -> DeliveredMatrixEvent | None:
+    """Late-bind Matrix delivery to avoid the hooks facade import cycle."""
+    from mindroom.matrix.client_delivery import send_message_result as _send_message_result  # noqa: PLC0415
+
+    return await _send_message_result(client, room_id, content)
 
 
 def resolve_hook_sender_domain(
@@ -49,6 +59,8 @@ async def send_hook_message(
     conversation_cache: ConversationCacheProtocol,
 ) -> str | None:
     """Send one hook-originated Matrix message."""
+    from mindroom.matrix.mentions import format_message_with_mentions  # noqa: PLC0415
+
     resolved_sender_domain = resolve_hook_sender_domain(client, sender_domain=sender_domain)
     if resolved_sender_domain is None:
         return None

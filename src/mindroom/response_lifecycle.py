@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from agno.db.sqlite import SqliteDb
 
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.history.types import HistoryScope
+    from mindroom.history import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mindroom.coalescing import coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
-from mindroom.hooks.ingress import hook_ingress_policy
+from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.identity import extract_agent_name
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001

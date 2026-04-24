@@ -41,21 +41,19 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history import (
     CompactionOutcome,
+    HistoryScope,
     PreparedHistoryState,
+    ScopeSessionContext,
+    apply_replay_plan,
+    close_agent_runtime_sqlite_dbs,
+    compute_prompt_token_breakdown,
+    open_resolved_scope_session_context,
 )
-from mindroom.history.compaction import compute_prompt_token_breakdown
 from mindroom.history.interrupted_replay import (
     persist_interrupted_replay,
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
-from mindroom.history.runtime import (
-    ScopeSessionContext,
-    apply_replay_plan,
-    close_agent_runtime_sqlite_dbs,
-    open_resolved_scope_session_context,
-)
-from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,

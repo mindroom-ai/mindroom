@@ -17,6 +17,7 @@ from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entit
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import (
+    EVENT_CONFIG_RELOADED,
     ConfigReloadedContext,
     HookRegistry,
     build_hook_matrix_admin,
@@ -24,7 +25,6 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
-from mindroom.hooks.types import EVENT_CONFIG_RELOADED
 from mindroom.knowledge import (
     KnowledgeManager,
     OrchestratorKnowledgeRefreshOwner,
@@ -122,8 +122,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import FrameType
 
-    from mindroom.hooks import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
-    from mindroom.hooks.sender import HookMessageSender
+    from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
 
     from .constants import RuntimePaths
 logger = get_logger(__name__)

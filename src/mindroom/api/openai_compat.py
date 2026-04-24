@@ -43,7 +43,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_team_messages_text,
 )
-from mindroom.history.runtime import (
+from mindroom.history import (
     ScopeSessionContext,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,

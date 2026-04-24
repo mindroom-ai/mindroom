@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from agno.db.sqlite import SqliteDb
     from agno.models.base import Model
 
-    from mindroom.history.runtime import ScopeSessionContext
+    from mindroom.history import ScopeSessionContext
 
 __all__ = [
     "ModelRunInput",

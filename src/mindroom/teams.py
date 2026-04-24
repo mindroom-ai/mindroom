@@ -39,14 +39,14 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_team_messages_text,
 )
-from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
-from mindroom.history.runtime import (
+from mindroom.history import (
     ScopeSessionContext,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
+    update_scope_seen_event_ids,
 )
-from mindroom.history.storage import update_scope_seen_event_ids
+from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import (
     KnowledgeAvailability,

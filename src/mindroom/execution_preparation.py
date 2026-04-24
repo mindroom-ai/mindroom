@@ -21,7 +21,10 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     RuntimePaths,
 )
-from mindroom.history.runtime import (
+from mindroom.history import (
+    PreparedHistoryState,
+    PreparedScopeHistory,
+    ResolvedReplayPlan,
     ScopeSessionContext,
     apply_replay_plan,
     estimate_preparation_static_tokens,
@@ -29,8 +32,8 @@ from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
+    read_scope_seen_event_ids,
 )
-from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
@@ -43,14 +46,11 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.config.main import Config
-    from mindroom.history import CompactionOutcome
-    from mindroom.history.runtime import PreparedScopeHistory
-    from mindroom.history.types import (
+    from mindroom.history import (
         CompactionDecision,
         CompactionLifecycle,
+        CompactionOutcome,
         PostResponseCompactionCheck,
-        PreparedHistoryState,
-        ResolvedReplayPlan,
     )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 

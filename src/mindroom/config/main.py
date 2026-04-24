@@ -46,7 +46,7 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
     safe_replace,
 )
-from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
+from mindroom.history import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     agent_username_localpart,

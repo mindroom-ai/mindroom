@@ -1,6 +1,32 @@
 """Persisted history compaction helpers."""
 
-from mindroom.history.runtime import prepare_history_for_run
+from mindroom.history.compaction import compute_prompt_token_breakdown
+from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
+from mindroom.history.runtime import (
+    PreparedScopeHistory,
+    ScopeSessionContext,
+    apply_replay_plan,
+    close_agent_runtime_sqlite_dbs,
+    close_team_runtime_sqlite_dbs,
+    create_scope_session_storage,
+    estimate_preparation_static_tokens,
+    estimate_preparation_static_tokens_for_team,
+    finalize_history_preparation,
+    open_bound_scope_session_context,
+    open_resolved_scope_session_context,
+    open_scope_session_context,
+    prepare_bound_scope_history,
+    prepare_history_for_run,
+    prepare_scope_history,
+    resolve_bound_team_scope_context,
+)
+from mindroom.history.storage import (
+    add_pending_force_compaction_scope,
+    read_scope_seen_event_ids,
+    read_scope_state,
+    update_scope_seen_event_ids,
+    write_scope_state,
+)
 from mindroom.history.types import (
     CompactionDecision,
     CompactionLifecycle,
@@ -13,6 +39,8 @@ from mindroom.history.types import (
     HistoryScopeState,
     PostResponseCompactionCheck,
     PreparedHistoryState,
+    ResolvedHistorySettings,
+    ResolvedReplayPlan,
 )
 
 __all__ = [
@@ -27,5 +55,30 @@ __all__ = [
     "HistoryScopeState",
     "PostResponseCompactionCheck",
     "PreparedHistoryState",
+    "PreparedScopeHistory",
+    "ResolvedHistorySettings",
+    "ResolvedReplayPlan",
+    "ScopeSessionContext",
+    "add_pending_force_compaction_scope",
+    "apply_replay_plan",
+    "close_agent_runtime_sqlite_dbs",
+    "close_team_runtime_sqlite_dbs",
+    "compute_prompt_token_breakdown",
+    "create_scope_session_storage",
+    "estimate_preparation_static_tokens",
+    "estimate_preparation_static_tokens_for_team",
+    "finalize_history_preparation",
+    "manual_compaction_unavailable_message",
+    "open_bound_scope_session_context",
+    "open_resolved_scope_session_context",
+    "open_scope_session_context",
+    "prepare_bound_scope_history",
     "prepare_history_for_run",
+    "prepare_scope_history",
+    "read_scope_seen_event_ids",
+    "read_scope_state",
+    "resolve_bound_team_scope_context",
+    "resolve_history_execution_plan",
+    "update_scope_seen_event_ids",
+    "write_scope_state",
 ]

@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
-    from mindroom.hooks.registry import HookRegistryPlugin
+    from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.tool_system.worker_routing import (
         ToolExecutionIdentity,

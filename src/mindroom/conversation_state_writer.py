@@ -14,8 +14,7 @@ from mindroom.agents import (
     get_agent_session,
     get_team_session,
 )
-from mindroom.history.runtime import create_scope_session_storage
-from mindroom.history.types import HistoryScope
+from mindroom.history import HistoryScope, create_scope_session_storage
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
 
 if TYPE_CHECKING:

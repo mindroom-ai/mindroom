@@ -29,13 +29,21 @@ from .context import (
     ToolAfterCallContext,
     ToolBeforeCallContext,
 )
-from .decorators import hook
+from .decorators import get_hook_metadata, hook, iter_module_hooks
 from .enrichment import (
     render_enrichment_block,
     render_system_enrichment_block,
 )
 from .execution import emit, emit_collect, emit_final_response_transform, emit_gate, emit_transform
-from .registry import HookRegistry
+from .ingress import (
+    HookIngressPolicy,
+    hook_ingress_policy,
+    is_automation_source_kind,
+    is_voice_event,
+    should_handle_interactive_text_response,
+)
+from .registry import HookRegistry, HookRegistryPlugin, HookRegistryState
+from .sender import build_hook_message_sender, send_hook_message
 from .state import build_hook_room_state_putter, build_hook_room_state_querier
 from .types import (
     BUILTIN_EVENT_NAMES,
@@ -58,11 +66,14 @@ from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EnrichmentItem,
+    HookCallback,
     HookMatrixAdmin,
     HookMessageSender,
     HookRoomStatePutter,
     HookRoomStateQuerier,
     RegisteredHook,
+    default_timeout_ms_for_event,
+    validate_event_name,
 )
 
 if TYPE_CHECKING:
@@ -101,11 +112,15 @@ __all__ = [
     "EnrichmentItem",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
+    "HookCallback",
     "HookContext",
     "HookContextSupport",
+    "HookIngressPolicy",
     "HookMatrixAdmin",
     "HookMessageSender",
     "HookRegistry",
+    "HookRegistryPlugin",
+    "HookRegistryState",
     "HookRoomStatePutter",
     "HookRoomStateQuerier",
     "MessageEnrichContext",
@@ -121,16 +136,26 @@ __all__ = [
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
     "build_hook_matrix_admin",
+    "build_hook_message_sender",
     "build_hook_room_state_putter",
     "build_hook_room_state_querier",
+    "default_timeout_ms_for_event",
     "emit",
     "emit_collect",
     "emit_final_response_transform",
     "emit_gate",
     "emit_transform",
+    "get_hook_metadata",
     "hook",
+    "hook_ingress_policy",
+    "is_automation_source_kind",
+    "is_voice_event",
+    "iter_module_hooks",
     "render_enrichment_block",
     "render_system_enrichment_block",
+    "send_hook_message",
+    "should_handle_interactive_text_response",
+    "validate_event_name",
 ]
 
 

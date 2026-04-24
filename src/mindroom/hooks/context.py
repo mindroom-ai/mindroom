@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history.types import HistoryScope
+    from mindroom.history import HistoryScope
     from mindroom.matrix.cache import AgentMessageSnapshot
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
