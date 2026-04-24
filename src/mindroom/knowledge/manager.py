@@ -1613,6 +1613,18 @@ class KnowledgeManager:
                 )
                 raise
 
+            if indexed_count != len(files):
+                await asyncio.to_thread(self._delete_vector_db, shadow_vector_db)
+                await asyncio.to_thread(
+                    self._save_persisted_indexing_state,
+                    _INDEXING_STATUS_COMPLETE,
+                    collection=live_collection_name,
+                    availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
+                    last_published_at=last_published_at,
+                    published_revision=published_revision,
+                )
+                return indexed_count
+
             previous_vector_db = self._knowledge.vector_db
             # Keep the Knowledge object stable so any already-resolved handles see the swap atomically.
             self._knowledge.vector_db = shadow_vector_db

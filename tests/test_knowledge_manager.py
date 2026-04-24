@@ -1017,6 +1017,67 @@ async def test_reindex_all_failure_preserves_previous_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_reindex_all_false_return_preserves_previous_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial shadow rebuild should keep serving the last complete snapshot."""
+    _ShadowChromaDb.collections = {}
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _ShadowChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _ShadowKnowledge)
+
+    docs_path = tmp_path / "knowledge"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "doc-a.md").write_text("old A", encoding="utf-8")
+    (docs_path / "doc-b.md").write_text("old B", encoding="utf-8")
+    config = _make_config(docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    await manager.reindex_all()
+    live_collection_name = manager._current_collection_name()
+
+    (docs_path / "doc-a.md").write_text("new A", encoding="utf-8")
+    (docs_path / "doc-b.md").write_text("new B", encoding="utf-8")
+    original_index_file_locked = manager._index_file_locked
+
+    async def _fail_one_shadow_file(
+        resolved_path: Path,
+        *,
+        upsert: bool,
+        knowledge: object | None = None,
+        indexed_files: set[str] | None = None,
+        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+    ) -> bool:
+        if knowledge is not None and knowledge is not manager.get_knowledge() and resolved_path.name == "doc-b.md":
+            return False
+        return await original_index_file_locked(
+            resolved_path,
+            upsert=upsert,
+            knowledge=knowledge,
+            indexed_files=indexed_files,
+            indexed_signatures=indexed_signatures,
+        )
+
+    monkeypatch.setattr(manager, "_index_file_locked", _fail_one_shadow_file)
+
+    indexed_count = await manager.reindex_all()
+
+    assert indexed_count == 1
+    assert manager._current_collection_name() == live_collection_name
+    live_results = manager.get_knowledge().search("snapshot", max_results=10)
+    assert {document.content for document in live_results} == {"old A", "old B"}
+
+    payload = json.loads(manager._indexing_settings_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "complete"
+    assert payload["collection"] == live_collection_name
+    assert payload["availability"] == "refresh_failed"
+
+
+@pytest.mark.asyncio
 async def test_initialize_shared_knowledge_managers_rebuilds_after_refresh_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
