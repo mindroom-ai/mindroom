@@ -1367,11 +1367,8 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     def worker() -> None:
         nonlocal result, error
 
-        async def run_execute() -> object:
-            return FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
-
         try:
-            result = asyncio.run(run_execute())
+            result = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
         except BaseException as exc:  # pragma: no cover - asserted below
             error = exc
 
@@ -1394,6 +1391,88 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     assert error is None
     assert not thread.is_alive()
     assert result is not None
+    assert result.status == "success"
+    assert result.result == "HI"
+    client.room_send.assert_awaited_once()
+    assert editor.await_args.args[2]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_approval_aexecute_resumes_on_runtime_loop(tmp_path: Path) -> None:
+    """Approval-gated sync tools should not deadlock under FunctionCall.aexecute()."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "rules": [{"match": "echo", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
+    )
+    client.rooms = {"!room:localhost": object()}
+    bot = MagicMock()
+    bot.agent_name = "router"
+    bot.running = True
+    bot.client = client
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
+    orchestrator.agent_bots = {"router": bot}
+    editor = AsyncMock(return_value=True)
+    initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=editor)
+
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, text: str) -> str:
+            return text.upper()
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    async def run_and_approve() -> object:
+        task = asyncio.create_task(
+            FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute(),
+        )
+        store = get_approval_store()
+        assert store is not None
+        pending = await _wait_for_sent_pending(store, client.room_send)
+        await store.resolve_approval(
+            card_event_id=pending.card_event_id,
+            room_id=pending.room_id,
+            status="approved",
+            reason=None,
+            resolved_by="@user:localhost",
+        )
+        return await task
+
+    result = await asyncio.wait_for(run_and_approve(), timeout=1)
+
     assert result.status == "success"
     assert result.result == "HI"
     client.room_send.assert_awaited_once()
@@ -1454,11 +1533,8 @@ async def test_tool_approval_scripts_cannot_mutate_rendered_approval_payload(tmp
     def worker() -> None:
         nonlocal result, error
 
-        async def run_execute() -> object:
-            return FunctionCall(function=function, arguments={"payload": "original"}, call_id="call-1").execute()
-
         try:
-            result = asyncio.run(run_execute())
+            result = FunctionCall(function=function, arguments={"payload": "original"}, call_id="call-1").execute()
         except BaseException as exc:  # pragma: no cover - asserted below
             error = exc
 

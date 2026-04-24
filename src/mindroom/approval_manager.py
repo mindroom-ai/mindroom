@@ -366,16 +366,13 @@ class ApprovalManager:
             return await self._await_waiter(waiter, expires_at=expires_at)
         except asyncio.CancelledError:
             pending = PendingApproval.from_card_event(card_event, room_id=room_id)
-            await self._emit_resolution(
+            decision = self._new_decision(status="expired", reason=_DEFAULT_CANCELLED_REASON, resolved_by=None)
+            if not await self._complete_with_terminal_resolution(
                 pending,
-                status="expired",
-                reason=_DEFAULT_CANCELLED_REASON,
-                resolved_by=None,
-            )
-            self._complete_waiter(
-                sent_event.event_id,
-                self._new_decision(status="expired", reason=_DEFAULT_CANCELLED_REASON, resolved_by=None),
-            )
+                decision=decision,
+            ):
+                with suppress(Exception):
+                    await self._wait_for_competing_terminal_decision(waiter)
             raise
         finally:
             with self._live_lock:
@@ -454,10 +451,14 @@ class ApprovalManager:
         cutoff_ts_ms = _lookback_cutoff_ms(lookback_hours)
         denied = 0
         for room_id in self._configured_approval_room_ids():
-            candidates = await self._scan_cached_room_cards(room_id, since_ts_ms=cutoff_ts_ms, limit=500)
-            if not candidates:
-                candidates = await self._scan_room_messages_for_cards(room_id, since_ts_ms=cutoff_ts_ms, limit=500)
-            for card_event in candidates:
+            cached_candidates = await self._scan_cached_room_cards(room_id, since_ts_ms=cutoff_ts_ms, limit=500)
+            history_candidates = await self._scan_room_messages_for_cards(room_id, since_ts_ms=cutoff_ts_ms, limit=500)
+            candidates_by_event_id: dict[str, dict[str, Any]] = {}
+            for card_event in [*cached_candidates, *history_candidates]:
+                event_id = card_event.get("event_id")
+                if isinstance(event_id, str) and event_id:
+                    candidates_by_event_id.setdefault(event_id, card_event)
+            for card_event in candidates_by_event_id.values():
                 try:
                     pending = PendingApproval.from_card_event(card_event, room_id=room_id)
                 except (TypeError, ValueError):
@@ -468,11 +469,12 @@ class ApprovalManager:
                 if still_pending is None:
                     continue
                 result = await self._resolve_card(
-                    card_event_id=pending.card_event_id,
-                    room_id=room_id,
+                    card_event_id=still_pending.card_event_id,
+                    room_id=still_pending.room_id,
                     status="denied",
                     reason=_STARTUP_AUTO_DENY_REASON,
                     resolved_by=transport_sender,
+                    pending=still_pending,
                 )
                 if result.handled:
                     denied += 1
@@ -544,9 +546,9 @@ class ApprovalManager:
     async def _expire_waiter(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
         pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
         decision = self._new_decision(status="expired", reason=_DEFAULT_TIMEOUT_REASON, resolved_by=None)
-        await self._emit_resolution(pending, status="expired", reason=decision.reason, resolved_by=None)
-        self._complete_waiter(waiter.card_event_id, decision)
-        return decision
+        if await self._complete_with_terminal_resolution(pending, decision=decision):
+            return decision
+        return await self._wait_for_competing_terminal_decision(waiter)
 
     async def _resolve_card(
         self,
@@ -583,7 +585,7 @@ class ApprovalManager:
                     resolved_by=resolved_by,
                 )
                 self._complete_waiter(card_event_id, fail_closed_decision)
-                self._release_resolution_claim(card_event_id, resolved=False)
+                self._release_resolution_claim(card_event_id, resolved=True)
                 claim_released = True
                 return AnchoredApprovalActionResult(handled=True)
 
@@ -708,11 +710,10 @@ class ApprovalManager:
             waiters = list(self._pending_by_card_event.values())
         for waiter in waiters:
             pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
-            await self._emit_resolution(pending, status="expired", reason=reason, resolved_by=None)
-            self._complete_waiter(
-                waiter.card_event_id,
-                self._new_decision(status="expired", reason=reason, resolved_by=None),
-            )
+            decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
+            if not await self._complete_with_terminal_resolution(pending, decision=decision):
+                with suppress(Exception):
+                    await self._wait_for_competing_terminal_decision(waiter)
 
     def _abort_pending(self, *, reason: str) -> None:
         with self._live_lock:
@@ -741,6 +742,35 @@ class ApprovalManager:
             waiter.future.set_result(decision)
         except InvalidStateError:
             return
+
+    async def _complete_with_terminal_resolution(
+        self,
+        pending: PendingApproval,
+        *,
+        decision: ApprovalDecision,
+    ) -> bool:
+        if not self._claim_resolution(pending.card_event_id):
+            return False
+        claim_released = False
+        try:
+            await self._emit_resolution(
+                pending,
+                status=decision.status,
+                reason=decision.reason,
+                resolved_by=decision.resolved_by,
+            )
+            self._complete_waiter(pending.card_event_id, decision)
+            self._release_resolution_claim(pending.card_event_id, resolved=True)
+            claim_released = True
+            return True
+        finally:
+            if not claim_released:
+                self._release_resolution_claim(pending.card_event_id, resolved=False)
+
+    async def _wait_for_competing_terminal_decision(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
+        if waiter.future.done():
+            return waiter.future.result()
+        return await asyncio.shield(asyncio.wrap_future(waiter.future))
 
     def _claim_resolution(self, card_event_id: str) -> bool:
         with self._live_lock:

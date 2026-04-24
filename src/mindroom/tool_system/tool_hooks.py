@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import wraps
-from threading import Thread
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
@@ -252,24 +250,7 @@ def _run_coroutine_from_sync(coroutine: ToolHookResult) -> ToolHookResult:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(runner_coroutine)
-
-    result: ToolHookResult = None
-    error: BaseException | None = None
-    context = copy_context()
-
-    def runner() -> None:
-        nonlocal error, result
-        try:
-            result = context.run(asyncio.run, runner_coroutine)
-        except BaseException as exc:  # pragma: no cover - re-raised in caller thread
-            error = exc
-
-    thread = Thread(target=runner)
-    thread.start()
-    thread.join()
-    if error is not None:
-        raise error
-    return result
+    return _DeferredAsyncToolHookResult(runner_coroutine)
 
 
 def _patch_agno_async_tool_hook_chain() -> None:
