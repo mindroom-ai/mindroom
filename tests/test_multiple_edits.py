@@ -28,6 +28,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _delivery_resolution(response_event_id: str | None) -> str | None:
+    """Build one test-side response result for edit-regeneration tests."""
+    return response_event_id
+
+
 @pytest.mark.asyncio
 async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     """Test that agents regenerate their response on each consecutive edit."""
@@ -150,7 +155,11 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit1_event.source = edit1_event.__dict__["source"]
 
     # Process first edit and verify regeneration happens through the shared response helper.
-    with patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response123")) as mock_generate_response:
+    with patch.object(
+        bot,
+        "_generate_response",
+        new=AsyncMock(return_value=_delivery_resolution("$response123")),
+    ) as mock_generate_response:
         await bot._on_message(room, edit1_event)
 
     assert mock_generate_response.await_count == 1
@@ -185,7 +194,11 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit2_event.source = edit2_event.__dict__["source"]
 
     # Process second edit and verify regeneration happens again.
-    with patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response123")) as mock_generate_response:
+    with patch.object(
+        bot,
+        "_generate_response",
+        new=AsyncMock(return_value=_delivery_resolution("$response123")),
+    ) as mock_generate_response:
         await bot._on_message(room, edit2_event)
 
     assert mock_generate_response.await_count == 1
@@ -220,7 +233,11 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     bot.client.room_send.reset_mock()
 
     # Process third edit and verify regeneration still happens.
-    with patch.object(bot, "_generate_response", new=AsyncMock(return_value="$response123")) as mock_generate_response:
+    with patch.object(
+        bot,
+        "_generate_response",
+        new=AsyncMock(return_value=_delivery_resolution("$response123")),
+    ) as mock_generate_response:
         await bot._on_message(room, edit3_event)
 
     assert mock_generate_response.await_count == 1

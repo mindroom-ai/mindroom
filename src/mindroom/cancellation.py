@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
+
+CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
+USER_STOP_CANCEL_MSG = "user_stop"
+SYNC_RESTART_CANCEL_MSG = "sync_restart"
 
 _TASK_CANCEL_SOURCES: dict[asyncio.Task[Any], str] = {}
 
@@ -32,3 +36,15 @@ def build_cancelled_error(reason: str | None) -> asyncio.CancelledError:
         if cancel_msg is not None:
             return asyncio.CancelledError(cancel_msg)
     return asyncio.CancelledError(reason or "Run cancelled")
+
+
+def _cancel_failure_reason(cancel_source: CancelSource) -> str:
+    """Return the canonical failure reason for one cancellation provenance."""
+    if cancel_source == "sync_restart":
+        return "sync_restart_cancelled"
+    if cancel_source == "user_stop":
+        return "cancelled_by_user"
+    return "interrupted"
+
+
+cancel_failure_reason = _cancel_failure_reason

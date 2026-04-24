@@ -248,6 +248,15 @@ class ResponseDraft:
     suppress: bool = False
 
 
+@dataclass(slots=True)
+class FinalResponseDraft:
+    """Mutable text-only outbound response candidate for final-response hooks."""
+
+    response_text: str
+    response_kind: str
+    envelope: MessageEnvelope
+
+
 @dataclass(frozen=True, slots=True)
 class ResponseResult:
     """Final outcome after send or edit."""
@@ -429,6 +438,13 @@ class BeforeResponseContext(HookContext):
 
 
 @dataclass(slots=True)
+class FinalResponseTransformContext(HookContext):
+    """Context for message:final_response_transform hooks."""
+
+    draft: FinalResponseDraft
+
+
+@dataclass(slots=True)
 class AfterResponseContext(HookContext):
     """Context for message:after_response hooks."""
 
@@ -437,7 +453,7 @@ class AfterResponseContext(HookContext):
 
 @dataclass(frozen=True, slots=True)
 class CancelledResponseInfo:
-    """Facts available when a response is cancelled mid-stream."""
+    """Facts available when final delivery ends on the cancelled/failure cleanup path."""
 
     envelope: MessageEnvelope
     visible_response_event_id: str | None = None
@@ -751,14 +767,9 @@ def _requester_id_for_hook_send(
     trigger_dispatch: bool = False,
 ) -> str | None:
     """Return the requester identity to preserve on hook-originated sends."""
-    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
-        requester_id = context.envelope.requester_id
-    elif isinstance(context, BeforeResponseContext):
-        requester_id = context.draft.envelope.requester_id
-    elif isinstance(context, AfterResponseContext):
-        requester_id = context.result.envelope.requester_id
-    elif isinstance(context, CancelledResponseContext):
-        requester_id = context.info.envelope.requester_id
+    envelope = _message_envelope_for_hook_context(context)
+    if envelope is not None:
+        requester_id = envelope.requester_id
     elif isinstance(context, ScheduleFiredContext):
         requester_id = context.created_by
     elif isinstance(context, ReactionReceivedContext | CustomEventContext):
@@ -779,17 +790,25 @@ def _message_received_depth_for_hook_send(context: object) -> int:
 
 def _current_message_received_depth(context: object) -> int:
     """Return the inbound synthetic hook-chain depth for one hook context."""
-    if isinstance(context, MessageReceivedContext | MessageEnrichContext):
-        return context.envelope.message_received_depth
-    if isinstance(context, BeforeResponseContext):
-        return context.draft.envelope.message_received_depth
-    if isinstance(context, AfterResponseContext):
-        return context.result.envelope.message_received_depth
-    if isinstance(context, CancelledResponseContext):
-        return context.info.envelope.message_received_depth
+    envelope = _message_envelope_for_hook_context(context)
+    if envelope is not None:
+        return envelope.message_received_depth
     if isinstance(context, CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext):
         return context.message_received_depth
     return 0
+
+
+def _message_envelope_for_hook_context(context: object) -> MessageEnvelope | None:
+    """Return the message envelope carried by one hook context when present."""
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
+        return context.envelope
+    if isinstance(context, BeforeResponseContext | FinalResponseTransformContext):
+        return context.draft.envelope
+    if isinstance(context, AfterResponseContext):
+        return context.result.envelope
+    if isinstance(context, CancelledResponseContext):
+        return context.info.envelope
+    return None
 
 
 def _next_message_received_depth(current_depth: int) -> int:

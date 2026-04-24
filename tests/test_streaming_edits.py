@@ -40,6 +40,10 @@ def _make_matrix_client_mock() -> AsyncMock:
     return client
 
 
+def _delivery_resolution(response_event_id: str | None) -> str | None:
+    return response_event_id
+
+
 def setup_test_bot(
     agent: AgentMatrixUser,
     storage_path: Path,
@@ -184,7 +188,7 @@ class TestStreamingEdits:
         with patch.object(
             bot,
             "_generate_response",
-            new=AsyncMock(return_value="$response123"),
+            new=AsyncMock(return_value=_delivery_resolution("$response123")),
         ) as mock_generate_response:
             await bot._on_message(mock_room, edit_event1)
         assert mock_generate_response.await_count == 1
@@ -217,7 +221,7 @@ class TestStreamingEdits:
         with patch.object(
             bot,
             "_generate_response",
-            new=AsyncMock(return_value="$response123"),
+            new=AsyncMock(return_value=_delivery_resolution("$response123")),
         ) as mock_generate_response:
             await bot._on_message(mock_room, edit_event2)
         assert mock_generate_response.await_count == 1

@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn
 
-from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.events import (
@@ -30,7 +30,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-StreamInputChunk = str | StructuredStreamChunk | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+StreamInputChunk = (
+    str | StructuredStreamChunk | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+)
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 _STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS = 5.0
 
@@ -203,8 +205,16 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             text_chunk = chunk.content
             if chunk.tool_trace is not None:
                 streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
-        elif isinstance(chunk, RunContentEvent) and chunk.content:
-            text_chunk = str(chunk.content)
+        elif isinstance(chunk, RunContentEvent):
+            if chunk.content:
+                text_chunk = str(chunk.content)
+            else:
+                _queue_delivery_request(delivery_queue, progress_hint=True)
+                continue
+        elif isinstance(chunk, RunCompletedEvent):
+            if chunk.content is not None:
+                streaming.canonical_final_body_candidate = str(chunk.content)
+            continue
         elif isinstance(chunk, ToolCallStartedEvent):
             if not streaming.show_tool_calls:
                 await _flush_phase_boundary_if_needed(streaming, delivery_queue)

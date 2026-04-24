@@ -97,7 +97,7 @@ __all__ = [
     "build_matrix_run_metadata",
     "stream_agent_response",
 ]
-AIStreamChunk = str | RunContentEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 _AI_RUN_METADATA_VERSION = 1
 
 
@@ -234,6 +234,7 @@ class _StreamingAttemptState:
     latest_request_input_tokens: int | None = None
     cancelled_run_event: RunCancelledEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
+    canonical_final_body_candidate: str | None = None
     request_metric_totals: dict[str, int] = field(default_factory=_empty_request_metric_totals)
     first_token_latency: float | None = None
     first_token_logged: bool = False
@@ -1217,7 +1218,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
 
 
 @timed("model_request_to_completion")
-async def _process_stream_events(  # noqa: C901, PLR0912
+async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     stream_generator: AsyncIterator[object],
     *,
     state: _StreamingAttemptState,
@@ -1233,7 +1234,9 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     del timing_scope
     try:
         async for event in stream_generator:
-            if isinstance(event, RunContentEvent) and event.content:
+            if isinstance(event, RunContentEvent):
+                if not event.content:
+                    continue
                 if not state.first_token_logged:
                     state.first_token_logged = True
                     if pipeline_timing is not None:
@@ -1275,6 +1278,10 @@ async def _process_stream_events(  # noqa: C901, PLR0912
 
             if isinstance(event, RunCompletedEvent):
                 state.completed_run_event = event
+                if event.content is not None:
+                    state.canonical_final_body_candidate = str(event.content)
+                    yield event
+                    continue
                 continue
 
             if isinstance(event, RunCancelledEvent):
@@ -1646,9 +1653,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     if run_metadata:
                         run_metadata_collector.update(run_metadata)
                 if turn_recorder is not None:
+                    final_visible_body = state.assistant_text or state.canonical_final_body_candidate or ""
                     turn_recorder.record_completed(
                         run_metadata=metadata,
-                        assistant_text=state.assistant_text,
+                        assistant_text=final_visible_body,
                         completed_tools=state.completed_tools,
                     )
             finally:

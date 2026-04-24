@@ -10,9 +10,8 @@ from typing import TYPE_CHECKING
 import nio
 from agno.run.cancel import acancel_run
 
-from mindroom.cancellation import request_task_cancel
+from mindroom.cancellation import USER_STOP_CANCEL_MSG, request_task_cancel
 from mindroom.logging_config import get_logger
-from mindroom.orchestration.runtime import USER_STOP_CANCEL_MSG
 
 if TYPE_CHECKING:
     from collections.abc import Callable

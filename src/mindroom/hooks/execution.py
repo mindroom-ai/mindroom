@@ -18,8 +18,11 @@ from .context import (
     CancelledResponseContext,
     CompactionHookContext,
     CustomEventContext,
+    FinalResponseDraft,
+    FinalResponseTransformContext,
     HookContext,
     MessageEnrichContext,
+    MessageEnvelope,
     MessageReceivedContext,
     ReactionReceivedContext,
     ResponseDraft,
@@ -43,6 +46,8 @@ _MAX_EMIT_DEPTH = 3
 _EMIT_DEPTH: ContextVar[int] = ContextVar("mindroom_hook_emit_depth", default=0)
 
 type HookExecutionContext = HookContext | ToolBeforeCallContext | ToolAfterCallContext
+type TransformContext = BeforeResponseContext | FinalResponseTransformContext
+type TransformDraft = ResponseDraft | FinalResponseDraft
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,19 +56,14 @@ class _HookInvocationResult:
     value: object | None = None
 
 
-def _scope_agent_name(context: HookExecutionContext) -> str | None:  # noqa: PLR0911
+def _scope_agent_name(context: HookExecutionContext) -> str | None:
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         return context.agent_name
+    envelope = _context_scope_envelope(context)
+    if envelope is not None:
+        return envelope.agent_name
     if isinstance(context, MessageEnrichContext | SystemEnrichContext):
         return context.target_entity_name
-    if isinstance(context, MessageReceivedContext):
-        return context.envelope.agent_name
-    if isinstance(context, BeforeResponseContext):
-        return context.draft.envelope.agent_name
-    if isinstance(context, AfterResponseContext):
-        return context.result.envelope.agent_name
-    if isinstance(context, CancelledResponseContext):
-        return context.info.envelope.agent_name
     if isinstance(context, AgentLifecycleContext):
         return context.entity_name
     if isinstance(context, CompactionHookContext | SessionHookContext):
@@ -71,17 +71,12 @@ def _scope_agent_name(context: HookExecutionContext) -> str | None:  # noqa: PLR
     return None
 
 
-def _scope_room_ids(context: HookExecutionContext) -> tuple[str, ...]:  # noqa: C901, PLR0911
+def _scope_room_ids(context: HookExecutionContext) -> tuple[str, ...]:  # noqa: PLR0911
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         return (context.room_id,) if context.room_id else ()
-    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
-        return (context.envelope.room_id,)
-    if isinstance(context, BeforeResponseContext):
-        return (context.draft.envelope.room_id,)
-    if isinstance(context, AfterResponseContext):
-        return (context.result.envelope.room_id,)
-    if isinstance(context, CancelledResponseContext):
-        return (context.info.envelope.room_id,)
+    envelope = _context_scope_envelope(context)
+    if envelope is not None:
+        return (envelope.room_id,)
     if isinstance(context, ScheduleFiredContext | ReactionReceivedContext):
         return (context.room_id,)
     if isinstance(context, AgentLifecycleContext):
@@ -107,6 +102,18 @@ def _hook_in_scope(hook: RegisteredHook, context: HookExecutionContext) -> bool:
             return False
 
     return True
+
+
+def _context_scope_envelope(context: HookExecutionContext) -> MessageEnvelope | None:
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
+        return context.envelope
+    if isinstance(context, BeforeResponseContext | FinalResponseTransformContext):
+        return context.draft.envelope
+    if isinstance(context, AfterResponseContext):
+        return context.result.envelope
+    if isinstance(context, CancelledResponseContext):
+        return context.info.envelope
+    return None
 
 
 def _context_logger(hook: RegisteredHook) -> object:
@@ -359,12 +366,90 @@ async def emit_transform(
     context: BeforeResponseContext,
 ) -> ResponseDraft:
     """Run transformer hooks serially and return the final draft."""
+    return cast(
+        "ResponseDraft",
+        await _emit_serial_transform(
+            registry,
+            event_name,
+            context,
+            copy_on_write=False,
+            preserve_failed_draft=True,
+            continue_on_cancelled=False,
+        ),
+    )
+
+
+async def emit_final_response_transform(
+    registry: HookRegistry,
+    event_name: str,
+    context: FinalResponseTransformContext,
+) -> FinalResponseDraft:
+    """Run final-response transform hooks serially with best-effort isolation."""
+    return cast(
+        "FinalResponseDraft",
+        await _emit_serial_transform(
+            registry,
+            event_name,
+            context,
+            copy_on_write=True,
+            preserve_failed_draft=False,
+            continue_on_cancelled=True,
+        ),
+    )
+
+
+def _copy_transform_draft(draft: TransformDraft) -> TransformDraft:
+    return deepcopy(draft)
+
+
+def _transform_context_with_draft(context: TransformContext, draft: TransformDraft) -> TransformContext:
+    return replace(context, draft=draft)
+
+
+def _next_transform_draft(
+    current_draft: TransformDraft,
+    hook_context: TransformContext,
+    invocation: _HookInvocationResult,
+    *,
+    preserve_failed_draft: bool,
+) -> TransformDraft:
+    if not invocation.succeeded:
+        return hook_context.draft if preserve_failed_draft else current_draft
+    if isinstance(invocation.value, type(current_draft)):
+        return invocation.value
+    return hook_context.draft
+
+
+async def _emit_serial_transform(
+    registry: HookRegistry,
+    event_name: str,
+    context: TransformContext,
+    *,
+    copy_on_write: bool,
+    preserve_failed_draft: bool,
+    continue_on_cancelled: bool,
+) -> TransformDraft:
     current_draft = context.draft
     for hook in _eligible_hooks(registry, event_name, context):
-        hook_context = cast("BeforeResponseContext", _bind_hook_context(hook, replace(context, draft=current_draft)))
-        invocation = await _invoke_hook(hook, hook_context)
-        if isinstance(invocation.value, ResponseDraft):
-            current_draft = invocation.value
+        hook_draft = _copy_transform_draft(current_draft) if copy_on_write else current_draft
+        bound_context = _bind_hook_context(hook, _transform_context_with_draft(context, hook_draft))
+        if bound_context is None:
+            return current_draft
+        hook_context = cast("TransformContext", bound_context)
+        try:
+            invocation = await _invoke_hook(hook, hook_context)
+        except asyncio.CancelledError:
+            if not continue_on_cancelled:
+                raise
+            hook_context.logger.warning(
+                "Hook execution cancelled during best-effort response transform",
+                correlation_id=context.correlation_id,
+            )
             continue
-        current_draft = hook_context.draft
+        current_draft = _next_transform_draft(
+            current_draft,
+            hook_context,
+            invocation,
+            preserve_failed_draft=preserve_failed_draft,
+        )
     return current_draft

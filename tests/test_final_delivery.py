@@ -1,0 +1,115 @@
+"""Direct tests for the retained terminal delivery fields."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+
+
+@dataclass(frozen=True)
+class _Expectation:
+    event_id: str | None
+    is_visible_response: bool
+    final_visible_event_id: str | None
+    handled_response_event_id: str | None
+    mark_handled: bool
+
+
+def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$final",
+                is_visible_response=True,
+                final_visible_body="hello",
+                delivery_kind="sent",
+            ),
+            _Expectation("$final", True, "$final", "$final", True),
+            id="completed-visible-delivery",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id="$stream",
+                is_visible_response=True,
+                final_visible_body="partial",
+                failure_reason="cancelled_by_user",
+            ),
+            _Expectation("$stream", True, "$stream", "$stream", True),
+            id="cancelled-visible-stream",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id="$stream",
+                is_visible_response=True,
+                final_visible_body="partial",
+                failure_reason="terminal_update_failed",
+            ),
+            _Expectation("$stream", True, "$stream", "$stream", True),
+            id="error-visible-stream",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id="$placeholder",
+                is_visible_response=True,
+                failure_reason="suppressed_by_hook",
+                suppressed=True,
+            ),
+            _Expectation("$placeholder", True, "$placeholder", None, False),
+            id="suppression-cleanup-failed",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id=None,
+                failure_reason="delivery_failed",
+            ),
+            _Expectation(None, False, None, None, False),
+            id="error-without-visible-response",
+        ),
+    ],
+)
+def test_final_delivery_outcomes_use_canonical_event_fields(
+    outcome: FinalDeliveryOutcome,
+    expected: _Expectation,
+) -> None:
+    """Call sites should rely on the canonical event id plus visible-response flag."""
+    assert outcome.event_id == expected.event_id
+    assert outcome.is_visible_response is expected.is_visible_response
+    assert outcome.final_visible_event_id == expected.final_visible_event_id
+    assert _handled_response_event_id(outcome) == expected.handled_response_event_id
+    assert outcome.mark_handled is expected.mark_handled
+
+
+def test_final_delivery_outcome_cancelled_for_empty_prompt_is_not_retryable() -> None:
+    outcome = FinalDeliveryOutcome.cancelled_for_empty_prompt()
+
+    assert outcome.terminal_status == "cancelled"
+    assert outcome.failure_reason == "empty_prompt"
+    assert outcome.mark_handled is False
+
+
+def test_stream_transport_outcome_accepts_placeholder_only_visible_state() -> None:
+    """Placeholder-only visibility must remain distinct from visible body."""
+    outcome = StreamTransportOutcome(
+        last_physical_stream_event_id="$thinking",
+        terminal_status="completed",
+        rendered_body="Thinking...",
+        visible_body_state="placeholder_only",
+        failure_reason="terminal_update_failed",
+    )
+
+    assert outcome.last_physical_stream_event_id == "$thinking"
+    assert outcome.has_any_physical_stream_event is True
+    assert outcome.has_rendered_visible_body is False

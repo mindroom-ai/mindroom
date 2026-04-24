@@ -16,7 +16,14 @@ from html import escape
 from typing import TYPE_CHECKING, Annotated, Literal, NoReturn, cast
 from uuid import uuid4
 
-from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import (
+    RunCompletedEvent,
+    RunContentEvent,
+    RunErrorEvent,
+    RunOutput,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
@@ -86,7 +93,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
-
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
@@ -1065,7 +1071,7 @@ def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> 
     return _format_stream_tool_event(event, tool_state)
 
 
-async def _stream_completion(
+async def _stream_completion(  # noqa: C901
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1117,22 +1123,37 @@ async def _stream_completion(
 
     async def event_generator() -> AsyncIterator[str]:
         tool_state = _ToolStreamState()
+        saw_text_delta = False
+        completed_body: str | None = None
         try:
             # 1. Initial role announcement
             yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
             # 2. Yield the peeked first event
-            text = _extract_stream_text(first_event, tool_state)
-            if text:
-                yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
+            if isinstance(first_event, RunCompletedEvent):
+                completed_body = str(first_event.content) if first_event.content is not None else None
+            else:
+                text = _extract_stream_text(first_event, tool_state)
+                if text:
+                    if isinstance(first_event, (RunContentEvent, str)):
+                        saw_text_delta = True
+                    yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
             # 3. Stream remaining content
             # Error strings after the first event are sent as content chunks
             # since we can't switch to an error HTTP status mid-stream.
             async for event in stream:
+                if isinstance(event, RunCompletedEvent):
+                    completed_body = str(event.content) if event.content is not None else completed_body
+                    continue
                 text = _extract_stream_text(event, tool_state)
                 if text:
+                    if isinstance(event, (RunContentEvent, str)):
+                        saw_text_delta = True
                     yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
+
+            if completed_body and not saw_text_delta:
+                yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': completed_body})}\n\n"
 
             # 4. Final chunk with finish_reason
             logger.info("Chat completion sent", model=agent_name, stream=True)

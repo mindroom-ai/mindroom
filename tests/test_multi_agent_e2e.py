@@ -14,6 +14,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
@@ -167,7 +168,12 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
                 should_use_streaming=AsyncMock(return_value=True),
             ),
         ):
-            mock_send_streaming_response.return_value = ("$response", "15% of 200 is 30")
+            mock_send_streaming_response.return_value = StreamTransportOutcome(
+                last_physical_stream_event_id="$response",
+                terminal_status="completed",
+                rendered_body="15% of 200 is 30",
+                visible_body_state="visible_body",
+            )
             await bot._on_message(room, message_event)
 
         # Verify AI was called with separate raw and model-facing prompts.

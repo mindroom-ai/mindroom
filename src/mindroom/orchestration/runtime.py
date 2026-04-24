@@ -7,12 +7,18 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from mindroom import constants
-from mindroom.cancellation import request_task_cancel
+from mindroom.cancellation import (
+    SYNC_RESTART_CANCEL_MSG,
+    USER_STOP_CANCEL_MSG,
+    CancelSource,
+    cancel_failure_reason,
+    request_task_cancel,
+)
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_session import PermanentMatrixStartupError
@@ -41,10 +47,17 @@ STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
 _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
-USER_STOP_CANCEL_MSG = "user_stop"
-SYNC_RESTART_CANCEL_MSG = "sync_restart"
 
-CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
+__all__ = [
+    "SYNC_RESTART_CANCEL_MSG",
+    "USER_STOP_CANCEL_MSG",
+    "CancelSource",
+    "cancel_failure_reason",
+    "classify_cancel_source",
+    "is_sync_restart_cancel",
+    "matrix_sync_startup_timeout_seconds",
+    "request_task_cancel",
+]
 
 
 def classify_cancel_source(exc: asyncio.CancelledError) -> CancelSource:
