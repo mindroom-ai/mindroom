@@ -3062,6 +3062,51 @@ class TestAgentBot:
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_finalize_streamed_response_placeholder_cleanup_failure_is_unhandled(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Failed placeholder-only cleanup should leave the user turn retryable."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
+        gateway = replace_delivery_gateway_deps(
+            bot,
+            redact_message_event=AsyncMock(return_value=False),
+            response_hooks=SimpleNamespace(
+                apply_before_response=AsyncMock(),
+                emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
+            ),
+        )
+
+        outcome = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                stream_transport_outcome=_stream_outcome(
+                    "$thinking",
+                    "Thinking...",
+                    terminal_status="cancelled",
+                    visible_body_state="placeholder_only",
+                    failure_reason="terminal_update_cancelled",
+                ),
+                initial_delivery_kind="edited",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-finalize-stream-placeholder-cleanup-failed",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome.terminal_status == "error"
+        assert outcome.event_id == "$thinking"
+        assert outcome.is_visible_response is False
+        assert outcome.mark_handled is False
+
+    @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_cancelled_visible_note_survives(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -3121,7 +3166,7 @@ class TestAgentBot:
             )
         tracker.record_handled_turn.assert_called_once_with(
             HandledTurnState.from_source_event_id(event.event_id)
-            .with_response_event_id("$cancelled")
+            .with_response_event_id("$cancelled"),
         )
 
     @pytest.mark.asyncio
@@ -3155,10 +3200,9 @@ class TestAgentBot:
         ):
             mock_send_streaming_response.return_value = StreamTransportOutcome(
                 last_physical_stream_event_id="$existing",
-                terminal_status="error",
+                terminal_status="completed",
                 rendered_body=None,
                 visible_body_state="none",
-                failure_reason="stream_completed_without_visible_body",
             )
             delivery = await bot._response_runner.process_and_respond_streaming(
                 _response_request(
@@ -3178,7 +3222,7 @@ class TestAgentBot:
                 ),
             )
 
-        assert delivery.terminal_status == "error"
+        assert delivery.terminal_status == "completed"
         assert _visible_response_event_id(delivery) == "$existing"
         assert _handled_response_event_id(delivery) == "$existing"
         assert delivery.mark_handled is True

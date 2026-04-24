@@ -334,7 +334,7 @@ class DeliveryGateway:
                 return FinalDeliveryOutcome(
                     terminal_status="error",
                     event_id=streamed_event_id,
-                    is_visible_response=True,
+                    is_visible_response=False,
                     failure_reason=cleanup_failure,
                     tool_trace=tuple(tool_trace or ()),
                     extra_content=extra_content,
@@ -861,6 +861,7 @@ class DeliveryGateway:
         response_text: str,
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
+        failure_reason: str | None = None,
     ) -> FinalDeliveryOutcome | None:
         if event_id is None:
             return None
@@ -882,6 +883,7 @@ class DeliveryGateway:
             is_visible_response=True,
             final_visible_body=interactive_response.formatted_text,
             delivery_kind="edited",
+            failure_reason=failure_reason,
             tool_trace=tuple(tool_trace or ()),
             extra_content=extra_content,
             option_map=interactive_response.option_map,
@@ -890,7 +892,7 @@ class DeliveryGateway:
             else None,
         )
 
-    async def finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912
+    async def finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
@@ -929,15 +931,15 @@ class DeliveryGateway:
                         tool_trace=request.tool_trace,
                         extra_content=request.extra_content,
                     )
-                    if cleanup_outcome.event_id is None or not cleanup_outcome.is_visible_response:
-                        return FinalDeliveryOutcome(
-                            terminal_status="cancelled",
-                            event_id=None,
-                            failure_reason=failure_reason,
-                            tool_trace=tuple(request.tool_trace or ()),
-                            extra_content=request.extra_content,
-                        )
-                    return cleanup_outcome
+                    if cleanup_outcome.event_id is not None:
+                        return cleanup_outcome
+                    return FinalDeliveryOutcome(
+                        terminal_status="cancelled",
+                        event_id=None,
+                        failure_reason=failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
+                    )
 
                 visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
                 if visible_stream_event_id is not None:
@@ -995,15 +997,15 @@ class DeliveryGateway:
                         tool_trace=request.tool_trace,
                         extra_content=request.extra_content,
                     )
-                    if cleanup_outcome.event_id is None or not cleanup_outcome.is_visible_response:
-                        return FinalDeliveryOutcome(
-                            terminal_status="error",
-                            event_id=None,
-                            failure_reason=failure_reason,
-                            tool_trace=tuple(request.tool_trace or ()),
-                            extra_content=request.extra_content,
-                        )
-                    return cleanup_outcome
+                    if cleanup_outcome.event_id is not None:
+                        return cleanup_outcome
+                    return FinalDeliveryOutcome(
+                        terminal_status="error",
+                        event_id=None,
+                        failure_reason=failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
+                    )
 
                 visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
                 if visible_stream_event_id is not None:
@@ -1068,6 +1070,25 @@ class DeliveryGateway:
                     extra_content=request.extra_content,
                 )
 
+            if (
+                stream_outcome.visible_body_state == "none"
+                and stream_outcome.failure_reason is None
+                and request.initial_delivery_kind == "edited"
+                and not request.existing_event_is_placeholder
+            ):
+                existing_visible_event_id = request.existing_event_id or streamed_event_id
+                if existing_visible_event_id is not None:
+                    return FinalDeliveryOutcome(
+                        terminal_status="completed",
+                        event_id=existing_visible_event_id,
+                        is_visible_response=True,
+                        final_visible_body=streamed_text or None,
+                        delivery_kind="edited",
+                        failure_reason=stream_outcome.failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
+                    )
+
             if stream_outcome.failure_reason is not None and stream_outcome.visible_body_state != "visible_body":
                 failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
                 if (
@@ -1125,6 +1146,17 @@ class DeliveryGateway:
                     extra_content=request.extra_content,
                 )
             try:
+                if stream_outcome.failure_reason is not None:
+                    failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
+                    return FinalDeliveryOutcome(
+                        terminal_status="error",
+                        event_id=visible_stream_event_id,
+                        is_visible_response=True,
+                        final_visible_body=streamed_text,
+                        failure_reason=failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
+                    )
                 final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
                     correlation_id=request.correlation_id,
                     envelope=request.response_envelope,
@@ -1142,6 +1174,7 @@ class DeliveryGateway:
                             response_text=final_transform_draft.response_text,
                             tool_trace=request.tool_trace,
                             extra_content=request.extra_content,
+                            failure_reason=stream_outcome.failure_reason,
                         )
                     except asyncio.CancelledError:
                         self.deps.logger.warning(

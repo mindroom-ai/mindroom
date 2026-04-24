@@ -473,7 +473,7 @@ class StreamingResponse:
             return stream_status
         return STREAM_STATUS_COMPLETED
 
-    async def finalize(  # noqa: C901
+    async def finalize(  # noqa: C901, PLR0911
         self,
         client: nio.AsyncClient,
         *,
@@ -526,6 +526,19 @@ class StreamingResponse:
             )
         if not text_to_send.strip() and final_stream_status == STREAM_STATUS_COMPLETED:
             text_to_send = canonical_final_body_candidate or ""
+        if (
+            not text_to_send.strip()
+            and final_stream_status == STREAM_STATUS_COMPLETED
+            and not has_placeholder
+        ):
+            return StreamTransportOutcome(
+                last_physical_stream_event_id=self.event_id,
+                terminal_status=terminal_status,
+                rendered_body=None,
+                visible_body_state="none",
+                canonical_final_body_candidate=canonical_final_body_candidate,
+                failure_reason=cancellation_failure_reason,
+            )
         if not text_to_send.strip():
             text_to_send = _PROGRESS_PLACEHOLDER
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)

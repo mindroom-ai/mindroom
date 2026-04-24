@@ -279,7 +279,7 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
             target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             stream_transport_outcome=StreamTransportOutcome(
                 last_physical_stream_event_id="$visible",
-                terminal_status="error",
+                terminal_status="completed",
                 rendered_body="visible plain text",
                 visible_body_state="visible_body",
                 canonical_final_body_candidate="yes\n\n- ✅ approve",
@@ -294,6 +294,8 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
         ),
     )
 
+    assert outcome.terminal_status == "error"
+    assert outcome.failure_reason == "terminal_update_failed"
     assert outcome.final_visible_body == "visible plain text"
     assert dict(outcome.option_map or {}) == {}
     assert list(outcome.options_list or ()) == []
