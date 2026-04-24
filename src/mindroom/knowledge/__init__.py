@@ -11,6 +11,7 @@ from mindroom.knowledge.shared_managers import (
     ensure_shared_knowledge_manager,
     get_shared_knowledge_manager_for_config,
     initialize_shared_knowledge_managers,
+    referenced_shared_knowledge_base_ids,
     shutdown_shared_knowledge_managers,
 )
 from mindroom.knowledge.utils import (
@@ -27,6 +28,7 @@ __all__ = [
     "shutdown_shared_knowledge_managers",
     "ensure_shared_knowledge_manager",
     "get_shared_knowledge_manager_for_config",
+    "referenced_shared_knowledge_base_ids",
     "ensure_request_knowledge_managers",
     "get_agent_knowledge",
     "KnowledgeAccessSupport",

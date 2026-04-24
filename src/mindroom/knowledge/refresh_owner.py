@@ -140,19 +140,15 @@ class OrchestratorKnowledgeRefreshOwner:
 
     def is_refreshing(self, base_id: str) -> bool:
         """Return whether one shared knowledge base is already refreshing."""
-        _ = base_id
-        task = self.orchestrator._knowledge_refresh_task
+        task = self.orchestrator._knowledge_base_refresh_tasks.get(base_id)
         return task is not None and not task.done()
 
     def _schedule(self, base_id: str) -> None:
         config = self.orchestrator.config
         if config is None or base_id not in config.knowledge_bases or self.is_refreshing(base_id):
             return
-        _create_logged_task(
-            self.orchestrator._schedule_knowledge_refresh(
-                config,
-                start_watcher=self.orchestrator.running,
-            ),
-            name=f"schedule_knowledge_refresh:{base_id}",
-            failure_message="Background knowledge refresh scheduling failed",
+        self.orchestrator._schedule_knowledge_base_refresh(
+            base_id,
+            config,
+            start_watcher=self.orchestrator.running,
         )

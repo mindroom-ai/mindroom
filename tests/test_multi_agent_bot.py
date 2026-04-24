@@ -7,7 +7,7 @@ import itertools
 import os
 import signal
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import SimpleNamespace
@@ -30,6 +30,7 @@ import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom import interactive
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import (
     AgentBot,
     TeamBot,
@@ -367,6 +368,91 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     return bind_runtime_paths(
         config,
         test_runtime_paths(runtime_root),
+    )
+
+
+@dataclass
+class _SlowIngressPlaceholderSetup:
+    bot: AgentBot
+    orchestrator: MultiAgentOrchestrator
+    room: nio.MatrixRoom
+    event: nio.RoomMessageText
+    prepared_event: PreparedTextEvent
+    target: MessageTarget
+    envelope: MessageEnvelope
+
+
+def _slow_ingress_placeholder_setup(
+    mock_agent_user: AgentMatrixUser,
+    tmp_path: Path,
+) -> _SlowIngressPlaceholderSetup:
+    """Build a bot turn setup for first-visible latency regressions."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                    knowledge_bases=["research"],
+                ),
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+            },
+            teams={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+            },
+        ),
+        tmp_path,
+    )
+    config.defaults.show_stop_button = False
+    bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+    _install_runtime_cache_support(bot)
+    bot.client = _make_matrix_client_mock()
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+    bot.orchestrator = orchestrator
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$slow_cache",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "room_id": room.room_id,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "hello"},
+        },
+    )
+    prepared_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$slow_cache",
+        body="hello",
+        source=event.source,
+        server_timestamp=1234567890,
+    )
+    target = MessageTarget.resolve(room.room_id, None, event.event_id)
+    return _SlowIngressPlaceholderSetup(
+        bot=bot,
+        orchestrator=orchestrator,
+        room=room,
+        event=event,
+        prepared_event=prepared_event,
+        target=target,
+        envelope=MessageEnvelope(
+            source_event_id=event.event_id,
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="message",
+        ),
     )
 
 
@@ -5451,12 +5537,12 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
-    async def test_media_dispatch_appends_live_event_before_enqueue(
+    async def test_media_dispatch_schedules_live_event_before_enqueue(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Image/file media dispatch should update the live cache before enqueueing dispatch."""
+        """Image/file media dispatch should schedule the live-cache write before enqueueing dispatch."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock()
@@ -5470,6 +5556,7 @@ class TestAgentBot:
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
 
         await bot._turn_controller._handle_media_message_inner(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         bot._conversation_cache.append_live_event.assert_awaited_once()
         append_args = bot._conversation_cache.append_live_event.await_args
@@ -5479,12 +5566,12 @@ class TestAgentBot:
         bot._turn_controller._enqueue_for_dispatch.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_audio_dispatch_appends_live_event_before_special_media_handling(
+    async def test_audio_dispatch_schedules_live_event_after_thread_lookup(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Audio dispatch should update live cache before special-media short-circuiting."""
+        """Audio dispatch should prime thread lookups before scheduling the live-cache write."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock()
@@ -5502,6 +5589,7 @@ class TestAgentBot:
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
 
         await bot._turn_controller._handle_media_message_inner(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         bot._conversation_cache.append_live_event.assert_awaited_once()
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(room, event)
@@ -8444,6 +8532,128 @@ class TestAgentBot:
         mock_enqueue.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_handle_message_inner_sends_placeholder_without_waiting_for_live_cache_append(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A slow advisory live-cache append must not delay the first visible placeholder."""
+        setup = _slow_ingress_placeholder_setup(mock_agent_user, tmp_path)
+        bot, orchestrator, event = setup.bot, setup.orchestrator, setup.event
+        (
+            append_started,
+            append_can_finish,
+            append_finished,
+            placeholder_sent,
+            response_can_finish,
+            knowledge_refresh_started,
+            knowledge_refresh_can_finish,
+        ) = (
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+
+        async def slow_append(*_args: object, **_kwargs: object) -> None:
+            append_started.set()
+            await append_can_finish.wait()
+            append_finished.set()
+
+        async def slow_knowledge_refresh(base_id: str, **_kwargs: object) -> KnowledgeManager:
+            assert base_id == "research"
+            knowledge_refresh_started.set()
+            await knowledge_refresh_can_finish.wait()
+            return MagicMock(spec=KnowledgeManager)
+
+        async def send_message(_client: object, _room_id: str, content: dict[str, Any]) -> DeliveredMatrixEvent:
+            if content.get("body") == "Thinking...":
+                placeholder_sent.set()
+            return delivered_matrix_event("$thinking", content)
+
+        async def slow_response(_message_id: str | None) -> None:
+            await response_can_finish.wait()
+
+        async def enqueue_and_send_placeholder(*_args: object, **_kwargs: object) -> None:
+            await bot._response_runner.run_cancellable_response(
+                room_id=setup.room.room_id,
+                reply_to_event_id=event.event_id,
+                thread_id=None,
+                target=setup.target,
+                response_function=slow_response,
+                thinking_message="Thinking...",
+                user_id="@user:localhost",
+            )
+
+        bot._conversation_cache.append_live_event = AsyncMock(side_effect=slow_append)
+        with (
+            patch(
+                "mindroom.orchestrator.ensure_shared_knowledge_manager",
+                new=AsyncMock(side_effect=slow_knowledge_refresh),
+            ),
+            patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=send_message)),
+            patch.object(
+                bot._turn_controller,
+                "_precheck_dispatch_event",
+                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
+                new=AsyncMock(return_value=setup.prepared_event),
+            ),
+            patch(
+                "mindroom.conversation_resolver.ConversationResolver.build_ingress_envelope",
+                return_value=setup.envelope,
+            ),
+            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                bot._response_runner,
+                "has_active_response_for_target",
+                return_value=False,
+            ),
+            patch.object(
+                bot._turn_controller,
+                "_enqueue_for_dispatch",
+                new=AsyncMock(side_effect=enqueue_and_send_placeholder),
+            ),
+        ):
+            orchestrator.knowledge_refresh_owner.schedule_refresh("research")
+            knowledge_task = orchestrator._knowledge_base_refresh_tasks["research"]
+            await asyncio.wait_for(knowledge_refresh_started.wait(), timeout=1.0)
+            task = asyncio.create_task(bot._on_message(setup.room, event))
+            try:
+                await asyncio.wait_for(append_started.wait(), timeout=1.0)
+                await asyncio.wait_for(placeholder_sent.wait(), timeout=1.0)
+                assert not append_finished.is_set()
+                assert not knowledge_task.done()
+
+                response_can_finish.set()
+                await asyncio.wait_for(task, timeout=1.0)
+                assert not append_finished.is_set()
+                assert not knowledge_task.done()
+            finally:
+                append_can_finish.set()
+                response_can_finish.set()
+                knowledge_refresh_can_finish.set()
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                await asyncio.wait_for(knowledge_task, timeout=1.0)
+                await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        assert append_finished.is_set()
+
+    @pytest.mark.asyncio
     async def test_execute_dispatch_action_team_defers_placeholder_creation_to_coordinator(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -9800,6 +10010,96 @@ class TestMultiAgentOrchestrator:
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         assert orchestrator.agent_bots == {}
         assert not orchestrator.running
+
+    @pytest.mark.asyncio
+    async def test_configure_knowledge_initializes_only_referenced_shared_bases(self, tmp_path: Path) -> None:
+        """Bot startup should not initialize unused top-level shared knowledge bases."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room1:localhost"],
+                        knowledge_bases=["research"],
+                    ),
+                },
+                knowledge_bases={
+                    "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+                    "unused": KnowledgeBaseConfig(path=str(tmp_path / "unused"), watch=False),
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        manager = MagicMock(spec=KnowledgeManager)
+
+        with patch(
+            "mindroom.orchestrator.initialize_shared_knowledge_managers",
+            new=AsyncMock(return_value={"research": manager}),
+        ) as mock_initialize:
+            await orchestrator._configure_knowledge(config, start_watcher=True)
+
+        mock_initialize.assert_awaited_once()
+        assert mock_initialize.await_args.kwargs["base_ids"] == {"research"}
+        assert orchestrator.knowledge_managers == {"research": manager}
+
+    @pytest.mark.asyncio
+    async def test_knowledge_refresh_owner_schedules_one_base_without_global_refresh(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A KB refresh request should not replace or serialize all shared-base refreshes."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room1:localhost"],
+                        knowledge_bases=["research"],
+                    ),
+                },
+                knowledge_bases={
+                    "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
+                    "unused": KnowledgeBaseConfig(path=str(tmp_path / "unused"), watch=False),
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = config
+        orchestrator.running = True
+        started = asyncio.Event()
+        unblock = asyncio.Event()
+        manager = MagicMock(spec=KnowledgeManager)
+
+        async def slow_refresh(base_id: str, **_kwargs: object) -> KnowledgeManager:
+            assert base_id == "research"
+            started.set()
+            await unblock.wait()
+            return manager
+
+        with (
+            patch("mindroom.orchestrator.ensure_shared_knowledge_manager", new=AsyncMock(side_effect=slow_refresh)) as mock_ensure,
+            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()) as mock_global_refresh,
+        ):
+            orchestrator.knowledge_refresh_owner.schedule_refresh("research")
+            task = orchestrator._knowledge_base_refresh_tasks["research"]
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+
+            assert orchestrator.knowledge_refresh_owner.is_refreshing("research")
+            assert not orchestrator.knowledge_refresh_owner.is_refreshing("unused")
+            assert "unused" not in orchestrator._knowledge_base_refresh_tasks
+
+            orchestrator.knowledge_refresh_owner.schedule_refresh("research")
+            assert mock_ensure.await_count == 1
+
+            unblock.set()
+            await asyncio.wait_for(task, timeout=1.0)
+
+        mock_global_refresh.assert_not_called()
+        mock_ensure.assert_awaited_once()
+        assert orchestrator.knowledge_managers == {"research": manager}
+        assert "research" not in orchestrator._knowledge_base_refresh_tasks
 
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:
