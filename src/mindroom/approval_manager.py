@@ -511,7 +511,7 @@ class ApprovalManager:
             if pending is None:
                 return ApprovalActionResult(consumed=False, resolved=False)
             if pending.approver_user_id != sender_id:
-                return ApprovalActionResult(consumed=True, resolved=False, thread_id=pending.thread_id)
+                return ApprovalActionResult(consumed=False, resolved=False, thread_id=pending.thread_id)
             return await self._resolve_live_response(
                 pending=pending,
                 status=status,
@@ -525,9 +525,13 @@ class ApprovalManager:
             approval_id=approval_id,
         )
         if pending is None:
-            return ApprovalActionResult(consumed=False, resolved=False)
+            consumed = card_event_id is not None and await self._known_approval_card(
+                room_id=room_id,
+                card_event_id=card_event_id,
+            )
+            return ApprovalActionResult(consumed=consumed, resolved=False)
         if pending.approver_user_id != sender_id:
-            return ApprovalActionResult(consumed=True, resolved=False, thread_id=pending.thread_id)
+            return ApprovalActionResult(consumed=False, resolved=False, thread_id=pending.thread_id)
         return await self._deny_matrix_only_card(
             pending=pending,
             reason=_STARTUP_AUTO_DENY_REASON,
@@ -607,7 +611,7 @@ class ApprovalManager:
         send_task: asyncio.Future[SentApprovalEvent | None],
     ) -> SentApprovalEvent | None:
         try:
-            return await asyncio.wait_for(asyncio.shield(send_task), timeout=1.0)
+            return await asyncio.wait_for(asyncio.shield(send_task), timeout=30.0)
         except TimeoutError:
             logger.warning("Cancelled approval send did not return an event id before cleanup timeout")
             return None
@@ -703,7 +707,7 @@ class ApprovalManager:
     ) -> ApprovalActionResult:
         waiter = self._claim_live_resolution(pending.card_event_id)
         if waiter is None:
-            return ApprovalActionResult(consumed=False, resolved=False, thread_id=pending.thread_id)
+            return ApprovalActionResult(consumed=True, resolved=False, thread_id=pending.thread_id)
         claim_released = False
         try:
             resolved_status, resolved_reason = self._normalized_resolution_request(
@@ -823,7 +827,7 @@ class ApprovalManager:
             pending = PendingApproval.from_card_event(card_event, room_id=room_id)
         except (TypeError, ValueError):
             return None
-        latest_edit = await self._latest_edit(room_id=room_id, card_event_id=card_event_id)
+        latest_edit = await self._latest_edit_with_history_fallback(pending)
         if pending.latest_status(latest_edit) != "pending":
             return None
         return pending
@@ -845,6 +849,21 @@ class ApprovalManager:
         if self._event_cache is None:
             return None
         return await self._event_cache.get_latest_edit(room_id, card_event_id)
+
+    async def _latest_edit_with_history_fallback(self, pending: PendingApproval) -> dict[str, Any] | None:
+        latest_edit = await self._latest_edit(room_id=pending.room_id, card_event_id=pending.card_event_id)
+        if latest_edit is not None:
+            return latest_edit
+        try:
+            history_events = await self._scan_room_messages_for_approval_events(
+                pending.room_id,
+                since_ts_ms=_lookback_cutoff_ms(24),
+                limit=500,
+            )
+        except Exception as exc:
+            logger.warning("approval.history_scan_failed", room_id=pending.room_id, error=str(exc))
+            return None
+        return _latest_replacement_edits_by_card_event_id(history_events).get(pending.card_event_id)
 
     async def _scan_cached_room_cards(
         self,
@@ -978,6 +997,15 @@ class ApprovalManager:
             return await self.get_pending_approval(room_id, approval_id)
         return None
 
+    async def _known_approval_card(self, *, room_id: str, card_event_id: str) -> bool:
+        card_event = await self._card_event(room_id=room_id, card_event_id=card_event_id)
+        if card_event is None:
+            return False
+        with suppress(TypeError, ValueError):
+            PendingApproval.from_card_event(card_event, room_id=room_id)
+            return True
+        return False
+
     async def _startup_pending_candidate(
         self,
         event: dict[str, Any],
@@ -1021,7 +1049,7 @@ class ApprovalManager:
         if pending.approval_id != approval_id:
             return None
         if not latest_edit_known:
-            latest_edit = await self._latest_edit(room_id=room_id, card_event_id=pending.card_event_id)
+            latest_edit = await self._latest_edit_with_history_fallback(pending)
         if pending.latest_status(latest_edit) != "pending":
             return None
         return pending

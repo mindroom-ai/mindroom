@@ -244,6 +244,7 @@ async def test_handle_response_event_wrong_clicker_noops(tmp_path: Path) -> None
         reason=None,
     )
     assert result.resolved is False
+    assert result.consumed is False
     editor.assert_not_awaited()
 
     await store.resolve_approval(
@@ -427,6 +428,47 @@ async def test_request_approval_cancel_after_event_id_before_sender_return_emits
 
 
 @pytest.mark.asyncio
+async def test_request_approval_cancelled_send_waits_past_old_cleanup_timeout(tmp_path: Path) -> None:
+    event_committed = asyncio.Event()
+    release_sender = asyncio.Event()
+    sent_content: dict[str, Any] = {}
+
+    async def sender(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> SentApprovalEvent:
+        sent_content.update(content)
+        event_committed.set()
+        await release_sender.wait()
+        return SentApprovalEvent("$approval")
+
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await asyncio.wait_for(event_committed.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.sleep(1.1)
+    assert task.done() is False
+
+    release_sender.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+    replacement = editor.await_args.args[2]
+    assert replacement["status"] == "expired"
+    assert replacement["resolution_reason"] == "Tool approval request was cancelled."
+    assert store._live_card_event_id_for_approval(sent_content["approval_id"]) is None
+
+
+@pytest.mark.asyncio
 async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_room_send(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
@@ -525,6 +567,62 @@ async def test_request_approval_cancel_during_click_resolution_emits_one_termina
 
 
 @pytest.mark.asyncio
+async def test_duplicate_live_response_from_approver_is_consumed_while_resolution_in_progress(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    edit_started = asyncio.Event()
+    release_edit = asyncio.Event()
+    edit_count = 0
+
+    async def editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
+        nonlocal edit_count
+        edit_count += 1
+        edit_started.set()
+        await release_edit.wait()
+        return True
+
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender)
+    first = asyncio.create_task(
+        store.handle_response_event(
+            room_id="!room:localhost",
+            sender_id="@user:localhost",
+            card_event_id=pending.card_event_id,
+            status="approved",
+            reason=None,
+        ),
+    )
+    await asyncio.wait_for(edit_started.wait(), timeout=1)
+
+    second_result = await store.handle_response_event(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="denied",
+        reason="Clicked twice.",
+    )
+
+    release_edit.set()
+    first_result = await first
+    decision = await task
+
+    assert second_result.consumed is True
+    assert second_result.resolved is False
+    assert first_result.resolved is True
+    assert decision.status == "approved"
+    assert edit_count == 1
+
+
+@pytest.mark.asyncio
 async def test_get_pending_approval_returns_none_for_resolved_card(tmp_path: Path) -> None:
     cache = FakeEventCache()
     card = _approval_card()
@@ -548,6 +646,33 @@ async def test_get_pending_approval_returns_none_for_resolved_card(tmp_path: Pat
     store = ApprovalManager(test_runtime_paths(tmp_path), event_cache=cache)
 
     assert await store.get_pending_approval("!room:localhost", "approval-1") is None
+
+
+@pytest.mark.asyncio
+async def test_card_response_history_fallback_consumes_already_resolved_card_when_cache_cold(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    card = _approval_card()
+    await cache.store_event("$approval", "!room:localhost", card)
+    scanner = AsyncMock(return_value=[card, _approval_edit(card, status="approved")])
+    editor = AsyncMock(return_value=True)
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        room_event_scanner=scanner,
+    )
+
+    result = await store.handle_response_event(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="denied",
+        reason="Too late.",
+    )
+
+    assert result.consumed is True
+    assert result.resolved is False
+    editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -722,6 +847,48 @@ async def test_get_pending_approval_room_history_scan_when_event_missing(tmp_pat
     assert pending is not None
     assert pending.approver_user_id == "@user:localhost"
     scanner.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wrong_clicker_response_is_not_consumed_and_leaves_card_pending(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender)
+
+    result = await store.handle_response_event(
+        room_id="!room:localhost",
+        sender_id="@other:localhost",
+        card_event_id=pending.card_event_id,
+        status="denied",
+        reason="Wrong user.",
+    )
+
+    assert result.consumed is False
+    assert result.resolved is False
+    editor.assert_not_awaited()
+
+    approver_result = await store.handle_response_event(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await task
+
+    assert approver_result.resolved is True
+    assert decision.status == "approved"
 
 
 @pytest.mark.asyncio
