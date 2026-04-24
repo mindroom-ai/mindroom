@@ -289,6 +289,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials_sync",
     "mindroom.frontend_assets",
+    "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.matrix.health",
     "mindroom.orchestration.runtime",
@@ -1503,6 +1504,7 @@ depends_on = [
 path = "mindroom.knowledge"
 depends_on = [
     "mindroom.knowledge.manager",
+    "mindroom.knowledge.refresh_owner",
     "mindroom.knowledge.shared_managers",
     "mindroom.knowledge.utils",
 ]
@@ -1529,6 +1531,10 @@ depends_on = [
     "mindroom.constants",
     "mindroom.knowledge.chunking",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.refresh_owner"
+depends_on = ["mindroom.knowledge.shared_managers"]
 
 [[modules]]
 path = "mindroom.knowledge.utils"
@@ -1631,9 +1637,13 @@ expose = [
     "KnowledgeManager",
     "ensure_request_knowledge_managers",
     "ensure_shared_knowledge_manager",
+    "format_knowledge_availability_notice",
     "get_agent_knowledge",
     "get_shared_knowledge_manager_for_config",
     "initialize_shared_knowledge_managers",
+    "KnowledgeAvailability",
+    "OrchestratorKnowledgeRefreshOwner",
+    "StandaloneKnowledgeRefreshOwner",
     "shutdown_shared_knowledge_managers",
 ]
 from = ["mindroom.knowledge"]

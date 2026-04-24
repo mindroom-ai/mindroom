@@ -27,6 +27,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import EVENT_CONFIG_RELOADED
 from mindroom.knowledge import (
     KnowledgeManager,
+    OrchestratorKnowledgeRefreshOwner,
     initialize_shared_knowledge_managers,
     shutdown_shared_knowledge_managers,
 )
@@ -231,6 +232,7 @@ class MultiAgentOrchestrator:
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     _plugin_watch_last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict, init=False)
     _plugin_watch_state_revision: int = field(default=0, init=False)
+    _knowledge_refresh_owner: OrchestratorKnowledgeRefreshOwner = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
 
     def __post_init__(self) -> None:
@@ -242,6 +244,12 @@ class MultiAgentOrchestrator:
             logger=logger,
             background_task_owner=self._event_cache_write_task_owner,
         )
+        self._knowledge_refresh_owner = OrchestratorKnowledgeRefreshOwner(self)
+
+    @property
+    def knowledge_refresh_owner(self) -> OrchestratorKnowledgeRefreshOwner:
+        """Return the orchestrator-owned background knowledge refresh scheduler."""
+        return self._knowledge_refresh_owner
 
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""

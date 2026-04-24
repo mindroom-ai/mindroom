@@ -273,7 +273,7 @@ class TestDelegateKnowledge:
             mock_get.assert_called_once()
             args, kwargs = mock_get.call_args
             assert args == ("researcher", config, runtime_paths)
-            assert set(kwargs["request_knowledge_managers"]) == {"docs"}
+            assert kwargs["request_knowledge_managers"] == {}
             assert "execution_identity" not in kwargs
             ai_kwargs = mock_ai_response.await_args.kwargs
             assert ai_kwargs["agent_name"] == "researcher"
@@ -283,6 +283,84 @@ class TestDelegateKnowledge:
             assert ai_kwargs["include_interactive_questions"] is False
             assert ai_kwargs["delegation_depth"] == 1
             assert result == "Found relevant docs"
+
+    @pytest.mark.asyncio
+    @patch("mindroom.agents.SqliteDb")
+    async def test_delegation_schedules_initial_load_for_unready_shared_base(
+        self,
+        mock_storage: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Delegation should trigger the shared-base initial load when the snapshot is still initializing."""
+        from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
+
+        assert mock_storage is not None
+        scheduled_base_ids: list[str] = []
+
+        class _FakeRefreshOwner:
+            def schedule_refresh(self, base_id: str) -> None:
+                scheduled_base_ids.append(f"refresh:{base_id}")
+
+            def schedule_initial_load(self, base_id: str) -> None:
+                scheduled_base_ids.append(base_id)
+
+            def is_refreshing(self, base_id: str) -> bool:
+                _ = base_id
+                return False
+
+        def fake_get_knowledge_for_base(
+            base_id: str,
+            *,
+            on_availability: object | None = None,
+            **_kwargs: object,
+        ) -> None:
+            _ = base_id
+            if on_availability is not None:
+                on_availability(KnowledgeAvailability.INITIALIZING)
+
+        config = Config(
+            agents={
+                "leader": AgentConfig(
+                    display_name="Leader",
+                    role="Lead",
+                    delegate_to=["researcher"],
+                ),
+                "researcher": AgentConfig(
+                    display_name="Researcher",
+                    role="Research with knowledge",
+                    knowledge_bases=["docs"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-4")},
+            knowledge_bases={"docs": {"path": "./docs"}},
+        )
+        config = _bind_runtime_paths(config, tmp_path)
+        agent = create_agent(
+            "leader",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
+            include_interactive_questions=False,
+            refresh_owner=_FakeRefreshOwner(),
+        )
+        delegate_tool = next(tool for tool in agent.tools if tool.name == "delegate")
+
+        with (
+            patch(
+                "mindroom.custom_tools.delegate.ensure_request_knowledge_managers",
+                new=AsyncMock(return_value={}),
+            ),
+            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            patch(
+                "mindroom.custom_tools.delegate.ai_response",
+                new_callable=AsyncMock,
+                return_value="Found relevant docs",
+            ),
+        ):
+            result = await delegate_tool.delegate_task("researcher", "Find info about X")
+
+        assert result == "Found relevant docs"
+        assert scheduled_base_ids == ["docs"]
 
     @pytest.mark.asyncio
     async def test_delegation_without_knowledge_passes_none(self, tmp_path: Path) -> None:

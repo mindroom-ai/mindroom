@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from agno.knowledge.knowledge import Knowledge
 
 from mindroom.knowledge.shared_managers import (
     ensure_agent_knowledge_managers,
+    get_published_shared_knowledge_manager,
     get_shared_knowledge_manager_for_config,
 )
 from mindroom.logging_config import get_logger
@@ -24,9 +26,19 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.manager import KnowledgeManager
+    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+
+
+class KnowledgeAvailability(Enum):
+    """Availability state for one shared knowledge base on the request path."""
+
+    READY = "ready"
+    INITIALIZING = "initializing"
+    REFRESH_FAILED = "refresh_failed"
+    CONFIG_MISMATCH = "config_mismatch"
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -82,6 +94,7 @@ def _get_knowledge_for_base(
     runtime_paths: RuntimePaths,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
+    on_availability: Callable[[KnowledgeAvailability], None] | None = None,
 ) -> Knowledge | None:
     """Resolve one configured base ID to its current Knowledge instance."""
     request_manager = request_knowledge_managers.get(base_id) if request_knowledge_managers is not None else None
@@ -90,13 +103,42 @@ def _get_knowledge_for_base(
     if config.get_private_knowledge_base_agent(base_id):
         return None
 
+    candidate_manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None
+    published_manager = get_published_shared_knowledge_manager(
+        base_id,
+        candidate_manager=candidate_manager,
+    )
+    if published_manager is None:
+        if on_availability is not None:
+            on_availability(KnowledgeAvailability.INITIALIZING)
+        return None
+
+    persisted_state = published_manager._cached_persisted_indexing_state
+    if (
+        persisted_state is not None
+        and persisted_state.availability == KnowledgeAvailability.REFRESH_FAILED.value
+        and on_availability is not None
+    ):
+        on_availability(KnowledgeAvailability.REFRESH_FAILED)
+        return published_manager.get_knowledge()
+    if (
+        persisted_state is None
+        or persisted_state.status != "complete"
+        or persisted_state.availability != KnowledgeAvailability.READY.value
+    ):
+        if on_availability is not None:
+            on_availability(KnowledgeAvailability.INITIALIZING)
+        return None
+
     manager = get_shared_knowledge_manager_for_config(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
-        candidate_manager=shared_manager_lookup(base_id) if shared_manager_lookup is not None else None,
+        candidate_manager=published_manager,
     )
-    return manager.get_knowledge() if manager is not None else None
+    if manager is None and on_availability is not None:
+        on_availability(KnowledgeAvailability.CONFIG_MISMATCH)
+    return published_manager.get_knowledge()
 
 
 def get_agent_knowledge(
@@ -106,20 +148,73 @@ def get_agent_knowledge(
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
     on_missing_bases: Callable[[list[str]], None] | None = None,
+    on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
-    return resolve_agent_knowledge(
-        agent_name,
-        config,
-        lambda base_id: _get_knowledge_for_base(
+    resolved_knowledge: dict[str, tuple[Knowledge | None, KnowledgeAvailability]] = {}
+
+    def _resolve(base_id: str) -> tuple[Knowledge | None, KnowledgeAvailability]:
+        if base_id in resolved_knowledge:
+            return resolved_knowledge[base_id]
+
+        availability = KnowledgeAvailability.READY
+
+        def _set_availability(value: KnowledgeAvailability) -> None:
+            nonlocal availability
+            availability = value
+
+        knowledge = _get_knowledge_for_base(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             request_knowledge_managers=request_knowledge_managers,
             shared_manager_lookup=shared_manager_lookup,
-        ),
+            on_availability=_set_availability,
+        )
+        if refresh_owner is not None:
+            if availability is KnowledgeAvailability.INITIALIZING:
+                refresh_owner.schedule_initial_load(base_id)
+            elif availability is not KnowledgeAvailability.READY:
+                refresh_owner.schedule_refresh(base_id)
+        resolved_knowledge[base_id] = (knowledge, availability)
+        return resolved_knowledge[base_id]
+
+    return resolve_agent_knowledge(
+        agent_name,
+        config,
+        lambda base_id: _resolve(base_id)[0],
         on_missing_bases=on_missing_bases,
+        get_availability=lambda base_id: _resolve(base_id)[1],
+        on_unavailable_bases=on_unavailable_bases,
     )
+
+
+def format_knowledge_availability_notice(
+    unavailable_bases: Mapping[str, KnowledgeAvailability],
+) -> str | None:
+    """Render one user-facing notice for unavailable or stale knowledge bases."""
+    if not unavailable_bases:
+        return None
+
+    lines: list[str] = []
+    for base_id, availability in sorted(unavailable_bases.items()):
+        if availability is KnowledgeAvailability.INITIALIZING:
+            lines.append(
+                f"Knowledge base `{base_id}` is initializing and unavailable for semantic search this turn. "
+                "Do not claim to have searched it.",
+            )
+        elif availability is KnowledgeAvailability.CONFIG_MISMATCH:
+            lines.append(
+                f"Knowledge base `{base_id}` is refreshing against newer config and may be stale this turn. "
+                "Do not claim to have searched the latest contents.",
+            )
+        elif availability is KnowledgeAvailability.REFRESH_FAILED:
+            lines.append(
+                f"Knowledge base `{base_id}` had a recent refresh failure and may be stale this turn. "
+                "Do not claim to have searched the latest contents.",
+            )
+    return "\n".join(lines) if lines else None
 
 
 @dataclass
@@ -135,11 +230,13 @@ class KnowledgeAccessSupport:
         agent_name: str,
         *,
         request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+        on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
     ) -> Knowledge | None:
         """Return the current knowledge assigned to one or more agent bases."""
+        orchestrator = self.runtime.orchestrator
+        refresh_owner = orchestrator.knowledge_refresh_owner if orchestrator is not None else None
 
         def _shared_manager(base_id: str) -> KnowledgeManager | None:
-            orchestrator = self.runtime.orchestrator
             if orchestrator is None:
                 return None
             return orchestrator.knowledge_managers.get(base_id)
@@ -155,6 +252,8 @@ class KnowledgeAccessSupport:
                 agent_name=agent_name,
                 knowledge_bases=missing_base_ids,
             ),
+            on_unavailable_bases=on_unavailable_bases,
+            refresh_owner=refresh_owner,
         )
 
 
@@ -170,7 +269,17 @@ class MultiKnowledgeVectorDb:
 
     # Agno Knowledge.__post_init__ calls exists()/create(); this adapter intentionally
     # lies because KnowledgeManager already owns the underlying DB lifecycle.
-    vector_dbs: list[_KnowledgeVectorDb]
+    vector_dbs: list[_KnowledgeVectorDb | Callable[[], _KnowledgeVectorDb | None]]
+
+    def _resolved_vector_dbs(self) -> list[_KnowledgeVectorDb]:
+        """Return the current vector DB instances for every merged source."""
+        resolved_vector_dbs: list[_KnowledgeVectorDb] = []
+        for source in self.vector_dbs:
+            vector_db = source() if callable(source) else source
+            if vector_db is None:
+                continue
+            resolved_vector_dbs.append(vector_db)
+        return resolved_vector_dbs
 
     def exists(self) -> bool:
         """Present as already-initialized to satisfy Knowledge.__post_init__."""
@@ -189,7 +298,7 @@ class MultiKnowledgeVectorDb:
     ) -> list[Document]:
         """Search each assigned vector database and interleave merged results."""
         results_by_db: list[list[Document]] = []
-        for vector_db in self.vector_dbs:
+        for vector_db in self._resolved_vector_dbs():
             try:
                 results = vector_db.search(query=query, limit=limit, filters=filters)
             except Exception:
@@ -230,7 +339,7 @@ class MultiKnowledgeVectorDb:
                 return []
             return results
 
-        results_by_db = await asyncio.gather(*[_search_one(vdb) for vdb in self.vector_dbs])
+        results_by_db = await asyncio.gather(*[_search_one(vdb) for vdb in self._resolved_vector_dbs()])
         return _interleave_documents(list(results_by_db), limit)
 
 
@@ -261,12 +370,16 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
         return None
     if len(knowledges) == 1:
         return knowledges[0]
-    vector_dbs = [knowledge.vector_db for knowledge in knowledges if knowledge.vector_db is not None]
-    if not vector_dbs:
+    vector_db_sources = [
+        (lambda knowledge=knowledge: cast("_KnowledgeVectorDb | None", knowledge.vector_db))
+        for knowledge in knowledges
+        if knowledge.vector_db is not None
+    ]
+    if not vector_db_sources:
         return None
     return Knowledge(
         name=f"{agent_name}_multi_knowledge",
-        vector_db=MultiKnowledgeVectorDb(vector_dbs=[cast("_KnowledgeVectorDb", vdb) for vdb in vector_dbs]),
+        vector_db=MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
         max_results=max(knowledge.max_results for knowledge in knowledges),
     )
 
@@ -277,6 +390,8 @@ def resolve_agent_knowledge(
     get_knowledge: Callable[[str], Knowledge | None],
     *,
     on_missing_bases: Callable[[list[str]], None] | None = None,
+    get_availability: Callable[[str], KnowledgeAvailability] | None = None,
+    on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for an agent into one Knowledge instance."""
     base_ids = config.get_agent_knowledge_base_ids(agent_name)
@@ -284,9 +399,14 @@ def resolve_agent_knowledge(
         return None
 
     missing_base_ids: list[str] = []
+    unavailable_base_ids: dict[str, KnowledgeAvailability] = {}
     knowledges: list[Knowledge] = []
     for base_id in base_ids:
         knowledge = get_knowledge(base_id)
+        if get_availability is not None:
+            availability = get_availability(base_id)
+            if availability is not KnowledgeAvailability.READY:
+                unavailable_base_ids[base_id] = availability
         if knowledge is None:
             missing_base_ids.append(base_id)
             continue
@@ -294,5 +414,7 @@ def resolve_agent_knowledge(
 
     if missing_base_ids and on_missing_bases is not None:
         on_missing_bases(missing_base_ids)
+    if unavailable_base_ids and on_unavailable_bases is not None:
+        on_unavailable_bases(unavailable_base_ids)
 
     return _merge_knowledge(agent_name, knowledges)

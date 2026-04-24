@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -760,6 +761,7 @@ async def _prepare_agent_and_prompt(
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     current_sender_id: str | None = None,
     include_openai_compat_guidance: bool = False,
@@ -808,6 +810,7 @@ async def _prepare_agent_and_prompt(
         include_openai_compat_guidance=include_openai_compat_guidance,
         execution_identity=execution_identity,
         delegation_depth=delegation_depth,
+        refresh_owner=refresh_owner,
         timing_scope=timing_scope,
     )
     if system_enrichment_items:
@@ -899,6 +902,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     turn_recorder: TurnRecorder | None = None,
@@ -942,6 +946,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
+        refresh_owner: Optional runtime-owned shared knowledge refresh scheduler
+            passed through to delegated child agents.
         matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
         system_enrichment_items: Optional system-prompt enrichment items for this run.
@@ -1003,6 +1009,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     execution_identity=execution_identity,
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
+                    refresh_owner=refresh_owner,
                     system_enrichment_items=system_enrichment_items,
                     current_sender_id=_prompt_current_sender_id(
                         user_id,
@@ -1330,6 +1337,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     delegation_depth: int = 0,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     turn_recorder: TurnRecorder | None = None,
@@ -1371,6 +1379,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
+        refresh_owner: Optional runtime-owned shared knowledge refresh scheduler
+            passed through to delegated child agents.
         matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
         system_enrichment_items: Optional system-prompt enrichment items for this run.
@@ -1435,6 +1445,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     execution_identity=execution_identity,
                     compaction_outcomes_collector=compaction_outcomes_collector,
                     delegation_depth=delegation_depth,
+                    refresh_owner=refresh_owner,
                     system_enrichment_items=system_enrichment_items,
                     current_sender_id=_prompt_current_sender_id(
                         user_id,
