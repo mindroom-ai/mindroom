@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal
@@ -158,38 +157,74 @@ class _JoinedTimelineTrustClassification:
 
     valid: bool
     joined_room_count: int
+    timeline_event_count: int
     limited_room_ids: list[str]
+
+
+def _invalid_joined_timeline_classification() -> _JoinedTimelineTrustClassification:
+    """Return the fail-closed joined timeline classification."""
+    return _JoinedTimelineTrustClassification(
+        valid=False,
+        joined_room_count=0,
+        timeline_event_count=0,
+        limited_room_ids=[],
+    )
+
+
+def _timeline_event_entry_valid(event: nio.Event) -> bool:
+    """Return whether one sync timeline entry has the fields cache writes require."""
+    event_source = event.source
+    event_id = event.event_id
+    _sender = event.sender
+    _server_timestamp = event.server_timestamp
+    if not isinstance(event_source, dict):
+        return False
+    return isinstance(event_id, str) and bool(event_id)
+
+
+def _classify_joined_room_timeline_cache_trust(
+    room_id: object,
+    room_info: nio.RoomInfo | None,
+) -> tuple[bool, int, bool]:
+    """Return whether one joined room has valid timeline cache data."""
+    if not isinstance(room_id, str) or room_info is None:
+        return False, 0, False
+    try:
+        timeline = room_info.timeline
+        limited = timeline.limited if timeline is not None else None
+        events = timeline.events if timeline is not None else None
+    except AttributeError:
+        return False, 0, False
+    if not isinstance(events, list) or not isinstance(limited, bool):
+        return False, 0, False
+    if not all(isinstance(event, nio.Event) and _timeline_event_entry_valid(event) for event in events):
+        return False, 0, False
+    return True, len(events), limited
 
 
 def _classify_joined_timeline_cache_trust(response: nio.SyncResponse) -> _JoinedTimelineTrustClassification:
     """Return whether joined-room first-sync data is complete enough to trust."""
-    joined_rooms = response.rooms.join
-    valid = isinstance(joined_rooms, Mapping) and bool(joined_rooms)
+    try:
+        joined_rooms = response.rooms.join
+    except AttributeError:
+        return _invalid_joined_timeline_classification()
+    if not isinstance(joined_rooms, dict):
+        return _invalid_joined_timeline_classification()
+
     limited_room_ids: list[str] = []
-    joined_room_count = len(joined_rooms) if isinstance(joined_rooms, Mapping) else 0
-    if valid:
-        for room_id, room_info in joined_rooms.items():
-            if not isinstance(room_id, str) or room_info is None:
-                valid = False
-                break
-            try:
-                timeline = room_info.timeline
-                limited = timeline.limited if timeline is not None else None
-                events = timeline.events if timeline is not None else None
-            except AttributeError:
-                valid = False
-                break
-            if not isinstance(events, list):
-                valid = False
-                break
-            if not isinstance(limited, bool):
-                valid = False
-                break
-            if limited:
-                limited_room_ids.append(room_id)
+    timeline_event_count = 0
+    for room_id, room_info in joined_rooms.items():
+        valid, room_event_count, limited = _classify_joined_room_timeline_cache_trust(room_id, room_info)
+        if not valid:
+            return _invalid_joined_timeline_classification()
+        timeline_event_count += room_event_count
+        if limited:
+            limited_room_ids.append(room_id)
+
     return _JoinedTimelineTrustClassification(
-        valid=valid,
-        joined_room_count=joined_room_count,
+        valid=True,
+        joined_room_count=len(joined_rooms),
+        timeline_event_count=timeline_event_count,
         limited_room_ids=limited_room_ids,
     )
 
@@ -1013,7 +1048,7 @@ class AgentBot:
 
     def _persist_sync_token(self) -> None:
         """Persist the current Matrix sync token."""
-        if self._runtime_view.sync_token_persistence_suppressed:
+        if self._runtime_view.sync_token_persistence_suppressed or self._runtime_view.sync_token_cache_catchup_pending:
             return
         if self.client is None:
             return
@@ -1035,19 +1070,65 @@ class AgentBot:
         except OSError as exc:
             self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
 
-    async def _first_sync_cache_failures(self, sync_cache_tasks: list[asyncio.Task[object]]) -> list[BaseException]:
-        """Wait for first-sync cache writes and return unsafe task outcomes."""
+    async def _sync_cache_failures(self, sync_cache_tasks: list[asyncio.Task[object]]) -> list[BaseException]:
+        """Wait for sync cache writes and return unsafe task outcomes."""
         sync_cache_results: list[object | BaseException] = []
         if sync_cache_tasks:
             sync_cache_results = await asyncio.gather(*sync_cache_tasks, return_exceptions=True)
-        sync_cache_errors = _sync_cache_failure_results(sync_cache_results)
-        if sync_cache_errors:
-            self.logger.warning(
-                "matrix_sync_cache_catchup_failed",
-                error_count=len(sync_cache_errors),
-                error_types=[type(error).__name__ for error in sync_cache_errors],
+        return _sync_cache_failure_results(sync_cache_results)
+
+    def _classify_sync_timeline_for_token_persistence(
+        self,
+        response: nio.SyncResponse,
+    ) -> tuple[_JoinedTimelineTrustClassification, list[BaseException]]:
+        """Validate sync timeline shape before cache writes can raise."""
+        try:
+            return _classify_joined_timeline_cache_trust(response), []
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except asyncio.CancelledError:
+            self._runtime_view.suppress_sync_token_persistence()
+            raise
+        except Exception as exc:
+            return _invalid_joined_timeline_classification(), [exc]
+
+    async def _sync_response_cache_errors(
+        self,
+        response: nio.SyncResponse,
+        *,
+        joined_timeline_classification: _JoinedTimelineTrustClassification,
+        durable_cache_available: bool,
+        validation_errors: list[BaseException],
+    ) -> list[BaseException]:
+        """Return validation or cache-write failures that block token persistence."""
+        if validation_errors or not joined_timeline_classification.valid or not durable_cache_available:
+            return validation_errors
+        try:
+            sync_cache_tasks = self._conversation_cache.cache_sync_timeline(
+                response,
+                raise_on_cache_write_failure=True,
             )
-        return sync_cache_errors
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except asyncio.CancelledError as exc:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                self._runtime_view.suppress_sync_token_persistence()
+                raise
+            return [exc]
+        except Exception as exc:
+            return [exc]
+        return await self._sync_cache_failures(sync_cache_tasks)
+
+    def _log_sync_cache_errors(self, sync_cache_errors: list[BaseException]) -> None:
+        """Log cache certification failures for one sync response."""
+        if not sync_cache_errors:
+            return
+        self.logger.warning(
+            "matrix_sync_cache_catchup_failed",
+            error_count=len(sync_cache_errors),
+            error_types=[type(error).__name__ for error in sync_cache_errors],
+        )
 
     @staticmethod
     def _restored_first_sync_catchup_safe(
@@ -1064,6 +1145,39 @@ class AgentBot:
             and joined_timeline_classification.joined_room_count > 0
             and not joined_timeline_classification.limited_room_ids
         )
+
+    @staticmethod
+    def _sync_token_cache_catchup_certified(
+        joined_timeline_classification: _JoinedTimelineTrustClassification,
+        sync_cache_errors: list[BaseException],
+        *,
+        durable_cache_available: bool,
+    ) -> bool:
+        """Return whether this sync response may advance the durable sync token."""
+        return (
+            joined_timeline_classification.valid
+            and not sync_cache_errors
+            and not joined_timeline_classification.limited_room_ids
+            and (durable_cache_available or joined_timeline_classification.timeline_event_count == 0)
+        )
+
+    @staticmethod
+    def _sync_token_cache_uncertified_reason(
+        joined_timeline_classification: _JoinedTimelineTrustClassification,
+        sync_cache_errors: list[BaseException],
+        *,
+        durable_cache_available: bool,
+    ) -> str:
+        """Return the reason this sync response cannot safely advance the token."""
+        if not joined_timeline_classification.valid:
+            return "invalid_sync_timeline"
+        if joined_timeline_classification.limited_room_ids:
+            return "limited_sync_timeline"
+        if sync_cache_errors:
+            return "cache_task_failed"
+        if not durable_cache_available and joined_timeline_classification.timeline_event_count > 0:
+            return "durable_event_cache_unavailable"
+        return "unknown"
 
     def _durable_event_cache_catchup_available(self) -> bool:
         """Return whether restored-token catch-up can durably write sync events."""
@@ -1109,18 +1223,51 @@ class AgentBot:
                 room_ids=limited_room_ids,
             )
 
-    async def _finish_first_sync_cache_catchup(
+    def _mark_sync_token_cache_uncertified(
         self,
-        response: nio.SyncResponse,
-        sync_cache_tasks: list[asyncio.Task[object]],
+        *,
+        joined_timeline_classification: _JoinedTimelineTrustClassification,
+        sync_cache_errors: list[BaseException],
+        durable_cache_available: bool,
+    ) -> None:
+        """Suppress future token saves after a sync response fails cache certification."""
+        self._runtime_view.suppress_sync_token_persistence()
+        self.logger.warning(
+            "matrix_sync_token_persistence_suppressed",
+            reason=self._sync_token_cache_uncertified_reason(
+                joined_timeline_classification,
+                sync_cache_errors,
+                durable_cache_available=durable_cache_available,
+            ),
+            joined_room_count=joined_timeline_classification.joined_room_count,
+            timeline_event_count=joined_timeline_classification.timeline_event_count,
+            limited_room_count=len(joined_timeline_classification.limited_room_ids),
+            error_count=len(sync_cache_errors),
+            error_types=[type(error).__name__ for error in sync_cache_errors],
+        )
+
+    def _finish_first_sync_cache_catchup(
+        self,
+        joined_timeline_classification: _JoinedTimelineTrustClassification,
+        sync_cache_errors: list[BaseException],
+        *,
+        durable_cache_available: bool,
     ) -> bool:
         """Apply first-sync cache trust rules and return whether to persist the token."""
-        sync_cache_errors = await self._first_sync_cache_failures(sync_cache_tasks)
         if not self._runtime_view.restored_sync_token:
-            return not sync_cache_errors
+            if self._sync_token_cache_catchup_certified(
+                joined_timeline_classification,
+                sync_cache_errors,
+                durable_cache_available=durable_cache_available,
+            ):
+                return True
+            self._mark_sync_token_cache_uncertified(
+                joined_timeline_classification=joined_timeline_classification,
+                sync_cache_errors=sync_cache_errors,
+                durable_cache_available=durable_cache_available,
+            )
+            return False
 
-        joined_timeline_classification = _classify_joined_timeline_cache_trust(response)
-        durable_cache_available = self._durable_event_cache_catchup_available()
         if self._restored_first_sync_catchup_safe(
             joined_timeline_classification,
             sync_cache_errors,
@@ -1135,6 +1282,66 @@ class AgentBot:
             durable_cache_available=durable_cache_available,
         )
         return False
+
+    def _finish_sync_cache_catchup(
+        self,
+        *,
+        first_sync_response: bool,
+        joined_timeline_classification: _JoinedTimelineTrustClassification,
+        sync_cache_errors: list[BaseException],
+        durable_cache_available: bool,
+    ) -> bool:
+        """Return whether the current sync response may persist its token."""
+        if first_sync_response:
+            return self._finish_first_sync_cache_catchup(
+                joined_timeline_classification,
+                sync_cache_errors,
+                durable_cache_available=durable_cache_available,
+            )
+        if self._sync_token_cache_catchup_certified(
+            joined_timeline_classification,
+            sync_cache_errors,
+            durable_cache_available=durable_cache_available,
+        ):
+            return True
+        self._mark_sync_token_cache_uncertified(
+            joined_timeline_classification=joined_timeline_classification,
+            sync_cache_errors=sync_cache_errors,
+            durable_cache_available=durable_cache_available,
+        )
+        return False
+
+    async def _certify_sync_response_for_token_persistence(
+        self,
+        response: nio.SyncResponse,
+        *,
+        first_sync_response: bool,
+    ) -> bool:
+        """Gate token persistence on durable sync timeline cache catch-up."""
+        self._runtime_view.begin_sync_token_cache_catchup()
+        try:
+            joined_timeline_classification, validation_errors = self._classify_sync_timeline_for_token_persistence(
+                response,
+            )
+            durable_cache_available = self._durable_event_cache_catchup_available()
+            sync_cache_errors = await self._sync_response_cache_errors(
+                response,
+                joined_timeline_classification=joined_timeline_classification,
+                durable_cache_available=durable_cache_available,
+                validation_errors=validation_errors,
+            )
+            self._log_sync_cache_errors(sync_cache_errors)
+            return self._finish_sync_cache_catchup(
+                first_sync_response=first_sync_response,
+                joined_timeline_classification=joined_timeline_classification,
+                sync_cache_errors=sync_cache_errors,
+                durable_cache_available=durable_cache_available,
+            )
+        except asyncio.CancelledError:
+            self._runtime_view.suppress_sync_token_persistence()
+            raise
+        finally:
+            self._runtime_view.finish_sync_token_cache_catchup()
 
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
@@ -1153,20 +1360,11 @@ class AgentBot:
 
         persist_sync_token = True
         if isinstance(_response, nio.SyncResponse):
-            # Cache before persisting so a crash prefers replaying one batch over
-            # skipping events whose timeline metadata never reached local state.
-            sync_cache_tasks = self._conversation_cache.cache_sync_timeline(
+            persist_sync_token = await self._certify_sync_response_for_token_persistence(
                 _response,
-                raise_on_cache_write_failure=first_sync_response and self._runtime_view.restored_sync_token,
+                first_sync_response=first_sync_response,
             )
-            if first_sync_response:
-                persist_sync_token = await self._finish_first_sync_cache_catchup(_response, sync_cache_tasks)
 
-        # Event callbacks run fire-and-forget in background tasks. A crash after
-        # persisting `next_batch` but before all callback tasks finish can still
-        # lose events. First restored-token catch-up is stricter above, but
-        # tracking every background task here would add more complexity than
-        # this restart optimization warrants.
         if persist_sync_token:
             self._persist_sync_token()
         self._first_sync_done = True

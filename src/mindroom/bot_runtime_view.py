@@ -71,6 +71,7 @@ class BotRuntimeState:
     restored_sync_token: bool = False
     sync_catchup_applied_at: float | None = None
     sync_token_persistence_suppressed: bool = False
+    sync_token_cache_catchup_pending: bool = False
 
     @property
     def pre_runtime_thread_cache_trusted(self) -> bool:
@@ -87,6 +88,7 @@ class BotRuntimeState:
         self.restored_sync_token = restored_sync_token
         self.sync_catchup_applied_at = None
         self.sync_token_persistence_suppressed = False
+        self.sync_token_cache_catchup_pending = False
 
     def mark_sync_catchup_applied(self) -> None:
         """Record that the first post-start Matrix sync has applied cache catch-up."""
@@ -101,3 +103,11 @@ class BotRuntimeState:
     def suppress_sync_token_persistence(self) -> None:
         """Prevent later same-runtime tokens from becoming future restored-token trust roots."""
         self.sync_token_persistence_suppressed = True
+
+    def begin_sync_token_cache_catchup(self) -> None:
+        """Block sync-token persistence until the current sync cache catch-up is certified."""
+        self.sync_token_cache_catchup_pending = True
+
+    def finish_sync_token_cache_catchup(self) -> None:
+        """Allow token persistence again after current sync cache catch-up is certified."""
+        self.sync_token_cache_catchup_pending = False

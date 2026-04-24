@@ -1664,7 +1664,7 @@ class TestThreadingBehavior:
             sync_response.__class__ = nio.SyncResponse
             sync_response.rooms = MagicMock()
             sync_response.rooms.join = {
-                "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event], limited=False)),
             }
             bot._first_sync_done = True
 
@@ -1677,6 +1677,179 @@ class TestThreadingBehavior:
         assert cached_event is not None
         assert cached_event["event_id"] == "$thread_msg:localhost"
         assert cached_event["content"]["body"] == "Thread reply"
+
+    @pytest.mark.asyncio
+    async def test_non_first_sync_waits_for_cache_write_before_token_persist(self, bot: AgentBot) -> None:
+        """Incremental sync tokens must not save until their cache writes are durable."""
+        cache_started = asyncio.Event()
+        allow_cache_finish = asyncio.Event()
+
+        async def slow_cache_write() -> None:
+            cache_started.set()
+            await allow_cache_finish.wait()
+
+        cache_task = asyncio.create_task(slow_cache_write())
+        bot._first_sync_done = True
+        bot.client.next_batch = "s_after_delayed_cache"
+        bot._coalescing_gate.drain_all = AsyncMock()
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(
+                        events=[
+                            _text_event(
+                                event_id="$delayed:localhost",
+                                body="Delayed",
+                                sender="@user:localhost",
+                                server_timestamp=1234567890,
+                            ),
+                        ],
+                        limited=False,
+                    ),
+                ),
+            },
+        )
+
+        with patch.object(bot._conversation_cache, "cache_sync_timeline", MagicMock(return_value=[cache_task])):
+            response_task = asyncio.create_task(
+                self._run_sync_response_without_startup_side_effects(bot, sync_response),
+            )
+            try:
+                await asyncio.wait_for(cache_started.wait(), timeout=1.0)
+
+                assert load_sync_token(bot.storage_path, bot.agent_name) is None
+                await bot.prepare_for_sync_shutdown()
+                assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+                allow_cache_finish.set()
+                await asyncio.wait_for(response_task, timeout=1.0)
+            finally:
+                allow_cache_finish.set()
+                await asyncio.gather(response_task, return_exceptions=True)
+
+        assert load_sync_token(bot.storage_path, bot.agent_name) == "s_after_delayed_cache"
+
+    @pytest.mark.asyncio
+    async def test_restored_first_sync_shutdown_does_not_flush_pending_uncertified_token(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Shutdown during restored-token catch-up must not save the advanced token early."""
+        cache_started = asyncio.Event()
+        allow_cache_finish = asyncio.Event()
+
+        async def slow_cache_write() -> None:
+            cache_started.set()
+            await allow_cache_finish.wait()
+
+        cache_task = asyncio.create_task(slow_cache_write())
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_pending_first_sync"
+        bot._coalescing_gate.drain_all = AsyncMock()
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_pending_first_sync")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=False)),
+            },
+        )
+
+        with patch.object(bot._conversation_cache, "cache_sync_timeline", MagicMock(return_value=[cache_task])):
+            response_task = asyncio.create_task(
+                self._run_sync_response_without_startup_side_effects(bot, sync_response),
+            )
+            try:
+                await asyncio.wait_for(cache_started.wait(), timeout=1.0)
+
+                await bot.prepare_for_sync_shutdown()
+                assert load_sync_token(bot.storage_path, bot.agent_name) == "s_before_pending_first_sync"
+
+                allow_cache_finish.set()
+                await asyncio.wait_for(response_task, timeout=1.0)
+            finally:
+                allow_cache_finish.set()
+                await asyncio.gather(response_task, return_exceptions=True)
+
+        assert load_sync_token(bot.storage_path, bot.agent_name) == "s_after_pending_first_sync"
+
+    @pytest.mark.asyncio
+    async def test_non_first_sync_cache_failure_suppresses_current_and_later_token_persistence(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A failed incremental cache write makes later same-runtime sync tokens unsafe too."""
+        bot._first_sync_done = True
+        bot.client.next_batch = "s_after_cache_failure"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_cache_failure")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(
+                        events=[
+                            _text_event(
+                                event_id="$failed:localhost",
+                                body="Failed",
+                                sender="@user:localhost",
+                                server_timestamp=1234567890,
+                            ),
+                        ],
+                        limited=False,
+                    ),
+                ),
+            },
+        )
+
+        async def fail_cache_write() -> None:
+            msg = "cache failed"
+            raise RuntimeError(msg)
+
+        cache_task = asyncio.create_task(fail_cache_write())
+        await asyncio.sleep(0)
+
+        with patch.object(bot._conversation_cache, "cache_sync_timeline", MagicMock(return_value=[cache_task])):
+            await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert load_sync_token(bot.storage_path, bot.agent_name) == "s_before_cache_failure"
+
+        bot.client.next_batch = "s_later_after_cache_failure"
+        await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
+
+        assert load_sync_token(bot.storage_path, bot.agent_name) == "s_before_cache_failure"
+
+    @pytest.mark.asyncio
+    async def test_non_first_sync_unavailable_event_cache_suppresses_token_for_event_timeline(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Incremental tokens cannot advance past events when durable cache writes are unavailable."""
+        event_cache = _runtime_event_cache()
+        event_cache.durable_writes_available = False
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        bot._first_sync_done = True
+        bot.client.next_batch = "s_after_unavailable_cache"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_unavailable_cache")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(
+                        events=[
+                            _text_event(
+                                event_id="$unavailable:localhost",
+                                body="Unavailable",
+                                sender="@user:localhost",
+                                server_timestamp=1234567890,
+                            ),
+                        ],
+                        limited=False,
+                    ),
+                ),
+            },
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert load_sync_token(bot.storage_path, bot.agent_name) == "s_before_unavailable_cache"
+        event_cache.store_events_batch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_first_sync_cache_task_cancelled_does_not_trust_cache(self, bot: AgentBot) -> None:
@@ -2036,6 +2209,28 @@ class TestThreadingBehavior:
             {
                 "!test:localhost": MagicMock(
                     timeline=MagicMock(events={"event_id": "$not-a-list:localhost"}, limited=False),
+                ),
+            },
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert bot._first_sync_done is True
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_timeline_event_entry_first_sync_does_not_trust_cache(self, bot: AgentBot) -> None:
+        """Malformed entries inside timeline.events must fail closed before token persistence."""
+        bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+        bot.client.next_batch = "s_after_malformed_event_entry"
+        save_sync_token(bot.storage_path, bot.agent_name, "s_before_malformed_event_entry")
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(events=[{"event_id": "$not-a-nio-event:localhost"}], limited=False),
                 ),
             },
         )
