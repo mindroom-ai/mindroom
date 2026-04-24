@@ -1076,6 +1076,22 @@ class ResponseRunner:
             ),
         )
 
+    async def generate_response_for_empty_prompt(
+        self,
+        request: ResponseRequest,
+        *,
+        response_kind: str,
+    ) -> str | None:
+        """Finalize an empty prompt through the locked lifecycle before setup side effects."""
+        return await self._run_locked_response_lifecycle(
+            request,
+            locked_operation=lambda resolved_target: self._finalize_empty_prompt_locked(
+                request,
+                resolved_target=resolved_target,
+                response_kind=response_kind,
+            ),
+        )
+
     async def generate_team_response_helper_locked(  # noqa: C901, PLR0912, PLR0915
         self,
         team_request: TeamResponseRequest,
@@ -1939,7 +1955,7 @@ class ResponseRunner:
             )
             raise
 
-    async def process_and_respond(  # noqa: C901, PLR0912, PLR0915
+    async def process_and_respond(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
@@ -2015,7 +2031,7 @@ class ResponseRunner:
                 interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
             )
             if request.existing_event_id:
-                outcome = await self.deps.delivery_gateway.deliver_cancelled_visible_note(
+                return await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                     CancelledVisibleNoteRequest(
                         target=runtime.resolved_target,
                         event_id=request.existing_event_id,
@@ -2026,7 +2042,6 @@ class ResponseRunner:
                         correlation_id=correlation_id,
                     ),
                 )
-                return outcome
             failure_reason = cancel_failure_reason(cancel_source)
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
@@ -2181,7 +2196,7 @@ class ResponseRunner:
                 run_metadata_content,
                 request.attachment_ids,
             )
-            outcome = await self.deps.delivery_gateway.finalize_streamed_response(
+            return await self.deps.delivery_gateway.finalize_streamed_response(
                 FinalizeStreamedResponseRequest(
                     target=runtime.resolved_target,
                     stream_transport_outcome=stream_transport_outcome,
@@ -2195,7 +2210,6 @@ class ResponseRunner:
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
             )
-            return outcome
         except asyncio.CancelledError as exc:
             self._log_cancelled_response(
                 exc=exc,
@@ -2334,6 +2348,8 @@ class ResponseRunner:
         response_run_id = str(uuid4())
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
+        delivery_failure_reason: str | None = None
+        delivery_cancelled = False
         tool_trace: list[Any] = []
         run_metadata_content: dict[str, Any] = {}
         resolved_correlation_id = self._correlation_id_for_request(request)
@@ -2385,6 +2401,11 @@ class ResponseRunner:
             if event_id:
                 tracked_event_id = event_id
 
+        def note_task_cancelled(failure_reason: str) -> None:
+            nonlocal delivery_failure_reason, delivery_cancelled
+            delivery_failure_reason = failure_reason
+            delivery_cancelled = True
+
         async def generate(message_id: str | None) -> None:
             nonlocal final_delivery_outcome, tracked_event_id
             if message_id is not None:
@@ -2424,35 +2445,62 @@ class ResponseRunner:
                 user_id=request.user_id,
                 run_id=response_run_id,
                 pipeline_timing=request.pipeline_timing,
+                on_cancelled=note_task_cancelled,
             )
             tracked_event_id = tracked_event_id or run_message_id
         except Exception as error:
             if not delivery_stage_started:
                 raise
             self._log_delivery_failure(response_kind="ai", error=error)
+        if final_delivery_outcome is None and delivery_cancelled:
+            final_delivery_outcome = FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id=None,
+                failure_reason=delivery_failure_reason or "interrupted",
+            )
         assert final_delivery_outcome is not None
-        final_outcome = await lifecycle.finalize(
-            final_delivery_outcome,
-            build_post_response_outcome=lambda _canonical_outcome: ResponseOutcome(
-                response_run_id=response_run_id,
-                session_id=session_id,
-                session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
-                execution_identity=execution_identity,
-                compaction_outcomes=tuple(compaction_outcomes),
-                interactive_target=resolved_target,
-                thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
-                thread_summary_thread_id=resolved_target.resolved_thread_id,
-                thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
-                memory_prompt=memory_prompt,
-                memory_thread_history=memory_thread_history,
-            ),
-            post_response_deps=lambda: self.deps.post_response_effects.build_deps(
-                room_id=request.room_id,
-                reply_to_event_id=request.reply_to_event_id,
-                thread_id=resolved_target.resolved_thread_id,
-                interactive_agent_name=self.deps.agent_name,
-                queue_memory_persistence=queue_memory_persistence,
-                persist_response_event_id=persist_response_event_id,
-            ),
+        post_response_outcome = ResponseOutcome(
+            response_run_id=response_run_id,
+            session_id=session_id,
+            session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
+            execution_identity=execution_identity,
+            compaction_outcomes=tuple(compaction_outcomes),
+            interactive_target=resolved_target,
+            thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
+            thread_summary_thread_id=resolved_target.resolved_thread_id,
+            thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
+            memory_prompt=memory_prompt,
+            memory_thread_history=memory_thread_history,
         )
+        post_response_deps = self.deps.post_response_effects.build_deps(
+            room_id=request.room_id,
+            reply_to_event_id=request.reply_to_event_id,
+            thread_id=resolved_target.resolved_thread_id,
+            interactive_agent_name=self.deps.agent_name,
+            queue_memory_persistence=queue_memory_persistence,
+            persist_response_event_id=persist_response_event_id,
+        )
+        try:
+            final_outcome = await lifecycle.finalize(
+                final_delivery_outcome,
+                build_post_response_outcome=lambda _final_outcome: post_response_outcome,
+                post_response_deps=post_response_deps,
+            )
+        except asyncio.CancelledError as exc:
+            failure_reason = cancel_failure_reason(classify_cancel_source(exc))
+            cancelled_outcome = FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id=final_delivery_outcome.final_visible_event_id,
+                is_visible_response=final_delivery_outcome.final_visible_event_id is not None,
+                final_visible_body=final_delivery_outcome.final_visible_body,
+                failure_reason=failure_reason,
+                tool_trace=final_delivery_outcome.tool_trace,
+                extra_content=final_delivery_outcome.extra_content,
+            )
+            await lifecycle.finalize(
+                cancelled_outcome,  # lifecycle.finalize cancelled terminal outcome before re-raising
+                build_post_response_outcome=lambda _final_outcome: post_response_outcome,
+                post_response_deps=post_response_deps,
+            )
+            raise
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None

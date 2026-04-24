@@ -66,7 +66,9 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
+    EVENT_MESSAGE_CANCELLED,
     EVENT_SESSION_STARTED,
+    CancelledResponseContext,
     EnrichmentItem,
     HookContextSupport,
     HookRegistry,
@@ -1661,6 +1663,55 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_seen_event_ids"] == ["$user_msg"]
     assert "$other-response" not in persisted_run.metadata["matrix_seen_event_ids"]
+
+
+@pytest.mark.asyncio
+async def test_generate_response_locked_finalizes_cancelled_task_before_delivery(
+    tmp_path: Path,
+) -> None:
+    """Task cancellation before delivery should still emit the canonical cancelled lifecycle."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    cancelled_seen: list[str | None] = []
+
+    @hook(EVENT_MESSAGE_CANCELLED)
+    async def on_cancelled(ctx: CancelledResponseContext) -> None:
+        cancelled_seen.append(ctx.info.failure_reason)
+
+    registry = HookRegistry.from_plugins([_plugin("cancelled-hooks", [on_cancelled])])
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str | None:
+        on_task_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
+        on_task_cancelled("sync_restart_cancelled")
+        return None
+
+    with (
+        patch.object(
+            ResponseRunner,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=registry,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        resolution = await coordinator.generate_response_locked(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+    assert resolution is None
+    assert cancelled_seen == ["sync_restart_cancelled"]
 
 
 @pytest.mark.asyncio
@@ -5295,7 +5346,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
     ) -> None:
-        """Final-event-only streams must not overwrite recorder text with canonical completion content."""
+        """Final-event-only streams should persist the delivered canonical completion content."""
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "OpenAIChat"
@@ -5326,7 +5377,7 @@ class TestUserIdPassthrough:
                 pass
 
         assert recorder.outcome == "completed"
-        assert recorder.assistant_text == ""
+        assert recorder.assistant_text == "hello from final event"
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_final_event_overwrites_partial_text_in_turn_recorder(

@@ -233,6 +233,7 @@ class _StreamingAttemptState:
     latest_request_input_tokens: int | None = None
     cancelled_run_event: RunCancelledEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
+    canonical_final_body_candidate: str | None = None
     request_metric_totals: dict[str, int] = field(default_factory=_empty_request_metric_totals)
     first_token_latency: float | None = None
     first_token_logged: bool = False
@@ -1271,6 +1272,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
             if isinstance(event, RunCompletedEvent):
                 state.completed_run_event = event
                 if event.content is not None:
+                    state.canonical_final_body_candidate = str(event.content)
                     yield event
                     continue
                 continue
@@ -1640,9 +1642,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     if run_metadata:
                         run_metadata_collector.update(run_metadata)
                 if turn_recorder is not None:
+                    final_visible_body = state.assistant_text or state.canonical_final_body_candidate or ""
                     turn_recorder.record_completed(
                         run_metadata=metadata,
-                        assistant_text=state.assistant_text,
+                        assistant_text=final_visible_body,
                         completed_tools=state.completed_tools,
                     )
             finally:
