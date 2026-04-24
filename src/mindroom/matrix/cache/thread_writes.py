@@ -591,13 +591,11 @@ class ThreadLiveWritePolicy:
             )
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
-            # UNKNOWN-impact mutations stay on the origin/main eager-invalidate path
-            # because it relies on the load-bearing invariant
-            # `room_invalidated_at >= validated_at` enforced in
-            # revalidate_thread_after_incremental_update_locked. Routing this work
-            # through the per-thread coordinator introduces race windows the existing
-            # invalidation model cannot safely handle (see R-final-5 reviewers B and F,
-            # ISSUE-176 thread). Optimization for this path is deferred to ISSUE-189.
+            # UNKNOWN-impact mutations must use the eager invalidate_room_threads
+            # path: the per-thread coordinator's concurrent writers cannot safely
+            # uphold the `room_invalidated_at >= validated_at` invariant that
+            # revalidate_thread_after_incremental_update_locked relies on at read
+            # time. See ISSUE-189 for the architectural follow-up.
             await self._cache_ops.invalidate_room_threads(
                 room_id,
                 reason="live_thread_lookup_unavailable",
@@ -738,13 +736,11 @@ class ThreadLiveWritePolicy:
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
             invalidate_started = time.perf_counter()
-            # UNKNOWN-impact mutations stay on the origin/main eager-invalidate path
-            # because it relies on the load-bearing invariant
-            # `room_invalidated_at >= validated_at` enforced in
-            # revalidate_thread_after_incremental_update_locked. Routing this work
-            # through the per-thread coordinator introduces race windows the existing
-            # invalidation model cannot safely handle (see R-final-5 reviewers B and F,
-            # ISSUE-176 thread). Optimization for this path is deferred to ISSUE-189.
+            # UNKNOWN-impact mutations must use the eager invalidate_room_threads
+            # path: the per-thread coordinator's concurrent writers cannot safely
+            # uphold the `room_invalidated_at >= validated_at` invariant that
+            # revalidate_thread_after_incremental_update_locked relies on at read
+            # time. See ISSUE-189 for the architectural follow-up.
             await self._cache_ops.invalidate_room_threads(
                 room_id,
                 reason="live_thread_lookup_unavailable",

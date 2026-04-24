@@ -3223,12 +3223,13 @@ class TestThreadingBehavior:
             ),
         )
         sibling_update_started = asyncio.Event()
+        release_sibling_update = asyncio.Event()
         append_started = asyncio.Event()
         append_task: asyncio.Task[None] | None = None
 
         async def blocking_sibling_thread_update() -> None:
             sibling_update_started.set()
-            await asyncio.sleep(0.2)
+            await release_sibling_update.wait()
 
         async def mark_thread_stale(
             marked_room_id: str,
@@ -3263,7 +3264,6 @@ class TestThreadingBehavior:
                 room_id=room_id,
                 thread_id=thread_a_id,
             )
-            started = time.perf_counter()
             append_task = asyncio.create_task(
                 access.append_live_event(
                     room_id,
@@ -3272,12 +3272,13 @@ class TestThreadingBehavior:
                 ),
             )
 
-            await asyncio.wait_for(append_started.wait(), timeout=0.1)
-            await asyncio.wait_for(append_task, timeout=0.1)
+            await asyncio.wait_for(append_started.wait(), timeout=1.0)
+            await asyncio.wait_for(append_task, timeout=1.0)
 
-            assert (time.perf_counter() - started) * 1000.0 < 100.0
+            assert release_sibling_update.is_set() is False
             assert sibling_task.done() is False
         finally:
+            release_sibling_update.set()
             pending_tasks = [sibling_task]
             if append_task is not None:
                 pending_tasks.append(append_task)

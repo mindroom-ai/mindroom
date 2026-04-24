@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import statistics
-import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,55 +12,102 @@ from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 ROOM_ID = "!issue-176:localhost"
 THREAD_A_ID = "$thread-a:localhost"
 THREAD_B_ID = "$thread-b:localhost"
-SLOW_FETCH_SECONDS = 0.2
-MEASUREMENT_RUNS = 3
 
 
-async def _slow_network_bound_update(label: str) -> str:
-    await asyncio.sleep(SLOW_FETCH_SECONDS)
-    return label
+async def _assert_sibling_threads_start_concurrently(coord: _EventCacheWriteCoordinator) -> None:
+    started_a = asyncio.Event()
+    started_b = asyncio.Event()
+    release_a = asyncio.Event()
+    release_b = asyncio.Event()
 
+    async def thread_a_update() -> str:
+        started_a.set()
+        await release_a.wait()
+        return "thread-a"
 
-async def _measure_room_scoped_total_ms(coord: _EventCacheWriteCoordinator) -> float:
-    started = time.perf_counter()
-    first = asyncio.create_task(
-        coord.run_room_update(
-            ROOM_ID,
-            lambda: _slow_network_bound_update("room-a"),
-            name="measure_room_update_a",
-        ),
-    )
-    second = asyncio.create_task(
-        coord.run_room_update(
-            ROOM_ID,
-            lambda: _slow_network_bound_update("room-b"),
-            name="measure_room_update_b",
-        ),
-    )
-    assert await asyncio.gather(first, second) == ["room-a", "room-b"]
-    return (time.perf_counter() - started) * 1000.0
+    async def thread_b_update() -> str:
+        started_b.set()
+        await release_b.wait()
+        return "thread-b"
 
-
-async def _measure_thread_scoped_total_ms(coord: _EventCacheWriteCoordinator) -> float:
-    started = time.perf_counter()
     first = asyncio.create_task(
         coord.run_thread_update(
             ROOM_ID,
             THREAD_A_ID,
-            lambda: _slow_network_bound_update("thread-a"),
+            thread_a_update,
             name="measure_thread_update_a",
         ),
     )
+    await asyncio.wait_for(started_a.wait(), timeout=1.0)
+
     second = asyncio.create_task(
         coord.run_thread_update(
             ROOM_ID,
             THREAD_B_ID,
-            lambda: _slow_network_bound_update("thread-b"),
+            thread_b_update,
             name="measure_thread_update_b",
         ),
     )
-    assert await asyncio.gather(first, second) == ["thread-a", "thread-b"]
-    return (time.perf_counter() - started) * 1000.0
+
+    try:
+        await asyncio.wait_for(started_b.wait(), timeout=1.0)
+        assert release_a.is_set() is False
+
+        release_a.set()
+        release_b.set()
+        assert await asyncio.wait_for(asyncio.gather(first, second), timeout=1.0) == ["thread-a", "thread-b"]
+    finally:
+        release_a.set()
+        release_b.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+
+async def _assert_room_update_blocks_later_thread(coord: _EventCacheWriteCoordinator) -> None:
+    started_a = asyncio.Event()
+    started_b = asyncio.Event()
+    release_a = asyncio.Event()
+    release_b = asyncio.Event()
+
+    async def room_update() -> str:
+        started_a.set()
+        await release_a.wait()
+        return "room-a"
+
+    async def thread_b_update() -> str:
+        started_b.set()
+        await release_b.wait()
+        return "thread-b"
+
+    first = asyncio.create_task(
+        coord.run_room_update(
+            ROOM_ID,
+            room_update,
+            name="measure_room_update_a",
+        ),
+    )
+    await asyncio.wait_for(started_a.wait(), timeout=1.0)
+
+    second = asyncio.create_task(
+        coord.run_thread_update(
+            ROOM_ID,
+            THREAD_B_ID,
+            thread_b_update,
+            name="measure_thread_update_b",
+        ),
+    )
+
+    try:
+        await asyncio.sleep(0)
+        assert started_b.is_set() is False
+
+        release_a.set()
+        await asyncio.wait_for(started_b.wait(), timeout=1.0)
+        release_b.set()
+        assert await asyncio.wait_for(asyncio.gather(first, second), timeout=1.0) == ["room-a", "thread-b"]
+    finally:
+        release_a.set()
+        release_b.set()
+        await asyncio.gather(first, second, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -73,14 +118,7 @@ async def test_issue_176_network_bound_sibling_thread_updates_run_in_parallel() 
         background_task_owner=object(),
     )
     try:
-        room_scoped_samples_ms = [await _measure_room_scoped_total_ms(coord) for _ in range(MEASUREMENT_RUNS)]
-        thread_scoped_samples_ms = [await _measure_thread_scoped_total_ms(coord) for _ in range(MEASUREMENT_RUNS)]
+        await _assert_sibling_threads_start_concurrently(coord)
+        await _assert_room_update_blocks_later_thread(coord)
     finally:
         await coord.close()
-
-    per_coro_sleep_ms = SLOW_FETCH_SECONDS * 1000.0
-    room_scoped_total_ms = statistics.median(room_scoped_samples_ms)
-    thread_scoped_total_ms = statistics.median(thread_scoped_samples_ms)
-
-    assert thread_scoped_total_ms < per_coro_sleep_ms * 1.5
-    assert room_scoped_total_ms > per_coro_sleep_ms * 1.8
