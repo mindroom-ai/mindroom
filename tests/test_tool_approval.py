@@ -333,7 +333,6 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
     room = MagicMock(room_id="!room:localhost")
     bot = MagicMock()
     bot._sender_can_resolve_tool_approval.return_value = True
-    bot._should_send_tool_approval_notice.return_value = True
     bot.orchestrator = MagicMock()
     bot.orchestrator._send_approval_notice = AsyncMock(return_value=True)
 
@@ -1070,7 +1069,7 @@ async def test_auto_deny_pending_on_startup_merges_cached_and_history_cards(tmp_
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_processes_cached_cards_when_history_scan_fails(
+async def test_auto_deny_pending_on_startup_skips_cached_cards_when_history_scan_fails(
     tmp_path: Path,
 ) -> None:
     cache = FakeEventCache()
@@ -1086,16 +1085,15 @@ async def test_auto_deny_pending_on_startup_processes_cached_cards_when_history_
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 1
+    assert await store.auto_deny_pending_on_startup() == 0
     scanner.assert_awaited()
-    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
-    replacement = editor.await_args.args[2]
-    assert replacement["status"] == "denied"
-    assert replacement["resolution_reason"] == "Bot restarted before approval — original request was cancelled."
+    editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_trusts_cached_cards_when_history_scan_fails(tmp_path: Path) -> None:
+async def test_auto_deny_pending_on_startup_leaves_cached_unknown_terminal_state_when_history_scan_fails(
+    tmp_path: Path,
+) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
@@ -1109,8 +1107,30 @@ async def test_auto_deny_pending_on_startup_trusts_cached_cards_when_history_sca
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 1
-    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+    assert await store.auto_deny_pending_on_startup() == 0
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_deny_pending_on_startup_skips_cached_card_without_terminal_when_history_scan_fails(
+    tmp_path: Path,
+) -> None:
+    cache = FakeEventCache()
+    await cache.store_event("$approval", "!room:localhost", _approval_card())
+    editor = AsyncMock(return_value=True)
+    scanner = AsyncMock(side_effect=RuntimeError("history unavailable"))
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        room_event_scanner=scanner,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.auto_deny_pending_on_startup() == 0
+    scanner.assert_awaited_once()
+    editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
@@ -267,6 +268,12 @@ class _LiveApprovalWaiter:
     future: Future[ApprovalDecision]
 
 
+class _StartupTerminalState(Enum):
+    RESOLVED = "resolved"
+    PENDING_CONFIRMED = "pending_confirmed"
+    UNKNOWN = "unknown"
+
+
 class ApprovalManager:
     """Coordinate live approval waiters against Matrix approval cards."""
 
@@ -459,6 +466,14 @@ class ApprovalManager:
 
     async def auto_deny_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
         """Auto-deny unresolved approval cards after startup using Matrix as source of truth."""
+        # AUTO-DENY MUST emit `m.replace` denied for same-router cards whose terminal state is
+        # PENDING_CONFIRMED: no cached terminal edit exists, and a successful bounded history scan
+        # found no later terminal edit for that card.
+        # AUTO-DENY MUST NOT emit anything for other routers' cards or RESOLVED cards with a
+        # cached or history-observed approved/denied/expired edit.
+        # UNKNOWN means we cannot prove whether Matrix already has a terminal edit, for example a
+        # cached original card with no cached edit while the history scan failed. UNKNOWN is skipped:
+        # missing a cleanup is safer than false-denying a card a human already approved.
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return 0
@@ -466,45 +481,92 @@ class ApprovalManager:
         cutoff_ts_ms = _lookback_cutoff_ms(lookback_hours)
         denied = 0
         for room_id in self._configured_approval_room_ids():
-            cached_candidates = await self._scan_cached_room_cards(room_id, since_ts_ms=cutoff_ts_ms, limit=500)
-            history_scan_failed = False
-            try:
-                history_candidates = await self._scan_room_messages_for_cards(
-                    room_id,
-                    since_ts_ms=cutoff_ts_ms,
-                    limit=500,
-                )
-            except Exception as exc:
-                logger.warning("approval.startup_scan_failed", room_id=room_id, error=str(exc))
-                history_scan_failed = True
-                history_candidates = []
-            candidates_by_event_id: dict[str, dict[str, Any]] = {}
-            for card_event in [*cached_candidates, *history_candidates]:
-                event_id = card_event.get("event_id")
-                if isinstance(event_id, str) and event_id:
-                    candidates_by_event_id.setdefault(event_id, card_event)
-            cached_event_ids = {
-                event_id
-                for event_id in (card_event.get("event_id") for card_event in cached_candidates)
-                if isinstance(event_id, str) and event_id
-            }
+            (
+                candidates_by_event_id,
+                cached_event_ids,
+                history_latest_edits,
+                history_scan_succeeded,
+            ) = await self._startup_card_candidates(room_id=room_id, since_ts_ms=cutoff_ts_ms)
             for event_id, card_event in candidates_by_event_id.items():
-                still_pending = await self._startup_pending_candidate(
-                    card_event,
-                    room_id=room_id,
-                    transport_sender=transport_sender,
-                    history_scan_failed=history_scan_failed and event_id not in cached_event_ids,
+                try:
+                    pending = PendingApproval.from_card_event(card_event, room_id=room_id)
+                except (TypeError, ValueError):
+                    continue
+                if pending.card_sender_id != transport_sender:
+                    continue
+                state = await self._classify_startup_card(
+                    pending,
+                    cached_candidate=event_id in cached_event_ids,
+                    history_latest_edit=history_latest_edits.get(event_id),
+                    history_scan_succeeded=history_scan_succeeded,
                 )
-                if still_pending is None:
+                if state != _StartupTerminalState.PENDING_CONFIRMED:
                     continue
                 result = await self._deny_matrix_only_card(
-                    pending=still_pending,
+                    pending=pending,
                     reason=_STARTUP_AUTO_DENY_REASON,
                     resolved_by=transport_sender,
                 )
                 if result.resolved:
                     denied += 1
         return denied
+
+    async def _startup_card_candidates(
+        self,
+        *,
+        room_id: str,
+        since_ts_ms: int,
+    ) -> tuple[dict[str, dict[str, Any]], set[str], dict[str, dict[str, Any]], bool]:
+        cached_candidates = await self._scan_cached_room_cards(room_id, since_ts_ms=since_ts_ms, limit=500)
+        history_scan_succeeded = True
+        try:
+            history_events = await self._scan_room_messages_for_approval_events(
+                room_id,
+                since_ts_ms=since_ts_ms,
+                limit=500,
+            )
+        except Exception as exc:
+            logger.warning("approval.startup_scan_failed", room_id=room_id, error=str(exc))
+            history_scan_succeeded = False
+            history_events = []
+        history_candidates = [event for event in history_events if _is_original_approval_card(event)]
+        cached_event_ids = {
+            event_id
+            for event_id in (card_event.get("event_id") for card_event in cached_candidates)
+            if isinstance(event_id, str) and event_id
+        }
+        candidates_by_event_id: dict[str, dict[str, Any]] = {}
+        for card_event in [*cached_candidates, *history_candidates]:
+            event_id = card_event.get("event_id")
+            if isinstance(event_id, str) and event_id:
+                candidates_by_event_id.setdefault(event_id, card_event)
+        return (
+            candidates_by_event_id,
+            cached_event_ids,
+            _latest_replacement_edits_by_card_event_id(history_events),
+            history_scan_succeeded,
+        )
+
+    async def _classify_startup_card(
+        self,
+        pending: PendingApproval,
+        *,
+        cached_candidate: bool,
+        history_latest_edit: dict[str, Any] | None,
+        history_scan_succeeded: bool,
+    ) -> _StartupTerminalState:
+        if cached_candidate:
+            cached_latest_edit = await self._latest_edit(
+                room_id=pending.room_id,
+                card_event_id=pending.card_event_id,
+            )
+            if cached_latest_edit is not None and pending.latest_status(cached_latest_edit) != "pending":
+                return _StartupTerminalState.RESOLVED
+        if not history_scan_succeeded:
+            return _StartupTerminalState.UNKNOWN
+        if pending.latest_status(history_latest_edit) != "pending":
+            return _StartupTerminalState.RESOLVED
+        return _StartupTerminalState.PENDING_CONFIRMED
 
     async def handle_response_event(
         self,
@@ -985,16 +1047,6 @@ class ApprovalManager:
             return []
         return await self._room_event_scanner(room_id, since_ts_ms, limit)
 
-    async def _scan_room_messages_for_cards(
-        self,
-        room_id: str,
-        *,
-        since_ts_ms: int,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        events = await self._scan_room_messages_for_approval_events(room_id, since_ts_ms=since_ts_ms, limit=limit)
-        return [event for event in events if _is_original_approval_card(event)]
-
     async def _shutdown(self, *, reason: str) -> None:
         with self._live_lock:
             waiters = list(self._pending_by_card_event.values())
@@ -1097,24 +1149,6 @@ class ApprovalManager:
             PendingApproval.from_card_event(card_event, room_id=room_id)
             return True
         return False
-
-    async def _startup_pending_candidate(
-        self,
-        event: dict[str, Any],
-        *,
-        room_id: str,
-        transport_sender: str,
-        history_scan_failed: bool,
-    ) -> PendingApproval | None:
-        try:
-            pending = PendingApproval.from_card_event(event, room_id=room_id)
-        except (TypeError, ValueError):
-            return None
-        if pending.card_sender_id != transport_sender:
-            return None
-        if history_scan_failed:
-            return None
-        return await self.get_pending_approval(room_id, pending.approval_id)
 
     async def _wait_for_competing_terminal_decision(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
         if waiter.future.done():

@@ -1603,13 +1603,7 @@ class AgentBot:
             reason=reason.strip() if isinstance(reason, str) and reason.strip() else None,
         )
         notice_event_id = approval_event_id or result.card_event_id
-        if (
-            notice_event_id is not None
-            and result.error_reason is not None
-            and self._should_send_tool_approval_notice(
-                room_id=room.room_id,
-            )
-        ):
+        if notice_event_id is not None and result.error_reason is not None:
             orchestrator = self.orchestrator
             if orchestrator is not None:
                 await orchestrator._send_approval_notice(
@@ -1619,18 +1613,6 @@ class AgentBot:
                     reason=result.error_reason,
                 )
         return result.consumed
-
-    def _should_send_tool_approval_notice(
-        self,
-        *,
-        room_id: str,
-    ) -> bool:
-        """Return whether this bot owns router-scoped approval notice transport."""
-        orchestrator = self.orchestrator
-        if orchestrator is None or self.client is None:
-            return False
-        transport_bot = orchestrator._approval_transport_bot(room_id)
-        return transport_bot is not None and transport_bot.client is self.client
 
     async def _on_media_message(
         self,
