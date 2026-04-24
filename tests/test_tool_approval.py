@@ -264,7 +264,12 @@ async def test_handle_response_event_orphan_approval_is_consumed_and_restart_den
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(test_runtime_paths(tmp_path), editor=editor, event_cache=cache)
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
 
     result = await store.handle_response_event(
         room_id="!room:localhost",
@@ -876,7 +881,12 @@ async def test_get_pending_approval_cache_miss_falls_back_to_room_get_event(tmp_
     card = _approval_card()
     fetcher = AsyncMock(return_value=card)
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(test_runtime_paths(tmp_path), event_fetcher=fetcher, editor=editor)
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        event_fetcher=fetcher,
+        editor=editor,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
 
     result = await store.handle_response_event(
         room_id="!room:localhost",
@@ -948,6 +958,32 @@ async def test_card_response_uses_same_router_cached_pending_without_history_sca
 
 
 @pytest.mark.asyncio
+async def test_card_response_ignores_cross_router_matrix_only_card(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    await cache.store_event("$approval", "!room:localhost", _approval_card(sender="@router_a:localhost"))
+    editor = AsyncMock(return_value=True)
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@router_b:localhost",
+    )
+
+    result = await store.handle_response_event(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="approved",
+        reason=None,
+    )
+
+    assert result.consumed is False
+    assert result.resolved is False
+    assert result.thread_id == "$thread"
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_response_events_emit_one_terminal_edit(tmp_path: Path) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
@@ -962,7 +998,12 @@ async def test_concurrent_response_events_emit_one_terminal_edit(tmp_path: Path)
         await release_edit.wait()
         return True
 
-    store = ApprovalManager(test_runtime_paths(tmp_path), event_cache=cache, editor=editor)
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        event_cache=cache,
+        editor=editor,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
     first = asyncio.create_task(
         store.handle_response_event(
             room_id="!room:localhost",

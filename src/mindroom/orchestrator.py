@@ -553,10 +553,11 @@ class MultiAgentOrchestrator:
         bot = self._approval_transport_bot(room_id)
         if bot is None or bot.client is None:
             return []
+        client = bot.client
         events: list[dict[str, Any]] = []
-        from_token: str | None = None
+        from_token = await self._approval_room_history_start_token(client)
         while len(events) < limit:
-            response = await bot.client.room_messages(
+            response = await client.room_messages(
                 room_id,
                 start=from_token,
                 limit=min(100, limit - len(events)),
@@ -583,6 +584,16 @@ class MultiAgentOrchestrator:
                 return events
             from_token = response.end
         return events
+
+    async def _approval_room_history_start_token(self, client: nio.AsyncClient) -> str:
+        from_token = client.next_batch
+        if not from_token:
+            await client.sync(timeout=10000)
+            from_token = client.next_batch
+        if not from_token:
+            msg = "no sync token available for history scan"
+            raise RoomMessagesError(msg)
+        return from_token
 
     async def _edit_approval_event_now(
         self,

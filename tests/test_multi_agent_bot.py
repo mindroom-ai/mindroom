@@ -11416,6 +11416,8 @@ class TestMultiAgentOrchestrator:
         router_bot.running = True
         router_bot.client = MagicMock()
         router_bot.client.rooms = {"!room:localhost": object()}
+        router_bot.client.next_batch = "$sync"
+        router_bot.client.sync = AsyncMock()
         router_bot.client.room_messages = AsyncMock(return_value=nio.RoomMessagesError(message="forbidden"))
         orchestrator.agent_bots = {"router": router_bot}
 
@@ -11425,6 +11427,61 @@ class TestMultiAgentOrchestrator:
                 since_ts_ms=0,
                 limit=10,
             )
+
+    @pytest.mark.asyncio
+    async def test_scan_approval_room_events_now_uses_next_batch_as_start_token(self, tmp_path: Path) -> None:
+        """History scans must pass a concrete sync token to Matrix pagination."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.client = MagicMock()
+        router_bot.client.rooms = {"!room:localhost": object()}
+        router_bot.client.next_batch = "$sync"
+        router_bot.client.sync = AsyncMock()
+        router_bot.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse("!room:localhost", [], "$sync", None),
+        )
+        orchestrator.agent_bots = {"router": router_bot}
+
+        events = await orchestrator._scan_approval_room_events_now(
+            "!room:localhost",
+            since_ts_ms=0,
+            limit=10,
+        )
+
+        assert events == []
+        router_bot.client.sync.assert_not_awaited()
+        assert router_bot.client.room_messages.await_args.kwargs["start"] == "$sync"
+
+    @pytest.mark.asyncio
+    async def test_scan_approval_room_events_now_syncs_before_scan_without_next_batch(self, tmp_path: Path) -> None:
+        """If startup cleanup runs before the first sync token, do one sync before paginating."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.client = MagicMock()
+        router_bot.client.rooms = {"!room:localhost": object()}
+        router_bot.client.next_batch = None
+
+        async def sync_once(**kwargs: int) -> None:
+            assert kwargs == {"timeout": 10000}
+            router_bot.client.next_batch = "$after-sync"
+
+        router_bot.client.sync = AsyncMock(side_effect=sync_once)
+        router_bot.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse("!room:localhost", [], "$after-sync", None),
+        )
+        orchestrator.agent_bots = {"router": router_bot}
+
+        events = await orchestrator._scan_approval_room_events_now(
+            "!room:localhost",
+            since_ts_ms=0,
+            limit=10,
+        )
+
+        assert events == []
+        router_bot.client.sync.assert_awaited_once_with(timeout=10000)
+        assert router_bot.client.room_messages.await_args.kwargs["start"] == "$after-sync"
 
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:

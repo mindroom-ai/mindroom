@@ -628,7 +628,7 @@ class ApprovalManager:
                 card_event_id=card_event_id,
             )
             return ApprovalActionResult(consumed=consumed, resolved=False, card_event_id=card_event_id)
-        if pending.approver_user_id != sender_id:
+        if pending.approver_user_id != sender_id or pending.card_sender_id != self._transport_sender_id():
             return ApprovalActionResult(
                 consumed=False,
                 resolved=False,
