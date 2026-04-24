@@ -69,7 +69,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
-from mindroom.knowledge import KnowledgeManager
+from mindroom.knowledge import KnowledgeAvailability, KnowledgeManager
 from mindroom.knowledge.utils import MultiKnowledgeVectorDb
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -310,6 +310,10 @@ def _mock_shared_knowledge_manager(
     manager.base_id = base_id
     manager.storage_path = storage_root
     manager.knowledge_path = knowledge_path
+    manager._cached_persisted_indexing_state = SimpleNamespace(
+        status="complete",
+        availability=KnowledgeAvailability.READY.value,
+    )
     manager.matches.return_value = True
     manager.get_knowledge.return_value = knowledge
     return manager
