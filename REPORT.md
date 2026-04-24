@@ -29,6 +29,8 @@
 - Round 6 fix: certified sync-token markers now persist `thread_cache_valid_after` with the token digest, while marker-only and plaintext tokens remain cache-trust fail-closed.
 - Round 6 fix: restored-token thread-cache reuse now uses the persisted valid-after boundary instead of removing the restart freshness boundary.
 - Round 6 fix: tokens certified by cold runtimes use that runtime start as the cache boundary, and later restored-token certifications carry the boundary forward.
+- Round 7 fix: disabled or unavailable durable event caches now block sync-token certification even for empty joined-room timelines.
+- Round 7 fix: once durable cache availability fails, the runtime suppresses later same-runtime token persistence until a fresh safe runtime state is established.
 
 ## Tests Run
 
@@ -125,6 +127,31 @@ Result: passed.
 ```bash
 uv sync --all-extras
 uv run pre-commit run --files src/mindroom/bot.py src/mindroom/bot_runtime_view.py src/mindroom/matrix/sync_tokens.py src/mindroom/matrix/conversation_cache.py src/mindroom/matrix/cache/thread_write_cache_ops.py tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py REPORT.md
+```
+
+Result: passed.
+
+```bash
+uv run pytest tests/test_threading_error.py::TestThreadingBehavior::test_non_first_sync_disabled_event_cache_suppresses_empty_token_and_later_persistence tests/test_threading_error.py::TestThreadingBehavior::test_non_first_sync_unavailable_event_cache_suppresses_token_for_event_timeline tests/test_matrix_sync_tokens.py::test_on_sync_response_persists_latest_sync_token -x -n 0 --no-cov -v
+```
+
+Result: 3 passed, 1 existing Pydantic deprecation warning.
+
+```bash
+uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py -x -n 0 --no-cov -v
+```
+
+Result: 248 passed, 1 existing Pydantic deprecation warning.
+
+```bash
+git --no-pager diff --check origin/main
+```
+
+Result: passed.
+
+```bash
+uv sync --all-extras
+uv run pre-commit run --files src/mindroom/bot.py tests/test_threading_error.py REPORT.md
 ```
 
 Result: passed.

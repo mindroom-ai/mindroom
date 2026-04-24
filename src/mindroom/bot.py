@@ -1196,7 +1196,7 @@ class AgentBot:
             joined_timeline_classification.valid
             and not sync_cache_errors
             and not joined_timeline_classification.limited_room_ids
-            and (durable_cache_available or joined_timeline_classification.timeline_event_count == 0)
+            and durable_cache_available
         )
 
     @staticmethod
@@ -1213,7 +1213,7 @@ class AgentBot:
             return "limited_sync_timeline"
         if sync_cache_errors:
             return "cache_task_failed"
-        if not durable_cache_available and joined_timeline_classification.timeline_event_count > 0:
+        if not durable_cache_available:
             return "durable_event_cache_unavailable"
         return "unknown"
 

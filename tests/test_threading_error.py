@@ -1962,6 +1962,47 @@ class TestThreadingBehavior:
         event_cache.store_events_batch.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_non_first_sync_disabled_event_cache_suppresses_empty_token_and_later_persistence(
+        self,
+        bot: AgentBot,
+        tmp_path: Path,
+    ) -> None:
+        """Disabled durable cache must not certify even an empty sync timeline."""
+        event_cache = _EventCache(tmp_path / "disabled-empty-event-cache.db")
+        await event_cache.initialize()
+        event_cache.disable("stale_marker_failed:thread:!test:localhost:$thread_root:localhost")
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        bot._first_sync_done = True
+        bot.client.next_batch = "s_after_disabled_no_events"
+        sync_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=False)),
+            },
+        )
+        sync_response.next_batch = "s_after_disabled_no_events"
+
+        try:
+            await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+        finally:
+            await event_cache.close()
+
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+        assert bot._runtime_view.sync_token_persistence_suppressed is True
+
+        bot.event_cache = _runtime_event_cache()
+        bot.client.next_batch = "s_later_after_disabled_cache"
+        later_response = self._sync_response(
+            {
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=False)),
+            },
+        )
+        later_response.next_batch = "s_later_after_disabled_cache"
+        await self._run_sync_response_without_startup_side_effects(bot, later_response)
+
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+    @pytest.mark.asyncio
     async def test_first_sync_cache_task_cancelled_does_not_trust_cache(self, bot: AgentBot) -> None:
         """Cancelled first-sync cache writes must fail closed for restored tokens."""
         _mark_restored_sync_token_runtime(bot)
