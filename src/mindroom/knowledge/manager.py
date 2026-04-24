@@ -591,6 +591,8 @@ class KnowledgeManager:
             return "full_reindex" if self._indexing_settings_path.exists() and self._has_existing_index() else "resume"
         if persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING:
             return "full_reindex"
+        if persisted_state.availability == _INDEXING_AVAILABILITY_REFRESH_FAILED:
+            return "full_reindex"
         if persisted_state.status == _INDEXING_STATUS_INDEXING or not self._has_existing_index():
             return "resume"
         return "incremental"

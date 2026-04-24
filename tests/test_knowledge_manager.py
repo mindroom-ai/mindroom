@@ -3993,6 +3993,56 @@ def test_startup_index_mode_does_not_use_collection_count_for_existing_index(
 
 
 @pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_full_reindexes_cold_refresh_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cold startup should rebuild a previously failed refresh instead of resuming it."""
+    _DummyChromaDb.metadatas = [{"source_path": "doc.md"}]
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = _make_config(tmp_path / "knowledge")
+    runtime_paths = runtime_paths_for(config)
+    seed_manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    seed_manager._save_persisted_indexing_state(
+        "complete",
+        collection=seed_manager._current_collection_name(),
+        availability="refresh_failed",
+    )
+
+    initialize_calls: list[str] = []
+    sync_calls: list[str] = []
+
+    async def _record_initialize(self: KnowledgeManager) -> None:
+        initialize_calls.append(self.base_id)
+
+    async def _record_sync_indexed_files(self: KnowledgeManager) -> dict[str, int]:
+        sync_calls.append(self.base_id)
+        return {"loaded_count": 1, "indexed_count": 0, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "initialize", _record_initialize)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", _record_sync_indexed_files)
+
+    try:
+        managers = await initialize_shared_knowledge_managers(
+            config,
+            runtime_paths,
+            reindex_on_create=False,
+        )
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+    assert managers["research"].base_id == "research"
+    assert initialize_calls == ["research"]
+    assert sync_calls == []
+
+
+@pytest.mark.asyncio
 async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
