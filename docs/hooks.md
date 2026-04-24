@@ -166,7 +166,6 @@ async def block_secret_reads(ctx):
 For streaming replies, once real visible assistant text has landed, `message:before_response` does not receive a post-visible finalize pass.
 Use `message:final_response_transform` for one text-only best-effort replacement on clean streamed success.
 `message:final_response_transform` may not suppress, redact, delete, or mutate response metadata.
-System-style replies such as command confirmations, routing rejections, dispatch-failure error messages, and team-resolution fallback messages are delivered as `response_kind="system"` and may emit `message:after_response` or `message:cancelled` without a preceding `message:before_response`.
 
 For `compaction:before` and `compaction:after`, `ctx.messages` contains raw `agno.models.message.Message` objects from the compacted session payload.
 MindRoom does not sanitize attachments, media, tool calls, tool args, provider metadata, citations, reasoning fields, metrics, references, or extra Pydantic fields before these hooks run.

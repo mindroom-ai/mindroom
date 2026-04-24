@@ -1727,7 +1727,6 @@ class TeamBot(AgentBot):
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None
             response_event_id: str | None
-            delivery_kind: Literal["sent", "edited"] | None
             if existing_event_id:
                 edited = await self._edit_message(
                     room_id=room_id,
@@ -1736,24 +1735,12 @@ class TeamBot(AgentBot):
                     thread_id=thread_id,
                 )
                 response_event_id = existing_event_id if edited else None
-                delivery_kind = "edited" if edited else None
             else:
                 response_event_id = await self._send_response(
                     room_id=room_id,
                     reply_to_event_id=reply_to_event_id,
                     response_text=team_resolution.reason,
                     thread_id=thread_id,
-                )
-                delivery_kind = "sent" if response_event_id is not None else None
-            if response_event_id is not None and delivery_kind is not None and response_envelope is not None:
-                await self._delivery_gateway.deps.response_hooks.emit_after_response(
-                    correlation_id=correlation_id or reply_to_event_id or room_id,
-                    envelope=response_envelope,
-                    response_text=team_resolution.reason,
-                    response_event_id=response_event_id,
-                    delivery_kind=delivery_kind,
-                    response_kind="system",
-                    continue_on_cancelled=True,
                 )
             return response_event_id
         assert team_resolution.mode is not None

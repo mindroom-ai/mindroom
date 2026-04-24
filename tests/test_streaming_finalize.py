@@ -20,7 +20,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
-from mindroom.response_lifecycle import DeliveryOutcome, ResponseLifecycle
+from mindroom.response_lifecycle import ResponseLifecycle
 from mindroom.streaming import (
     StreamingResponse,
     send_streaming_response,
@@ -111,8 +111,8 @@ async def test_transport_retry_terminal_send_with_no_event_id_retries_until_send
 
     assert mock_send.await_count == 2
     sleep_mock.assert_not_awaited()
-    assert outcome.terminal_operation == "send"
-    assert outcome.terminal_result == "failed"
+    assert outcome.terminal_status == "completed"
+    assert outcome.failure_reason == "terminal_update_failed"
     assert outcome.last_physical_stream_event_id is None
 
 
@@ -135,8 +135,8 @@ async def test_transport_cancelled_terminal_update_does_not_sleep_behind_retry_b
         outcome = await streaming.finalize(_client(), cancelled=True)
 
     sleep_mock.assert_not_awaited()
-    assert outcome.terminal_result == "cancelled"
     assert outcome.terminal_status == "cancelled"
+    assert outcome.failure_reason == "cancelled_by_user"
 
 
 @pytest.mark.asyncio
@@ -158,8 +158,8 @@ async def test_transport_restart_interrupted_terminal_update_does_not_sleep_behi
 
     assert mock_edit.await_count == 1
     sleep_mock.assert_not_awaited()
-    assert outcome.terminal_result == "failed"
     assert outcome.terminal_status == "cancelled"
+    assert outcome.failure_reason == "sync_restart_cancelled"
 
 
 @pytest.mark.asyncio
@@ -178,7 +178,7 @@ async def test_transport_placeholder_only_cancelled_terminal_update_keeps_commit
     ):
         outcome = await streaming.finalize(_client(), cancelled=True)
 
-    assert outcome.terminal_result == "cancelled"
+    assert outcome.failure_reason == "cancelled_by_user"
     assert outcome.rendered_body == "Thinking..."
     assert outcome.visible_body_state == "placeholder_only"
 
@@ -243,7 +243,7 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
         ),
     )
 
-    assert transport_outcome.terminal_result == "failed"
+    assert transport_outcome.failure_reason == "sync_restart_cancelled"
     assert transport_outcome.rendered_body is not None
     assert outcome.option_map is None
     assert outcome.options_list is None
@@ -279,8 +279,6 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
             target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             stream_transport_outcome=StreamTransportOutcome(
                 last_physical_stream_event_id="$visible",
-                terminal_operation="edit",
-                terminal_result="failed",
                 terminal_status="error",
                 rendered_body="visible plain text",
                 visible_body_state="visible_body",
@@ -363,8 +361,6 @@ async def test_transport_final_event_only_body_uses_canonical_final_candidate(tm
     assert outcome.terminal_status == "completed"
     assert outcome.rendered_body == "Thinking..."
     assert outcome.visible_body_state == "placeholder_only"
-    assert outcome.terminal_operation == "none"
-    assert outcome.terminal_result == "not_attempted"
     assert outcome.canonical_final_body_candidate == "hello from final event"
 
 
@@ -455,8 +451,6 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
             target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             stream_transport_outcome=StreamTransportOutcome(
                 last_physical_stream_event_id="$streaming",
-                terminal_operation="send",
-                terminal_result="succeeded",
                 terminal_status="completed",
                 rendered_body="chunk",
                 visible_body_state="visible_body",
@@ -494,13 +488,8 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
         correlation_id="corr-final-transform-failure",
     )
     finalized = await lifecycle.finalize(
-        DeliveryOutcome(final_delivery_outcome=outcome),
-        build_post_response_outcome=lambda delivered: ResponseOutcome(
-            resolved_event_id=delivered.final_visible_event_id,
-            interactive_event_id=delivered.final_visible_event_id,
-            compaction_event_id=delivered.final_visible_event_id,
-            suppressed=delivered.suppressed,
-        ),
+        outcome,
+        build_post_response_outcome=lambda _delivered: ResponseOutcome(),
         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
@@ -542,8 +531,6 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
             target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             stream_transport_outcome=StreamTransportOutcome(
                 last_physical_stream_event_id="$streaming",
-                terminal_operation="edit",
-                terminal_result="succeeded",
                 terminal_status="cancelled",
                 rendered_body="partial answer\n\n**[Response interrupted by service restart]**",
                 visible_body_state="visible_body",

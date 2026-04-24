@@ -46,7 +46,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
-from mindroom.response_lifecycle import DeliveryOutcome, ResponseLifecycle
+from mindroom.response_lifecycle import ResponseLifecycle
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
@@ -2693,10 +2693,10 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
-            )
+        )
 
         assert outcome.last_physical_stream_event_id == "$event123"
-        assert outcome.terminal_result == "succeeded"
+        assert outcome.terminal_status == "completed"
         assert outcome.rendered_body == "hello"
 
     @pytest.mark.asyncio
@@ -3088,8 +3088,6 @@ class TestStreamingBehavior:
                 finalize_calls.append(error)
                 return StreamTransportOutcome(
                     last_physical_stream_event_id=self.event_id,
-                    terminal_operation="none",
-                    terminal_result="not_attempted",
                     terminal_status="completed",
                     rendered_body=None,
                     visible_body_state="none",
@@ -3889,8 +3887,6 @@ class TestStreamingBehavior:
                 target=MessageTarget.resolve("!test:localhost", None, "$event123"),
                 stream_transport_outcome=StreamTransportOutcome(
                     last_physical_stream_event_id="$streaming",
-                    terminal_operation="send",
-                    terminal_result="succeeded",
                     terminal_status="completed",
                     rendered_body="chunk",
                     visible_body_state="visible_body",
@@ -3932,13 +3928,8 @@ class TestStreamingBehavior:
             correlation_id="corr-final-transform-success",
         )
         finalized = await lifecycle.finalize(
-            DeliveryOutcome(final_delivery_outcome=outcome),
-            build_post_response_outcome=lambda delivered: ResponseOutcome(
-                resolved_event_id=delivered.final_visible_event_id,
-                interactive_event_id=delivered.final_visible_event_id,
-                compaction_event_id=delivered.final_visible_event_id,
-                suppressed=delivered.suppressed,
-            ),
+            outcome,
+            build_post_response_outcome=lambda _delivered: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=MagicMock()),
         )
 
@@ -3999,8 +3990,6 @@ class TestStreamingBehavior:
                 target=MessageTarget.resolve("!test:localhost", None, "$event123"),
                 stream_transport_outcome=StreamTransportOutcome(
                     last_physical_stream_event_id="$streaming",
-                    terminal_operation="send",
-                    terminal_result="succeeded",
                     terminal_status="completed",
                     rendered_body="chunk",
                     visible_body_state="visible_body",
@@ -4037,13 +4026,8 @@ class TestStreamingBehavior:
             correlation_id="corr-final-transform-noop",
         )
         finalized = await lifecycle.finalize(
-            DeliveryOutcome(final_delivery_outcome=outcome),
-            build_post_response_outcome=lambda delivered: ResponseOutcome(
-                resolved_event_id=delivered.final_visible_event_id,
-                interactive_event_id=delivered.final_visible_event_id,
-                compaction_event_id=delivered.final_visible_event_id,
-                suppressed=delivered.suppressed,
-            ),
+            outcome,
+            build_post_response_outcome=lambda _delivered: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=MagicMock()),
         )
 
@@ -4056,8 +4040,8 @@ class TestStreamingBehavior:
         response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_streamed_success_noop_final_transform_keeps_matching_interactive_options(self) -> None:
-        """Preserved streamed interactive text should keep the matching raw option metadata."""
+    async def test_streamed_success_noop_final_transform_uses_visible_interactive_metadata(self) -> None:
+        """No-op final transforms should derive interactive metadata only from visible text."""
         response_envelope = MessageEnvelope(
             source_event_id="$event123",
             room_id="!test:localhost",
@@ -4114,8 +4098,6 @@ class TestStreamingBehavior:
                 target=MessageTarget.resolve("!test:localhost", None, "$event123"),
                 stream_transport_outcome=StreamTransportOutcome(
                     last_physical_stream_event_id="$streaming",
-                    terminal_operation="send",
-                    terminal_result="succeeded",
                     terminal_status="completed",
                     rendered_body=formatted_interactive.formatted_text,
                     visible_body_state="visible_body",
@@ -4132,8 +4114,8 @@ class TestStreamingBehavior:
 
         assert outcome.final_visible_event_id == "$streaming"
         assert outcome.final_visible_body == formatted_interactive.formatted_text
-        assert outcome.option_map == formatted_interactive.option_map
-        assert outcome.options_list == tuple(formatted_interactive.options_list or ())
+        assert dict(outcome.option_map or {}) == {}
+        assert list(outcome.options_list or ()) == []
         response_hooks.apply_final_response_transform.assert_awaited_once()
         response_hooks.emit_cancelled_response.assert_not_awaited()
 

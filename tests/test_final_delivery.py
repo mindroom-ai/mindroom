@@ -104,8 +104,6 @@ def test_stream_transport_outcome_accepts_placeholder_only_visible_state() -> No
     """Placeholder-only visibility must remain distinct from visible body."""
     outcome = StreamTransportOutcome(
         last_physical_stream_event_id="$thinking",
-        terminal_operation="edit",
-        terminal_result="failed",
         terminal_status="completed",
         rendered_body="Thinking...",
         visible_body_state="placeholder_only",

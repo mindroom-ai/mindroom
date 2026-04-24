@@ -170,8 +170,6 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         ):
             mock_send_streaming_response.return_value = StreamTransportOutcome(
                 last_physical_stream_event_id="$response",
-                terminal_operation="send",
-                terminal_result="succeeded",
                 terminal_status="completed",
                 rendered_body="15% of 200 is 30",
                 visible_body_state="visible_body",

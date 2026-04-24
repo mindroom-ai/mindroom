@@ -588,8 +588,6 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         chunks = [str(chunk) async for chunk in response_stream]
         return StreamTransportOutcome(
             last_physical_stream_event_id="$response",
-            terminal_operation="send",
-            terminal_result="succeeded",
             terminal_status="completed",
             rendered_body="".join(chunks),
             visible_body_state="visible_body",

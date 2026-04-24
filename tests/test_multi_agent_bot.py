@@ -154,16 +154,12 @@ def _stream_outcome(
     event_id: str | None,
     body: str,
     *,
-    terminal_operation: str = "send",
-    terminal_result: str = "succeeded",
     terminal_status: str = "completed",
     visible_body_state: str = "visible_body",
     failure_reason: str | None = None,
 ) -> StreamTransportOutcome:
     return StreamTransportOutcome(
         last_physical_stream_event_id=event_id,
-        terminal_operation=terminal_operation,
-        terminal_result=terminal_result,
         terminal_status=terminal_status,
         rendered_body=body,
         visible_body_state=visible_body_state,
@@ -1910,8 +1906,6 @@ class TestAgentBot:
                 pass
             return StreamTransportOutcome(
                 last_physical_stream_event_id="$response",
-                terminal_operation="send",
-                terminal_result="succeeded",
                 terminal_status="completed",
                 rendered_body="chunk",
                 visible_body_state="visible_body",
@@ -2003,8 +1997,6 @@ class TestAgentBot:
                 pass
             return StreamTransportOutcome(
                 last_physical_stream_event_id="$response",
-                terminal_operation="send",
-                terminal_result="succeeded",
                 terminal_status="completed",
                 rendered_body="hello",
                 visible_body_state="visible_body",
@@ -2130,7 +2122,6 @@ class TestAgentBot:
                     transport_outcome=_stream_outcome(
                         "$terminal",
                         "partial\n\n**[Response interrupted by an error: boom]**",
-                        terminal_result="failed",
                         terminal_status="error",
                         failure_reason="boom",
                     ),
@@ -2718,12 +2709,12 @@ class TestAgentBot:
         assert mock_edit_message.await_args.args[3]["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
 
     @pytest.mark.asyncio
-    async def test_team_generate_response_nonteam_fallback_emits_after_response_without_before_response(
+    async def test_team_generate_response_nonteam_fallback_delivers_without_after_response(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Non-team fallback should deliver directly and emit only the terminal after_response hook."""
+        """Non-team fallback should deliver directly without response lifecycle hooks."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         team_member = config.get_ids(runtime_paths)["general"]
@@ -2788,7 +2779,7 @@ class TestAgentBot:
             new_text="No team available",
             thread_id="$thread",
         )
-        bot._delivery_gateway.deps.response_hooks.emit_after_response.assert_awaited_once()
+        bot._delivery_gateway.deps.response_hooks.emit_after_response.assert_not_awaited()
         bot._delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
         assert delivery_resolution == "$existing"
 
@@ -3049,8 +3040,6 @@ class TestAgentBot:
                 stream_transport_outcome=_stream_outcome(
                     "$thinking",
                     "Thinking...",
-                    terminal_operation="edit",
-                    terminal_result="cancelled",
                     terminal_status="cancelled",
                     visible_body_state="placeholder_only",
                     failure_reason="terminal_update_cancelled",
@@ -3166,8 +3155,6 @@ class TestAgentBot:
         ):
             mock_send_streaming_response.return_value = StreamTransportOutcome(
                 last_physical_stream_event_id="$existing",
-                terminal_operation="edit",
-                terminal_result="failed",
                 terminal_status="error",
                 rendered_body=None,
                 visible_body_state="none",
@@ -4642,8 +4629,6 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=StreamTransportOutcome(
                         last_physical_stream_event_id="$team-response",
-                        terminal_operation="send",
-                        terminal_result="succeeded",
                         terminal_status="completed",
                         rendered_body="Team reply",
                         visible_body_state="visible_body",
@@ -4753,8 +4738,6 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=StreamTransportOutcome(
                         last_physical_stream_event_id="$placeholder",
-                        terminal_operation="edit",
-                        terminal_result="succeeded",
                         terminal_status="completed",
                         rendered_body="stream chunk",
                         visible_body_state="visible_body",
@@ -4831,8 +4814,6 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=StreamTransportOutcome(
                         last_physical_stream_event_id="$placeholder",
-                        terminal_operation="edit",
-                        terminal_result="succeeded",
                         terminal_status="completed",
                         rendered_body="stream chunk",
                         visible_body_state="visible_body",

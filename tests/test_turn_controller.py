@@ -151,6 +151,63 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
 
 
 @pytest.mark.asyncio
+async def test_handle_interactive_selection_does_not_mark_handled_when_runner_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A retryable terminal outcome must not mark the source turn handled."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+
+    agent_user = AgentMatrixUser(
+        agent_name="general",
+        user_id="@mindroom_general:localhost",
+        display_name="GeneralAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+
+    room = MagicMock()
+    room.room_id = "!test:localhost"
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        selection_key="1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+
+    bot._conversation_resolver.fetch_thread_history = AsyncMock(return_value=[])
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+    bot._delivery_gateway.send_text = AsyncMock(return_value="$ack:localhost")
+    replace_turn_controller_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        delivery_gateway=bot._delivery_gateway,
+    )
+    bot._turn_controller.deps.turn_store.record_turn = MagicMock()
+    generate_response_mock = AsyncMock(return_value=None)
+    install_generate_response_mock(bot, generate_response_mock)
+
+    await bot._turn_controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id="@user:localhost",
+    )
+
+    generate_response_mock.assert_awaited_once()
+    bot._turn_controller.deps.turn_store.record_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_on_message_passes_resolved_thread_id_to_interactive_text_response(
     tmp_path: Path,
 ) -> None:

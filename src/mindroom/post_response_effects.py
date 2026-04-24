@@ -270,6 +270,7 @@ async def apply_post_response_effects(
         response_event_id is not None
         and deps.dispatch_compaction_notices is not None
         and outcome.compaction_outcomes
+        and (not final_delivery_outcome.suppressed or outcome.dispatch_compaction_when_suppressed)
     ):
         await deps.dispatch_compaction_notices(
             response_event_id,

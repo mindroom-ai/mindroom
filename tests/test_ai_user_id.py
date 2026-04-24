@@ -120,16 +120,12 @@ def _stream_outcome(
     event_id: str | None,
     body: str,
     *,
-    terminal_operation: str = "send",
-    terminal_result: str = "succeeded",
     terminal_status: str = "completed",
     visible_body_state: str = "visible_body",
     failure_reason: str | None = None,
 ) -> StreamTransportOutcome:
     return StreamTransportOutcome(
         last_physical_stream_event_id=event_id,
-        terminal_operation=terminal_operation,
-        terminal_result=terminal_result,
         terminal_status=terminal_status,
         rendered_body=body,
         visible_body_state=visible_body_state,
@@ -412,8 +408,6 @@ def _build_response_runner(
         AsyncMock(
             return_value=StreamTransportOutcome(
                 last_physical_stream_event_id="$msg_id",
-                terminal_operation="send",
-                terminal_result="succeeded",
                 terminal_status="completed",
                 rendered_body="Hello!",
                 visible_body_state="visible_body",
@@ -635,18 +629,23 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
 async def test_process_and_respond_streaming_preserves_user_stop_outcome(
     tmp_path: Path,
 ) -> None:
-    """Explicit user-stop during streamed delivery should finalize, then re-raise cancellation."""
+    """Explicit user-stop during streamed delivery should finalize once through the locked path."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
 
-    with patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})):
+    with (
+        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
         coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
         expected_outcome = FinalDeliveryOutcome(
             terminal_status="cancelled",
@@ -664,8 +663,6 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
                 transport_outcome=_stream_outcome(
                     "$streaming",
                     "partial answer\n\n**[Response cancelled by user]**",
-                    terminal_operation="edit",
-                    terminal_result="succeeded",
                     terminal_status="cancelled",
                     failure_reason="cancelled_by_user",
                 ),
@@ -676,18 +673,29 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
             "finalize_streamed_response",
             AsyncMock(return_value=expected_outcome),
         )
+        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
 
-        with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
-            await coordinator.process_and_respond_streaming(
+        response_event_id = await coordinator.generate_response_locked(
+            replace(
                 _response_request(
                     prompt="Hello",
                     user_id="@alice:localhost",
                     thread_id="$thread-root",
                 ),
-                run_id="run-1",
-            )
+                existing_event_id="$streaming",
+            ),
+            resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
 
+    assert response_event_id == "$streaming"
     coordinator.deps.delivery_gateway.finalize_streamed_response.assert_awaited_once()
+    coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+    assert (
+        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+            "failure_reason"
+        ]
+        == "cancelled_by_user"
+    )
 
 
 def test_session_started_event_is_registered() -> None:
@@ -1177,7 +1185,6 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
                 transport_outcome=_stream_outcome(
                     "$terminal",
                     accumulated,
-                    terminal_result="failed",
                     terminal_status="error",
                     failure_reason="boom",
                 ),
@@ -1251,7 +1258,6 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
                 transport_outcome=_stream_outcome(
                     "$terminal",
                     "Partial answer\n\n**[Response interrupted by an error: boom]**",
-                    terminal_result="failed",
                     terminal_status="error",
                     failure_reason="boom",
                 ),
@@ -1325,7 +1331,6 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
                 transport_outcome=_stream_outcome(
                     "$terminal",
                     "Partial answer\n\n🔧 `run_shell_command` [1]\n\n**[Response interrupted by an error: boom]**",
-                    terminal_result="failed",
                     terminal_status="error",
                     failure_reason="boom",
                 ),
@@ -1659,10 +1664,10 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
 
 
 @pytest.mark.asyncio
-async def test_generate_response_locked_persists_interrupted_history_when_final_delivery_is_cancelled(
+async def test_generate_response_locked_returns_none_when_final_delivery_is_unhandled(
     tmp_path: Path,
 ) -> None:
-    """Delivery-stage cancellation after a completed non-streaming run should still persist replay."""
+    """A terminal unhandled delivery outcome should not mark the turn handled."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -1698,7 +1703,13 @@ async def test_generate_response_locked_persists_interrupted_history_when_final_
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
             "deliver_final",
-            AsyncMock(side_effect=asyncio.CancelledError("delivery cancel")),
+            AsyncMock(
+                return_value=FinalDeliveryOutcome(
+                    terminal_status="cancelled",
+                    event_id=None,
+                    failure_reason="delivery_cancelled",
+                ),
+            ),
         )
 
         with patch.object(
@@ -1712,23 +1723,14 @@ async def test_generate_response_locked_persists_interrupted_history_when_final_
             )
 
     assert resolution is None
-    persisted_session = cast("AgentSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("RunOutput", persisted_session.runs[0])
-    assert persisted_run.run_id == "run-delivery-cancel"
-    assert persisted_run.messages is not None
-    assert [(message.role, message.content) for message in persisted_run.messages] == [
-        ("user", "Hello"),
-        ("assistant", "Hello!\n\n[interrupted]"),
-    ]
+    assert storage.session is None
 
 
 @pytest.mark.asyncio
-async def test_generate_response_locked_delivery_cancel_with_visible_tools_replays_tool_trace_once(
+async def test_generate_response_locked_unhandled_delivery_outcome_does_not_persist_tool_replay(
     tmp_path: Path,
 ) -> None:
-    """Delivery-interrupted replay must not duplicate inline tool blocks from the finished run."""
+    """An unhandled delivery outcome should not synthesize interrupted replay from visible tools."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -1775,7 +1777,13 @@ async def test_generate_response_locked_delivery_cancel_with_visible_tools_repla
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
             "deliver_final",
-            AsyncMock(side_effect=asyncio.CancelledError("delivery cancel")),
+            AsyncMock(
+                return_value=FinalDeliveryOutcome(
+                    terminal_status="cancelled",
+                    event_id=None,
+                    failure_reason="delivery_cancelled",
+                ),
+            ),
         )
 
         resolution = await coordinator.generate_response_locked(
@@ -1784,20 +1792,11 @@ async def test_generate_response_locked_delivery_cancel_with_visible_tools_repla
         )
 
     assert resolution is None
-    persisted_session = cast("AgentSession", history_storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("RunOutput", persisted_session.runs[0])
-    assert persisted_run.messages is not None
-    assistant_content = cast("str", persisted_run.messages[1].content)
-    assert assistant_content.count("[tool:run_shell_command completed]") == 1
-    assert assistant_content == (
-        "Half done\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]"
-    )
+    assert history_storage.session is None
 
 
 @pytest.mark.asyncio
-async def test_generate_response_locked_persists_interrupted_history_when_stream_finalize_is_cancelled(
+async def test_generate_response_locked_preserves_visible_stream_when_finalize_returns_cancelled(
     tmp_path: Path,
 ) -> None:
     """Delivery-stage cancellation after streaming completes should still persist replay."""
@@ -1849,8 +1848,6 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
             )
             return StreamTransportOutcome(
                 last_physical_stream_event_id="$stream-msg",
-                terminal_operation="send",
-                terminal_result="succeeded",
                 terminal_status="completed",
                 rendered_body="Hello!",
                 visible_body_state="visible_body",
@@ -1859,7 +1856,16 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
             "finalize_streamed_response",
-            AsyncMock(side_effect=asyncio.CancelledError("delivery cancel")),
+            AsyncMock(
+                return_value=FinalDeliveryOutcome(
+                    terminal_status="cancelled",
+                    event_id="$stream-msg",
+                    is_visible_response=True,
+                    final_visible_body="Hello!",
+                    delivery_kind="sent",
+                    failure_reason="delivery_cancelled",
+                ),
+            ),
         )
 
         with patch.object(
@@ -1873,16 +1879,7 @@ async def test_generate_response_locked_persists_interrupted_history_when_stream
             )
 
     assert resolution == "$stream-msg"
-    persisted_session = cast("AgentSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("RunOutput", persisted_session.runs[0])
-    assert persisted_run.run_id == "run-stream-delivery-cancel"
-    assert persisted_run.messages is not None
-    assert [(message.role, message.content) for message in persisted_run.messages] == [
-        ("user", "Hello"),
-        ("assistant", "Hello!\n\n[interrupted]"),
-    ]
+    assert storage.session is None
 
 
 @pytest.mark.asyncio
@@ -1938,8 +1935,6 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             )
             return StreamTransportOutcome(
                 last_physical_stream_event_id="$stream-msg",
-                terminal_operation="send",
-                terminal_result="succeeded",
                 terminal_status="completed",
                 rendered_body="Hello!",
                 visible_body_state="visible_body",
@@ -1948,7 +1943,16 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
             "finalize_streamed_response",
-            AsyncMock(side_effect=RuntimeError("delivery crash")),
+            AsyncMock(
+                return_value=FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id="$stream-msg",
+                    is_visible_response=True,
+                    final_visible_body="Hello!",
+                    delivery_kind="sent",
+                    failure_reason="delivery crash",
+                ),
+            ),
         )
 
         with patch.object(
@@ -2220,7 +2224,6 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
                 transport_outcome=_stream_outcome(
                     "$team-terminal",
                     accumulated,
-                    terminal_result="failed",
                     terminal_status="error",
                     failure_reason="boom",
                 ),
@@ -2303,7 +2306,6 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
                 transport_outcome=_stream_outcome(
                     "$team-terminal",
                     "Team hello\n\n**[Response interrupted by an error: boom]**",
-                    terminal_result="failed",
                     terminal_status="error",
                     failure_reason="boom",
                 ),
@@ -2389,7 +2391,6 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
                         "🔧 `run_shell_command` [1]\n\n"
                         "**[Response interrupted by an error: boom]**"
                     ),
-                    terminal_result="failed",
                     terminal_status="error",
                     failure_reason="boom",
                 ),
@@ -2570,7 +2571,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_helper_persists_interrupted_history_when_stream_finalize_is_cancelled(
+async def test_generate_team_response_helper_preserves_visible_stream_when_finalize_returns_cancelled(
     tmp_path: Path,
 ) -> None:
     """Delivery-stage cancellation after team streaming completes should still persist replay."""
@@ -2597,7 +2598,16 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
             "finalize_streamed_response",
-            AsyncMock(side_effect=asyncio.CancelledError("delivery cancel")),
+            AsyncMock(
+                return_value=FinalDeliveryOutcome(
+                    terminal_status="cancelled",
+                    event_id="$team-msg",
+                    is_visible_response=True,
+                    final_visible_body="Team hello",
+                    delivery_kind="sent",
+                    failure_reason="delivery_cancelled",
+                ),
+            ),
         )
 
         async def consume_stream(request: object) -> StreamTransportOutcome:
@@ -2627,17 +2637,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
         )
 
     assert resolution == "$team-msg"
-    persisted_session = cast("TeamSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
-    assert isinstance(persisted_run.run_id, str)
-    assert persisted_run.run_id
-    assert persisted_run.messages is not None
-    assert [(message.role, message.content) for message in persisted_run.messages] == [
-        ("user", "Hello"),
-        ("assistant", "Team hello\n\n[interrupted]"),
-    ]
+    assert storage.session is None
 
 
 @pytest.mark.asyncio
@@ -2677,8 +2677,6 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
                     transport_outcome=_stream_outcome(
                         "$team-msg",
                         "Team hello",
-                        terminal_operation="edit",
-                        terminal_result="cancelled",
                         terminal_status="cancelled",
                         failure_reason="cancelled_by_user",
                     ),
@@ -2732,7 +2730,16 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
             "finalize_streamed_response",
-            AsyncMock(side_effect=RuntimeError("delivery crash")),
+            AsyncMock(
+                return_value=FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id="$team-msg",
+                    is_visible_response=True,
+                    final_visible_body="Team hello",
+                    delivery_kind="sent",
+                    failure_reason="delivery crash",
+                ),
+            ),
         )
 
         async def consume_stream(request: object) -> StreamTransportOutcome:
@@ -3267,8 +3274,6 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
             AsyncMock(
                 return_value=StreamTransportOutcome(
                     last_physical_stream_event_id="$team-msg",
-                    terminal_operation="send",
-                    terminal_result="succeeded",
                     terminal_status="completed",
                     rendered_body="Team hello",
                     visible_body_state="visible_body",

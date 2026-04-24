@@ -259,9 +259,12 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
     queue_thread_summary = MagicMock()
 
     await apply_post_response_effects(
-        ResponseOutcome(
-            resolved_event_id=None,
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id=None,
             suppressed=True,
+        ),
+        ResponseOutcome(
             interactive_target=MessageTarget.resolve(
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -291,12 +294,16 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
     )
 
     await apply_post_response_effects(
-        ResponseOutcome(
-            resolved_event_id="$stream",
-            interactive_event_id="$stream",
-            compaction_event_id="$stream",
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$stream",
+            is_visible_response=True,
+            final_visible_body="Choose",
+            delivery_kind="sent",
             option_map={"1": "yes"},
             options_list=({"emoji": "1", "label": "Yes", "value": "yes"},),
+        ),
+        ResponseOutcome(
             interactive_target=target,
         ),
         PostResponseEffectsDeps(
@@ -324,11 +331,15 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
     )
 
     await apply_post_response_effects(
-        ResponseOutcome(
-            resolved_event_id="$stream",
-            compaction_event_id="$stream",
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$stream",
+            is_visible_response=True,
+            final_visible_body="Choose",
             option_map={"1": "yes"},
             options_list=({"emoji": "1", "label": "Yes", "value": "yes"},),
+        ),
+        ResponseOutcome(
             interactive_target=target,
         ),
         PostResponseEffectsDeps(
@@ -399,10 +410,14 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         patch("mindroom.thread_summary._recover_last_summary_count", new=AsyncMock(return_value=0)),
     ):
         await apply_post_response_effects(
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="response",
+                delivery_kind="sent",
+            ),
             ResponseOutcome(
-                resolved_event_id="$response",
-                interactive_event_id="$response",
-                compaction_event_id="$response",
                 thread_summary_room_id="!room:localhost",
                 thread_summary_thread_id="$thread",
                 thread_summary_message_count_hint=4,

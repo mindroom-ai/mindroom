@@ -83,8 +83,6 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         mock_ai_response.return_value = mock_stream()
         mock_send_streaming_response.return_value = StreamTransportOutcome(
             last_physical_stream_event_id="$agent_message_id",
-            terminal_operation="send",
-            terminal_result="succeeded",
             terminal_status="completed",
             rendered_body="Test interactive response",
             visible_body_state="visible_body",
@@ -272,8 +270,6 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         mock_ai_response.return_value = mock_stream()
         mock_send_streaming_response.return_value = StreamTransportOutcome(
             last_physical_stream_event_id="$standalone_message",
-            terminal_operation="send",
-            terminal_result="succeeded",
             terminal_status="completed",
             rendered_body="Test interactive response",
             visible_body_state="visible_body",

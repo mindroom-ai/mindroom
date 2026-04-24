@@ -42,7 +42,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
-from mindroom.response_lifecycle import DeliveryOutcome, ResponseLifecycle
+from mindroom.response_lifecycle import ResponseLifecycle
 from mindroom.response_runner import ResponseRequest
 from mindroom.turn_store import LoadedTurnRecord
 from tests.conftest import (
@@ -516,12 +516,8 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
         correlation_id="corr-suppressed-final",
     )
     finalized = await lifecycle.finalize(
-        DeliveryOutcome(final_delivery_outcome=result),
-        build_post_response_outcome=lambda outcome: ResponseOutcome(
-            resolved_event_id=outcome.final_visible_event_id,
-            compaction_event_id=outcome.final_visible_event_id,
-            suppressed=outcome.suppressed,
-        ),
+        result,
+        build_post_response_outcome=lambda _outcome: ResponseOutcome(),
         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
@@ -590,21 +586,14 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
         nonlocal delivery_result
         event_id = "$response" if mode == "final" else "$stream"
         delivery_result = await lifecycle.finalize(
-            DeliveryOutcome(
-                final_delivery_outcome=FinalDeliveryOutcome(
-                    terminal_status="completed",
-                    event_id=tracked_event_id or event_id,
-                    is_visible_response=True,
-                    final_visible_body="visible response",
-                    delivery_kind=expected_delivery_kind,
-                ),
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id=tracked_event_id or event_id,
+                is_visible_response=True,
+                final_visible_body="visible response",
+                delivery_kind=expected_delivery_kind,
             ),
-            build_post_response_outcome=lambda outcome: ResponseOutcome(
-                resolved_event_id=outcome.final_visible_event_id,
-                interactive_event_id=outcome.final_visible_event_id,
-                compaction_event_id=outcome.final_visible_event_id,
-                suppressed=outcome.suppressed,
-            ),
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
@@ -692,11 +681,8 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
         correlation_id="corr-delivery-failure",
     )
     finalized = await lifecycle.finalize(
-        DeliveryOutcome(final_delivery_outcome=outcome),
-        build_post_response_outcome=lambda delivered: ResponseOutcome(
-            resolved_event_id=delivered.final_visible_event_id,
-            suppressed=delivered.suppressed,
-        ),
+        outcome,
+        build_post_response_outcome=lambda _delivered: ResponseOutcome(),
         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
@@ -751,8 +737,6 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
             target=MessageTarget.resolve("!room:localhost", None, "$event"),
             stream_transport_outcome=StreamTransportOutcome(
                 last_physical_stream_event_id="$thinking",
-                terminal_operation="none",
-                terminal_result="not_attempted",
                 terminal_status="completed",
                 rendered_body="Thinking...",
                 visible_body_state="placeholder_only",
@@ -788,13 +772,8 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
     )
 
     finalized = await lifecycle.finalize(
-        DeliveryOutcome(final_delivery_outcome=outcome),
-        build_post_response_outcome=lambda delivered: ResponseOutcome(
-            resolved_event_id=delivered.final_visible_event_id,
-            interactive_event_id=delivered.final_visible_event_id,
-            compaction_event_id=delivered.final_visible_event_id,
-            suppressed=delivered.suppressed,
-        ),
+        outcome,
+        build_post_response_outcome=lambda _delivered: ResponseOutcome(),
         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
