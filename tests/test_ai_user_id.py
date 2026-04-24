@@ -222,12 +222,17 @@ def _prepared_prompt_result(
     agent: object,
     *,
     prompt: str = "test prompt",
+    estimated_context_tokens: int | None = None,
+    prepared_context_tokens: int | None = None,
 ) -> _PreparedAgentRun:
     return _PreparedAgentRun(
         agent=agent,
         messages=(Message(role="user", content=prompt),),
         unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(),
+        prepared_history=PreparedHistoryState(
+            estimated_context_tokens=estimated_context_tokens,
+            prepared_context_tokens=prepared_context_tokens,
+        ),
     )
 
 
@@ -4721,7 +4726,9 @@ class TestUserIdPassthrough:
             replays_persisted_history=False,
             compaction_outcomes=[],
             compaction_decision=None,
-            post_response_compaction_checks=[],
+            compaction_reply_outcome="none",
+            prepared_context_tokens=None,
+            estimated_context_tokens=None,
         )
 
         with (
@@ -6217,8 +6224,10 @@ class TestUserIdPassthrough:
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=2000)},
         )
 
-        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, estimated_context_tokens=1500)
             run_metadata: dict[str, object] = {}
             await ai_response(
                 agent_name="general",
@@ -6237,7 +6246,7 @@ class TestUserIdPassthrough:
         assert payload["usage"]["cache_read_tokens"] == 640
         assert payload["usage"]["cache_write_tokens"] == 32
         assert payload["usage"]["reasoning_tokens"] == 24
-        assert payload["context"]["input_tokens"] == 800
+        assert payload["context"]["input_tokens"] == 1500
         assert payload["context"]["window_tokens"] == 2000
         assert "utilization_pct" not in payload["context"]
         assert payload["tools"]["count"] == 0
@@ -6919,7 +6928,10 @@ class TestUserIdPassthrough:
         ]
 
     @pytest.mark.asyncio
-    async def test_stream_agent_response_uses_request_metrics_fallback(self, tmp_path: Path) -> None:
+    async def test_stream_agent_response_uses_request_metrics_fallback(
+        self,
+        tmp_path: Path,
+    ) -> None:
         """Streaming metadata should fall back to model request metrics when needed."""
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
@@ -7017,8 +7029,11 @@ class TestUserIdPassthrough:
         assert payload["usage"]["total_tokens"] == 15
 
     @pytest.mark.asyncio
-    async def test_stream_agent_response_uses_latest_request_tokens_for_context(self, tmp_path: Path) -> None:
-        """Streaming context metadata should reflect the latest request, not cumulative run usage."""
+    async def test_stream_agent_response_uses_prepared_context_estimate_for_context(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming context metadata should use the prepared full-context estimate when available."""
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "OpenAIChat"
@@ -7055,8 +7070,10 @@ class TestUserIdPassthrough:
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
         )
 
-        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, estimated_context_tokens=900)
             run_metadata: dict[str, object] = {}
             async for _chunk in stream_agent_response(
                 agent_name="general",
@@ -7075,9 +7092,9 @@ class TestUserIdPassthrough:
         assert payload["usage"]["total_tokens"] == 890
         assert payload["usage"]["cache_read_tokens"] == 576
         assert payload["usage"]["reasoning_tokens"] == 48
-        assert payload["context"]["input_tokens"] == 120
+        assert payload["context"]["input_tokens"] == 900
         assert payload["context"]["cache_read_input_tokens"] == 64
-        assert payload["context"]["uncached_input_tokens"] == 56
+        assert payload["context"]["uncached_input_tokens"] == 836
         assert "cached_input_tokens" not in payload["context"]
         assert payload["context"]["window_tokens"] == 1000
 
@@ -7140,6 +7157,75 @@ class TestUserIdPassthrough:
         assert "cache_write_input_tokens" not in payload["context"]
         assert "uncached_input_tokens" not in payload["context"]
         assert payload["context"]["window_tokens"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_prefers_request_metric_totals_over_final_event_fragment(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming metadata should not let a partial final event hide cumulative request totals."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="step one")
+            yield ModelRequestCompletedEvent(
+                model="test-model",
+                model_provider="openai",
+                input_tokens=700,
+                output_tokens=50,
+                total_tokens=750,
+            )
+            yield RunContentEvent(content="step two")
+            yield ModelRequestCompletedEvent(
+                model="test-model",
+                model_provider="openai",
+                input_tokens=120,
+                output_tokens=20,
+                total_tokens=140,
+            )
+            yield RunCompletedEvent(
+                run_id="run-2",
+                session_id="session1",
+                metrics=Metrics(
+                    input_tokens=120,
+                    output_tokens=20,
+                    total_tokens=140,
+                ),
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        config = Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
+        )
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, estimated_context_tokens=900)
+            run_metadata: dict[str, object] = {}
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=config,
+                run_metadata_collector=run_metadata,
+            ):
+                pass
+
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["run_id"] == "run-2"
+        assert payload["usage"]["input_tokens"] == 820
+        assert payload["usage"]["output_tokens"] == 70
+        assert payload["usage"]["total_tokens"] == 890
+        assert payload["context"]["input_tokens"] == 900
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_context_counts_latest_anthropic_cache_tokens(self, tmp_path: Path) -> None:

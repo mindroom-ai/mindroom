@@ -8,7 +8,8 @@ from typing import Literal, Protocol, TypeGuard
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
 _CompactionMode = Literal["auto", "manual"]
-_CompactionDecisionMode = Literal["none", "opportunistic", "required"]
+_CompactionDecisionMode = Literal["none", "required"]
+CompactionReplyOutcome = Literal["none", "success", "failed", "timeout"]
 _CompactionLifecycleStatus = Literal["success", "failed", "timeout"]
 _CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summary_input_budget"]
 _ReplayPlanMode = Literal["configured", "limited", "disabled"]
@@ -101,23 +102,6 @@ class CompactionDecision:
 
 
 @dataclass(frozen=True)
-class PostResponseCompactionCheck:
-    """Post-response check for whether the updated session should compact now."""
-
-    agent_name: str
-    session_id: str
-    scope_kind: _ScopeKind
-    scope_id: str
-    execution_plan: ResolvedHistoryExecutionPlan
-    active_context_window: int | None
-
-    @property
-    def scope(self) -> HistoryScope:
-        """Return the typed history scope for this request."""
-        return HistoryScope(kind=self.scope_kind, scope_id=self.scope_id)
-
-
-@dataclass(frozen=True)
 class CompactionLifecycleStart:
     """Visible lifecycle notice payload emitted before foreground compaction."""
 
@@ -137,6 +121,57 @@ class CompactionLifecycleSuccess:
     notice_event_id: str | None
     outcome: CompactionOutcome
     duration_ms: int
+
+
+@dataclass(frozen=True)
+class CompactionLifecycleProgress:
+    """Visible lifecycle progress payload emitted after persisted compaction chunks."""
+
+    notice_event_id: str | None
+    mode: _CompactionMode
+    session_id: str
+    scope: str
+    summary_model: str
+    before_tokens: int
+    after_tokens: int
+    history_budget_tokens: int | None
+    runs_before: int
+    compacted_run_count: int
+    runs_remaining: int
+    duration_ms: int | None = None
+
+    def to_notice_metadata(self) -> dict[str, object]:
+        """Return serialized progress metadata for Matrix compaction messages."""
+        meta: dict[str, object] = {
+            "version": 3,
+            "status": "running",
+            "mode": self.mode,
+            "session_id": self.session_id,
+            "scope": self.scope,
+            "summary_model": self.summary_model,
+            "before_tokens": self.before_tokens,
+            "after_tokens": self.after_tokens,
+            "runs_before": self.runs_before,
+            "compacted_run_count": self.compacted_run_count,
+            "runs_remaining": self.runs_remaining,
+        }
+        if self.history_budget_tokens is not None:
+            meta["history_budget_tokens"] = self.history_budget_tokens
+        if self.duration_ms is not None:
+            meta["duration_ms"] = self.duration_ms
+        return meta
+
+    def format_notice(self) -> str:
+        """Format a human-readable in-progress compaction notice."""
+        body = (
+            f"Compacting history... saved {self.compacted_run_count}/{self.runs_before} runs: "
+            f"{_format_exact_tokens(self.before_tokens)} -> {_format_exact_tokens(self.after_tokens)}"
+        )
+        if self.history_budget_tokens is not None:
+            body += f" / {_format_exact_tokens(self.history_budget_tokens)} history budget"
+        if self.runs_remaining:
+            body += f"\n   {self.runs_remaining} runs remaining"
+        return body
 
 
 @dataclass(frozen=True)
@@ -162,6 +197,9 @@ class CompactionLifecycle(Protocol):
 
     async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
         """Edit the lifecycle notice after successful compaction."""
+
+    async def progress(self, event: CompactionLifecycleProgress) -> None:
+        """Edit the lifecycle notice after persisted compaction progress."""
 
     async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
         """Edit the lifecycle notice after failed compaction."""
@@ -276,4 +314,6 @@ class PreparedHistoryState:
     compaction_decision: CompactionDecision = field(
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
-    post_response_compaction_checks: list[PostResponseCompactionCheck] = field(default_factory=list)
+    compaction_reply_outcome: CompactionReplyOutcome = "none"
+    prepared_context_tokens: int | None = None
+    estimated_context_tokens: int | None = None

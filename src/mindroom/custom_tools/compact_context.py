@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 
 
 class CompactContextTools(Toolkit):
-    """Tool that requests scoped compaction before the next run."""
+    """Tool that requests scoped compaction before the next reply."""
 
     def __init__(
         self,
@@ -50,7 +50,7 @@ class CompactContextTools(Toolkit):
         super().__init__(name="compact_context", tools=[self.compact_context])
 
     async def compact_context(self, agent: Agent | None = None, run_context: RunContext | None = None) -> str:
-        """Request compaction before the next run in the current scope."""
+        """Request compaction before the next reply."""
         if agent is None:
             return "Error: No active agent available. Cannot determine history scope."
 
@@ -100,7 +100,7 @@ class CompactContextTools(Toolkit):
                 agent=self._agent_name,
                 scope=scope_context.scope.key,
             )
-            return "Compaction scheduled for the next reply in this conversation scope."
+            return "Compaction will run before the next reply in this thread."
 
     def _resolve_active_compaction_settings(
         self,

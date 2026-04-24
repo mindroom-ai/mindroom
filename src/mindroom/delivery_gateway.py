@@ -50,7 +50,12 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.history import CompactionLifecycleFailure, CompactionLifecycleStart, CompactionLifecycleSuccess
+    from mindroom.history import (
+        CompactionLifecycleFailure,
+        CompactionLifecycleProgress,
+        CompactionLifecycleStart,
+        CompactionLifecycleSuccess,
+    )
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.streaming_delivery import StreamInputChunk
@@ -248,13 +253,20 @@ class MatrixCompactionLifecycle:
 
     delivery_gateway: DeliveryGateway
     target: MessageTarget
-    reply_to_event_id: str
+    reply_to_event_id: str | None
 
     async def start(self, event: CompactionLifecycleStart) -> str | None:
         """Send the initial visible lifecycle notice."""
         return await self.delivery_gateway.send_compaction_lifecycle_start(
             target=self.target,
             reply_to_event_id=self.reply_to_event_id,
+            event=event,
+        )
+
+    async def progress(self, event: CompactionLifecycleProgress) -> None:
+        """Edit the lifecycle notice after persisted compaction progress."""
+        await self.delivery_gateway.edit_compaction_lifecycle_progress(
+            target=self.target,
             event=event,
         )
 
@@ -887,7 +899,7 @@ class DeliveryGateway:
         self,
         *,
         target: MessageTarget,
-        reply_to_event_id: str,
+        reply_to_event_id: str | None,
         event: CompactionLifecycleStart,
     ) -> str | None:
         """Send the foreground compaction lifecycle notice."""
@@ -924,6 +936,22 @@ class DeliveryGateway:
             return delivered.event_id
         self.deps.logger.error("Failed to send compaction lifecycle notice", **target.log_context)
         return None
+
+    async def edit_compaction_lifecycle_progress(
+        self,
+        *,
+        target: MessageTarget,
+        event: CompactionLifecycleProgress,
+    ) -> None:
+        """Edit the foreground compaction lifecycle notice after progress."""
+        if event.notice_event_id is None:
+            return
+        await self._edit_compaction_lifecycle_notice(
+            target=target,
+            event_id=event.notice_event_id,
+            body=event.format_notice(),
+            metadata=event.to_notice_metadata(),
+        )
 
     async def edit_compaction_lifecycle_success(
         self,

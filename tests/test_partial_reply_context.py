@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import (
+    COMPACTION_NOTICE_CONTENT_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -27,6 +28,7 @@ from mindroom.execution_preparation import (
     _get_unseen_event_ids_for_metadata,
     _get_unseen_messages_for_sender,
     _PartialReplyKind,
+    _sanitize_thread_history_for_replay,
 )
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
@@ -402,6 +404,42 @@ class TestUnseenMessagesPartialReplies:
         assert "Do NOT repeat or redo that work." in str(context_messages[0].content)
         assert context_messages[1].content == "You (reply still streaming): Partial reply"
         assert context_messages[2].content == "Answer the new question."
+
+    def test_replay_fallback_sanitizer_matches_unseen_context_rules(self) -> None:
+        """Full-thread fallback replay should not reintroduce synthetic notices or stale partial replies."""
+        config = _make_config()
+        runtime_paths = runtime_paths_for(config)
+        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+
+        sanitized = _sanitize_thread_history_for_replay(
+            [
+                _make_visible_message(
+                    event_id="e1",
+                    sender=agent_id,
+                    body="Compacting...",
+                    content={COMPACTION_NOTICE_CONTENT_KEY: True},
+                ),
+                _make_visible_message(
+                    event_id="e2",
+                    sender=agent_id,
+                    body=f"Interrupted answer\n\n{_CANCELLED_RESPONSE_NOTE}",
+                    stream_status=STREAM_STATUS_CANCELLED,
+                ),
+                _make_visible_message(
+                    event_id="e3",
+                    sender=agent_id,
+                    body="Live answer",
+                    stream_status=STREAM_STATUS_STREAMING,
+                ),
+                _make_visible_message(event_id="e4", sender="@user:localhost", body="Follow-up"),
+            ],
+            response_sender_id=agent_id,
+            active_event_ids={"e3"},
+        )
+
+        assert [message.event_id for message in sanitized] == ["e3", "e4"]
+        assert sanitized[0].sender == "You (reply still streaming)"
+        assert sanitized[0].body == "Live answer"
 
     def test_interrupted_self_reply_leaves_only_newer_external_messages_in_unseen_prompt(self) -> None:
         """Interrupted self replies should not trigger unseen-context continuation headers anymore."""

@@ -366,6 +366,18 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
             "response_runtime_start": 14.0,
             "response_runtime_ready": 15.0,
             "ai_prepare_start": 15.5,
+            "memory_prepare_start": 15.6,
+            "memory_prepare_ready": 15.8,
+            "agent_build_start": 15.8,
+            "agent_build_ready": 16.0,
+            "history_classify_start": 16.0,
+            "history_classify_ready": 16.2,
+            "required_compaction_start": 16.2,
+            "required_compaction_ready": 16.6,
+            "replay_plan_start": 16.6,
+            "replay_plan_ready": 16.8,
+            "prompt_assembly_start": 16.8,
+            "prompt_assembly_ready": 17.0,
             "history_ready": 17.0,
             "model_request_sent": 18.0,
             "model_first_token": 19.5,
@@ -398,6 +410,12 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["diag_lock_wait_ms"] == 2000.0
     assert summary["diag_runtime_prepare_ms"] == 1000.0
     assert summary["diag_llm_prepare_ms"] == 1500.0
+    assert summary["diag_memory_prepare_ms"] == 200.0
+    assert summary["diag_agent_build_ms"] == 200.0
+    assert summary["diag_history_classify_ms"] == 200.0
+    assert summary["diag_required_compaction_ms"] == 400.0
+    assert summary["diag_replay_plan_ms"] == 200.0
+    assert summary["diag_prompt_assembly_ms"] == 200.0
     assert summary["diag_history_ready_to_model_request_ms"] == 1000.0
     assert summary["diag_provider_ttft_ms"] == 1500.0
     assert summary["diag_first_visible_to_stream_complete_ms"] == 4000.0

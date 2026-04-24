@@ -12,9 +12,10 @@ import json
 import re
 import time
 from contextlib import ExitStack
+from copy import deepcopy
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Annotated, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 from agno.run.agent import (
@@ -37,7 +38,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.background import BackgroundTask
 
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
-from mindroom.ai import AIStreamChunk, ai_response, build_matrix_run_metadata, stream_agent_response
+from mindroom.ai import (
+    AIStreamChunk,
+    ai_response,
+    build_matrix_run_metadata,
+    build_prepared_history_run_metadata,
+    stream_agent_response,
+)
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import prepare_bound_team_run_context, render_prepared_team_messages_text
@@ -45,7 +52,6 @@ from mindroom.history import (
     ScopeSessionContext,
     close_team_runtime_state_dbs,
     open_bound_scope_session_context,
-    run_post_response_compaction_check,
     team_tool_definition_payloads_for_logging,
 )
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
@@ -95,7 +101,7 @@ if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
 
     from mindroom.config.main import Config
-    from mindroom.history import CompactionOutcome, PostResponseCompactionCheck
+    from mindroom.history import CompactionOutcome
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 logger = get_logger(__name__)
 
@@ -121,19 +127,19 @@ async def _run_openai_response_backgrounds(
     always_background: BackgroundTask | None,
 ) -> None:
     """Run completion-scoped and always-run OpenAI response backgrounds."""
-    background_error: BaseException | None = None
-    if completed and completion_background is not None:
-        try:
-            await completion_background()
-        except BaseException as error:
-            background_error = error
-
     finalizer_error: BaseException | None = None
     if always_background is not None:
         try:
             await always_background()
         except BaseException as error:
             finalizer_error = error
+
+    background_error: BaseException | None = None
+    if completed and completion_background is not None:
+        try:
+            await completion_background()
+        except BaseException as error:
+            background_error = error
 
     if response_error is not None:
         raise response_error
@@ -245,8 +251,6 @@ class _PreparedOpenAIMaterializedTeamExecution:
 
     messages: tuple[Message, ...]
     run_metadata: dict[str, object] | None
-    unseen_event_ids: list[str]
-    post_response_compaction_checks: list[PostResponseCompactionCheck] | None = None
 
 
 def _openai_team_request_log_context(
@@ -1055,7 +1059,6 @@ async def _non_stream_completion(
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
-    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     response_text = await ai_response(
         agent_name=agent_name,
         prompt=prompt,
@@ -1070,7 +1073,6 @@ async def _non_stream_completion(
         include_openai_compat_guidance=True,
         active_event_ids=set(),
         execution_identity=execution_identity,
-        post_response_compaction_checks_collector=post_response_compaction_checks,
         refresh_scheduler=refresh_scheduler,
     )
 
@@ -1091,15 +1093,7 @@ async def _non_stream_completion(
             ),
         ],
     )
-    return _OpenAIJSONResponse(
-        content=response.model_dump(),
-        background=_openai_post_response_compaction_task(
-            post_response_compaction_checks,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-        ),
-    )
+    return _OpenAIJSONResponse(content=response.model_dump())
 
 
 # ---------------------------------------------------------------------------
@@ -1262,7 +1256,6 @@ async def _stream_completion(  # noqa: C901, PLR0915
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
-    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     stream = cast(
         "AsyncGenerator[AIStreamChunk, None]",
         stream_with_tool_execution_identity(
@@ -1281,7 +1274,6 @@ async def _stream_completion(  # noqa: C901, PLR0915
                 include_openai_compat_guidance=True,
                 active_event_ids=set(),
                 execution_identity=execution_identity,
-                post_response_compaction_checks_collector=post_response_compaction_checks,
                 refresh_scheduler=refresh_scheduler,
             ),
         ),
@@ -1368,59 +1360,9 @@ async def _stream_completion(  # noqa: C901, PLR0915
     response = _OpenAIStreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        background=_openai_post_response_compaction_task(
-            post_response_compaction_checks,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-        ),
     )
     response.completion_predicate = lambda: stream_completed
     return response
-
-
-async def _run_openai_post_response_compaction_checks(
-    checks: Sequence[PostResponseCompactionCheck],
-    *,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-) -> None:
-    """Run post-response compaction for OpenAI-compatible sessions without Matrix notices."""
-    for check in checks:
-        try:
-            await run_post_response_compaction_check(
-                check=check,
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=execution_identity,
-                compaction_lifecycle=None,
-            )
-        except Exception:
-            logger.exception(
-                "OpenAI-compatible post-response compaction failed",
-                session_id=check.session_id,
-                scope=check.scope.key,
-            )
-
-
-def _openai_post_response_compaction_task(
-    checks: Sequence[PostResponseCompactionCheck],
-    *,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-) -> BackgroundTask | None:
-    """Return a response-finalizer task for post-response OpenAI compaction."""
-    if not checks:
-        return None
-    return BackgroundTask(
-        _run_openai_post_response_compaction_checks,
-        tuple(checks),
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1497,6 +1439,30 @@ def _format_team_output(response: TeamRunOutput | RunOutput) -> str:
     return "\n\n".join(parts) if parts else str(response.content or "")
 
 
+def _merge_openai_metadata_content(
+    base: dict[str, object] | None,
+    extra: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if base is None:
+        return deepcopy(extra) if extra is not None else None
+    if extra is None:
+        return deepcopy(base)
+    merged = deepcopy(base)
+    for key, value in extra.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = (
+                _merge_openai_metadata_content(
+                    cast("dict[str, object]", existing),
+                    cast("dict[str, object]", value),
+                )
+                or {}
+            )
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
 def _is_failed_team_output(response: TeamRunOutput | RunOutput) -> bool:
     """Return whether a fallback team output ended in a terminal non-success state."""
     return is_errored_run_output(response) or is_cancelled_run_output(response)
@@ -1554,11 +1520,10 @@ async def prepare_materialized_team_execution(
     correlation_id: str | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
     configured_team_name: str | None,
+    execution_identity: ToolExecutionIdentity | None = None,
     matrix_run_metadata: dict[str, object] | None = None,
-    system_enrichment_items: tuple[object, ...] = (),
 ) -> _PreparedOpenAIMaterializedTeamExecution:
     """Prepare one team run using only public execution-preparation interfaces."""
-    del system_enrichment_items
     _scrub_queued_notice_team_scope_context(scope_context)
     prepared_execution = await prepare_bound_team_run_context(
         scope_context=scope_context,
@@ -1578,8 +1543,10 @@ async def prepare_materialized_team_execution(
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
+        execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
     )
+    run_extra_content = build_prepared_history_run_metadata(prepared_execution.prepared_history)
     run_metadata = build_matrix_run_metadata(
         reply_to_event_id,
         prepared_execution.unseen_event_ids,
@@ -1589,13 +1556,14 @@ async def prepare_materialized_team_execution(
         correlation_id=correlation_id,
         tools_schema=team_tool_definition_payloads_for_logging(team),
         model_params=model_params_payload(team.model) if team.model is not None else {},
-        extra_metadata=matrix_run_metadata,
+        extra_metadata=cast(
+            "dict[str, Any] | None",
+            _merge_openai_metadata_content(matrix_run_metadata, run_extra_content),
+        ),
     )
     return _PreparedOpenAIMaterializedTeamExecution(
         messages=prepared_execution.messages,
         run_metadata=cast("dict[str, object] | None", run_metadata),
-        unseen_event_ids=prepared_execution.unseen_event_ids,
-        post_response_compaction_checks=prepared_execution.post_response_compaction_checks,
     )
 
 
@@ -1609,7 +1577,6 @@ async def _prepare_openai_team_prompt(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> _PreparedOpenAITeamPrompt:
     """Prepare the final prompt for one OpenAI-compatible team run."""
@@ -1632,11 +1599,9 @@ async def _prepare_openai_team_prompt(
         correlation_id=uuid4().hex,
         compaction_outcomes_collector=None,
         configured_team_name=team_name,
+        execution_identity=execution_identity,
         matrix_run_metadata=None,
-        system_enrichment_items=(),
     )
-    if post_response_compaction_checks_collector is not None:
-        post_response_compaction_checks_collector.extend(prepared_execution.post_response_compaction_checks or [])
     return _PreparedOpenAITeamPrompt(
         prompt=render_prepared_team_messages_text(prepared_execution.messages),
         run_metadata=prepared_execution.run_metadata,
@@ -1660,7 +1625,6 @@ async def _non_stream_team_completion(
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
-    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     try:
         with open_bound_scope_session_context(
             agents=[],
@@ -1698,7 +1662,7 @@ async def _non_stream_team_completion(
                     prompt,
                     unavailable_bases,
                 )
-                prepared_team_prompt = await _prepare_openai_team_prompt(
+                prepared_team_run = await _prepare_openai_team_prompt(
                     scope_context=scope_context,
                     team_name=team_name,
                     agents=agents,
@@ -1707,7 +1671,6 @@ async def _non_stream_team_completion(
                     config=config,
                     runtime_paths=runtime_paths,
                     thread_history=thread_history,
-                    post_response_compaction_checks_collector=post_response_compaction_checks,
                     execution_identity=execution_identity,
                 )
             except Exception:
@@ -1719,15 +1682,15 @@ async def _non_stream_team_completion(
                         team_name=team_name,
                         session_id=session_id,
                         requester_id=execution_identity.requester_id if execution_identity else None,
-                        prompt=prepared_team_prompt.prompt,
-                        metadata=prepared_team_prompt.run_metadata,
+                        prompt=prepared_team_run.prompt,
+                        metadata=prepared_team_run.run_metadata,
                     ),
                 ):
                     response = await team.arun(
-                        prepared_team_prompt.prompt,
+                        prepared_team_run.prompt,
                         session_id=session_id,
                         user_id=user,
-                        metadata=prepared_team_prompt.run_metadata,
+                        metadata=prepared_team_run.run_metadata,
                     )
             except Exception:
                 logger.exception("Team execution failed", team=team_name)
@@ -1759,15 +1722,7 @@ async def _non_stream_team_completion(
                     ),
                 ],
             )
-            return _OpenAIJSONResponse(
-                content=result.model_dump(),
-                background=_openai_post_response_compaction_task(
-                    post_response_compaction_checks,
-                    runtime_paths=runtime_paths,
-                    config=config,
-                    execution_identity=execution_identity,
-                ),
-            )
+            return _OpenAIJSONResponse(content=result.model_dump())
     finally:
         close_team_runtime_state_dbs(
             agents=agents,
@@ -1795,7 +1750,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     scope_context: ScopeSessionContext | None = None
     stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
-    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
 
     async def _cleanup() -> None:
         if stream is not None:
@@ -1847,7 +1801,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 prompt,
                 unavailable_bases,
             )
-            prepared_team_prompt = await _prepare_openai_team_prompt(
+            prepared_team_run = await _prepare_openai_team_prompt(
                 scope_context=scope_context,
                 team_name=team_name,
                 agents=agents,
@@ -1856,7 +1810,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 config=config,
                 runtime_paths=runtime_paths,
                 thread_history=thread_history,
-                post_response_compaction_checks_collector=post_response_compaction_checks,
                 execution_identity=execution_identity,
             )
         except Exception:
@@ -1868,8 +1821,8 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 team_name=team_name,
                 session_id=session_id,
                 requester_id=execution_identity.requester_id if execution_identity else None,
-                prompt=prepared_team_prompt.prompt,
-                metadata=prepared_team_prompt.run_metadata,
+                prompt=prepared_team_run.prompt,
+                metadata=prepared_team_run.run_metadata,
             )
             stream = cast(
                 "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
@@ -1879,12 +1832,12 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                         cast(
                             "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
                             team.arun(
-                                prepared_team_prompt.prompt,
+                                prepared_team_run.prompt,
                                 stream=True,
                                 stream_events=True,
                                 session_id=session_id,
                                 user_id=user,
-                                metadata=prepared_team_prompt.run_metadata,
+                                metadata=prepared_team_run.run_metadata,
                             ),
                         ),
                         request_context=request_log_context,
@@ -1936,12 +1889,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         response = _OpenAIStreamingResponse(
             _event_generator(),
             media_type="text/event-stream",
-            background=_openai_post_response_compaction_task(
-                post_response_compaction_checks,
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=execution_identity,
-            ),
         )
         response.completion_predicate = lambda: stream_completed and not stream_failed
     except Exception:

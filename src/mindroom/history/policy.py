@@ -90,7 +90,7 @@ def classify_compaction_decision(  # noqa: PLR0911
     trigger_budget_tokens: int | None = None,
     hard_budget_tokens: int | None = None,
 ) -> CompactionDecision:
-    """Classify compaction as none, immediate post-response, or foreground required."""
+    """Classify compaction as none or required before the next reply."""
     resolved_trigger_budget = plan.replay_budget_tokens if trigger_budget_tokens is None else trigger_budget_tokens
     resolved_hard_budget = plan.hard_replay_budget_tokens if hard_budget_tokens is None else hard_budget_tokens
 
@@ -147,7 +147,7 @@ def classify_compaction_decision(  # noqa: PLR0911
             hard_budget_tokens=resolved_hard_budget,
             fitted_replay_tokens=current_history_tokens,
         )
-    if resolved_hard_budget is None or current_history_tokens > resolved_hard_budget:
+    if resolved_hard_budget is not None and current_history_tokens > resolved_hard_budget:
         return CompactionDecision(
             mode="required",
             reason="history_exceeds_hard_budget",
@@ -157,8 +157,8 @@ def classify_compaction_decision(  # noqa: PLR0911
             fitted_replay_tokens=resolved_hard_budget,
         )
     return CompactionDecision(
-        mode="opportunistic",
-        reason="over_trigger_fits_hard_budget",
+        mode="none",
+        reason="within_hard_budget",
         current_history_tokens=current_history_tokens,
         trigger_budget_tokens=resolved_trigger_budget,
         hard_budget_tokens=resolved_hard_budget,

@@ -174,8 +174,9 @@ Approval-gated tools are stricter than plain ad-hoc chat access.
 Approval-gated tools only work there while the router is already joined.
 
 MindRoom compacts in one visible lifecycle.
-If the current reply needs compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
-After a successful visible reply, MindRoom re-checks the updated persisted session and immediately compacts if the next reply would cross the compaction threshold.
+If the current reply needs required compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
+Manual `compact_context` records a durable request that runs before the next reply in the same thread.
+MindRoom does not run a separate background post-response compaction path.
 It always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
 That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.
 Compaction rewrites the persisted Agno session in SQLite.

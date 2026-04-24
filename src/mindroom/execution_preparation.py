@@ -46,8 +46,15 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.config.main import Config
-    from mindroom.history import CompactionDecision, CompactionLifecycle, CompactionOutcome, PostResponseCompactionCheck
+    from mindroom.history import (
+        CompactionDecision,
+        CompactionLifecycle,
+        CompactionOutcome,
+        CompactionReplyOutcome,
+    )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.timing import DispatchPipelineTiming
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -91,7 +98,9 @@ class PreparedExecutionContext:
     replays_persisted_history: bool
     compaction_outcomes: list[CompactionOutcome]
     compaction_decision: CompactionDecision | None = None
-    post_response_compaction_checks: list[PostResponseCompactionCheck] | None = None
+    compaction_reply_outcome: CompactionReplyOutcome = "none"
+    prepared_context_tokens: int | None = None
+    estimated_context_tokens: int | None = None
 
     @property
     def final_prompt(self) -> str:
@@ -102,6 +111,22 @@ class PreparedExecutionContext:
     def context_messages(self) -> tuple[Message, ...]:
         """Return replayed context messages without the current user turn."""
         return self.messages[:-1]
+
+    @property
+    def prepared_history(self) -> PreparedHistoryState:
+        """Return the history diagnostics prepared for this execution."""
+        default_decision = PreparedHistoryState().compaction_decision
+        return PreparedHistoryState(
+            compaction_outcomes=self.compaction_outcomes,
+            replay_plan=self.replay_plan,
+            replays_persisted_history=self.replays_persisted_history,
+            compaction_decision=(
+                self.compaction_decision if self.compaction_decision is not None else default_decision
+            ),
+            compaction_reply_outcome=self.compaction_reply_outcome,
+            prepared_context_tokens=self.prepared_context_tokens,
+            estimated_context_tokens=self.estimated_context_tokens,
+        )
 
 
 @dataclass(frozen=True)
@@ -442,6 +467,33 @@ def _build_thread_history_messages(
     )
 
 
+def _thread_history_without_current_event(
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    current_event_id: str | None,
+) -> Sequence[ResolvedVisibleMessage] | None:
+    """Return thread history suitable for full-context fallback replay."""
+    if not thread_history or current_event_id is None:
+        return thread_history
+    return tuple(msg for msg in thread_history if msg.event_id != current_event_id)
+
+
+def _sanitize_thread_history_for_replay(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    response_sender_id: str | None,
+    active_event_ids: Collection[str],
+) -> tuple[ResolvedVisibleMessage, ...]:
+    """Apply unseen-context sanitization before fallback full-thread replay."""
+    sanitized, _, _ = _get_unseen_messages_for_sender(
+        thread_history,
+        sender_id=response_sender_id,
+        seen_event_ids=set(),
+        current_event_id=None,
+        active_event_ids=active_event_ids,
+    )
+    return tuple(sanitized)
+
+
 def _get_unseen_event_ids_for_metadata(
     unseen_messages: list[ResolvedVisibleMessage],
     *,
@@ -518,11 +570,13 @@ def _finalize_prepared_history(
     prepared_scope_history: PreparedScopeHistory,
     config: Config,
     static_prompt_tokens: int,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedHistoryState:
     return finalize_history_preparation(
         prepared_scope_history=prepared_scope_history,
         config=config,
         static_prompt_tokens=static_prompt_tokens,
+        pipeline_timing=pipeline_timing,
     )
 
 
@@ -541,26 +595,28 @@ async def _prepare_execution_context_common(
     render_messages_text_fn: Callable[[Sequence[Message]], str],
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     timing_scope: str | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     del timing_scope
     seen_event_ids = _scope_seen_event_ids(scope_context)
-    replay_fallback_messages = (
-        None
-        if reply_to_event_id and thread_history
-        else _build_thread_history_messages(
-            prompt,
-            thread_history,
+    fallback_thread_history = _thread_history_without_current_event(thread_history, reply_to_event_id)
+    if fallback_thread_history is not None:
+        fallback_thread_history = _sanitize_thread_history_for_replay(
+            fallback_thread_history,
             response_sender_id=response_sender_id,
-            current_sender_id=current_sender_id,
-            max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
-            max_message_length=(
-                thread_history_render_limits.max_message_length if thread_history_render_limits else None
-            ),
-            missing_sender_label=(
-                thread_history_render_limits.missing_sender_label if thread_history_render_limits else None
-            ),
+            active_event_ids=active_event_ids,
         )
+    replay_fallback_messages = _build_thread_history_messages(
+        prompt,
+        fallback_thread_history,
+        response_sender_id=response_sender_id,
+        current_sender_id=current_sender_id,
+        max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
+        max_message_length=(thread_history_render_limits.max_message_length if thread_history_render_limits else None),
+        missing_sender_label=(
+            thread_history_render_limits.missing_sender_label if thread_history_render_limits else None
+        ),
     )
 
     provisional_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
@@ -594,25 +650,33 @@ async def _prepare_execution_context_common(
     else:
         unseen_event_ids = []
 
+    final_static_tokens = estimate_static_tokens_fn(
+        render_messages_text_fn(final_messages),
+        render_messages_text_fn(replay_fallback_messages) if replay_fallback_messages is not None else None,
+    )
     prepared_history = _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
         config=config,
-        static_prompt_tokens=estimate_static_tokens_fn(
-            render_messages_text_fn(final_messages),
-            render_messages_text_fn(replay_fallback_messages) if replay_fallback_messages is not None else None,
-        ),
+        static_prompt_tokens=final_static_tokens,
+        pipeline_timing=pipeline_timing,
     )
+    if pipeline_timing is not None:
+        pipeline_timing.mark("prompt_assembly_start")
     if replay_fallback_messages is not None and not prepared_history.replays_persisted_history and thread_history:
         final_messages = replay_fallback_messages
+    if pipeline_timing is not None:
+        pipeline_timing.mark("prompt_assembly_ready")
 
     return PreparedExecutionContext(
         messages=final_messages,
         replay_plan=prepared_history.replay_plan,
+        estimated_context_tokens=prepared_history.estimated_context_tokens,
         unseen_event_ids=unseen_event_ids,
         replays_persisted_history=prepared_history.replays_persisted_history,
         compaction_outcomes=prepared_history.compaction_outcomes,
         compaction_decision=prepared_history.compaction_decision,
-        post_response_compaction_checks=prepared_history.post_response_compaction_checks,
+        compaction_reply_outcome=prepared_history.compaction_reply_outcome,
+        prepared_context_tokens=prepared_history.prepared_context_tokens,
     )
 
 
@@ -633,6 +697,8 @@ async def prepare_agent_execution_context(
     compaction_lifecycle: CompactionLifecycle | None = None,
     current_sender_id: str | None = None,
     timing_scope: str | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
     response_sender_id = config.get_ids(runtime_paths).get(agent_name)
@@ -664,6 +730,8 @@ async def prepare_agent_execution_context(
             ),
             timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
+            pipeline_timing=pipeline_timing,
+            execution_identity=execution_identity,
         )
 
     return await _prepare_execution_context_common(
@@ -684,6 +752,7 @@ async def prepare_agent_execution_context(
         render_messages_text_fn=render_prepared_messages_text,
         thread_history_render_limits=None,
         timing_scope=timing_scope,
+        pipeline_timing=pipeline_timing,
     )
 
 
@@ -706,6 +775,8 @@ async def prepare_bound_team_execution_context(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
 
@@ -726,6 +797,8 @@ async def prepare_bound_team_execution_context(
             active_model_name=active_model_name,
             active_context_window=active_context_window,
             compaction_lifecycle=compaction_lifecycle,
+            pipeline_timing=pipeline_timing,
+            execution_identity=execution_identity,
         )
 
     return await _prepare_execution_context_common(
@@ -747,6 +820,7 @@ async def prepare_bound_team_execution_context(
         ),
         render_messages_text_fn=render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,
+        pipeline_timing=pipeline_timing,
     )
 
 
@@ -769,6 +843,8 @@ async def prepare_bound_team_run_context(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> PreparedExecutionContext:
     """Prepare a team run with queued-notice scrubbing and replay application."""
     ai_runtime.scrub_queued_notice_session_context(
@@ -793,6 +869,8 @@ async def prepare_bound_team_run_context(
         compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,
+        pipeline_timing=pipeline_timing,
+        execution_identity=execution_identity,
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)

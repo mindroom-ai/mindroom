@@ -827,6 +827,7 @@ depends_on = [
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.ai_run_metadata",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.history",
@@ -890,6 +891,7 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.authorization",
     "mindroom.cancellation",
@@ -1820,6 +1822,7 @@ depends_on = [
 path = "mindroom.post_response_effects"
 depends_on = [
     "mindroom.delivery_gateway",
+    "mindroom.history",
     "mindroom.matrix.conversation_cache",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
@@ -2062,6 +2065,7 @@ from = ["mindroom.runtime_resolution"]
 expose = [
     "AIStreamChunk",
     "build_matrix_run_metadata",
+    "build_prepared_history_run_metadata",
     "ai_response",
     "resolve_run_correlation_id",
     "stream_agent_response",
@@ -2590,6 +2594,7 @@ expose = [
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
     "manual_compaction_unavailable_message",
+    "note_prepared_history_timing",
     "open_bound_scope_session_context",
     "open_resolved_scope_session_context",
     "open_scope_session_context",
@@ -2600,7 +2605,6 @@ expose = [
     "read_scope_state",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
-    "run_post_response_compaction_check",
     "strip_transient_enrichment_from_session",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",

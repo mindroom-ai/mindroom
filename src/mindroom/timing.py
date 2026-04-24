@@ -63,6 +63,12 @@ DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
     ("diag_lock_wait_ms", "lock_wait_start", "lock_acquired"),
     ("diag_runtime_prepare_ms", "response_runtime_start", "response_runtime_ready"),
     ("diag_llm_prepare_ms", "ai_prepare_start", "history_ready"),
+    ("diag_memory_prepare_ms", "memory_prepare_start", "memory_prepare_ready"),
+    ("diag_agent_build_ms", "agent_build_start", "agent_build_ready"),
+    ("diag_history_classify_ms", "history_classify_start", "history_classify_ready"),
+    ("diag_required_compaction_ms", "required_compaction_start", "required_compaction_ready"),
+    ("diag_replay_plan_ms", "replay_plan_start", "replay_plan_ready"),
+    ("diag_prompt_assembly_ms", "prompt_assembly_start", "prompt_assembly_ready"),
     ("diag_history_ready_to_model_request_ms", "history_ready", "model_request_sent"),
     ("diag_provider_ttft_ms", "model_request_sent", "model_first_token"),
     ("diag_first_visible_to_stream_complete_ms", "first_visible_reply", "streaming_complete"),
@@ -85,7 +91,7 @@ class DispatchPipelineTiming:
         if overwrite or label not in self.marks:
             self.marks[label] = time.perf_counter()
 
-    def note(self, **metadata: TimingMetadataValue) -> None:
+    def note(self, **metadata: TimingMetadataValue | None) -> None:
         """Attach diagnostic metadata for the eventual summary log."""
         for key, value in metadata.items():
             if value is not None:

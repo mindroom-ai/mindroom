@@ -22,7 +22,7 @@ from dotenv import dotenv_values
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
-MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS = 300.0
+MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]

@@ -1,4 +1,4 @@
-"""Tests for the next-run `compact_context` trigger."""
+"""Tests for the `compact_context` manual compaction trigger."""
 
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ from mindroom.history.types import (
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -52,6 +53,9 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
+
+
+COMPACT_CONTEXT_SUCCESS = "Compaction will run before the next reply in this thread."
 
 
 class FakeModel(Model):
@@ -134,6 +138,20 @@ def _session(session_id: str, *, runs: list[RunOutput] | None = None) -> AgentSe
     )
 
 
+def _execution_identity(session_id: str = "session-1", *, agent_name: str = "test_agent") -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=session_id,
+        tenant_id=None,
+        account_id=None,
+    )
+
+
 def _agent(*, team_id: str | None = None) -> Agent:
     agent = Agent(id="test_agent", model=FakeModel(id="fake-model", provider="fake"))
     agent.team_id = team_id
@@ -148,6 +166,7 @@ def _open_scope_context(
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
+    execution_identity: ToolExecutionIdentity | None = None,
     create_session_if_missing: bool = False,
 ) -> Iterator[ScopeSessionContext]:
     with open_scope_session_context(
@@ -156,7 +175,7 @@ def _open_scope_context(
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
-        execution_identity=None,
+        execution_identity=execution_identity,
         create_session_if_missing=create_session_if_missing,
     ) as scope_context:
         assert scope_context is not None
@@ -198,11 +217,12 @@ def _close_test_storages(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def test_compact_context_runtime_annotations_resolve_for_agno_registration(tmp_path: Path) -> None:
     """Agno should be able to evaluate tool annotations at runtime."""
     config, runtime_paths = _make_config(tmp_path)
+    identity = _execution_identity()
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
 
     function = Function.from_callable(tool.compact_context)
@@ -216,16 +236,17 @@ def test_compact_context_runtime_annotations_resolve_for_agno_registration(tmp_p
 
 @pytest.mark.asyncio
 async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -> None:
-    """Schedule agent-scope compaction for the next reply."""
+    """Schedule agent-scope compaction before the next reply."""
     config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
 
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
 
     result = await tool.compact_context(agent=_agent())
@@ -234,21 +255,22 @@ async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is True
-    assert result == "Compaction scheduled for the next reply in this conversation scope."
+    assert result == COMPACT_CONTEXT_SUCCESS
 
 
 @pytest.mark.asyncio
 async def test_compact_context_requires_compaction_window(tmp_path: Path) -> None:
     """Manual compaction should fail fast when no usable model window is configured."""
     config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=None)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
 
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
 
     result = await tool.compact_context(agent=_agent())
@@ -272,11 +294,12 @@ async def test_compact_context_closes_scope_storage_after_budget_error(tmp_path:
         storage=storage,
         session=_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]),
     )
+    identity = _execution_identity()
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
 
     with (
@@ -315,7 +338,7 @@ async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=_execution_identity(),
     )
 
     with (
@@ -334,7 +357,7 @@ async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path
     ):
         result = await tool.compact_context(agent=_agent())
 
-    assert result == "Compaction scheduled for the next reply in this conversation scope."
+    assert result == COMPACT_CONTEXT_SUCCESS
     storage.upsert_session.assert_called_once_with(scope_context.session)
     storage.close.assert_called_once_with()
 
@@ -343,14 +366,15 @@ async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path
 async def test_compact_context_requires_positive_summary_input_budget(tmp_path: Path) -> None:
     """Manual compaction should fail fast when the compaction model cannot fit any summary input."""
     config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=4096)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
 
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
 
     result = await tool.compact_context(agent=_agent())
@@ -383,7 +407,8 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
         ),
         runtime_paths,
     )
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     session = _session(
         "session-1",
         runs=[
@@ -399,11 +424,11 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
 
     result = await tool.compact_context(agent=_agent())
-    assert result == "Compaction scheduled for the next reply in this conversation scope."
+    assert result == COMPACT_CONTEXT_SUCCESS
 
     with (
         patch(
@@ -536,14 +561,15 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
 async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Path) -> None:
     """Only the team scope should receive the forced-compaction flag."""
     config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
 
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
 
     team_agent = _agent(team_id="team-123")
@@ -553,6 +579,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
+        execution_identity=identity,
         create_session_if_missing=True,
     ) as team_context:
         assert team_context.session is not None
@@ -568,6 +595,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
+        execution_identity=identity,
     ) as reloaded_team_context:
         assert reloaded_team_context.session is not None
         team_state = read_scope_state(reloaded_team_context.session, HistoryScope(kind="team", scope_id="team-123"))
@@ -579,7 +607,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
 async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(tmp_path: Path) -> None:
     """Forced compaction clears itself when the scope has no visible runs to compact."""
     config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
     session = _session("session-1")
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(
@@ -625,7 +653,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
 async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp_path: Path) -> None:
     """Forced compaction of a single run produces a summary and clears the flag."""
     config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
     session = _session(
         "session-1",
         runs=[
@@ -680,7 +708,8 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
 async def test_compact_context_persists_pending_force_flag_across_stale_run_save(tmp_path: Path) -> None:
     """Current-run session saves should not erase a compact_context request before the next run."""
     config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     session = _session(
         "session-1",
         runs=[
@@ -694,7 +723,7 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
     live_session_state: dict[str, object] = {}
     run_context = RunContext(run_id="run-123", session_id="session-1", session_state=live_session_state)
@@ -709,7 +738,7 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
     stale_live_session.session_data = {"session_state": live_session_state}
 
     result = await tool.compact_context(agent=_agent(), run_context=run_context)
-    assert result == "Compaction scheduled for the next reply in this conversation scope."
+    assert result == COMPACT_CONTEXT_SUCCESS
     assert run_context.session_state is live_session_state
     storage.upsert_session(stale_live_session)
 
@@ -763,11 +792,12 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
     legacy_storage = create_session_storage("alpha", config, runtime_paths, execution_identity=None)
     legacy_storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="alpha")]))
 
+    identity = _execution_identity(agent_name="beta")
     tool = CompactContextTools(
         agent_name="beta",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
     agent = Agent(id="beta", model=FakeModel(id="fake-model", provider="fake"))
     agent.team_id = "team-123"
@@ -781,11 +811,12 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
+        execution_identity=identity,
     ) as team_context:
         assert team_context.session is not None
         team_state = read_scope_state(team_context.session, HistoryScope(kind="team", scope_id="team-123"))
     assert team_state.force_compact_before_next_run is True
-    assert result == "Compaction scheduled for the next reply in this conversation scope."
+    assert result == COMPACT_CONTEXT_SUCCESS
 
 
 @pytest.mark.asyncio
@@ -810,11 +841,12 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         ),
         runtime_paths,
     )
+    identity = _execution_identity()
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
     team_agent = _agent(team_id="team_123")
     with _open_scope_context(
@@ -823,6 +855,7 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
+        execution_identity=identity,
         create_session_if_missing=True,
     ) as team_context:
         assert team_context.session is not None
@@ -853,11 +886,12 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
+        execution_identity=identity,
     ) as reloaded_team_context:
         assert reloaded_team_context.session is not None
         team_state = read_scope_state(reloaded_team_context.session, HistoryScope(kind="team", scope_id="team_123"))
     assert team_state.force_compact_before_next_run is True
-    assert result == "Compaction scheduled for the next reply in this conversation scope."
+    assert result == COMPACT_CONTEXT_SUCCESS
 
 
 @pytest.mark.asyncio
@@ -889,11 +923,12 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
     )
     monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
 
+    identity = _execution_identity()
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
     team_agent = _agent(team_id="team_123")
     with _open_scope_context(
@@ -902,6 +937,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
+        execution_identity=identity,
         create_session_if_missing=True,
     ) as team_context:
         assert team_context.session is not None
@@ -932,11 +968,12 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
+        execution_identity=identity,
     ) as reloaded_team_context:
         assert reloaded_team_context.session is not None
         team_state = read_scope_state(reloaded_team_context.session, HistoryScope(kind="team", scope_id="team_123"))
     assert team_state.force_compact_before_next_run is True
-    assert result == "Compaction scheduled for the next reply in this conversation scope."
+    assert result == COMPACT_CONTEXT_SUCCESS
 
 
 @pytest.mark.asyncio
@@ -965,11 +1002,12 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
     )
     monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
 
+    identity = _execution_identity()
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=SimpleNamespace(session_id="session-1"),
+        execution_identity=identity,
     )
     with _open_scope_context(
         agent=_agent(),
@@ -977,6 +1015,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
+        execution_identity=identity,
         create_session_if_missing=True,
     ) as scope_context:
         assert scope_context.session is not None
@@ -1007,6 +1046,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
+        execution_identity=identity,
     ) as reloaded_scope_context:
         assert reloaded_scope_context.session is not None
         agent_state = read_scope_state(
@@ -1014,4 +1054,4 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
             HistoryScope(kind="agent", scope_id="test_agent"),
         )
     assert agent_state.force_compact_before_next_run is True
-    assert result == "Compaction scheduled for the next reply in this conversation scope."
+    assert result == COMPACT_CONTEXT_SUCCESS

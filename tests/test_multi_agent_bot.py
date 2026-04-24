@@ -69,7 +69,7 @@ from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionLifecycleStart, CompactionOutcome
-from mindroom.history.types import HistoryScope, PostResponseCompactionCheck
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -5378,11 +5378,9 @@ class TestAgentBot:
     ) -> None:
         """A delivered non-streaming Matrix error reply should not be a successful run outcome."""
         captured_outcomes: list[ResponseOutcome] = []
-        check = cast("PostResponseCompactionCheck", MagicMock())
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-            collector = kwargs["post_response_compaction_checks_collector"]
-            collector.append(check)
+            assert {"post" + "_response_compaction_checks_collector"}.isdisjoint(kwargs)
             return "friendly-error"
 
         async def fake_apply_post_response_effects(
@@ -5415,7 +5413,6 @@ class TestAgentBot:
 
         assert len(captured_outcomes) == 1
         assert captured_outcomes[0].run_succeeded is False
-        assert captured_outcomes[0].post_response_compaction_checks == (check,)
 
     @pytest.mark.asyncio
     async def test_generate_response_marks_streaming_model_error_unsuccessful_for_post_effects(
@@ -5425,11 +5422,9 @@ class TestAgentBot:
     ) -> None:
         """A delivered streaming Matrix error reply should not be a successful run outcome."""
         captured_outcomes: list[ResponseOutcome] = []
-        check = cast("PostResponseCompactionCheck", MagicMock())
 
         async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
-            collector = kwargs["post_response_compaction_checks_collector"]
-            collector.append(check)
+            assert {"post" + "_response_compaction_checks_collector"}.isdisjoint(kwargs)
             yield "friendly-error"
 
         async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
@@ -5473,7 +5468,6 @@ class TestAgentBot:
 
         assert len(captured_outcomes) == 1
         assert captured_outcomes[0].run_succeeded is False
-        assert captured_outcomes[0].post_response_compaction_checks == (check,)
 
     @pytest.mark.asyncio
     async def test_generate_response_runs_post_effects_after_cancellable_wrapper(
@@ -9663,13 +9657,13 @@ class TestAgentBot:
 
         with (
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
         ):
             await bot._turn_controller._enqueue_for_dispatch(event, room, source_kind="message")
 
         mock_dispatch.assert_not_awaited()
-        mock_enqueue.assert_awaited_once()
-        key, pending_event = mock_enqueue.await_args.args
+        mock_start.assert_awaited_once()
+        key, pending_event = mock_start.await_args.args
         assert key == (room.room_id, None, "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
@@ -9764,7 +9758,7 @@ class TestAgentBot:
                 "_dispatch_text_message",
                 new=AsyncMock(),
             ) as mock_dispatch,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
 
@@ -9776,8 +9770,8 @@ class TestAgentBot:
         assert signal_target.resolved_thread_id == target.resolved_thread_id
         assert mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"] is envelope
         mock_dispatch.assert_not_awaited()
-        mock_enqueue.assert_awaited_once()
-        key, pending_event = mock_enqueue.await_args.args
+        mock_start.assert_awaited_once()
+        key, pending_event = mock_start.await_args.args
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
@@ -9845,13 +9839,13 @@ class TestAgentBot:
                 new=AsyncMock(return_value=None),
             ),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
 
         mock_dispatch.assert_not_awaited()
-        mock_enqueue.assert_awaited_once()
-        _key, pending_event = mock_enqueue.await_args.args
+        mock_start.assert_awaited_once()
+        _key, pending_event = mock_start.await_args.args
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
         assert pending_event.source_kind == source_kind
@@ -9901,7 +9895,7 @@ class TestAgentBot:
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
         ):
             await bot._turn_controller._on_audio_media_message(
                 room,
@@ -9912,8 +9906,8 @@ class TestAgentBot:
         mock_reserve_waiting_human_message.assert_called_once()
         reserved_envelope = mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"]
         assert reserved_envelope.source_kind == "voice"
-        mock_enqueue.assert_awaited_once()
-        key, pending_event = mock_enqueue.await_args.args
+        mock_start.assert_awaited_once()
+        key, pending_event = mock_start.await_args.args
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
@@ -9995,7 +9989,7 @@ class TestAgentBot:
                 new=AsyncMock(return_value="$thread_root"),
             ),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
         ):
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
@@ -10004,8 +9998,8 @@ class TestAgentBot:
 
         assert handled is True
         mock_dispatch.assert_not_awaited()
-        mock_enqueue.assert_awaited_once()
-        key, pending_event = mock_enqueue.await_args.args
+        mock_start.assert_awaited_once()
+        key, pending_event = mock_start.await_args.args
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
@@ -10091,7 +10085,7 @@ class TestAgentBot:
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
         ):
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
@@ -10101,8 +10095,8 @@ class TestAgentBot:
         assert handled is True
         mock_dispatch.assert_not_awaited()
         mock_reserve_waiting_human_message.assert_called_once()
-        mock_enqueue.assert_awaited_once()
-        key, pending_event = mock_enqueue.await_args.args
+        mock_start.assert_awaited_once()
+        key, pending_event = mock_start.await_args.args
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
