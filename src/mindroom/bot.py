@@ -1235,7 +1235,7 @@ class AgentBot:
     ) -> None:
         """Clear restored-token trust and log why first-sync catch-up was unsafe."""
         limited_room_ids = joined_timeline_classification.limited_room_ids
-        self._runtime_view.mark_restored_sync_token_invalid()
+        self._runtime_view.revoke_current_thread_cache_trust()
         self._runtime_view.suppress_sync_token_persistence()
         self._clear_sync_token_state()
         if not durable_cache_available:
@@ -1269,8 +1269,8 @@ class AgentBot:
         durable_cache_available: bool,
     ) -> None:
         """Suppress future token saves after a sync response fails cache certification."""
+        self._runtime_view.revoke_current_thread_cache_trust()
         self._runtime_view.suppress_sync_token_persistence()
-        self._runtime_view.mark_restored_sync_token_invalid()
         self.logger.warning(
             "matrix_sync_token_persistence_suppressed",
             reason=self._sync_token_cache_uncertified_reason(
@@ -1350,6 +1350,15 @@ class AgentBot:
         )
         return False
 
+    def _fail_closed_cancelled_restored_first_sync(self) -> None:
+        """Prevent a restarted sync loop from trusting a skipped restored-token batch."""
+        if not self._runtime_view.restored_sync_token:
+            return
+        self._runtime_view.revoke_current_thread_cache_trust()
+        self._runtime_view.suppress_sync_token_persistence()
+        self._clear_sync_token_state()
+        self.logger.warning("matrix_sync_cache_catchup_cancelled")
+
     async def _certify_sync_response_for_token_persistence(
         self,
         response: nio.SyncResponse,
@@ -1369,8 +1378,7 @@ class AgentBot:
                 durable_cache_available=durable_cache_available,
                 validation_errors=validation_errors,
             )
-            self._log_sync_cache_errors(sync_cache_errors)
-            return self._finish_sync_cache_catchup(
+            persist_sync_token = self._finish_sync_cache_catchup(
                 first_sync_response=first_sync_response,
                 joined_timeline_classification=joined_timeline_classification,
                 sync_cache_errors=sync_cache_errors,
@@ -1378,7 +1386,12 @@ class AgentBot:
             )
         except asyncio.CancelledError:
             self._runtime_view.suppress_sync_token_persistence()
+            if first_sync_response:
+                self._fail_closed_cancelled_restored_first_sync()
             raise
+        else:
+            self._log_sync_cache_errors(sync_cache_errors)
+            return persist_sync_token
         finally:
             self._runtime_view.finish_sync_token_cache_catchup()
 

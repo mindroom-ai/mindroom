@@ -125,6 +125,11 @@ class BotRuntimeState:
         self.sync_token_thread_cache_valid_after = None
         self.sync_catchup_applied_at = None
 
+    def revoke_current_thread_cache_trust(self) -> None:
+        """Move the live thread-cache freshness boundary past an uncertified sync."""
+        self.mark_restored_sync_token_invalid()
+        self.runtime_started_at = time.time()
+
     def suppress_sync_token_persistence(self) -> None:
         """Prevent later same-runtime tokens from becoming future restored-token trust roots."""
         self.sync_token_persistence_suppressed = True

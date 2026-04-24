@@ -31,6 +31,8 @@
 - Round 6 fix: tokens certified by cold runtimes use that runtime start as the cache boundary, and later restored-token certifications carry the boundary forward.
 - Round 7 fix: disabled or unavailable durable event caches now block sync-token certification even for empty joined-room timelines.
 - Round 7 fix: once durable cache availability fails, the runtime suppresses later same-runtime token persistence until a fresh safe runtime state is established.
+- Round 8 fix: uncertified strict sync-cache certification now advances the live thread-cache freshness boundary before reporting the failure, forcing current-runtime thread rows validated before the failure to refetch.
+- Round 8 fix: parent cancellation during restored first-sync certification now clears restored-token trust, `client.next_batch`, and the saved token before re-raising, so a same-bot sync-loop restart cannot certify a skipped batch.
 
 ## Tests Run
 
@@ -144,14 +146,21 @@ uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tes
 Result: 248 passed, 1 existing Pydantic deprecation warning.
 
 ```bash
-git --no-pager diff --check origin/main
+uv run pytest tests/test_threading_error.py -k "store_failure_revokes_current_runtime_thread_cache or cancelled_restored_first_sync_clears_advanced_token_before_restart" -x -n 0 --no-cov -v
 ```
 
-Result: passed.
+Result: 2 passed, 172 deselected, 1 existing Pydantic deprecation warning.
+
+```bash
+uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py -x -n 0 --no-cov -v
+```
+
+Result: 250 passed, 1 existing Pydantic deprecation warning.
 
 ```bash
 uv sync --all-extras
-uv run pre-commit run --files src/mindroom/bot.py tests/test_threading_error.py REPORT.md
+git --no-pager diff --check
+uv run pre-commit run --files src/mindroom/bot.py src/mindroom/bot_runtime_view.py tests/test_threading_error.py REPORT.md
 ```
 
 Result: passed.
