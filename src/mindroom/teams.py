@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history import CompactionOutcome
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
@@ -1176,6 +1177,7 @@ def materialize_exact_team_members(
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
     unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact team-member set without silent fallback."""
@@ -1198,6 +1200,7 @@ def materialize_exact_team_members(
             shared_manager_lookup=shared_manager_lookup,
             on_missing_bases=_on_missing_agent_bases,
             on_unavailable_bases=unavailable_bases.update if unavailable_bases is not None else None,
+            refresh_owner=refresh_owner,
         )
         return create_agent(
             agent_name,
@@ -1212,6 +1215,7 @@ def materialize_exact_team_members(
             knowledge=knowledge,
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
+            refresh_owner=refresh_owner,
         )
 
     team_members = materialize_exact_requested_team_members(
@@ -1263,6 +1267,7 @@ def _materialize_team_members(
         request_knowledge_managers=request_knowledge_managers,
         shared_manager_lookup=_shared_manager,
         unavailable_bases=unavailable_bases,
+        refresh_owner=orchestrator.knowledge_refresh_owner,
         reason_prefix=reason_prefix,
     )
 

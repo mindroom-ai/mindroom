@@ -51,11 +51,15 @@ class ThreadReadPolicy:
     def _coordinator(self) -> EventCacheWriteCoordinator | None:
         return self.runtime.event_cache_write_coordinator
 
-    async def _wait_for_pending_room_cache_updates(self, room_id: str) -> None:
+    async def _wait_for_pending_thread_cache_updates(self, room_id: str, thread_id: str) -> None:
         coordinator = self._coordinator()
         if coordinator is None:
             return
-        await coordinator.wait_for_room_idle(room_id)
+        await coordinator.wait_for_thread_idle(
+            room_id,
+            thread_id,
+            ignore_cancelled_room_fences=True,
+        )
 
     def _full_history_result(
         self,
@@ -89,10 +93,12 @@ class ThreadReadPolicy:
             return await load()
         return typing.cast(
             "ThreadHistoryResult",
-            await coordinator.run_room_update(
+            await coordinator.run_thread_update(
                 room_id,
+                thread_id,
                 load,
                 name=name,
+                ignore_cancelled_room_fences=True,
             ),
         )
 
@@ -104,8 +110,8 @@ class ThreadReadPolicy:
         full_history: bool,
         dispatch_safe: bool,
     ) -> ThreadHistoryResult:
-        """Resolve one thread read through the shared barrier and fetch selection path."""
-        await self._wait_for_pending_room_cache_updates(room_id)
+        """Resolve one thread read through the same-thread barrier and fetch selection path."""
+        await self._wait_for_pending_thread_cache_updates(room_id, thread_id)
         if full_history and dispatch_safe:
             return await self._run_thread_read(
                 room_id,

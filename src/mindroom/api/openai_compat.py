@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.config.main import Config
+    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
@@ -648,6 +649,15 @@ async def _resolve_auto_route(
     return routed
 
 
+def _request_knowledge_refresh_owner(request: Request) -> KnowledgeRefreshOwner | None:
+    """Return the app-scoped background knowledge refresh owner, if configured."""
+    try:
+        owner = request.app.state.knowledge_refresh_owner
+    except AttributeError:
+        return None
+    return cast("KnowledgeRefreshOwner | None", owner)
+
+
 def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]:
     """Build a missing-knowledge callback for one agent name."""
     return lambda missing_base_ids: logger.warning(
@@ -787,6 +797,8 @@ async def chat_completions(
         thread_id=None,
         resolved_thread_id=None,
     )
+    knowledge_refresh_owner = _request_knowledge_refresh_owner(request)
+
     # Team execution path
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
         team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
@@ -801,6 +813,7 @@ async def chat_completions(
                 thread_history,
                 req.user,
                 execution_identity=execution_identity,
+                refresh_owner=knowledge_refresh_owner,
             )
         else:
             with tool_execution_identity(execution_identity):
@@ -814,6 +827,7 @@ async def chat_completions(
                     thread_history,
                     req.user,
                     execution_identity=execution_identity,
+                    refresh_owner=knowledge_refresh_owner,
                 )
     else:
         # Resolve knowledge base for this agent
@@ -825,6 +839,7 @@ async def chat_completions(
                 runtime_paths,
                 on_missing_bases=_log_missing_knowledge_bases(agent_name),
                 on_unavailable_bases=unavailable_bases.update,
+                refresh_owner=knowledge_refresh_owner,
             )
         except Exception:
             logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
@@ -843,6 +858,7 @@ async def chat_completions(
                 req.user,
                 knowledge,
                 execution_identity=execution_identity,
+                refresh_owner=knowledge_refresh_owner,
             )
         else:
             with tool_execution_identity(execution_identity):
@@ -856,6 +872,7 @@ async def chat_completions(
                     req.user,
                     knowledge,
                     execution_identity=execution_identity,
+                    refresh_owner=knowledge_refresh_owner,
                 )
 
     return response
@@ -876,6 +893,7 @@ async def _non_stream_completion(
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
     response_text = await ai_response(
@@ -892,6 +910,7 @@ async def _non_stream_completion(
         include_openai_compat_guidance=True,
         active_event_ids=set(),
         execution_identity=execution_identity,
+        refresh_owner=refresh_owner,
     )
 
     # Detect error responses from ai_response()
@@ -1062,6 +1081,7 @@ async def _stream_completion(  # noqa: C901
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     stream = cast(
@@ -1082,6 +1102,7 @@ async def _stream_completion(  # noqa: C901
                 include_openai_compat_guidance=True,
                 active_event_ids=set(),
                 execution_identity=execution_identity,
+                refresh_owner=refresh_owner,
             ),
         ),
     )
@@ -1159,6 +1180,7 @@ def _build_team(
     scope_context: ScopeSessionContext | None = None,
     session_id: str | None = None,
     unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> tuple[list[Agent], Team, TeamMode]:
     """Create member agents and build one agno.Team for a configured team.
 
@@ -1178,6 +1200,7 @@ def _build_team(
         session_id=session_id,
         include_openai_compat_guidance=True,
         unavailable_bases=unavailable_bases,
+        refresh_owner=refresh_owner,
         reason_prefix=f"Team '{team_name}'",
     )
     try:
@@ -1265,6 +1288,7 @@ async def _non_stream_team_completion(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
     agents: list[Agent] = []
@@ -1290,6 +1314,7 @@ async def _non_stream_team_completion(
                     scope_context,
                     session_id,
                     unavailable_bases,
+                    refresh_owner,
                 )
             except ValueError as e:
                 return _error_response(500, str(e), error_type="server_error")
@@ -1368,6 +1393,7 @@ async def _stream_team_completion(  # noqa: C901
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     stack = ExitStack()
@@ -1408,6 +1434,7 @@ async def _stream_team_completion(  # noqa: C901
                     scope_context,
                     session_id,
                     unavailable_bases,
+                    refresh_owner,
                 )
         except ValueError as e:
             await _cleanup()

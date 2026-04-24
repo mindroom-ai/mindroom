@@ -123,6 +123,21 @@ type MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
+_VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
+
+
+def _append_knowledge_availability_enrichment(
+    system_enrichment_items: Sequence[EnrichmentItem],
+    unavailable_bases: Mapping[str, KnowledgeAvailability],
+) -> tuple[EnrichmentItem, ...]:
+    """Append one volatile knowledge-availability notice when needed."""
+    notice = format_knowledge_availability_notice(unavailable_bases)
+    if notice is None:
+        return tuple(system_enrichment_items)
+    return (
+        *system_enrichment_items,
+        EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
+    )
 
 
 def _merge_response_extra_content(
@@ -151,8 +166,31 @@ def _split_delivery_tool_trace(
 
 
 def _strip_visible_tool_markers(text: str) -> str:
-    """Remove Matrix-visible tool marker lines from streamed text before replay persistence."""
-    filtered_lines = [line for line in text.splitlines() if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)]
+    """Remove Matrix-visible tool markers from streamed text before replay persistence."""
+    lines = text.splitlines()
+    filtered_lines: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line):
+            filtered_lines.append(line)
+            index += 1
+            continue
+
+        index += 1
+        spacer_lines: list[str] = []
+        while index < len(lines) and not lines[index].strip():
+            spacer_lines.append(lines[index])
+            index += 1
+
+        if index < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[index]):
+            filtered_lines.extend(spacer_lines)
+            index += 1
+            if index < len(lines) and not lines[index].strip():
+                index += 1
+            continue
+
+        filtered_lines.extend(spacer_lines)
     return "\n".join(filtered_lines).rstrip()
 
 
@@ -1819,13 +1857,10 @@ class ResponseRunner:
                 request_knowledge_managers=runtime.request_knowledge_managers,
                 on_unavailable_bases=unavailable_bases.update,
             )
-            system_enrichment_items = request.system_enrichment_items
-            notice = format_knowledge_availability_notice(unavailable_bases)
-            if notice is not None:
-                system_enrichment_items = (
-                    *system_enrichment_items,
-                    EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
-                )
+            system_enrichment_items = _append_knowledge_availability_enrichment(
+                request.system_enrichment_items,
+                unavailable_bases,
+            )
             matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
             return await ai_response(
                 agent_name=self.deps.agent_name,
@@ -1849,6 +1884,11 @@ class ResponseRunner:
                 run_metadata_collector=run_metadata_content,
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 compaction_outcomes_collector=compaction_outcomes,
+                refresh_owner=(
+                    self.deps.runtime.orchestrator.knowledge_refresh_owner
+                    if self.deps.runtime.orchestrator is not None
+                    else None
+                ),
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
                 turn_recorder=turn_recorder,
@@ -1902,13 +1942,10 @@ class ResponseRunner:
             request_knowledge_managers=runtime.request_knowledge_managers,
             on_unavailable_bases=unavailable_bases.update,
         )
-        system_enrichment_items = request.system_enrichment_items
-        notice = format_knowledge_availability_notice(unavailable_bases)
-        if notice is not None:
-            system_enrichment_items = (
-                *system_enrichment_items,
-                EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
-            )
+        system_enrichment_items = _append_knowledge_availability_enrichment(
+            request.system_enrichment_items,
+            unavailable_bases,
+        )
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         response_stream = stream_agent_response(
             agent_name=self.deps.agent_name,
@@ -1931,6 +1968,11 @@ class ResponseRunner:
             run_metadata_collector=run_metadata_content,
             execution_identity=runtime.tool_dispatch.execution_identity,
             compaction_outcomes_collector=compaction_outcomes,
+            refresh_owner=(
+                self.deps.runtime.orchestrator.knowledge_refresh_owner
+                if self.deps.runtime.orchestrator is not None
+                else None
+            ),
             matrix_run_metadata=matrix_run_metadata,
             system_enrichment_items=system_enrichment_items,
             turn_recorder=turn_recorder,

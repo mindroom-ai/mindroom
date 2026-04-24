@@ -32,7 +32,12 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
 )
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalizeStreamedResponseRequest
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    DeliveryGatewayDeps,
+    DeliveryResult,
+    FinalizeStreamedResponseRequest,
+)
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
@@ -40,6 +45,7 @@ from mindroom.history.interrupted_replay import (
     render_interrupted_replay_content,
 )
 from mindroom.hooks import MessageEnvelope
+from mindroom.knowledge.shared_managers import _shared_knowledge_manager_init_lock
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
@@ -70,6 +76,7 @@ from mindroom.streaming_delivery import (
     _shutdown_stream_delivery,
     _StreamDeliveryShutdownTimeoutError,
 )
+from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import (
@@ -114,6 +121,48 @@ def _make_matrix_client_mock() -> AsyncMock:
     client = make_matrix_client_mock(user_id="@mindroom_streaming:localhost")
     client.room_get_event_relations = MagicMock(return_value=_aiter())
     return client
+
+
+@asynccontextmanager
+async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+    yield
+
+
+def _make_bot_with_shared_knowledge(
+    *,
+    tmp_path: Path,
+    agent: AgentMatrixUser,
+    base_id: str,
+) -> AgentBot:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(
+                    display_name="HelperAgent",
+                    rooms=["!test:localhost"],
+                    knowledge_bases=[base_id],
+                ),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+            knowledge_bases={base_id: {"path": f"./{base_id}"}},
+        ),
+        runtime_paths,
+    )
+    bot = AgentBot(
+        agent,
+        tmp_path,
+        rooms=["!test:localhost"],
+        enable_streaming=True,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_cache_support(bot)
+    bot.client = _make_matrix_client_mock()
+    return bot
 
 
 async def _consume_streaming_chunks_for_test(
@@ -2073,6 +2122,149 @@ class TestStreamingBehavior:
         assert isinstance(content["m.relates_to"], dict)
         assert content["m.relates_to"]["event_id"] == "$thread:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply:localhost"
+
+    @pytest.mark.asyncio
+    async def test_chat_turn_does_not_block_on_repo_change(
+        self,
+        mock_helper_agent: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A held shared-init lock must not block one streamed Matrix turn."""
+        base_id = "repo_change_docs"
+        bot = _make_bot_with_shared_knowledge(
+            tmp_path=tmp_path,
+            agent=mock_helper_agent,
+            base_id=base_id,
+        )
+        mock_send_response = MagicMock()
+        mock_send_response.__class__ = nio.RoomSendResponse
+        mock_send_response.event_id = "$thinking"
+        bot.client.room_send.return_value = mock_send_response
+        pipeline_timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
+        lock = _shared_knowledge_manager_init_lock(base_id)
+        await lock.acquire()
+
+        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+            system_enrichment_items = kwargs["system_enrichment_items"]
+            assert len(system_enrichment_items) == 1
+            assert (
+                f"Knowledge base `{base_id}` is initializing and unavailable for semantic search this turn."
+                in system_enrichment_items[0].text
+            )
+            yield "stream chunk"
+
+        async def fake_send_streaming_response(*args: object, **_kwargs: object) -> tuple[str, str]:
+            response_stream = args[7]
+            chunks = [str(chunk) async for chunk in response_stream]
+            return "$response", "".join(chunks)
+
+        try:
+            with (
+                patch(
+                    "mindroom.delivery_gateway.send_streaming_response",
+                    new=AsyncMock(side_effect=fake_send_streaming_response),
+                ),
+                patch_response_runner_module(
+                    should_use_streaming=AsyncMock(return_value=True),
+                    stream_agent_response=fake_stream_agent_response,
+                    typing_indicator=_noop_typing_indicator,
+                ),
+            ):
+                event_id = await asyncio.wait_for(
+                    bot._response_runner.generate_response(
+                        ResponseRequest(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event",
+                            thread_id=None,
+                            thread_history=[],
+                            prompt="Please check the docs",
+                            user_id="@user:localhost",
+                            pipeline_timing=pipeline_timing,
+                        ),
+                    ),
+                    timeout=0.5,
+                )
+        finally:
+            if lock.locked():
+                lock.release()
+
+        assert event_id == "$response"
+        assert "placeholder_sent" in pipeline_timing.marks
+        assert "streaming_complete" in pipeline_timing.marks
+        assert pipeline_timing.marks["placeholder_sent"] <= pipeline_timing.marks["streaming_complete"]
+
+    @pytest.mark.asyncio
+    async def test_fresh_turn_does_zero_freshness_work_on_request_path(
+        self,
+        mock_helper_agent: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A live turn should not call knowledge freshness lifecycle functions."""
+        bot = _make_bot_with_shared_knowledge(
+            tmp_path=tmp_path,
+            agent=mock_helper_agent,
+            base_id="fresh_turn_docs",
+        )
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            system_enrichment_items = kwargs["system_enrichment_items"]
+            assert len(system_enrichment_items) == 1
+            assert "Knowledge base `fresh_turn_docs` is initializing" in system_enrichment_items[0].text
+            return "handled"
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
+                new=AsyncMock(
+                    return_value=DeliveryResult(
+                        event_id="$response",
+                        response_text="handled",
+                        delivery_kind="sent",
+                    ),
+                ),
+            ),
+            patch(
+                "mindroom.knowledge.shared_managers.initialize_manager_for_startup",
+                new=AsyncMock(),
+            ) as initialize_manager_for_startup,
+            patch(
+                "mindroom.knowledge.manager.KnowledgeManager.finish_pending_background_git_startup",
+                new=AsyncMock(),
+            ) as finish_pending_background_git_startup,
+            patch(
+                "mindroom.knowledge.manager.KnowledgeManager.sync_git_repository",
+                new=AsyncMock(),
+            ) as sync_git_repository,
+            patch(
+                "mindroom.knowledge.manager.KnowledgeManager.sync_indexed_files",
+                new=AsyncMock(),
+            ) as sync_indexed_files,
+            patch(
+                "mindroom.knowledge.manager.KnowledgeManager.reindex_all",
+                new=AsyncMock(),
+            ) as reindex_all,
+            patch_response_runner_module(
+                ai_response=AsyncMock(side_effect=fake_ai_response),
+                typing_indicator=_noop_typing_indicator,
+            ),
+        ):
+            delivery = await bot._response_runner.process_and_respond(
+                ResponseRequest(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id=None,
+                    thread_history=[],
+                    prompt="Please check the docs",
+                    user_id="@user:localhost",
+                ),
+            )
+
+        assert delivery.event_id == "$response"
+        assert initialize_manager_for_startup.await_count == 0
+        assert finish_pending_background_git_startup.await_count == 0
+        assert sync_git_repository.await_count == 0
+        assert sync_indexed_files.await_count == 0
+        assert reindex_all.await_count == 0
 
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
