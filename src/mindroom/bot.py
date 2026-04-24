@@ -1571,13 +1571,23 @@ class AgentBot:
         sender_can_resolve = self._sender_can_resolve_tool_approval(room, sender_id)
         if not sender_can_resolve:
             return False
-        return await approval_manager.handle_response_event(
+        result = await approval_manager.handle_response_event(
             room_id=room.room_id,
             sender_id=sender_id,
             card_event_id=approval_event_id,
             status=status,
             reason=reason.strip() if isinstance(reason, str) and reason.strip() else None,
         )
+        if result.error_reason is not None and self._should_send_tool_approval_notice(room_id=room.room_id):
+            orchestrator = self.orchestrator
+            if orchestrator is not None:
+                await orchestrator._send_approval_notice(
+                    room_id=room.room_id,
+                    approval_event_id=approval_event_id,
+                    thread_id=result.thread_id,
+                    reason=result.error_reason,
+                )
+        return result.handled
 
     def _should_send_tool_approval_notice(
         self,

@@ -288,6 +288,7 @@ class MultiAgentOrchestrator:
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
+    _approval_cache_write_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -451,7 +452,7 @@ class MultiAgentOrchestrator:
                     agent_name=bot.agent_name,
                 )
                 return None
-            await self._cache_approval_event_now(bot, room_id, str(response.event_id))
+            self._track_approval_cache_write(bot, room_id, str(response.event_id))
             return SentApprovalEvent(event_id=str(response.event_id))
         logger.warning(
             "Failed to send approval Matrix event",
@@ -616,6 +617,23 @@ class MultiAgentOrchestrator:
             return False
         await self._cache_approval_event_now(bot, room_id, str(response.event_id))
         return True
+
+    def _track_approval_cache_write(self, bot: AgentBot | TeamBot, room_id: str, event_id: str) -> None:
+        task = asyncio.create_task(
+            self._cache_approval_event_now(bot, room_id, event_id),
+            name=f"approval_cache_write_{event_id}",
+        )
+        self._approval_cache_write_tasks.add(task)
+        task.add_done_callback(self._finish_approval_cache_write)
+
+    def _finish_approval_cache_write(self, task: asyncio.Task[None]) -> None:
+        self._approval_cache_write_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception as exc:
+            logger.warning("approval_cache_write_failed", error=str(exc))
 
     async def _cache_approval_event_now(
         self,

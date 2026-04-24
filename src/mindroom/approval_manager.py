@@ -286,6 +286,8 @@ class ApprovalManager:
         self._transport_sender = transport_sender
         self._live_lock = threading.Lock()
         self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
+        self._resolving_card_event_ids: set[str] = set()
+        self._resolved_card_event_ids: set[str] = set()
         _purge_legacy_approval_files(runtime_paths.storage_root)
 
     async def request_approval(  # noqa: PLR0911
@@ -409,16 +411,39 @@ class ApprovalManager:
             if pending is not None:
                 return pending
 
+        cached_pending: PendingApproval | None = None
         for event in await self._scan_cached_room_cards(room_id, since_ts_ms=_lookback_cutoff_ms(24), limit=500):
             pending = await self._pending_from_event_if_matching(event, room_id=room_id, approval_id=approval_id)
             if pending is not None:
-                return pending
+                cached_pending = pending
+                break
 
-        for event in await self._scan_room_messages_for_cards(room_id, since_ts_ms=_lookback_cutoff_ms(24), limit=500):
-            pending = await self._pending_from_event_if_matching(event, room_id=room_id, approval_id=approval_id)
-            if pending is not None:
-                return pending
-        return None
+        history_events = await self._scan_room_messages_for_approval_events(
+            room_id,
+            since_ts_ms=_lookback_cutoff_ms(24),
+            limit=500,
+        )
+        history_latest_edits = _latest_replacement_edits_by_card_event_id(history_events)
+        history_matched = False
+        for event in history_events:
+            if not _is_original_approval_card(event):
+                continue
+            card_event_id = str(event.get("event_id", ""))
+            history_pending = await self._pending_from_event_if_matching(
+                event,
+                room_id=room_id,
+                approval_id=approval_id,
+                latest_edit=history_latest_edits.get(card_event_id),
+                latest_edit_known=card_event_id in history_latest_edits,
+            )
+            if history_pending is not None:
+                return history_pending
+            with suppress(ValueError, TypeError):
+                parsed = PendingApproval.from_card_event(event, room_id=room_id)
+                history_matched = parsed.approval_id == approval_id or history_matched
+        if history_matched:
+            return None
+        return cached_pending
 
     async def auto_deny_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
         """Auto-deny unresolved approval cards after startup using Matrix as source of truth."""
@@ -435,7 +460,7 @@ class ApprovalManager:
             for card_event in candidates:
                 try:
                     pending = PendingApproval.from_card_event(card_event, room_id=room_id)
-                except ValueError:
+                except (TypeError, ValueError):
                     continue
                 if pending.card_sender_id != transport_sender:
                     continue
@@ -461,12 +486,12 @@ class ApprovalManager:
         card_event_id: str,
         status: ResolutionStatus,
         reason: str | None,
-    ) -> bool:
+    ) -> AnchoredApprovalActionResult:
         """Resolve one typed approval response parsed by Matrix event dispatch."""
         pending = await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
         if pending is None or pending.approver_user_id != sender_id:
-            return False
-        result = await self._resolve_card(
+            return AnchoredApprovalActionResult(handled=False)
+        return await self._resolve_card(
             card_event_id=card_event_id,
             room_id=room_id,
             status=status,
@@ -474,7 +499,6 @@ class ApprovalManager:
             resolved_by=sender_id,
             pending=pending,
         )
-        return result.handled
 
     def _configure_transport(
         self,
@@ -537,31 +561,46 @@ class ApprovalManager:
         pending = pending or await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
         if pending is None:
             return AnchoredApprovalActionResult(handled=False)
-        resolved_status, resolved_reason = self._normalized_resolution_request(pending, status=status, reason=reason)
-        delivered = await self._emit_resolution(
-            pending,
-            status=resolved_status,
-            reason=resolved_reason,
-            resolved_by=resolved_by,
-        )
-        if not delivered:
-            fail_closed_decision = self._new_decision(
-                status="denied",
-                reason=_DEFAULT_SEND_FAILURE_REASON,
+        if not self._claim_resolution(card_event_id):
+            return AnchoredApprovalActionResult(handled=False, thread_id=pending.thread_id)
+        claim_released = False
+        try:
+            resolved_status, resolved_reason = self._normalized_resolution_request(
+                pending,
+                status=status,
+                reason=reason,
+            )
+            delivered = await self._emit_resolution(
+                pending,
+                status=resolved_status,
+                reason=resolved_reason,
                 resolved_by=resolved_by,
             )
-            self._complete_waiter(card_event_id, fail_closed_decision)
-            return AnchoredApprovalActionResult(handled=True)
+            if not delivered:
+                fail_closed_decision = self._new_decision(
+                    status="denied",
+                    reason=_DEFAULT_SEND_FAILURE_REASON,
+                    resolved_by=resolved_by,
+                )
+                self._complete_waiter(card_event_id, fail_closed_decision)
+                self._release_resolution_claim(card_event_id, resolved=False)
+                claim_released = True
+                return AnchoredApprovalActionResult(handled=True)
 
-        decision = self._new_decision(status=resolved_status, reason=resolved_reason, resolved_by=resolved_by)
-        self._complete_waiter(card_event_id, decision)
-        return AnchoredApprovalActionResult(
-            handled=True,
-            error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON
-            if resolved_reason == _DEFAULT_TRUNCATED_APPROVAL_REASON
-            else None,
-            thread_id=pending.thread_id,
-        )
+            decision = self._new_decision(status=resolved_status, reason=resolved_reason, resolved_by=resolved_by)
+            self._complete_waiter(card_event_id, decision)
+            self._release_resolution_claim(card_event_id, resolved=True)
+            claim_released = True
+            return AnchoredApprovalActionResult(
+                handled=True,
+                error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON
+                if resolved_reason == _DEFAULT_TRUNCATED_APPROVAL_REASON
+                else None,
+                thread_id=pending.thread_id,
+            )
+        finally:
+            if not claim_released:
+                self._release_resolution_claim(card_event_id, resolved=False)
 
     async def _emit_resolution(
         self,
@@ -601,7 +640,7 @@ class ApprovalManager:
             return None
         try:
             pending = PendingApproval.from_card_event(card_event, room_id=room_id)
-        except ValueError:
+        except (TypeError, ValueError):
             return None
         latest_edit = await self._latest_edit(room_id=room_id, card_event_id=card_event_id)
         if pending.latest_status(latest_edit) != "pending":
@@ -643,7 +682,7 @@ class ApprovalManager:
         )
         return [event for event in events if _is_original_approval_card(event)]
 
-    async def _scan_room_messages_for_cards(
+    async def _scan_room_messages_for_approval_events(
         self,
         room_id: str,
         *,
@@ -652,7 +691,16 @@ class ApprovalManager:
     ) -> list[dict[str, Any]]:
         if self._room_event_scanner is None:
             return []
-        events = await self._room_event_scanner(room_id, since_ts_ms, limit)
+        return await self._room_event_scanner(room_id, since_ts_ms, limit)
+
+    async def _scan_room_messages_for_cards(
+        self,
+        room_id: str,
+        *,
+        since_ts_ms: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        events = await self._scan_room_messages_for_approval_events(room_id, since_ts_ms=since_ts_ms, limit=limit)
         return [event for event in events if _is_original_approval_card(event)]
 
     async def _shutdown(self, *, reason: str) -> None:
@@ -670,6 +718,7 @@ class ApprovalManager:
         with self._live_lock:
             waiters = list(self._pending_by_card_event.values())
             self._pending_by_card_event.clear()
+            self._resolving_card_event_ids.clear()
         for waiter in waiters:
             self._complete_waiter(
                 waiter.card_event_id,
@@ -693,20 +742,41 @@ class ApprovalManager:
         except InvalidStateError:
             return
 
+    def _claim_resolution(self, card_event_id: str) -> bool:
+        with self._live_lock:
+            waiter = self._pending_by_card_event.get(card_event_id)
+            if (
+                card_event_id in self._resolving_card_event_ids
+                or card_event_id in self._resolved_card_event_ids
+                or (waiter is not None and waiter.future.done())
+            ):
+                return False
+            self._resolving_card_event_ids.add(card_event_id)
+            return True
+
+    def _release_resolution_claim(self, card_event_id: str, *, resolved: bool) -> None:
+        with self._live_lock:
+            self._resolving_card_event_ids.discard(card_event_id)
+            if resolved:
+                self._resolved_card_event_ids.add(card_event_id)
+
     async def _pending_from_event_if_matching(
         self,
         event: dict[str, Any],
         *,
         room_id: str,
         approval_id: str,
+        latest_edit: dict[str, Any] | None = None,
+        latest_edit_known: bool = False,
     ) -> PendingApproval | None:
         try:
             pending = PendingApproval.from_card_event(event, room_id=room_id)
-        except ValueError:
+        except (TypeError, ValueError):
             return None
         if pending.approval_id != approval_id:
             return None
-        latest_edit = await self._latest_edit(room_id=room_id, card_event_id=pending.card_event_id)
+        if not latest_edit_known:
+            latest_edit = await self._latest_edit(room_id=room_id, card_event_id=pending.card_event_id)
         if pending.latest_status(latest_edit) != "pending":
             return None
         return pending
@@ -888,6 +958,31 @@ def _is_original_approval_card(event: dict[str, Any]) -> bool:
         return False
     content = event.get("content")
     return isinstance(content, dict) and not _is_replace_content(content)
+
+
+def _latest_replacement_edits_by_card_event_id(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    latest_edits: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("type") != "io.mindroom.tool_approval":
+            continue
+        content = event.get("content")
+        if not isinstance(content, dict):
+            continue
+        relates_to = content.get("m.relates_to")
+        if not isinstance(relates_to, dict) or relates_to.get("rel_type") != "m.replace":
+            continue
+        card_event_id = relates_to.get("event_id")
+        if not isinstance(card_event_id, str) or not card_event_id:
+            continue
+        current = latest_edits.get(card_event_id)
+        if current is None or _event_timestamp_ms(event) >= _event_timestamp_ms(current):
+            latest_edits[card_event_id] = event
+    return latest_edits
+
+
+def _event_timestamp_ms(event: dict[str, Any]) -> int:
+    timestamp = event.get("origin_server_ts")
+    return timestamp if isinstance(timestamp, int) and not isinstance(timestamp, bool) else 0
 
 
 def _lookback_cutoff_ms(lookback_hours: int) -> int:
