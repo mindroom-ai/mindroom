@@ -295,6 +295,7 @@ class ApprovalManager:
         self._resolving_card_event_ids: set[str] = set()
         self._resolved_card_event_ids: set[str] = set()
         self._cancelled_card_event_ids: set[str] = set()
+        self._post_cancel_cleanup_tasks: set[asyncio.Task[None]] = set()
         _purge_legacy_approval_files(runtime_paths.storage_root)
 
     async def request_approval(  # noqa: PLR0911
@@ -410,7 +411,17 @@ class ApprovalManager:
 
         cached_pending: PendingApproval | None = None
         for event in await self._scan_cached_room_cards(room_id, since_ts_ms=_lookback_cutoff_ms(24), limit=500):
-            pending = await self._pending_from_event_if_matching(event, room_id=room_id, approval_id=approval_id)
+            event_id = event.get("event_id")
+            latest_edit = (
+                await self._latest_edit(room_id=room_id, card_event_id=event_id) if isinstance(event_id, str) else None
+            )
+            pending = await self._pending_from_event_if_matching(
+                event,
+                room_id=room_id,
+                approval_id=approval_id,
+                latest_edit=latest_edit,
+                latest_edit_known=True,
+            )
             if pending is not None:
                 cached_pending = pending
                 break
@@ -472,12 +483,17 @@ class ApprovalManager:
                 event_id = card_event.get("event_id")
                 if isinstance(event_id, str) and event_id:
                     candidates_by_event_id.setdefault(event_id, card_event)
-            for card_event in candidates_by_event_id.values():
+            cached_event_ids = {
+                event_id
+                for event_id in (card_event.get("event_id") for card_event in cached_candidates)
+                if isinstance(event_id, str) and event_id
+            }
+            for event_id, card_event in candidates_by_event_id.items():
                 still_pending = await self._startup_pending_candidate(
                     card_event,
                     room_id=room_id,
                     transport_sender=transport_sender,
-                    history_scan_failed=history_scan_failed,
+                    history_scan_failed=history_scan_failed and event_id not in cached_event_ids,
                 )
                 if still_pending is None:
                     continue
@@ -593,20 +609,17 @@ class ApprovalManager:
         try:
             sent_event = await asyncio.shield(send_task)
         except asyncio.CancelledError:
-            sent_event = await self._sent_event_after_send_cancellation(send_task)
-            if sent_event is not None:
-                waiter = self._bind_live_waiter(
+            cleanup_task = asyncio.create_task(
+                self._cleanup_cancelled_send_when_event_arrives(
+                    send_task=send_task,
                     room_id=room_id,
                     content=content,
                     requested_at=requested_at,
                     approval_id=approval_id,
-                    sent_event=sent_event,
-                )
-                try:
-                    await self._settle_bound_waiter_as_cancelled(waiter)
-                finally:
-                    with self._live_lock:
-                        self._pending_by_card_event.pop(waiter.card_event_id, None)
+                ),
+            )
+            self._post_cancel_cleanup_tasks.add(cleanup_task)
+            cleanup_task.add_done_callback(self._post_cancel_cleanup_tasks.discard)
             raise
 
         if sent_event is None:
@@ -619,20 +632,37 @@ class ApprovalManager:
             sent_event=sent_event,
         )
 
-    async def _sent_event_after_send_cancellation(
+    async def _cleanup_cancelled_send_when_event_arrives(
         self,
+        *,
         send_task: asyncio.Future[SentApprovalEvent | None],
-    ) -> SentApprovalEvent | None:
+        room_id: str,
+        content: dict[str, Any],
+        requested_at: datetime,
+        approval_id: str,
+    ) -> None:
         try:
-            return await asyncio.wait_for(asyncio.shield(send_task), timeout=30.0)
-        except TimeoutError:
-            logger.warning("Cancelled approval send did not return an event id before cleanup timeout")
-            return None
+            sent_event = await asyncio.shield(send_task)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning("Cancelled approval send failed before returning an event id", exc_info=True)
-            return None
+            return
+        if sent_event is None:
+            return
+
+        waiter = self._bind_live_waiter(
+            room_id=room_id,
+            content=content,
+            requested_at=requested_at,
+            approval_id=approval_id,
+            sent_event=sent_event,
+        )
+        try:
+            await self._settle_bound_waiter_as_cancelled(waiter)
+        finally:
+            with self._live_lock:
+                self._pending_by_card_event.pop(waiter.card_event_id, None)
 
     def _bind_live_waiter(
         self,
