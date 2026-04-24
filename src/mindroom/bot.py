@@ -1602,16 +1602,19 @@ class AgentBot:
             status=status,
             reason=reason.strip() if isinstance(reason, str) and reason.strip() else None,
         )
+        notice_event_id = approval_event_id or result.card_event_id
         if (
-            approval_event_id is not None
+            notice_event_id is not None
             and result.error_reason is not None
-            and self._should_send_tool_approval_notice(room_id=room.room_id)
+            and self._should_send_tool_approval_notice(
+                room_id=room.room_id,
+            )
         ):
             orchestrator = self.orchestrator
             if orchestrator is not None:
                 await orchestrator._send_approval_notice(
                     room_id=room.room_id,
-                    approval_event_id=approval_event_id,
+                    approval_event_id=notice_event_id,
                     thread_id=result.thread_id,
                     reason=result.error_reason,
                 )

@@ -517,16 +517,18 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
 
 
 @pytest.mark.asyncio
-async def test_request_approval_cancel_during_click_resolution_emits_one_terminal_edit(tmp_path: Path) -> None:
+async def test_request_approval_cancel_during_click_resolution_leaves_expired_terminal_edit(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     edit_started = asyncio.Event()
     release_edit = asyncio.Event()
     edit_count = 0
+    edits: list[dict[str, Any]] = []
 
-    async def editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
+    async def editor(_room_id: str, _event_id: str, content: dict[str, Any]) -> bool:
         nonlocal edit_count
         edit_count += 1
+        edits.append(content)
         if edit_count == 1:
             edit_started.set()
             await release_edit.wait()
@@ -563,7 +565,62 @@ async def test_request_approval_cancel_during_click_resolution_emits_one_termina
     click_result = await click_task
 
     assert click_result.resolved is True
-    assert edit_count == 1
+    assert edit_count == 2
+    assert edits[-1]["status"] == "expired"
+    assert edits[-1]["resolution_reason"] == "Tool approval request was cancelled."
+
+
+@pytest.mark.asyncio
+async def test_request_approval_cancel_during_click_resolution_emits_expired_not_approved(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    release_edit = asyncio.Event()
+    edits: list[dict[str, Any]] = []
+
+    async def editor(_room_id: str, _event_id: str, content: dict[str, Any]) -> bool:
+        edits.append(content)
+        await release_edit.wait()
+        return True
+
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender)
+    click_task = asyncio.create_task(
+        store.handle_response_event(
+            room_id="!room:localhost",
+            sender_id="@user:localhost",
+            card_event_id=pending.card_event_id,
+            status="approved",
+            reason=None,
+        ),
+    )
+    async with asyncio.timeout(1):
+        while True:
+            with store._live_lock:
+                resolving = pending.card_event_id in store._resolving_card_event_ids
+            if resolving:
+                break
+            await asyncio.sleep(0)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    release_edit.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    click_result = await click_task
+
+    assert click_result.resolved is True
+    assert len(edits) == 1
+    assert edits[0]["status"] == "expired"
+    assert edits[0]["resolution_reason"] == "Tool approval request was cancelled."
 
 
 @pytest.mark.asyncio
@@ -953,7 +1010,9 @@ async def test_auto_deny_pending_on_startup_merges_cached_and_history_cards(tmp_
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_processes_cached_cards_when_history_scan_fails(tmp_path: Path) -> None:
+async def test_auto_deny_pending_on_startup_does_not_process_cached_cards_when_history_scan_fails(
+    tmp_path: Path,
+) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
@@ -967,12 +1026,28 @@ async def test_auto_deny_pending_on_startup_processes_cached_cards_when_history_
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 1
+    assert await store.auto_deny_pending_on_startup() == 0
     scanner.assert_awaited()
-    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
-    replacement = editor.await_args.args[2]
-    assert replacement["status"] == "denied"
-    assert replacement["resolution_reason"] == "Bot restarted before approval — original request was cancelled."
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_deny_pending_on_startup_skips_cached_cards_when_history_scan_fails(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    await cache.store_event("$approval", "!room:localhost", _approval_card())
+    editor = AsyncMock(return_value=True)
+    scanner = AsyncMock(side_effect=RuntimeError("network unavailable"))
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        room_event_scanner=scanner,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.auto_deny_pending_on_startup() == 0
+    editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio

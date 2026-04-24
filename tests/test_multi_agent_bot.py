@@ -503,6 +503,7 @@ async def _start_live_approval(
     *,
     approver_user_id: str = "@user:localhost",
     editor: AsyncMock | None = None,
+    arguments: dict[str, Any] | None = None,
 ) -> tuple[ApprovalManager, PendingApproval, asyncio.Task[Any], AsyncMock]:
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     approval_editor = editor or AsyncMock(return_value=True)
@@ -510,7 +511,7 @@ async def _start_live_approval(
     task = asyncio.create_task(
         store.request_approval(
             tool_name="read_file",
-            arguments={"path": "notes.txt"},
+            arguments=arguments or {"path": "notes.txt"},
             room_id="!test:localhost",
             requester_id="@user:localhost",
             approver_user_id=approver_user_id,
@@ -3989,6 +3990,54 @@ class TestAgentBot:
 
             assert decision.status == "approved"
             assert editor.await_args.args[2]["status"] == "approved"
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_unknown_truncated_approval_id_response_sends_notice_with_card_event_id(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Approval-id-only responses should still send truncated-argument denial notices."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        orchestrator = MagicMock()
+        orchestrator._approval_transport_bot.return_value = bot
+        orchestrator._send_approval_notice = AsyncMock(return_value=True)
+        bot.orchestrator = orchestrator
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        _store, pending, task, editor = await _start_live_approval(
+            runtime_paths,
+            arguments={"content": "x" * 10_000},
+        )
+
+        try:
+            event = SimpleNamespace(
+                type="io.mindroom.tool_approval_response",
+                sender="@user:localhost",
+                source={"content": {"approval_id": pending.approval_id, "approved": True}},
+            )
+            await bot._on_unknown_event(room, event)
+            decision = await task
+
+            assert decision.status == "denied"
+            assert "displayed arguments are truncated" in (decision.reason or "")
+            replacement = editor.await_args.args[2]
+            assert replacement["status"] == "denied"
+            assert "displayed arguments are truncated" in replacement["resolution_reason"]
+            orchestrator._send_approval_notice.assert_awaited_once_with(
+                room_id="!test:localhost",
+                approval_event_id=pending.card_event_id,
+                thread_id=pending.thread_id,
+                reason=replacement["resolution_reason"],
+            )
         finally:
             if not task.done():
                 task.cancel()
