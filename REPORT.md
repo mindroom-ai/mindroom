@@ -23,6 +23,9 @@
 - Round 4 fix: shutdown and hot-reload now flush only the latest in-memory cache-certified sync token, not a raw `client.next_batch` candidate that nio advanced before the response callback started certification.
 - Round 4 fix: strict sync cache catch-up now rechecks durable event-cache availability after queued cache writes drain, so availability lost after preflight fails closed instead of certifying no-op writes.
 - Round 4 fix: post-start `M_UNKNOWN_POS` now clears `client.next_batch`, the saved token file, and restored-token trust state through the same localized bad-token handler.
+- Round 5 fix: certified sync tokens now carry a hash-backed provenance marker, while legacy plaintext tokens restore only for Matrix continuity and suppress same-runtime token persistence.
+- Round 5 fix: every `M_UNKNOWN_POS` now poisons later token persistence, including non-restored runtimes.
+- Round 5 fix: later sync cache certification failures revoke current in-memory pre-runtime thread-cache trust before strict thread reads can reuse old rows.
 
 ## Tests Run
 
@@ -69,6 +72,24 @@ uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tes
 Result: 242 passed, 1 existing Pydantic deprecation warning.
 
 ```bash
+uv run pytest tests/test_matrix_sync_tokens.py::test_legacy_plaintext_sync_token_restores_without_cache_trust tests/test_matrix_sync_tokens.py::test_unknown_pos_non_restored_runtime_suppresses_later_token_persistence tests/test_threading_error.py::TestThreadingBehavior::test_non_first_sync_cache_failure_revokes_restored_thread_cache_trust -x -n 0 --no-cov -v
+```
+
+Result: 3 passed, 1 existing Pydantic deprecation warning.
+
+```bash
+uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py -k "sync_token or first_sync or restored_token or untrusted_restart" -x -n 0 --no-cov -v
+```
+
+Result: 37 passed, 208 deselected, 1 existing Pydantic deprecation warning.
+
+```bash
+uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py -x -n 0 --no-cov -v
+```
+
+Result: 245 passed, 1 existing Pydantic deprecation warning.
+
+```bash
 git --no-pager diff --check origin/main
 ```
 
@@ -76,7 +97,7 @@ Result: passed.
 
 ```bash
 uv sync --all-extras
-uv run pre-commit run --files src/mindroom/bot.py tests/test_matrix_sync_tokens.py tests/test_threading_error.py REPORT.md
+uv run pre-commit run --files src/mindroom/bot.py src/mindroom/matrix/sync_tokens.py tests/test_matrix_sync_tokens.py tests/test_threading_error.py REPORT.md
 ```
 
 Result: passed.

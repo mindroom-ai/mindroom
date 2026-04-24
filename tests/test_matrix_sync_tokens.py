@@ -13,7 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token, save_sync_token
+from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -61,6 +61,10 @@ def _token_path(tmp_path: Path, *, agent_name: str = "code") -> Path:
     return tmp_path / "sync_tokens" / f"{agent_name}.token"
 
 
+def _certification_path(tmp_path: Path, *, agent_name: str = "code") -> Path:
+    return tmp_path / "sync_tokens" / f"{agent_name}.token.certified"
+
+
 def test_load_sync_token_returns_none_when_missing(tmp_path: Path) -> None:
     """First-run agents should have no saved sync token."""
     assert load_sync_token(tmp_path, "code") is None
@@ -82,6 +86,9 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
     token_path = _token_path(tmp_path)
     assert token_path.read_text(encoding="utf-8") == "s12345"
     assert load_sync_token(tmp_path, "code") == "s12345"
+    token_record = load_sync_token_record(tmp_path, "code")
+    assert token_record is not None
+    assert token_record.certified is True
 
 
 def test_clear_sync_token_removes_saved_token(tmp_path: Path) -> None:
@@ -92,6 +99,7 @@ def test_clear_sync_token_removes_saved_token(tmp_path: Path) -> None:
 
     assert load_sync_token(tmp_path, "code") is None
     assert not _token_path(tmp_path).exists()
+    assert not _certification_path(tmp_path).exists()
 
 
 def test_clear_sync_token_is_idempotent(tmp_path: Path) -> None:
@@ -120,6 +128,43 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
         await bot.start()
 
     assert client.next_batch == "s_saved"
+
+
+@pytest.mark.asyncio
+async def test_legacy_plaintext_sync_token_restores_without_cache_trust(tmp_path: Path) -> None:
+    """Origin/main plaintext tokens are sync continuity only, not cache-trust roots."""
+    bot = _agent_bot(tmp_path)
+    token_path = _token_path(tmp_path, agent_name=bot.agent_name)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text("s_legacy", encoding="utf-8")
+
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        await bot.start()
+
+    assert client.next_batch == "s_legacy"
+    assert bot._runtime_view.restored_sync_token is False
+    assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+    assert bot._runtime_view.sync_token_persistence_suppressed is True
+
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_legacy"
+    response.rooms = MagicMock(join={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=False))})
+
+    await bot._on_sync_response(response)
+
+    token_record = load_sync_token_record(tmp_path, bot.agent_name)
+    assert token_record is not None
+    assert token_record.token == token_path.read_text(encoding="utf-8")
+    assert token_record.certified is False
 
 
 def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
@@ -198,6 +243,29 @@ async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_pa
     assert load_sync_token(tmp_path, bot.agent_name) is None
     assert bot._runtime_view.restored_sync_token is False
     assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_pos_non_restored_runtime_suppresses_later_token_persistence(tmp_path: Path) -> None:
+    """Any M_UNKNOWN_POS poisons later token saves, even without restored-token startup."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_rejected_cold"
+    bot._first_sync_done = True
+    bot._runtime_view.mark_runtime_started(restored_sync_token=False)
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    await bot._on_sync_error(sync_error)
+
+    bot.client.next_batch = "s_later_after_unknown_pos"
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_later_after_unknown_pos"
+    response.rooms = MagicMock(join={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=False))})
+    await bot._on_sync_response(response)
+
+    assert bot._runtime_view.sync_token_persistence_suppressed is True
+    assert load_sync_token(tmp_path, bot.agent_name) is None
 
 
 @pytest.mark.asyncio

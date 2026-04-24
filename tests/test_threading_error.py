@@ -35,6 +35,7 @@ from mindroom.matrix import thread_bookkeeping
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
+    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
@@ -1816,6 +1817,86 @@ class TestThreadingBehavior:
         await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
 
         assert load_sync_token(bot.storage_path, bot.agent_name) == "s_before_cache_failure"
+
+    @pytest.mark.asyncio
+    async def test_non_first_sync_cache_failure_revokes_restored_thread_cache_trust(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Later cache certification failures must revoke already-granted pre-runtime trust."""
+        support = await _bind_owned_runtime_support(bot)
+        room_id = "!test:localhost"
+        thread_id = "$thread_root:localhost"
+        root_event = _text_event(
+            event_id=thread_id,
+            body="Old root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        reply_event = _text_event(
+            event_id="$old_reply:localhost",
+            body="Old reply",
+            sender="@agent:localhost",
+            server_timestamp=2000,
+            thread_id=thread_id,
+        )
+        try:
+            await bot.event_cache.replace_thread(
+                room_id,
+                thread_id,
+                [root_event.source, reply_event.source],
+                validated_at=1.0,
+            )
+            bot._runtime_view.mark_runtime_started(restored_sync_token=True)
+            bot._runtime_view.mark_sync_catchup_applied()
+            assert bot._runtime_view.pre_runtime_thread_cache_trusted is True
+
+            bot._first_sync_done = True
+            bot.client.next_batch = "s_after_cache_failure"
+            save_sync_token(bot.storage_path, bot.agent_name, "s_before_cache_failure")
+            sync_response = self._sync_response(
+                {
+                    room_id: MagicMock(
+                        timeline=MagicMock(
+                            events=[
+                                _text_event(
+                                    event_id="$failed:localhost",
+                                    body="Failed",
+                                    sender="@user:localhost",
+                                    server_timestamp=1234567890,
+                                ),
+                            ],
+                            limited=False,
+                        ),
+                    ),
+                },
+            )
+
+            async def fail_cache_write() -> None:
+                msg = "cache failed"
+                raise RuntimeError(msg)
+
+            cache_task = asyncio.create_task(fail_cache_write())
+            await asyncio.sleep(0)
+
+            with patch.object(bot._conversation_cache, "cache_sync_timeline", MagicMock(return_value=[cache_task])):
+                await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+            page = MagicMock(spec=nio.RoomMessagesResponse)
+            page.chunk = [reply_event, root_event]
+            page.end = None
+            bot.client.room_messages = AsyncMock(return_value=page)
+
+            history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
+        finally:
+            await _close_bound_runtime_support(bot, support)
+
+        assert bot._runtime_view.restored_sync_token is False
+        assert bot._runtime_view.pre_runtime_thread_cache_trusted is False
+        assert load_sync_token(bot.storage_path, bot.agent_name) == "s_before_cache_failure"
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "validated_before_runtime_start"
+        bot.client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_non_first_sync_unavailable_event_cache_suppresses_token_for_event_timeline(

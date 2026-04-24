@@ -41,7 +41,7 @@ from mindroom.matrix.identity import (
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
-from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token, save_sync_token
+from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import (
     AgentMatrixUser,
     create_agent_user,
@@ -430,6 +430,7 @@ class AgentBot:
         self._first_sync_done = False
         self._sync_shutting_down = False
         self._certified_sync_token: str | None = None
+        self._restored_sync_token_uncertified = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._runtime_view = BotRuntimeState(
             client=None,
@@ -1034,21 +1035,23 @@ class AgentBot:
     def _restore_saved_sync_token(self) -> bool:
         """Restore the saved Matrix sync token onto the current client."""
         assert self.client is not None
+        self._restored_sync_token_uncertified = False
         try:
-            token = load_sync_token(self.storage_path, self.agent_name)
+            token_record = load_sync_token_record(self.storage_path, self.agent_name)
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
             self._certified_sync_token = None
             return False
 
-        if token is None:
+        if token_record is None:
             self._certified_sync_token = None
             return False
 
-        self.client.next_batch = token
-        self._certified_sync_token = token
-        self.logger.info("matrix_sync_token_restored")
-        return True
+        self.client.next_batch = token_record.token
+        self._certified_sync_token = token_record.token if token_record.certified else None
+        self._restored_sync_token_uncertified = not token_record.certified
+        self.logger.info("matrix_sync_token_restored", certified=token_record.certified)
+        return token_record.certified
 
     def _certify_sync_response_token(self, response: nio.SyncResponse) -> bool:
         """Record the response token that just passed durable cache catch-up."""
@@ -1074,6 +1077,7 @@ class AgentBot:
     def _clear_sync_token_state(self) -> None:
         """Clear in-memory and persisted Matrix sync token state."""
         self._certified_sync_token = None
+        self._restored_sync_token_uncertified = False
         if self.client is not None:
             self.client.next_batch = None
         try:
@@ -1244,6 +1248,7 @@ class AgentBot:
     ) -> None:
         """Suppress future token saves after a sync response fails cache certification."""
         self._runtime_view.suppress_sync_token_persistence()
+        self._runtime_view.mark_restored_sync_token_invalid()
         self.logger.warning(
             "matrix_sync_token_persistence_suppressed",
             reason=self._sync_token_cache_uncertified_reason(
@@ -1399,8 +1404,7 @@ class AgentBot:
         if _response.status_code == "M_UNKNOWN_POS":
             restored_sync_token = self._runtime_view.restored_sync_token
             self._runtime_view.mark_restored_sync_token_invalid()
-            if restored_sync_token:
-                self._runtime_view.suppress_sync_token_persistence()
+            self._runtime_view.suppress_sync_token_persistence()
             self._clear_sync_token_state()
             self.logger.warning(
                 "matrix_sync_token_rejected",
@@ -1451,6 +1455,9 @@ class AgentBot:
         try:
             restored_sync_token = self._restore_saved_sync_token()
             self._runtime_view.mark_runtime_started(restored_sync_token=restored_sync_token)
+            if self._restored_sync_token_uncertified:
+                self._runtime_view.suppress_sync_token_persistence()
+                self.logger.warning("matrix_sync_token_uncertified_legacy")
             await self._set_avatar_if_available()
             await self._set_presence_with_model_info()
             interactive.init_persistence(self.runtime_paths.storage_root)
