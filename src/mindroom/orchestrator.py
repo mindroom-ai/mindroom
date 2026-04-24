@@ -371,14 +371,22 @@ class MultiAgentOrchestrator:
         )
 
     async def _cancel_knowledge_refresh_task(self) -> None:
-        """Cancel any in-flight background knowledge refresh tasks."""
+        """Cancel the in-flight global background knowledge refresh task."""
         task = self._knowledge_refresh_task
         self._knowledge_refresh_task = None
         await cancel_logged_task(task)
+
+    async def _cancel_knowledge_base_refresh_tasks(self) -> None:
+        """Cancel any in-flight per-base background knowledge refresh tasks."""
         tasks = list(self._knowledge_base_refresh_tasks.values())
         self._knowledge_base_refresh_tasks.clear()
         for refresh_task in tasks:
             await cancel_logged_task(refresh_task)
+
+    async def _cancel_knowledge_refresh_tasks(self) -> None:
+        """Cancel all in-flight background knowledge refresh tasks."""
+        await self._cancel_knowledge_refresh_task()
+        await self._cancel_knowledge_base_refresh_tasks()
 
     async def _cancel_config_reload_task(self) -> None:
         """Cancel any queued config reload task."""
@@ -1700,7 +1708,7 @@ class MultiAgentOrchestrator:
         self.running = False
         await self._cancel_config_reload_task()
         await self._stop_memory_auto_flush_worker()
-        await self._cancel_knowledge_refresh_task()
+        await self._cancel_knowledge_refresh_tasks()
         await self._cancel_bot_start_tasks()
         await self._stop_mcp_manager()
         await shutdown_shared_knowledge_managers()

@@ -10102,6 +10102,58 @@ class TestMultiAgentOrchestrator:
         assert "research" not in orchestrator._knowledge_base_refresh_tasks
 
     @pytest.mark.asyncio
+    async def test_global_knowledge_refresh_does_not_cancel_per_base_refresh(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A global refresh replacement should not cancel isolated per-base refreshes."""
+        config = MagicMock()
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        base_started = asyncio.Event()
+        base_unblock = asyncio.Event()
+        global_started = asyncio.Event()
+        global_unblock = asyncio.Event()
+        manager = MagicMock(spec=KnowledgeManager)
+
+        async def slow_base_refresh(base_id: str, **_kwargs: object) -> KnowledgeManager:
+            assert base_id == "research"
+            base_started.set()
+            await base_unblock.wait()
+            return manager
+
+        async def slow_global_refresh(*_: object, **__: object) -> None:
+            global_started.set()
+            await global_unblock.wait()
+
+        with (
+            patch("mindroom.orchestrator.ensure_shared_knowledge_manager", new=AsyncMock(side_effect=slow_base_refresh)),
+            patch.object(orchestrator, "_configure_knowledge", side_effect=slow_global_refresh),
+        ):
+            orchestrator._schedule_knowledge_base_refresh("research", config, start_watcher=True)
+            base_task = orchestrator._knowledge_base_refresh_tasks["research"]
+            await asyncio.wait_for(base_started.wait(), timeout=1.0)
+
+            await orchestrator._schedule_knowledge_refresh(config, start_watcher=True)
+            global_task = orchestrator._knowledge_refresh_task
+            assert global_task is not None
+            await asyncio.wait_for(global_started.wait(), timeout=1.0)
+
+            assert orchestrator._knowledge_base_refresh_tasks["research"] is base_task
+            assert not base_task.done()
+
+            global_unblock.set()
+            await asyncio.wait_for(global_task, timeout=1.0)
+            assert orchestrator._knowledge_base_refresh_tasks["research"] is base_task
+            assert not base_task.done()
+
+            base_unblock.set()
+            await asyncio.wait_for(base_task, timeout=1.0)
+
+        assert orchestrator.knowledge_managers == {"research": manager}
+        assert orchestrator._knowledge_refresh_task is None
+        assert "research" not in orchestrator._knowledge_base_refresh_tasks
+
+    @pytest.mark.asyncio
     async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:
         """Global users and room-permitted users should be invited to managed rooms."""
         config = _runtime_bound_config(
