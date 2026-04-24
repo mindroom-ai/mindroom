@@ -33,6 +33,8 @@
 - Round 7 fix: once durable cache availability fails, the runtime suppresses later same-runtime token persistence until a fresh safe runtime state is established.
 - Round 8 fix: uncertified strict sync-cache certification now advances the live thread-cache freshness boundary before reporting the failure, forcing current-runtime thread rows validated before the failure to refetch.
 - Round 8 fix: parent cancellation during restored first-sync certification now clears restored-token trust, `client.next_batch`, and the saved token before re-raising, so a same-bot sync-loop restart cannot certify a skipped batch.
+- Round 9 fix: parent cancellation during any sync-cache certification now revokes current-runtime thread-cache trust before re-raising and rewinds `client.next_batch` to the last cache-certified token when available.
+- Round 9 fix: runtime trust revocation now installs a guarded thread-write boundary, so prewarm fetches that started before revocation cannot later write snapshots that look fresh.
 
 ## Tests Run
 
@@ -164,6 +166,44 @@ uv run pre-commit run --files src/mindroom/bot.py src/mindroom/bot_runtime_view.
 ```
 
 Result: passed.
+
+```bash
+nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix --run 'uv run pytest tests/test_threading_error.py -k "cancelled_non_first_sync_revokes_current_thread_cache_before_restart or prewarm_started_before_trust_revocation_does_not_seed_fresh_cache" -x -n 0 --no-cov -v'
+```
+
+Result: 2 passed, 174 deselected, 1 existing Pydantic deprecation warning.
+
+```bash
+nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix --run 'uv run pytest tests/test_matrix_sync_tokens.py tests/test_threading_error.py tests/test_thread_history.py -x -n 0 --no-cov -v'
+```
+
+Result: 252 passed, 1 existing Pydantic deprecation warning.
+
+```bash
+nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix --run 'uv run pytest tests/test_event_cache.py tests/test_bot_ready_hook.py -x -n 0 --no-cov -v'
+```
+
+Result: 64 passed, 1 existing Pydantic deprecation warning.
+
+```bash
+git --no-pager diff --check
+```
+
+Result: passed.
+
+```bash
+uv sync --all-extras
+uv run pre-commit run --files src/mindroom/bot.py src/mindroom/bot_runtime_view.py src/mindroom/matrix/cache/event_cache.py tests/test_threading_error.py
+```
+
+Result: passed.
+
+```bash
+nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix --run 'uv run pytest -x -n 0 --no-cov -q'
+```
+
+Result: pytest summary reported 5135 passed, 28 skipped, 49 warnings in 490.53s.
+The wrapper process stayed alive after printing the passing summary and was terminated afterward.
 
 ## Deviations
 

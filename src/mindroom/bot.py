@@ -1350,14 +1350,25 @@ class AgentBot:
         )
         return False
 
-    def _fail_closed_cancelled_restored_first_sync(self) -> None:
-        """Prevent a restarted sync loop from trusting a skipped restored-token batch."""
-        if not self._runtime_view.restored_sync_token:
+    def _rewind_client_next_batch_to_certified_token(self) -> None:
+        """Move nio's in-memory token back to the last cache-certified batch."""
+        if self.client is None:
             return
+        self.client.next_batch = self._certified_sync_token
+
+    def _fail_closed_cancelled_sync_certification(self, *, first_sync_response: bool) -> None:
+        """Prevent a restarted sync loop from trusting a skipped sync batch."""
+        restored_first_sync = first_sync_response and self._runtime_view.restored_sync_token
         self._runtime_view.revoke_current_thread_cache_trust()
         self._runtime_view.suppress_sync_token_persistence()
-        self._clear_sync_token_state()
-        self.logger.warning("matrix_sync_cache_catchup_cancelled")
+        if restored_first_sync:
+            self._clear_sync_token_state()
+        else:
+            self._rewind_client_next_batch_to_certified_token()
+        self.logger.warning(
+            "matrix_sync_cache_certification_cancelled",
+            first_sync=first_sync_response,
+        )
 
     async def _certify_sync_response_for_token_persistence(
         self,
@@ -1385,9 +1396,7 @@ class AgentBot:
                 durable_cache_available=durable_cache_available,
             )
         except asyncio.CancelledError:
-            self._runtime_view.suppress_sync_token_persistence()
-            if first_sync_response:
-                self._fail_closed_cancelled_restored_first_sync()
+            self._fail_closed_cancelled_sync_certification(first_sync_response=first_sync_response)
             raise
         else:
             self._log_sync_cache_errors(sync_cache_errors)
