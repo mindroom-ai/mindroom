@@ -402,9 +402,15 @@ def _load_agent_model_instance(
     config: Config,
     runtime_paths: constants.RuntimePaths,
     model_name: str,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Model:
     """Load one agent model while preserving prompt-assembly timing attribution."""
-    return model_loading.get_model_instance(config, runtime_paths, model_name)
+    return model_loading.get_model_instance(
+        config,
+        runtime_paths,
+        model_name,
+        execution_identity=execution_identity,
+    )
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
@@ -1097,7 +1103,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
-    model = _load_agent_model_instance(config, runtime_paths, model_name)
+    model = _load_agent_model_instance(config, runtime_paths, model_name, execution_identity)
     logger.info(
         "create_agent",
         agent=agent_name,

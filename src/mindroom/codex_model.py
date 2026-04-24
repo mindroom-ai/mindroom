@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import base64
+import fcntl
+import hashlib
 import json
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,9 +20,13 @@ from agno.utils.http import get_default_async_client, get_default_sync_client
 from openai import AsyncOpenAI, OpenAI
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from agno.models.message import Message
     from agno.run.agent import RunOutput
     from pydantic import BaseModel
+
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_REFRESH_URL = "https://auth.openai.com/oauth/token"
@@ -28,6 +35,7 @@ CODEX_REFRESH_SKEW_SECONDS = 30
 CODEX_MODEL_PREFIX = "openai-codex/"
 CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
 CODEX_UNSUPPORTED_REQUEST_PARAMS = {"max_output_tokens"}
+CODEX_PROMPT_CACHE_KEY_PREFIX = "mindroom"
 
 
 class CodexAuthError(ValueError):
@@ -51,27 +59,37 @@ def borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str 
         msg = "No ChatGPT access token found in Codex auth.json. Run `codex login` first."
         raise CodexAuthError(msg)
 
-    access_token = str(tokens["access_token"])
-    account_id = str(tokens["account_id"]) if tokens.get("account_id") else None
-    expires_at = _jwt_exp(access_token)
-    if expires_at is not None and time.time() < expires_at - CODEX_REFRESH_SKEW_SECONDS:
-        return access_token, account_id
+    usable_token = _usable_access_token(tokens)
+    if usable_token is not None:
+        return usable_token
 
-    refresh_token = tokens.get("refresh_token")
-    if not refresh_token:
-        msg = "No Codex refresh token found. Run `codex login` to re-authenticate."
-        raise CodexAuthError(msg)
+    with _codex_auth_refresh_lock(auth_path):
+        auth = _read_codex_auth(auth_path)
+        tokens = auth.get("tokens")
+        if not isinstance(tokens, dict) or not tokens.get("access_token"):
+            msg = "No ChatGPT access token found in Codex auth.json. Run `codex login` first."
+            raise CodexAuthError(msg)
 
-    refreshed = _refresh_codex_tokens(str(refresh_token))
-    if not refreshed.get("access_token"):
-        msg = "Codex token refresh response did not include an access token."
-        raise CodexAuthError(msg)
+        usable_token = _usable_access_token(tokens)
+        if usable_token is not None:
+            return usable_token
 
-    _update_tokens(tokens, refreshed)
-    auth["tokens"] = tokens
-    auth["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
-    _write_codex_auth(auth_path, auth)
-    return str(tokens["access_token"]), account_id
+        refresh_token = tokens.get("refresh_token")
+        if not refresh_token:
+            msg = "No Codex refresh token found. Run `codex login` to re-authenticate."
+            raise CodexAuthError(msg)
+
+        account_id = str(tokens["account_id"]) if tokens.get("account_id") else None
+        refreshed = _refresh_codex_tokens(str(refresh_token))
+        if not refreshed.get("access_token"):
+            msg = "Codex token refresh response did not include an access token."
+            raise CodexAuthError(msg)
+
+        _update_tokens(tokens, refreshed)
+        auth["tokens"] = tokens
+        auth["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+        _write_codex_auth(auth_path, auth)
+        return str(tokens["access_token"]), account_id
 
 
 def _codex_auth_path(*, codex_home: str | Path | None) -> Path:
@@ -92,9 +110,32 @@ def _read_codex_auth(auth_path: Path) -> dict[str, Any]:
     return auth
 
 
+@contextmanager
+def _codex_auth_refresh_lock(auth_path: Path) -> Iterator[None]:
+    lock_path = auth_path.with_name(f"{auth_path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _usable_access_token(tokens: dict[str, Any]) -> tuple[str, str | None] | None:
+    access_token = str(tokens["access_token"])
+    expires_at = _jwt_exp(access_token)
+    if expires_at is None or time.time() >= expires_at - CODEX_REFRESH_SKEW_SECONDS:
+        return None
+    account_id = str(tokens["account_id"]) if tokens.get("account_id") else None
+    return access_token, account_id
+
+
 def _write_codex_auth(auth_path: Path, auth: dict[str, Any]) -> None:
     temp_path = auth_path.with_name(f"{auth_path.name}.tmp")
-    temp_path.write_text(json.dumps(auth, indent=2), encoding="utf-8")
+    temp_path.unlink(missing_ok=True)
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+        temp_file.write(json.dumps(auth, indent=2))
     temp_path.replace(auth_path)
     auth_path.chmod(0o600)
 
@@ -153,6 +194,32 @@ def _update_tokens(tokens: dict[str, Any], refreshed: dict[str, Any]) -> None:
             tokens[key] = refreshed[key]
 
 
+def derive_codex_prompt_cache_key(identity: ToolExecutionIdentity) -> str | None:
+    """Derive a stable Codex prompt-cache routing key for one active execution."""
+    if identity.session_id is None:
+        return None
+    source = ":".join(
+        (
+            identity.channel,
+            identity.agent_name,
+            identity.requester_id or "",
+            identity.room_id or "",
+            identity.resolved_thread_id or identity.thread_id or "",
+            identity.session_id,
+        ),
+    )
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
+    return f"{CODEX_PROMPT_CACHE_KEY_PREFIX}-{digest}"
+
+
+def _codex_prompt_cache_headers(prompt_cache_key: str) -> dict[str, str]:
+    return {
+        "session_id": prompt_cache_key,
+        "x-client-request-id": prompt_cache_key,
+        "x-codex-window-id": f"{prompt_cache_key}:1",
+    }
+
+
 @dataclass
 class CodexResponses(OpenAIResponses):
     """Agno Responses model backed by the local Codex CLI ChatGPT OAuth credentials."""
@@ -163,6 +230,7 @@ class CodexResponses(OpenAIResponses):
     base_url: str = CODEX_BASE_URL
     store: bool = False
     codex_home: str | None = None
+    prompt_cache_key: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize LLM-plugin-style model IDs before Agno uses the model id."""
@@ -193,6 +261,9 @@ class CodexResponses(OpenAIResponses):
         instructions = [self.system_prompt, *(self.instructions or [])]
         return "\n\n".join(instruction for instruction in instructions if instruction) or CODEX_DEFAULT_INSTRUCTIONS
 
+    def _prompt_cache_key(self) -> str | None:
+        return self.prompt_cache_key
+
     def get_request_params(
         self,
         messages: list[Message] | None = None,
@@ -208,6 +279,13 @@ class CodexResponses(OpenAIResponses):
             tool_choice=tool_choice,
         )
         request_params.setdefault("instructions", self._instructions_text())
+        prompt_cache_key = self._prompt_cache_key()
+        if prompt_cache_key:
+            request_params.setdefault("prompt_cache_key", prompt_cache_key)
+            extra_headers = dict(request_params.get("extra_headers") or {})
+            for header_name, header_value in _codex_prompt_cache_headers(prompt_cache_key).items():
+                extra_headers.setdefault(header_name, header_value)
+            request_params["extra_headers"] = extra_headers
         for param_name in CODEX_UNSUPPORTED_REQUEST_PARAMS:
             request_params.pop(param_name, None)
         return request_params

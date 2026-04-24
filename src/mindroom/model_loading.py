@@ -15,7 +15,7 @@ from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 
-from mindroom.codex_model import CodexResponses, normalize_codex_model_id
+from mindroom.codex_model import CodexResponses, derive_codex_prompt_cache_key, normalize_codex_model_id
 from mindroom.constants import RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -45,6 +46,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
     model_config: ModelConfig,
     extra_kwargs: dict[str, Any],
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> Model:
     """Create a model instance for one provider."""
     canonical_provider = _canonical_provider(provider)
@@ -103,6 +105,10 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
 
     if canonical_provider in {"codex", "openai_codex"}:
         extra_kwargs.pop("api_key", None)
+        if "prompt_cache_key" not in extra_kwargs and execution_identity is not None:
+            prompt_cache_key = derive_codex_prompt_cache_key(execution_identity)
+            if prompt_cache_key is not None:
+                extra_kwargs["prompt_cache_key"] = prompt_cache_key
         return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
 
     provider_map: dict[str, type[Any]] = {
@@ -128,6 +134,7 @@ def get_model_instance(
     config: Config,
     runtime_paths: RuntimePaths,
     model_name: str = "default",
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Model:
     """Get a model instance from config.yaml."""
     if model_name not in config.models:
@@ -156,6 +163,7 @@ def get_model_instance(
         model_config,
         extra_kwargs,
         runtime_paths,
+        execution_identity,
     )
     if config.debug.log_llm_requests:
         install_llm_request_logging(

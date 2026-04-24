@@ -211,7 +211,7 @@ mindroom config init --profile public-vertexai-anthropic
 mindroom config init --force
 ```
 
-The `public-codex` profile and `--provider codex` preset generate `provider: codex` with `id: gpt-5.5`. Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
+The `public-codex` profile and `--provider codex` preset generate `provider: codex` with `id: gpt-5.5`. They set `extra_kwargs.reasoning_effort: medium`. Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key. Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 
 ### config show
 

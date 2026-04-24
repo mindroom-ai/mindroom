@@ -357,6 +357,9 @@ class TestConfigInit:
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
+        assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
+        assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
+        assert "Prompt caching is enabled automatically per active agent session." in target.read_text()
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
@@ -383,6 +386,7 @@ class TestConfigInit:
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
+        assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
 
     @pytest.mark.parametrize("profile", ["openai-codex", "public-openai-codex"])
     def test_init_rejects_openai_codex_profile_aliases(self, tmp_path: Path, profile: str) -> None:
@@ -581,6 +585,8 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
+        assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
+        assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
 
         env_content = (tmp_path / ".env").read_text()
         assert "Run `codex login` before starting MindRoom." in env_content

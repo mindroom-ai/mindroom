@@ -660,6 +660,14 @@ def _model_template_block(provider_preset: _ProviderPreset) -> str:
     """Render the provider-specific YAML fragment for models.default."""
     provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
     lines = [f"provider: {provider}", f"id: {model_id}"]
+    if provider_preset == "codex":
+        lines.extend(
+            [
+                "# Prompt caching is enabled automatically per active agent session.",
+                "extra_kwargs:",
+                "  reasoning_effort: medium",
+            ],
+        )
     return textwrap.indent("\n".join(lines), "    ")
 
 
