@@ -39,7 +39,11 @@ from mindroom.history.runtime import (
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
 )
-from mindroom.knowledge import get_agent_knowledge, initialize_shared_knowledge_managers
+from mindroom.knowledge import (
+    KnowledgeAvailability,
+    format_knowledge_availability_notice,
+    get_agent_knowledge,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.routing import suggest_agent
@@ -81,6 +85,7 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.config.main import Config
+    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
 
 logger = get_logger(__name__)
 
@@ -638,20 +643,13 @@ async def _resolve_auto_route(
     return routed
 
 
-async def _ensure_knowledge_initialized(config: Config, runtime_paths: RuntimePaths) -> None:
-    """Initialize knowledge managers if needed.
-
-    Safe to call multiple times — `initialize_shared_knowledge_managers` is
-    idempotent and reuses existing managers that match the config.
-    """
-    if not config.knowledge_bases:
-        return
-    await initialize_shared_knowledge_managers(
-        config=config,
-        runtime_paths=runtime_paths,
-        start_watchers=False,
-        reindex_on_create=False,
-    )
+def _request_knowledge_refresh_owner(request: Request) -> KnowledgeRefreshOwner | None:
+    """Return the app-scoped background knowledge refresh owner, if configured."""
+    try:
+        owner = request.app.state.knowledge_refresh_owner
+    except AttributeError:
+        return None
+    return cast("KnowledgeRefreshOwner | None", owner)
 
 
 def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]:
@@ -661,6 +659,20 @@ def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]
         agent=agent_name,
         knowledge_bases=missing_base_ids,
     )
+
+
+def _knowledge_availability_system_message(unavailable_bases: dict[str, KnowledgeAvailability]) -> str | None:
+    """Render one OpenAI-compatible system message for unavailable or stale knowledge."""
+    return format_knowledge_availability_notice(unavailable_bases)
+
+
+def _prepend_knowledge_availability_notice(
+    prompt: str,
+    unavailable_bases: dict[str, KnowledgeAvailability],
+) -> str:
+    """Prefix the prompt with the degraded-knowledge notice when shared bases are unavailable."""
+    availability_hint = _knowledge_availability_system_message(unavailable_bases)
+    return f"{availability_hint}\n\n{prompt}" if availability_hint else prompt
 
 
 # ---------------------------------------------------------------------------
@@ -779,14 +791,7 @@ async def chat_completions(
         thread_id=None,
         resolved_thread_id=None,
     )
-
-    # Initialize shared knowledge managers once per request (idempotent).
-    # `/v1` only supports shared/unscoped agent state today, so private
-    # requester-local knowledge is intentionally out of scope here.
-    try:
-        await _ensure_knowledge_initialized(config, runtime_paths)
-    except Exception:
-        logger.warning("Knowledge initialization failed, proceeding without knowledge", exc_info=True)
+    knowledge_refresh_owner = _request_knowledge_refresh_owner(request)
 
     # Team execution path
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
@@ -802,6 +807,7 @@ async def chat_completions(
                 thread_history,
                 req.user,
                 execution_identity=execution_identity,
+                refresh_owner=knowledge_refresh_owner,
             )
         else:
             with tool_execution_identity(execution_identity):
@@ -815,19 +821,26 @@ async def chat_completions(
                     thread_history,
                     req.user,
                     execution_identity=execution_identity,
+                    refresh_owner=knowledge_refresh_owner,
                 )
     else:
         # Resolve knowledge base for this agent
+        unavailable_bases: dict[str, KnowledgeAvailability] = {}
         try:
             knowledge = get_agent_knowledge(
                 agent_name,
                 config,
                 runtime_paths,
                 on_missing_bases=_log_missing_knowledge_bases(agent_name),
+                on_unavailable_bases=unavailable_bases.update,
+                refresh_owner=knowledge_refresh_owner,
             )
         except Exception:
             logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
             knowledge = None
+        availability_hint = _knowledge_availability_system_message(unavailable_bases)
+        if availability_hint:
+            prompt = f"{availability_hint}\n\n{prompt}"
         if req.stream:
             response = await _stream_completion(
                 agent_name,
@@ -839,6 +852,7 @@ async def chat_completions(
                 req.user,
                 knowledge,
                 execution_identity=execution_identity,
+                refresh_owner=knowledge_refresh_owner,
             )
         else:
             with tool_execution_identity(execution_identity):
@@ -852,6 +866,7 @@ async def chat_completions(
                     req.user,
                     knowledge,
                     execution_identity=execution_identity,
+                    refresh_owner=knowledge_refresh_owner,
                 )
 
     return response
@@ -872,6 +887,7 @@ async def _non_stream_completion(
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
     response_text = await ai_response(
@@ -888,6 +904,7 @@ async def _non_stream_completion(
         include_openai_compat_guidance=True,
         active_event_ids=set(),
         execution_identity=execution_identity,
+        refresh_owner=refresh_owner,
     )
 
     # Detect error responses from ai_response()
@@ -1058,6 +1075,7 @@ async def _stream_completion(
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     stream = cast(
@@ -1078,6 +1096,7 @@ async def _stream_completion(
                 include_openai_compat_guidance=True,
                 active_event_ids=set(),
                 execution_identity=execution_identity,
+                refresh_owner=refresh_owner,
             ),
         ),
     )
@@ -1139,6 +1158,8 @@ def _build_team(
     execution_identity: ToolExecutionIdentity | None,
     scope_context: ScopeSessionContext | None = None,
     session_id: str | None = None,
+    unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> tuple[list[Agent], Team, TeamMode]:
     """Create member agents and build one agno.Team for a configured team.
 
@@ -1157,6 +1178,8 @@ def _build_team(
         execution_identity=execution_identity,
         session_id=session_id,
         include_openai_compat_guidance=True,
+        unavailable_bases=unavailable_bases,
+        refresh_owner=refresh_owner,
         reason_prefix=f"Team '{team_name}'",
     )
     try:
@@ -1244,11 +1267,13 @@ async def _non_stream_team_completion(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
     agents: list[Agent] = []
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
+    unavailable_bases: dict[str, KnowledgeAvailability] = {}
     try:
         with open_bound_scope_session_context(
             agents=[],
@@ -1267,6 +1292,8 @@ async def _non_stream_team_completion(
                     execution_identity,
                     scope_context,
                     session_id,
+                    unavailable_bases,
+                    refresh_owner,
                 )
             except ValueError as e:
                 return _error_response(500, str(e), error_type="server_error")
@@ -1280,6 +1307,7 @@ async def _non_stream_team_completion(
             )
 
             try:
+                prompt = _prepend_knowledge_availability_notice(prompt, unavailable_bases)
                 team_run_input = await _prepare_openai_team_run_input(
                     scope_context=scope_context,
                     team_name=team_name,
@@ -1344,6 +1372,7 @@ async def _stream_team_completion(  # noqa: C901
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     stack = ExitStack()
@@ -1351,6 +1380,7 @@ async def _stream_team_completion(  # noqa: C901
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
+    unavailable_bases: dict[str, KnowledgeAvailability] = {}
 
     async def _cleanup() -> None:
         if stream is not None:
@@ -1382,6 +1412,8 @@ async def _stream_team_completion(  # noqa: C901
                     execution_identity,
                     scope_context,
                     session_id,
+                    unavailable_bases,
+                    refresh_owner,
                 )
         except ValueError as e:
             await _cleanup()
@@ -1396,6 +1428,7 @@ async def _stream_team_completion(  # noqa: C901
         )
 
         try:
+            prompt = _prepend_knowledge_availability_notice(prompt, unavailable_bases)
             team_run_input = await _prepare_openai_team_run_input(
                 scope_context=scope_context,
                 team_name=team_name,

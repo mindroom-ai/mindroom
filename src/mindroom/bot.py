@@ -807,6 +807,7 @@ class AgentBot:
                 f"Private agent '{self.agent_name}' requires an explicit execution identity."
             )
             raise ValueError(msg)
+        assert self.orchestrator is not None
         knowledge = self._knowledge_access_support.for_agent(self.agent_name)
         return create_agent(
             agent_name=self.agent_name,
@@ -815,6 +816,7 @@ class AgentBot:
             knowledge=knowledge,
             execution_identity=None,
             hook_registry=self.hook_registry,
+            refresh_owner=self.orchestrator.knowledge_refresh_owner,
         )
 
     def _should_accept_invite(self) -> bool:
