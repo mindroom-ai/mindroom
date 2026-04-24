@@ -12,6 +12,10 @@ if TYPE_CHECKING:
     import aiosqlite
 
 
+_RUNTIME_ONLY_EVENT_SOURCE_KEYS = frozenset({"com.mindroom.dispatch_pipeline_timing"})
+_EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
+
+
 @dataclass(frozen=True, slots=True)
 class SerializedCachedEvent:
     """One normalized cached event plus its serialized storage row."""
@@ -475,7 +479,7 @@ def _with_thread_root_self_rows(
 
 def _edit_cache_row(room_id: str, event: dict[str, Any]) -> tuple[str, str, str, int] | None:
     """Return one edit-index row for a cached event when it is an edit."""
-    if event.get("type") != "m.room.message":
+    if event.get("type") not in _EDITABLE_EVENT_TYPES:
         return None
 
     event_info = EventInfo.from_event(event)

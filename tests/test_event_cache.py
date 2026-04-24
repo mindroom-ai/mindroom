@@ -876,6 +876,61 @@ async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(
 
 
 @pytest.mark.asyncio
+async def test_edit_cache_row_indexes_io_mindroom_tool_approval_edits(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Custom approval-card edits must be visible through the latest-edit index."""
+    cache = event_cache
+
+    approval_card = {
+        "event_id": "$approval",
+        "sender": "@bot:localhost",
+        "origin_server_ts": 1000,
+        "type": "io.mindroom.tool_approval",
+        "content": {
+            "approval_id": "approval-1",
+            "requester_id": "@user:localhost",
+            "status": "pending",
+            "tool_name": "read_file",
+        },
+    }
+    approval_edit = {
+        "event_id": "$approval_edit",
+        "sender": "@bot:localhost",
+        "origin_server_ts": 2000,
+        "type": "io.mindroom.tool_approval",
+        "content": {
+            "approval_id": "approval-1",
+            "requester_id": "@user:localhost",
+            "status": "approved",
+            "tool_name": "read_file",
+            "m.new_content": {
+                "approval_id": "approval-1",
+                "requester_id": "@user:localhost",
+                "status": "approved",
+                "tool_name": "read_file",
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+        },
+    }
+
+    try:
+        await cache.store_events_batch(
+            [
+                ("$approval", "!room:localhost", approval_card),
+                ("$approval_edit", "!room:localhost", approval_edit),
+            ],
+        )
+        latest_edit = await cache.get_latest_edit("!room:localhost", "$approval")
+    finally:
+        await cache.close()
+
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$approval_edit"
+    assert latest_edit["content"]["m.new_content"]["status"] == "approved"
+
+
+@pytest.mark.asyncio
 async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(
     event_cache: ConversationEventCache,
 ) -> None:
