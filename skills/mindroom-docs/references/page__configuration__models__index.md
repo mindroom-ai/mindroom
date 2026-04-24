@@ -109,7 +109,12 @@ models:
   default:
     provider: codex
     id: gpt-5.5
+    # Prompt caching is enabled automatically per active agent session.
+    extra_kwargs:
+      reasoning_effort: medium
 ```
+
+Set Codex reasoning effort through `extra_kwargs.reasoning_effort`. Agno maps this to the Responses API `reasoning.effort` field. Supported effort values are `minimal`, `low`, `medium`, and `high`. The starter Codex profile uses `medium`. MindRoom sends a Codex prompt-cache key plus the Codex CLI session headers for each active agent session. By default, that key is derived from the current execution identity, so separate Matrix threads can run concurrently without sharing one global cache key. You can set `extra_kwargs.prompt_cache_key` to override that derived key for a model, but avoid a single low-cardinality value for many busy threads unless you intentionally want those requests routed together. Live testing against the Codex subscription endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key. Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected. Treat Codex prompt caching as best-effort rather than guaranteed.
 
 ## Context Window
 
