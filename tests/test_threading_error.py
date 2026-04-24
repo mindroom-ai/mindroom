@@ -1868,7 +1868,7 @@ class TestThreadingBehavior:
             }
 
             bot._conversation_cache.cache_sync_timeline(sync_response)
-            await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+            await bot.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
 
             cached_thread_events = await bot.event_cache.get_thread_events(
                 "!test:localhost",

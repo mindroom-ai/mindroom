@@ -7,6 +7,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -156,7 +157,8 @@ class _ShadowCollection:
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
         _ = include
-        selected_all = list(_ShadowChromaDb.collections.get(self._name, []))
+        with _ShadowChromaDb.lock:
+            selected_all = list(_ShadowChromaDb.collections.get(self._name, []))
         if where:
             key, value = next(iter(where.items()))
             selected_all = [item for item in selected_all if item["metadata"].get(key) == value]
@@ -183,20 +185,23 @@ class _ShadowKnowledge:
         reader: object | None = None,
     ) -> None:
         _ = (upsert, reader)
-        _ShadowChromaDb.collections.setdefault(self.vector_db.collection_name, []).append(
-            {
-                "content": Path(path).read_text(encoding="utf-8"),
-                "metadata": dict(metadata),
-            },
-        )
+        item = {
+            "content": Path(path).read_text(encoding="utf-8"),
+            "metadata": dict(metadata),
+        }
+        with _ShadowChromaDb.lock:
+            _ShadowChromaDb.collections.setdefault(self.vector_db.collection_name, []).append(item)
 
     def remove_vectors_by_metadata(self, metadata: dict[str, object]) -> bool:
         collection_name = self.vector_db.collection_name
-        existing = _ShadowChromaDb.collections.get(collection_name, [])
-        filtered = [
-            item for item in existing if not all(item["metadata"].get(key) == value for key, value in metadata.items())
-        ]
-        _ShadowChromaDb.collections[collection_name] = filtered
+        with _ShadowChromaDb.lock:
+            existing = _ShadowChromaDb.collections.get(collection_name, [])
+            filtered = [
+                item
+                for item in existing
+                if not all(item["metadata"].get(key) == value for key, value in metadata.items())
+            ]
+            _ShadowChromaDb.collections[collection_name] = filtered
         return len(filtered) != len(existing)
 
     def search(
@@ -208,29 +213,33 @@ class _ShadowKnowledge:
     ) -> list[Document]:
         _ = (query, filters, search_type)
         limit = 5 if max_results is None else max_results
-        return [
-            Document(content=item["content"], meta_data=dict(item["metadata"]))
-            for item in _ShadowChromaDb.collections.get(self.vector_db.collection_name, [])[:limit]
-        ]
+        with _ShadowChromaDb.lock:
+            items = list(_ShadowChromaDb.collections.get(self.vector_db.collection_name, []))
+        return [Document(content=item["content"], meta_data=dict(item["metadata"])) for item in items[:limit]]
 
 
 class _ShadowChromaDb:
     collections: ClassVar[dict[str, list[dict[str, object]]]] = {}
+    lock: ClassVar[Lock] = Lock()
 
     def __init__(self, *, collection: str, **_: object) -> None:
         self.collection_name = collection
         self.client = _ShadowClient()
-        self.collections.setdefault(collection, [])
+        with self.lock:
+            self.collections.setdefault(collection, [])
 
     def delete(self) -> bool:
-        self.collections.pop(self.collection_name, None)
+        with self.lock:
+            self.collections.pop(self.collection_name, None)
         return True
 
     def create(self) -> None:
-        self.collections[self.collection_name] = []
+        with self.lock:
+            self.collections[self.collection_name] = []
 
     def exists(self) -> bool:
-        return self.collection_name in self.collections
+        with self.lock:
+            return self.collection_name in self.collections
 
     def search(
         self,
@@ -240,10 +249,9 @@ class _ShadowChromaDb:
         filters: dict[str, object] | list[object] | None = None,
     ) -> list[Document]:
         _ = (query, filters)
-        return [
-            Document(content=item["content"], meta_data=dict(item["metadata"]))
-            for item in self.collections.get(self.collection_name, [])[:limit]
-        ]
+        with self.lock:
+            items = list(self.collections.get(self.collection_name, []))
+        return [Document(content=item["content"], meta_data=dict(item["metadata"])) for item in items[:limit]]
 
 
 def _mind_private_agent(
