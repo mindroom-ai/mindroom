@@ -3195,87 +3195,7 @@ class TestThreadingBehavior:
             )
             await coordinator.wait_for_room_idle(room_id)
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("timing_enabled_for_test", [False, True], ids=["timing_disabled", "timing_enabled"])
-    async def test_live_unknown_event_publishes_room_stale_marker_before_room_barrier(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        timing_enabled_for_test: bool,
-    ) -> None:
-        """Live unknown thread mutations should publish the room stale marker before queued bookkeeping."""
-        if timing_enabled_for_test:
-            monkeypatch.setenv("MINDROOM_TIMING", "1")
-        else:
-            monkeypatch.delenv("MINDROOM_TIMING", raising=False)
-
-        coordinator = _runtime_write_coordinator()
-        event_cache = _runtime_event_cache()
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(
-                client=_make_client_mock(),
-                event_cache=event_cache,
-                coordinator=coordinator,
-            ),
-        )
-        prior_write_started = asyncio.Event()
-        allow_prior_write_finish = asyncio.Event()
-        room_invalidation_started = asyncio.Event()
-
-        async def slow_prior_room_update() -> None:
-            prior_write_started.set()
-            await allow_prior_write_finish.wait()
-
-        async def mark_room_threads_stale(room_id: str, *, reason: str) -> None:
-            assert room_id == "!test:localhost"
-            assert reason == "live_thread_lookup_unavailable"
-            room_invalidation_started.set()
-
-        access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(
-            return_value=MutationThreadImpact.unknown(),
-        )
-        event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
-
-        coordinator.queue_room_update(
-            "!test:localhost",
-            slow_prior_room_update,
-            name="matrix_cache_prior_update",
-        )
-        await asyncio.wait_for(prior_write_started.wait(), timeout=1.0)
-
-        event = nio.RoomMessageText.from_dict(
-            {
-                "type": "m.room.message",
-                "room_id": "!test:localhost",
-                "event_id": "$unknown-edit:localhost",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234,
-                "content": {
-                    "body": "updated",
-                    "msgtype": "m.text",
-                },
-            },
-        )
-
-        live_task = asyncio.create_task(
-            access.append_live_event(
-                "!test:localhost",
-                event,
-                event_info=EventInfo.from_event(event.source),
-            ),
-        )
-        await asyncio.wait_for(room_invalidation_started.wait(), timeout=1.0)
-        assert live_task.done() is False
-
-        allow_prior_write_finish.set()
-        await live_task
-        await coordinator.wait_for_room_idle("!test:localhost")
-
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
-            "!test:localhost",
-            reason="live_thread_lookup_unavailable",
-        )
-        event_cache.append_event.assert_not_awaited()
+    # UNKNOWN-impact live mutation optimization is deferred to ISSUE-189.
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("timing_enabled_for_test", [False, True], ids=["timing_disabled", "timing_enabled"])
@@ -5432,10 +5352,9 @@ class TestThreadingBehavior:
 
         real_get_thread_cache_state = event_cache.get_thread_cache_state
         real_mark_room_threads_stale = event_cache.mark_room_threads_stale
-        real_queue_room_cache_update = access._live._cache_ops.queue_room_cache_update
         reader_ready = asyncio.Event()
         release_reader = asyncio.Event()
-        room_update_queued = asyncio.Event()
+        room_invalidation_finished = asyncio.Event()
         live_task: asyncio.Task[None] | None = None
         history: ThreadHistoryResult | None = None
 
@@ -5450,25 +5369,14 @@ class TestThreadingBehavior:
             assert room_id_arg == room_id
             assert reason == "live_thread_lookup_unavailable"
             await real_mark_room_threads_stale(room_id_arg, reason=reason)
+            room_invalidation_finished.set()
 
         async def resolve_unknown_impact(*_args: object, **_kwargs: object) -> MutationThreadImpact:
             return MutationThreadImpact.unknown()
 
-        def queue_room_cache_update(
-            room_id_arg: str,
-            update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
-            *,
-            name: str,
-        ) -> asyncio.Task[object]:
-            assert room_id_arg == room_id
-            assert name == "matrix_cache_append_live_event"
-            room_update_queued.set()
-            return real_queue_room_cache_update(room_id_arg, update_coro_factory, name=name)
-
         event_cache.get_thread_cache_state = AsyncMock(side_effect=blocking_get_thread_cache_state)
         event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
         access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(side_effect=resolve_unknown_impact)
-        access._live._cache_ops.queue_room_cache_update = queue_room_cache_update
         unknown_event = _text_event(
             event_id="$unknown-edit:localhost",
             body="* Updated",
@@ -5490,7 +5398,7 @@ class TestThreadingBehavior:
                     event_info=EventInfo.from_event(unknown_event.source),
                 ),
             )
-            await asyncio.wait_for(room_update_queued.wait(), timeout=1.0)
+            await asyncio.wait_for(room_invalidation_finished.wait(), timeout=1.0)
 
             release_reader.set()
             history = await asyncio.wait_for(read_task, timeout=1.0)

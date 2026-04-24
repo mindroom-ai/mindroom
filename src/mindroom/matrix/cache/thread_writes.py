@@ -591,25 +591,16 @@ class ThreadLiveWritePolicy:
             )
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
+            # UNKNOWN-impact mutations stay on the origin/main eager-invalidate path
+            # because it relies on the load-bearing invariant
+            # `room_invalidated_at >= validated_at` enforced in
+            # revalidate_thread_after_incremental_update_locked. Routing this work
+            # through the per-thread coordinator introduces race windows the existing
+            # invalidation model cannot safely handle (see R-final-5 reviewers B and F,
+            # ISSUE-176 thread). Optimization for this path is deferred to ISSUE-189.
             await self._cache_ops.invalidate_room_threads(
                 room_id,
                 reason="live_thread_lookup_unavailable",
-            )
-            await self._cache_ops.queue_room_cache_update(
-                room_id,
-                lambda: _apply_thread_message_mutation(
-                    cache_ops=self._cache_ops,
-                    room_id=room_id,
-                    event_info=event_info,
-                    impact=impact,
-                    event_source=None,
-                    event_id=event.event_id,
-                    context="live",
-                    room_level_skip_message=room_level_skip_message,
-                    invalidate_on_append_failure=True,
-                    allow_room_invalidation=False,
-                ),
-                name="matrix_cache_append_live_event",
             )
             return
 
@@ -747,53 +738,27 @@ class ThreadLiveWritePolicy:
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
             invalidate_started = time.perf_counter()
-            append_metrics: dict[str, str | int | float | bool] = {}
+            # UNKNOWN-impact mutations stay on the origin/main eager-invalidate path
+            # because it relies on the load-bearing invariant
+            # `room_invalidated_at >= validated_at` enforced in
+            # revalidate_thread_after_incremental_update_locked. Routing this work
+            # through the per-thread coordinator introduces race windows the existing
+            # invalidation model cannot safely handle (see R-final-5 reviewers B and F,
+            # ISSUE-176 thread). Optimization for this path is deferred to ISSUE-189.
             await self._cache_ops.invalidate_room_threads(
                 room_id,
                 reason="live_thread_lookup_unavailable",
             )
-            append_metrics["invalidate_ms"] = round((time.perf_counter() - invalidate_started) * 1000, 1)
-            queue_started = time.perf_counter()
-            outcome = "room_invalidated"
-
-            async def invalidate_room() -> bool:
-                return await _apply_thread_message_mutation(
-                    cache_ops=self._cache_ops,
-                    room_id=room_id,
-                    event_info=event_info,
-                    impact=impact,
-                    event_source=None,
-                    event_id=event.event_id,
-                    context="live",
-                    room_level_skip_message=room_level_skip_message,
-                    invalidate_on_append_failure=True,
-                    allow_room_invalidation=False,
-                )
-
-            try:
-                await self._cache_ops.queue_room_cache_update(
-                    room_id,
-                    invalidate_room,
-                    name="matrix_cache_append_live_event",
-                )
-            except asyncio.CancelledError:
-                outcome = "cancelled"
-                raise
-            except Exception:
-                outcome = "error"
-                raise
-            finally:
-                emit_timing_event(
-                    "Live event cache append timing",
-                    room_id=room_id,
-                    event_id=event.event_id,
-                    impact_state="unknown",
-                    impact_resolution_ms=impact_resolution_ms,
-                    queue_and_update_ms=round((time.perf_counter() - queue_started) * 1000, 1),
-                    total_ms=round((time.perf_counter() - started) * 1000, 1),
-                    outcome=outcome,
-                    **append_metrics,
-                )
+            emit_timing_event(
+                "Live event cache append timing",
+                room_id=room_id,
+                event_id=event.event_id,
+                impact_state="unknown",
+                impact_resolution_ms=impact_resolution_ms,
+                invalidate_ms=round((time.perf_counter() - invalidate_started) * 1000, 1),
+                total_ms=round((time.perf_counter() - started) * 1000, 1),
+                outcome="room_invalidated",
+            )
             return
         await self._append_live_threaded_event_with_timing(
             room_id,
