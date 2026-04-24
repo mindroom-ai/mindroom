@@ -65,6 +65,12 @@ Set the API key for each provider you use in `config.yaml`:
 All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
 See [Model Configuration — File-based Secrets](models.md#file-based-secrets) for details.
 
+### Codex CLI Subscription Auth
+
+The `codex` provider does not use an API key environment variable.
+Run `codex login` so `~/.codex/auth.json` contains ChatGPT OAuth tokens.
+Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
+
 ### Operational
 
 | Variable | Description | Default |

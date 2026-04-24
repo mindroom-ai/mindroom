@@ -62,10 +62,11 @@ _CONFIG_PATH_OPTION: Path | None = typer.Option(
 )
 
 _ConfigInitProfile = Literal["full", "minimal", "public"]
-_ProviderPreset = Literal["anthropic", "openai", "openrouter", "vertexai_claude"]
+_ProviderPreset = Literal["anthropic", "codex", "openai", "openrouter", "vertexai_claude"]
 
 _DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
     "anthropic": ("anthropic", "claude-sonnet-4-6"),
+    "codex": ("codex", "gpt-5.5"),
     "openai": ("openai", "gpt-5.4"),
     "openrouter": ("openrouter", "anthropic/claude-sonnet-4.6"),
     "vertexai_claude": ("vertexai_claude", "claude-sonnet-4-6"),
@@ -73,11 +74,18 @@ _DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
 
 _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY",),
+    "codex": (),
     "openai": ("OPENAI_API_KEY",),
     "openrouter": ("OPENROUTER_API_KEY",),
     "vertexai_claude": (),
 }
-_CANONICAL_INIT_PROFILES: tuple[str, ...] = ("full", "minimal", "public", "public-vertexai-anthropic")
+_CANONICAL_INIT_PROFILES: tuple[str, ...] = (
+    "full",
+    "minimal",
+    "public",
+    "public-codex",
+    "public-vertexai-anthropic",
+)
 
 
 def _config_init_storage_plan(
@@ -158,6 +166,10 @@ def _should_write_env_file(env_path: Path, *, force: bool) -> bool:
 
 def _config_init_env_hint(selected_profile: _ConfigInitProfile, selected_preset: _ProviderPreset) -> str:
     """Return the env setup hint shown after `mindroom config init`."""
+    if selected_preset == "codex":
+        if selected_profile == "public":
+            return "Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)"
+        return "Set your Matrix homeserver and run `codex login` before starting MindRoom"
     if selected_preset == "vertexai_claude":
         if selected_profile == "public":
             return "Set your Vertex AI project/region and Google auth (Matrix homeserver is prefilled)"
@@ -289,14 +301,14 @@ def config_init(
         "full",
         "--profile",
         help=(
-            "Template profile: full, minimal, public, or public-vertexai-anthropic "
-            "(hosted Matrix with Vertex AI Claude defaults)."
+            "Template profile: full, minimal, public, public-codex, or public-vertexai-anthropic "
+            "(hosted Matrix with provider defaults)."
         ),
     ),
     provider: str | None = typer.Option(
         None,
         "--provider",
-        help="Provider preset for generated config: anthropic, openai, openrouter, or vertexai_claude.",
+        help="Provider preset for generated config: anthropic, codex, openai, openrouter, or vertexai_claude.",
     ),
 ) -> None:
     """Create a starter config.yaml with example agents and models.
@@ -567,7 +579,7 @@ def _resolve_config_init_selection(
     provider_preset = _normalize_provider_preset(provider) if provider else None
     if provider and provider_preset is None:
         console.print(
-            "[red]Invalid --provider value.[/red] Use: anthropic, openai, openrouter, or vertexai_claude.",
+            "[red]Invalid --provider value.[/red] Use: anthropic, codex, openai, openrouter, or vertexai_claude.",
         )
         raise typer.Exit(1)
 
@@ -588,6 +600,8 @@ def _normalize_init_profile(profile: str) -> tuple[_ConfigInitProfile, _Provider
         "full": ("full", None),
         "minimal": ("minimal", None),
         "public": ("public", None),
+        "public-codex": ("public", "codex"),
+        "codex": ("public", "codex"),
         "public-vertexai-anthropic": ("public", "vertexai_claude"),
         "public-vertexai-claude": ("public", "vertexai_claude"),
         "vertexai-anthropic": ("public", "vertexai_claude"),
@@ -613,6 +627,7 @@ def _normalize_provider_preset(provider: str) -> _ProviderPreset | None:
         "anthropic": "anthropic",
         "claude": "anthropic",
         "a": "anthropic",
+        "codex": "codex",
         "openai": "openai",
         "o": "openai",
         "openrouter": "openrouter",
@@ -631,14 +646,14 @@ def _prompt_provider_preset() -> _ProviderPreset:
     """Prompt the user for a starter provider preset."""
     while True:
         raw_value = typer.prompt(
-            "Choose provider preset [anthropic/openai/openrouter/vertexai_claude]",
+            "Choose provider preset [anthropic/codex/openai/openrouter/vertexai_claude]",
             default="openai",
             show_default=True,
         )
         provider_preset = _normalize_provider_preset(raw_value)
         if provider_preset is not None:
             return provider_preset
-        console.print("[red]Invalid choice.[/red] Enter anthropic, openai, openrouter, or vertexai_claude.")
+        console.print("[red]Invalid choice.[/red] Enter anthropic, codex, openai, openrouter, or vertexai_claude.")
 
 
 def _model_template_block(provider_preset: _ProviderPreset) -> str:
@@ -893,6 +908,14 @@ defaults:
 
 def _provider_env_template(provider_preset: _ProviderPreset) -> str:
     """Return the provider-specific section of the starter .env file."""
+    if provider_preset == "codex":
+        return textwrap.dedent("""\
+        # Codex CLI subscription authentication
+        # Run `codex login` before starting MindRoom.
+        # MindRoom reads ChatGPT OAuth tokens from ~/.codex/auth.json by default.
+        # CODEX_HOME=~/.codex
+        """).rstrip()
+
     if provider_preset == "vertexai_claude":
         return textwrap.dedent("""\
         # Vertex AI Claude configuration
