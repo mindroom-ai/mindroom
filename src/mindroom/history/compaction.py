@@ -270,6 +270,8 @@ async def compact_scope_history(
     working_session = deepcopy(session)
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
     rewrite_result = await _rewrite_working_session_for_compaction(
+        storage=storage,
+        persisted_session=session,
         working_session=working_session,
         summary_model=summary_model,
         session_id=session.session_id,
@@ -356,6 +358,8 @@ async def compact_scope_history(
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
 async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
     *,
+    storage: SqliteDb,
+    persisted_session: AgentSession | TeamSession,
     working_session: AgentSession | TeamSession,
     summary_model: Model,
     session_id: str,
@@ -435,6 +439,12 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
         if pending_selected_run_ids is not None:
             pending_selected_run_ids.difference_update(compacted_run_ids)
 
+        _persist_compaction_progress(
+            storage=storage,
+            persisted_session=persisted_session,
+            working_session=working_session,
+        )
+
         if pending_selected_run_ids:
             continue
 
@@ -456,6 +466,19 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
         compacted_run_count=total_compacted_run_count,
         compacted_messages=tuple(compacted_messages),
     )
+
+
+def _persist_compaction_progress(
+    *,
+    storage: SqliteDb,
+    persisted_session: AgentSession | TeamSession,
+    working_session: AgentSession | TeamSession,
+) -> None:
+    """Save one successful compaction chunk before attempting the next chunk."""
+    persisted_session.summary = working_session.summary
+    persisted_session.runs = working_session.runs
+    persisted_session.metadata = working_session.metadata
+    storage.upsert_session(persisted_session)
 
 
 def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
