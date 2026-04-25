@@ -971,6 +971,7 @@ async def chat_completions(  # noqa: C901, PLR0912
                     on_missing_bases=_log_missing_knowledge_bases(agent_name),
                     on_unavailable_bases=unavailable_bases.update,
                     refresh_owner=knowledge_refresh_owner,
+                    execution_identity=execution_identity,
                 )
             except Exception:
                 logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)

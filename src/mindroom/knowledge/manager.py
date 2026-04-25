@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.embedder.ollama import OllamaEmbedder
@@ -23,7 +23,6 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
-from watchfiles import Change, awatch
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
@@ -352,7 +351,7 @@ def _matches_root_glob(relative_path: str, pattern: str) -> bool:
 
 @dataclass
 class KnowledgeManager:
-    """Manage indexing and watching for one knowledge base folder."""
+    """Manage indexing for one knowledge base folder."""
 
     base_id: str
     config: Config
@@ -371,26 +370,13 @@ class KnowledgeManager:
     _indexed_signatures: dict[str, tuple[int, int] | None] = field(default_factory=dict, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _watch_task: asyncio.Task[None] | None = field(default=None, init=False)
-    _watch_stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _git_sync_task: asyncio.Task[None] | None = field(default=None, init=False)
-    _git_sync_stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _git_startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _git_syncing: bool = field(default=False, init=False)
     _git_repo_present: bool = field(default=False, init=False)
     _git_initial_sync_complete: bool = field(default=False, init=False)
     _git_last_successful_sync_at: datetime | None = field(default=None, init=False)
     _git_last_successful_commit: str | None = field(default=None, init=False)
     _git_last_error: str | None = field(default=None, init=False)
-    _git_background_startup_mode: Literal["resume", "incremental"] | None = field(
-        default=None,
-        init=False,
-    )
-    _deferred_shared_runtime_mode: Literal["watch", "git_sync"] | None = field(
-        default=None,
-        init=False,
-    )
     _git_lfs_checked: bool = field(default=False, init=False)
     _git_lfs_repository_ready: bool = field(default=False, init=False)
     _cached_persisted_indexing_state: _PersistedIndexingState | None = field(default=None, init=False, repr=False)
@@ -542,7 +528,9 @@ class KnowledgeManager:
             payload["last_published_at"] = last_published_at
         if published_revision is not None:
             payload["published_revision"] = published_revision
-        self._indexing_settings_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path = self._indexing_settings_path.with_suffix(f"{self._indexing_settings_path.suffix}.tmp")
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(self._indexing_settings_path)
         self._cached_persisted_indexing_state = _PersistedIndexingState(
             settings=self._indexing_settings,
             status=status,
@@ -644,46 +632,17 @@ class KnowledgeManager:
     def _mark_git_initial_sync_complete(self) -> None:
         self._git_initial_sync_complete = True
 
-    def defer_shared_runtime_restore(
-        self,
-        runtime_mode: Literal["watch", "git_sync"] | None,
-    ) -> None:
-        """Remember a shared runtime mode to restart after an explicit reindex succeeds."""
-        self._deferred_shared_runtime_mode = runtime_mode
-
-    async def restore_deferred_shared_runtime(self) -> None:
-        """Restart any shared watcher or Git sync that was deferred during explicit reindex bootstrap."""
-        runtime_mode = self._deferred_shared_runtime_mode
-        if runtime_mode is None:
-            return
-        if runtime_mode == "watch":
-            await self.start_watcher()
-        elif runtime_mode == "git_sync":
-            await self._start_git_sync()
-        self._deferred_shared_runtime_mode = None
-
     async def reindex_explicitly(self) -> int:
-        """Run a manual full reindex and restore any deferred shared runtime afterward."""
-        try:
-            if self._git_config() is not None:
-                result = await self.finish_pending_background_git_startup(force_full_reindex=True)
-                return int(result["indexed_count"])
-            return await self.reindex_all()
-        finally:
-            await self.restore_deferred_shared_runtime()
+        """Run a manual full reindex."""
+        if self._git_config() is not None:
+            await self.sync_git_repository(index_changes=False)
+        return await self.reindex_all()
 
     def _git_sync_timeout_seconds(self) -> float | None:
         git_config = self._git_config()
         if git_config is None:
             return None
         return float(git_config.sync_timeout_seconds)
-
-    def _git_background_startup_enabled(self) -> bool:
-        return (
-            self._git_config() is not None
-            and self._git_startup_behavior() == "background"
-            and self.git_background_startup_allowed
-        )
 
     def _skip_hidden_paths(self) -> bool:
         git_config = self._git_config()
@@ -1237,92 +1196,14 @@ class KnowledgeManager:
             "removed_count": removed_count,
         }
 
-    async def prepare_background_git_startup(
-        self,
-        startup_mode: Literal["resume", "incremental"],
-    ) -> dict[str, Any]:
-        """Record startup state and defer Git sync/index refresh to the background loop."""
-        await self.load_indexed_files()
-        self._git_background_startup_mode = startup_mode
-        self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
-        self._clear_git_initial_sync_complete()
-        return {
-            "startup_mode": startup_mode,
-            "loaded_count": len(self._indexed_files),
-            "indexed_count": 0,
-            "removed_count": 0,
-            "git_deferred": True,
-        }
-
-    @overload
-    async def finish_pending_background_git_startup(
-        self,
-        *,
-        force_full_reindex: Literal[True],
-    ) -> dict[str, Any]: ...
-
-    @overload
-    async def finish_pending_background_git_startup(
-        self,
-        *,
-        force_full_reindex: Literal[False] = False,
-    ) -> dict[str, Any] | None: ...
-
-    async def finish_pending_background_git_startup(
-        self,
-        *,
-        force_full_reindex: bool = False,
-    ) -> dict[str, Any] | None:
-        """Finish deferred Git startup work immediately when a caller cannot wait for the poll loop."""
-        git_config = self._git_config()
-        if git_config is None:
-            if force_full_reindex:
-                msg = f"Knowledge base '{self.base_id}' is not Git-backed"
-                raise RuntimeError(msg)
-            return None
-
-        async with self._git_startup_lock:
-            startup_mode = self._git_background_startup_mode
-            effective_mode = "full_reindex" if force_full_reindex else startup_mode
-            if effective_mode is None:
-                return None
-
-            git_result = await self.sync_git_repository(index_changes=False)
-            if effective_mode == "full_reindex":
-                indexed_count = await self.reindex_all()
-                result = {
-                    **git_result,
-                    "startup_mode": effective_mode,
-                    "indexed_count": indexed_count,
-                }
-            else:
-                sync_result = await self.sync_indexed_files()
-                await asyncio.to_thread(self._save_persisted_indexing_settings)
-                result = {
-                    **git_result,
-                    "startup_mode": effective_mode,
-                    **sync_result,
-                }
-            self._git_background_startup_mode = None
-            self._mark_git_initial_sync_complete()
-            return result
-
     async def ensure_git_checkout_ready(self) -> None:
         """Ensure the Git checkout exists before direct file writes land in the knowledge folder."""
         if self._git_config() is None:
-            return
-        if await self.finish_pending_background_git_startup() is not None:
             return
         if (self._knowledge_source_path() / ".git").is_dir():
             self._git_repo_present = True
             return
         await self.sync_git_repository(index_changes=False)
-
-    async def _run_pending_background_git_startup(self) -> dict[str, Any]:
-        result = await self.finish_pending_background_git_startup()
-        if result is not None:
-            return result
-        return await self.sync_git_repository()
 
     async def sync_git_repository(self, *, index_changes: bool = True) -> dict[str, Any]:
         """Fetch and force-align one configured Git repository, then update the index."""
@@ -1370,86 +1251,6 @@ class KnowledgeManager:
             "changed_count": len(changed_files),
             "removed_count": len(removed_files),
         }
-
-    async def _git_sync_loop(self) -> None:
-        """Poll the configured Git repository and keep the knowledge folder up to date."""
-        while not self._git_sync_stop_event.is_set():
-            git_config = self._git_config()
-            if git_config is None:
-                return
-            try:
-                await self._run_pending_background_git_startup()
-            except Exception:
-                logger.exception(
-                    "Knowledge Git sync failed",
-                    base_id=self.base_id,
-                    repo_url=_redact_url_credentials(git_config.repo_url),
-                    branch=git_config.branch,
-                )
-
-            try:
-                await asyncio.wait_for(
-                    self._git_sync_stop_event.wait(),
-                    timeout=float(git_config.poll_interval_seconds),
-                )
-            except TimeoutError:
-                continue
-
-    async def _start_git_sync(self) -> None:
-        git_config = self._git_config()
-        if git_config is None:
-            return
-        if self._git_sync_task is not None and not self._git_sync_task.done():
-            return
-
-        self._git_sync_stop_event = asyncio.Event()
-        self._git_sync_task = asyncio.create_task(self._git_sync_loop())
-        logger.info(
-            "Knowledge Git sync started",
-            base_id=self.base_id,
-            repo_url=_redact_url_credentials(git_config.repo_url),
-            branch=git_config.branch,
-            poll_interval_seconds=git_config.poll_interval_seconds,
-        )
-
-    async def _stop_git_sync(self) -> None:
-        if self._git_sync_task is None:
-            return
-
-        self._git_sync_stop_event.set()
-        self._git_sync_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await self._git_sync_task
-
-        self._git_sync_task = None
-        logger.info("Knowledge Git sync stopped", base_id=self.base_id)
-
-    async def start_watcher(self) -> None:
-        """Start background file watching if enabled."""
-        await self._start_git_sync()
-
-        base_config = self.config.get_knowledge_base_config(self.base_id)
-        if not base_config.watch:
-            return
-        if self._watch_task is not None and not self._watch_task.done():
-            return
-
-        self._watch_stop_event = asyncio.Event()
-        self._watch_task = asyncio.create_task(self._watch_loop())
-        logger.info("Knowledge folder watcher started", base_id=self.base_id, path=str(self._knowledge_source_path()))
-
-    async def stop_watcher(self) -> None:
-        """Stop the background file watcher."""
-        await self._stop_git_sync()
-
-        if self._watch_task is not None:
-            self._watch_stop_event.set()
-            self._watch_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._watch_task
-
-            self._watch_task = None
-            logger.info("Knowledge folder watcher stopped", base_id=self.base_id)
 
     async def _index_file_locked(
         self,
@@ -1628,15 +1429,12 @@ class KnowledgeManager:
                 )
                 return indexed_count
 
-            previous_vector_db = self._knowledge.vector_db
             # Keep the Knowledge object stable so any already-resolved handles see the swap atomically.
             self._knowledge.vector_db = shadow_vector_db
             async with self._state_lock:
                 self._indexed_files = shadow_indexed_files
                 self._indexed_signatures = shadow_indexed_signatures
             await asyncio.to_thread(self._save_persisted_indexing_settings)
-            if isinstance(previous_vector_db, ChromaDb):
-                await asyncio.to_thread(self._delete_vector_db, previous_vector_db)
             return indexed_count
 
     async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:
@@ -1693,30 +1491,5 @@ class KnowledgeManager:
                 ),
                 "last_successful_commit": self._git_last_successful_commit,
                 "last_error": self._git_last_error,
-                "pending_startup_mode": self._git_background_startup_mode,
             }
         return status
-
-    async def _watch_loop(self) -> None:
-        """Watch the knowledge folder for file changes."""
-        async for changes in awatch(self._knowledge_source_path(), stop_event=self._watch_stop_event):
-            if not changes:
-                continue
-
-            for change, changed_path in changes:
-                await self._handle_file_change(change, Path(changed_path))
-
-    async def _handle_file_change(self, change: Change, file_path: Path) -> None:
-        """Handle one filesystem change event."""
-        try:
-            resolved_path = self.resolve_file_path(file_path)
-        except ValueError:
-            return
-        if not self._include_relative_path(self._relative_path(resolved_path)):
-            return
-
-        if change in {Change.added, Change.modified}:
-            if resolved_path.exists() and resolved_path.is_file():
-                await self.index_file(resolved_path, upsert=True)
-        elif change == Change.deleted:
-            await self.remove_file(resolved_path)

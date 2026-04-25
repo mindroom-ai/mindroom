@@ -44,7 +44,6 @@ from mindroom.history.interrupted_replay import (
     render_interrupted_replay_content,
 )
 from mindroom.hooks import MessageEnvelope
-from mindroom.knowledge.shared_managers import _shared_knowledge_manager_init_lock
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
@@ -1983,12 +1982,6 @@ class TestStreamingBehavior:
         async def response_stream() -> AsyncIterator[str]:
             yield "Hello from the original thread"
 
-        async def empty_request_knowledge_managers(
-            _agent_names: list[str],
-            _execution_identity: object,
-        ) -> dict[str, object]:
-            return {}
-
         async def no_latest_thread_event(
             _client: object,
             _room_id: str,
@@ -2055,7 +2048,6 @@ class TestStreamingBehavior:
             patch("mindroom.streaming.send_message_result", new=record_send),
             patch("mindroom.streaming.edit_message_result", new=record_edit),
             patch_response_runner_module(
-                ensure_request_knowledge_managers=empty_request_knowledge_managers,
                 stream_agent_response=MagicMock(return_value=response_stream()),
                 typing_indicator=noop_typing,
             ),
@@ -2128,7 +2120,7 @@ class TestStreamingBehavior:
         mock_helper_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A held shared-init lock must not block one streamed Matrix turn."""
+        """A missing knowledge snapshot must not block one streamed Matrix turn."""
         base_id = "repo_change_docs"
         bot = _make_bot_with_shared_knowledge(
             tmp_path=tmp_path,
@@ -2140,8 +2132,6 @@ class TestStreamingBehavior:
         mock_send_response.event_id = "$thinking"
         bot.client.room_send.return_value = mock_send_response
         pipeline_timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
-        lock = _shared_knowledge_manager_init_lock(base_id)
-        await lock.acquire()
 
         async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncIterator[str]:
             system_enrichment_items = kwargs["system_enrichment_items"]
@@ -2163,35 +2153,31 @@ class TestStreamingBehavior:
                 visible_body_state="visible_body",
             )
 
-        try:
-            with (
-                patch(
-                    "mindroom.delivery_gateway.send_streaming_response",
-                    new=AsyncMock(side_effect=fake_send_streaming_response),
-                ),
-                patch_response_runner_module(
-                    should_use_streaming=AsyncMock(return_value=True),
-                    stream_agent_response=fake_stream_agent_response,
-                    typing_indicator=_noop_typing_indicator,
-                ),
-            ):
-                event_id = await asyncio.wait_for(
-                    bot._response_runner.generate_response(
-                        ResponseRequest(
-                            room_id="!test:localhost",
-                            reply_to_event_id="$event",
-                            thread_id=None,
-                            thread_history=[],
-                            prompt="Please check the docs",
-                            user_id="@user:localhost",
-                            pipeline_timing=pipeline_timing,
-                        ),
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_streaming_response",
+                new=AsyncMock(side_effect=fake_send_streaming_response),
+            ),
+            patch_response_runner_module(
+                should_use_streaming=AsyncMock(return_value=True),
+                stream_agent_response=fake_stream_agent_response,
+                typing_indicator=_noop_typing_indicator,
+            ),
+        ):
+            event_id = await asyncio.wait_for(
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id=None,
+                        thread_history=[],
+                        prompt="Please check the docs",
+                        user_id="@user:localhost",
+                        pipeline_timing=pipeline_timing,
                     ),
-                    timeout=0.5,
-                )
-        finally:
-            if lock.locked():
-                lock.release()
+                ),
+                timeout=0.5,
+            )
 
         assert event_id == "$response"
         assert "placeholder_sent" in pipeline_timing.marks
@@ -2231,14 +2217,6 @@ class TestStreamingBehavior:
                 ),
             ),
             patch(
-                "mindroom.knowledge.shared_managers.initialize_manager_for_startup",
-                new=AsyncMock(),
-            ) as initialize_manager_for_startup,
-            patch(
-                "mindroom.knowledge.manager.KnowledgeManager.finish_pending_background_git_startup",
-                new=AsyncMock(),
-            ) as finish_pending_background_git_startup,
-            patch(
                 "mindroom.knowledge.manager.KnowledgeManager.sync_git_repository",
                 new=AsyncMock(),
             ) as sync_git_repository,
@@ -2267,8 +2245,6 @@ class TestStreamingBehavior:
             )
 
         assert delivery.event_id == "$response"
-        assert initialize_manager_for_startup.await_count == 0
-        assert finish_pending_background_git_startup.await_count == 0
         assert sync_git_repository.await_count == 0
         assert sync_indexed_files.await_count == 0
         assert reindex_all.await_count == 0

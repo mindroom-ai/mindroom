@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+    from collections.abc import AsyncIterator, Callable, Iterator
 
 import pytest
 from agno.agent import Agent as AgnoAgent
@@ -2828,13 +2828,13 @@ class TestTeamCompletion:
         scheduled_base_ids: list[str] = []
 
         class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
+            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(f"refresh:{base_id}")
 
-            def schedule_initial_load(self, base_id: str) -> None:
+            def schedule_initial_load(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
-            def is_refreshing(self, base_id: str) -> bool:
+            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
                 _ = base_id
                 return False
 
@@ -3186,13 +3186,13 @@ class TestTeamCompletion:
         scheduled_base_ids: list[str] = []
 
         class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
+            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(f"refresh:{base_id}")
 
-            def schedule_initial_load(self, base_id: str) -> None:
+            def schedule_initial_load(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
-            def is_refreshing(self, base_id: str) -> bool:
+            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
                 _ = base_id
                 return False
 
@@ -4615,8 +4615,7 @@ class TestKnowledgeIntegration:
             *,
             config: Config | None = None,
             runtime_paths: RuntimePaths | None = None,
-            request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
-            shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
+            execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
         ) -> MagicMock | None:
             observed_calls.append((base_id, config, runtime_paths))
@@ -4660,17 +4659,14 @@ class TestKnowledgeIntegration:
 
         assert mock_ai.call_args.kwargs["knowledge"] is None
 
-    def test_chat_completions_does_not_await_initialize_shared_knowledge_managers(
+    def test_chat_completions_does_not_await_request_path_reindex(
         self,
         knowledge_app_client: TestClient,
     ) -> None:
         """Chat completions should not await shared-manager initialization on the request path."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch(
-                "mindroom.knowledge.shared_managers.initialize_shared_knowledge_managers",
-                new_callable=AsyncMock,
-            ) as mock_init,
+            patch("mindroom.knowledge.manager.KnowledgeManager.reindex_all", new_callable=AsyncMock) as reindex_all,
         ):
             mock_ai.return_value = "Response"
 
@@ -4682,7 +4678,7 @@ class TestKnowledgeIntegration:
                 },
             )
 
-        assert mock_init.await_count == 0
+        assert reindex_all.await_count == 0
 
     def test_unready_kb_emits_system_hint(self, knowledge_app_client: TestClient) -> None:
         """Missing published knowledge should inject a system-style degraded hint."""
@@ -4691,13 +4687,13 @@ class TestKnowledgeIntegration:
         scheduled_base_ids: list[str] = []
 
         class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
+            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(f"refresh:{base_id}")
 
-            def schedule_initial_load(self, base_id: str) -> None:
+            def schedule_initial_load(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
-            def is_refreshing(self, base_id: str) -> bool:
+            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
                 _ = base_id
                 return False
 
@@ -4706,8 +4702,7 @@ class TestKnowledgeIntegration:
             *,
             config: Config | None = None,  # noqa: ARG001
             runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
-            request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
-            shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
+            execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[KnowledgeAvailability], None] | None = None,
         ) -> None:
             _ = base_id
@@ -4789,8 +4784,7 @@ class TestKnowledgeIntegration:
             *,
             config: Config | None = None,  # noqa: ARG001
             runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
-            request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
-            shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
+            execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
         ) -> MagicMock | None:
             return {"docs": mock_knowledge_docs, "wiki": mock_knowledge_wiki}.get(base_id)

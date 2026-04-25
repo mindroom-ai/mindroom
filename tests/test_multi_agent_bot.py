@@ -75,7 +75,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
-from mindroom.knowledge import KnowledgeAvailability, KnowledgeManager
+from mindroom.knowledge import KnowledgeAvailability
 from mindroom.knowledge.utils import MultiKnowledgeVectorDb
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -400,26 +400,6 @@ def _mock_managed_bot(config: Config) -> MagicMock:
     bot.event_cache_write_coordinator = None
     bot._set_presence_with_model_info = AsyncMock()
     return bot
-
-
-def _mock_shared_knowledge_manager(
-    *,
-    base_id: str,
-    storage_root: Path,
-    knowledge_path: Path,
-    knowledge: object,
-) -> KnowledgeManager:
-    manager = MagicMock(spec=KnowledgeManager)
-    manager.base_id = base_id
-    manager.storage_path = storage_root
-    manager.knowledge_path = knowledge_path
-    manager._cached_persisted_indexing_state = SimpleNamespace(
-        status="complete",
-        availability=KnowledgeAvailability.READY.value,
-    )
-    manager.matches.return_value = True
-    manager.get_knowledge.return_value = knowledge
-    return manager
 
 
 def _hook_plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
@@ -813,7 +793,6 @@ class TestAgentBot:
             runtime_root=tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.orchestrator = MagicMock(knowledge_managers={"research": MagicMock()})
 
         assert bot._knowledge_access_support.for_agent("calculator") is None
 
@@ -832,15 +811,13 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         expected_knowledge = object()
-        manager = _mock_shared_knowledge_manager(
-            base_id="research",
-            storage_root=runtime_paths_for(config).storage_root,
-            knowledge_path=(tmp_path / "kb").resolve(),
-            knowledge=expected_knowledge,
+        lookup = SimpleNamespace(
+            snapshot=SimpleNamespace(knowledge=expected_knowledge),
+            availability=KnowledgeAvailability.READY,
         )
-        bot.orchestrator = MagicMock(knowledge_managers={"research": manager})
 
-        assert bot._knowledge_access_support.for_agent("calculator") is expected_knowledge
+        with patch("mindroom.knowledge.utils.get_published_snapshot", return_value=lookup):
+            assert bot._knowledge_access_support.for_agent("calculator") is expected_knowledge
 
     def test_agent_property_rejects_private_agent_without_request_identity(
         self,
@@ -903,22 +880,16 @@ class TestAgentBot:
         ]
         legal_knowledge = Knowledge(vector_db=legal_vector_db)
 
-        research_manager = _mock_shared_knowledge_manager(
-            base_id="research",
-            storage_root=runtime_paths_for(config).storage_root,
-            knowledge_path=(tmp_path / "kb_research").resolve(),
-            knowledge=research_knowledge,
-        )
-        legal_manager = _mock_shared_knowledge_manager(
-            base_id="legal",
-            storage_root=runtime_paths_for(config).storage_root,
-            knowledge_path=(tmp_path / "kb_legal").resolve(),
-            knowledge=legal_knowledge,
-        )
+        def _lookup(base_id: str, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                snapshot=SimpleNamespace(
+                    knowledge={"research": research_knowledge, "legal": legal_knowledge}[base_id],
+                ),
+                availability=KnowledgeAvailability.READY,
+            )
 
-        bot.orchestrator = MagicMock(knowledge_managers={"research": research_manager, "legal": legal_manager})
-
-        combined_knowledge = bot._knowledge_access_support.for_agent("calculator")
+        with patch("mindroom.knowledge.utils.get_published_snapshot", side_effect=_lookup):
+            combined_knowledge = bot._knowledge_access_support.for_agent("calculator")
         assert combined_knowledge is not None
 
         docs = combined_knowledge.search("knowledge query", max_results=4)
@@ -930,39 +901,6 @@ class TestAgentBot:
         ]
         research_vector_db.search.assert_called_once_with(query="knowledge query", limit=4, filters=None)
         legal_vector_db.search.assert_called_once_with(query="knowledge query", limit=4, filters=None)
-
-    def test_knowledge_for_agent_prefers_request_bound_manager(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Request-bound managers should win over later cache lookups."""
-        config = self.create_config_with_knowledge_bases(
-            assigned_bases=["research"],
-            knowledge_bases={
-                "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
-            },
-            runtime_root=tmp_path,
-        )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        cached_manager = MagicMock()
-        cached_manager.get_knowledge.return_value = object()
-        bot.orchestrator = MagicMock(knowledge_managers={"research": cached_manager})
-
-        expected_knowledge = object()
-        bound_manager = MagicMock()
-        bound_manager.get_knowledge.return_value = expected_knowledge
-
-        assert (
-            bot._knowledge_access_support.for_agent(
-                "calculator",
-                request_knowledge_managers={"research": bound_manager},
-            )
-            is expected_knowledge
-        )
-
-        bound_manager.get_knowledge.assert_called_once_with()
-        cached_manager.get_knowledge.assert_not_called()
 
     def test_multi_knowledge_vector_db_interleaves_sync_results(self) -> None:
         """Round-robin merge should include top results from each knowledge base."""
@@ -1856,8 +1794,7 @@ class TestAgentBot:
         bot._knowledge_access_support.for_agent.assert_called_once()
         args, kwargs = bot._knowledge_access_support.for_agent.call_args
         assert args == ("calculator",)
-        assert kwargs["request_knowledge_managers"] == {}
-        assert "execution_identity" not in kwargs
+        assert kwargs["execution_identity"] is not None
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_attachment_ids_in_response_metadata(
@@ -10459,8 +10396,8 @@ class TestMultiAgentOrchestrator:
                 mock_start.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_start_sets_up_rooms_before_knowledge(self, tmp_path: Path) -> None:
-        """Room creation/invites should happen before knowledge refresh work."""
+    async def test_orchestrator_start_sets_up_rooms_before_auxiliary_workers(self, tmp_path: Path) -> None:
+        """Room creation/invites should happen before auxiliary runtime workers."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
 
@@ -10478,19 +10415,15 @@ class TestMultiAgentOrchestrator:
         async def _setup_rooms(_: list[Any]) -> None:
             call_order.append("setup_rooms")
 
-        async def _schedule_knowledge(*_: object, **__: object) -> None:
-            call_order.append("schedule_knowledge")
-
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
-            patch.object(orchestrator, "_schedule_knowledge_refresh", side_effect=_schedule_knowledge),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         ):
             await _run_orchestrator_start_until_ready(orchestrator)
 
-        assert call_order == ["wait_for_homeserver", "setup_rooms", "schedule_knowledge"]
+        assert call_order == ["wait_for_homeserver", "setup_rooms"]
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -10515,7 +10448,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
             patch.object(orchestrator, "initialize", side_effect=_initialize),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_configure_knowledge", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         ):
@@ -10699,33 +10631,6 @@ class TestMultiAgentOrchestrator:
             )
 
     @pytest.mark.asyncio
-    async def test_schedule_knowledge_refresh_retries_until_success(self, tmp_path: Path) -> None:
-        """Background knowledge refresh should keep retrying until it succeeds."""
-        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        config = MagicMock()
-        attempts = 0
-
-        async def _configure(*_: object, **__: object) -> None:
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                msg = "boom"
-                raise RuntimeError(msg)
-
-        with (
-            patch.object(orchestrator, "_configure_knowledge", side_effect=_configure),
-            patch("mindroom.orchestration.runtime.STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
-            patch("mindroom.orchestration.runtime.STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
-        ):
-            await orchestrator._schedule_knowledge_refresh(config, start_watcher=True)
-            task = orchestrator._knowledge_refresh_task
-            assert task is not None
-            await task
-
-        assert orchestrator._knowledge_refresh_task is None
-        assert attempts == 2
-
-    @pytest.mark.asyncio
     async def test_orchestrator_start_schedules_retry_for_failed_agents(self, tmp_path: Path) -> None:
         """Startup should keep degraded agents around and retry them in the background."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
@@ -10746,7 +10651,6 @@ class TestMultiAgentOrchestrator:
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
@@ -10777,7 +10681,6 @@ class TestMultiAgentOrchestrator:
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
@@ -10975,8 +10878,8 @@ class TestMultiAgentOrchestrator:
         reset_runtime_state()
 
     @pytest.mark.asyncio
-    async def test_update_config_schedules_knowledge_refresh_when_running(self, tmp_path: Path) -> None:
-        """Hot reload should schedule (not block on) knowledge refresh while running."""
+    async def test_update_config_syncs_runtime_services_when_running(self, tmp_path: Path) -> None:
+        """Hot reload should sync runtime services without global knowledge refresh work."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
 
         config = MagicMock()
@@ -11004,15 +10907,13 @@ class TestMultiAgentOrchestrator:
                 return_value=set(),
             ),
             patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
-            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()) as mock_schedule_knowledge,
-            patch.object(orchestrator, "_configure_knowledge", new=AsyncMock()) as mock_configure_knowledge,
-            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
             updated = await orchestrator.update_config()
 
         assert updated is False
-        mock_schedule_knowledge.assert_awaited_once_with(config, start_watcher=True)
-        mock_configure_knowledge.assert_not_awaited()
+        mock_sync_runtime.assert_awaited_once_with(config, start_watcher=True)
+        assert not hasattr(orchestrator, "_schedule_knowledge_refresh")
 
     @pytest.mark.asyncio
     async def test_update_config_uses_custom_config_path(self, tmp_path: Path) -> None:
@@ -11400,7 +11301,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.load_config", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
             try:
@@ -11468,7 +11368,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.load_config", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
             try:
@@ -11559,7 +11458,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
             patch("mindroom.orchestrator.create_temp_user", return_value=MagicMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
-            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
@@ -11640,7 +11538,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
             patch("mindroom.orchestrator.create_temp_user", return_value=MagicMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
-            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),

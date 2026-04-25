@@ -51,8 +51,6 @@ from mindroom.history.interrupted_replay import split_interrupted_tool_trace, to
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import (
     KnowledgeAvailability,
-    KnowledgeManager,
-    ensure_request_knowledge_managers,
     format_knowledge_availability_notice,
     get_agent_knowledge,
 )
@@ -1175,8 +1173,6 @@ def materialize_exact_team_members(
     session_id: str | None = None,
     include_openai_compat_guidance: bool = False,
     materializable_agent_names: set[str] | None = None,
-    request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
-    shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
     unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
     refresh_owner: KnowledgeRefreshOwner | None = None,
     reason_prefix: str = "Team request",
@@ -1197,11 +1193,10 @@ def materialize_exact_team_members(
             agent_name,
             config,
             runtime_paths,
-            request_knowledge_managers=request_knowledge_managers,
-            shared_manager_lookup=shared_manager_lookup,
             on_missing_bases=_on_missing_agent_bases,
             on_unavailable_bases=unavailable_bases.update if unavailable_bases is not None else None,
             refresh_owner=refresh_owner,
+            execution_identity=execution_identity,
         )
         return create_agent(
             agent_name,
@@ -1247,16 +1242,12 @@ def _materialize_team_members(
     execution_identity: ToolExecutionIdentity | None,
     *,
     session_id: str | None = None,
-    request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact requested team-member set without silent fallback."""
     requested_agent_names = _requested_team_agent_names(agent_names)
     assert orchestrator.config is not None
-
-    def _shared_manager(base_id: str) -> KnowledgeManager | None:
-        return orchestrator.knowledge_managers.get(base_id)
 
     return materialize_exact_team_members(
         requested_agent_names,
@@ -1265,36 +1256,10 @@ def _materialize_team_members(
         execution_identity=execution_identity,
         session_id=session_id,
         materializable_agent_names=resolve_live_shared_agent_names(orchestrator),
-        request_knowledge_managers=request_knowledge_managers,
-        shared_manager_lookup=_shared_manager,
         unavailable_bases=unavailable_bases,
         refresh_owner=orchestrator.knowledge_refresh_owner,
         reason_prefix=reason_prefix,
     )
-
-
-async def _ensure_request_team_knowledge_managers(
-    agent_names: list[str],
-    orchestrator: MultiAgentOrchestrator,
-    execution_identity: ToolExecutionIdentity | None,
-) -> dict[str, KnowledgeManager]:
-    """Resolve request-scoped knowledge managers needed for one team request."""
-    if execution_identity is None:
-        return {}
-    assert orchestrator.config is not None
-    try:
-        return await ensure_request_knowledge_managers(
-            agent_names,
-            config=orchestrator.config,
-            runtime_paths=orchestrator.runtime_paths,
-            execution_identity=execution_identity,
-        )
-    except Exception:
-        logger.exception(
-            "Failed to initialize request-scoped knowledge managers for team request",
-            agent_names=agent_names,
-        )
-        return {}
 
 
 def _create_team_instance(
@@ -1533,11 +1498,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     assert orchestrator.config is not None
     requested_agent_names = _requested_team_agent_names(agent_names)
     orchestrator.config.assert_team_agents_supported(requested_agent_names)
-    request_knowledge_managers = await _ensure_request_team_knowledge_managers(
-        requested_agent_names,
-        orchestrator,
-        execution_identity,
-    )
     unavailable_bases: dict[str, KnowledgeAvailability] = {}
     try:
         team_members = _materialize_team_members(
@@ -1545,7 +1505,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             orchestrator,
             execution_identity,
             session_id=session_id,
-            request_knowledge_managers=request_knowledge_managers,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
         )
@@ -1896,11 +1855,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         [mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids],
     )
     orchestrator.config.assert_team_agents_supported(requested_agent_names)
-    request_knowledge_managers = await _ensure_request_team_knowledge_managers(
-        requested_agent_names,
-        orchestrator,
-        execution_identity,
-    )
     unavailable_bases: dict[str, KnowledgeAvailability] = {}
     try:
         team_members = _materialize_team_members(
@@ -1908,7 +1862,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             orchestrator,
             execution_identity,
             session_id=session_id,
-            request_knowledge_managers=request_knowledge_managers,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
         )

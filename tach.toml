@@ -1625,25 +1625,27 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge"
 depends_on = [
+    "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.refresh_owner",
-    "mindroom.knowledge.shared_managers",
+    "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.registry",
     "mindroom.knowledge.utils",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.availability"
+depends_on = []
 
 [[modules]]
 path = "mindroom.knowledge.chunking"
 depends_on = []
 
 [[modules]]
-path = "mindroom.knowledge.startup"
-depends_on = []
-
-[[modules]]
-path = "mindroom.knowledge.shared_managers"
+path = "mindroom.knowledge.registry"
 depends_on = [
+    "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
-    "mindroom.knowledge.startup",
     "mindroom.runtime_resolution",
 ]
 
@@ -1656,12 +1658,26 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.knowledge.refresh_owner"
-depends_on = ["mindroom.knowledge.shared_managers"]
+depends_on = [
+    "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.registry",
+    "mindroom.logging_config",
+]
+
+[[modules]]
+path = "mindroom.knowledge.refresh_runner"
+depends_on = [
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.registry",
+    "mindroom.runtime_resolution",
+]
 
 [[modules]]
 path = "mindroom.knowledge.utils"
 depends_on = [
-    "mindroom.knowledge.shared_managers",
+    "mindroom.knowledge.availability",
+    "mindroom.knowledge.registry",
+    "mindroom.logging_config",
     "mindroom.runtime_protocols",
 ]
 
@@ -1763,17 +1779,23 @@ from = ["mindroom.model_loading"]
 [[interfaces]]
 expose = [
     "KnowledgeAccessSupport",
+    "KnowledgeSnapshotKey",
+    "KnowledgeSnapshotLookup",
     "KnowledgeManager",
-    "ensure_request_knowledge_managers",
-    "ensure_shared_knowledge_manager",
+    "KnowledgeRefreshOwner",
+    "PublishedKnowledgeSnapshot",
+    "clear_published_snapshots",
     "format_knowledge_availability_notice",
     "get_agent_knowledge",
-    "get_shared_knowledge_manager_for_config",
-    "initialize_shared_knowledge_managers",
+    "get_published_snapshot",
     "KnowledgeAvailability",
     "OrchestratorKnowledgeRefreshOwner",
+    "PerBindingKnowledgeRefreshOwner",
+    "publish_snapshot",
+    "refresh_knowledge_binding",
+    "resolve_snapshot_key",
+    "snapshot_indexed_count",
     "StandaloneKnowledgeRefreshOwner",
-    "shutdown_shared_knowledge_managers",
 ]
 from = ["mindroom.knowledge"]
 

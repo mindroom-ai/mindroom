@@ -273,8 +273,7 @@ class TestDelegateKnowledge:
             mock_get.assert_called_once()
             args, kwargs = mock_get.call_args
             assert args == ("researcher", config, runtime_paths)
-            assert kwargs["request_knowledge_managers"] == {}
-            assert "execution_identity" not in kwargs
+            assert kwargs["execution_identity"] is None
             ai_kwargs = mock_ai_response.await_args.kwargs
             assert ai_kwargs["agent_name"] == "researcher"
             assert ai_kwargs["config"] == config
@@ -298,13 +297,13 @@ class TestDelegateKnowledge:
         scheduled_base_ids: list[str] = []
 
         class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
+            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(f"refresh:{base_id}")
 
-            def schedule_initial_load(self, base_id: str) -> None:
+            def schedule_initial_load(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
-            def is_refreshing(self, base_id: str) -> bool:
+            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
                 _ = base_id
                 return False
 
@@ -346,10 +345,6 @@ class TestDelegateKnowledge:
         delegate_tool = next(tool for tool in agent.tools if tool.name == "delegate")
 
         with (
-            patch(
-                "mindroom.custom_tools.delegate.ensure_request_knowledge_managers",
-                new=AsyncMock(return_value={}),
-            ),
             patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
             patch(
                 "mindroom.custom_tools.delegate.ai_response",

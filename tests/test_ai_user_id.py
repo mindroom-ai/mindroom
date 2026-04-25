@@ -600,7 +600,6 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello!")),
     ):
         coordinator = _build_response_runner(
@@ -644,7 +643,6 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
@@ -751,7 +749,6 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [first, second])])
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
     ):
@@ -858,7 +855,6 @@ async def test_process_and_respond_applies_session_started_agent_and_room_scopes
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [matching, wrong_agent, wrong_room])])
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
     ):
@@ -922,7 +918,6 @@ async def test_process_and_respond_does_not_emit_session_started_without_persist
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
     ):
@@ -1034,7 +1029,6 @@ async def test_session_started_hooks_continue_after_timeout(tmp_path: Path) -> N
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [slow, fast])])
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
     ):
@@ -1093,7 +1087,6 @@ async def test_session_started_hooks_continue_after_runtime_error(tmp_path: Path
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [failing, fast])])
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
     ):
@@ -1173,7 +1166,6 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.stream_agent_response") as mock_stream,
     ):
         coordinator = _build_response_runner(
@@ -1247,7 +1239,6 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
     storage = _SessionStorage()
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.stream_agent_response") as mock_stream,
     ):
         coordinator = _build_response_runner(
@@ -1321,7 +1312,6 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
     storage = _SessionStorage()
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.stream_agent_response") as mock_stream,
         patch.object(ResponseRunner, "_show_tool_calls", return_value=True),
     ):
@@ -1413,7 +1403,6 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
     ):
@@ -1489,7 +1478,6 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.stream_agent_response") as mock_stream,
     ):
         coordinator = _build_response_runner(
@@ -1881,7 +1869,6 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
     )
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
         patch.object(ResponseRunner, "_show_tool_calls", return_value=True),
@@ -2106,7 +2093,6 @@ async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_contex
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
     ):
@@ -2141,7 +2127,6 @@ async def test_process_and_respond_streaming_uses_resolved_thread_id_for_ai_logg
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.stream_agent_response") as mock_stream,
     ):
         coordinator = _build_response_runner(
@@ -2179,7 +2164,6 @@ async def test_process_and_respond_passes_current_and_model_prompt_to_ai(
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
     ):
@@ -2218,7 +2202,6 @@ async def test_process_and_respond_streaming_passes_current_and_model_prompt_to_
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.stream_agent_response") as mock_stream,
     ):
         coordinator = _build_response_runner(
@@ -2260,7 +2243,6 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
 
     with (
-        patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
@@ -3509,7 +3491,6 @@ class TestUserIdPassthrough:
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
         with (
-            patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
             patch("mindroom.response_runner.ai_response") as mock_ai,
         ):
             coordinator = _build_response_runner(
@@ -3558,7 +3539,6 @@ class TestUserIdPassthrough:
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
         with (
-            patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
             patch("mindroom.response_runner.stream_agent_response") as mock_stream,
         ):
             coordinator = _build_response_runner(

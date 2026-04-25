@@ -25,12 +25,7 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
-from mindroom.knowledge import (
-    KnowledgeManager,
-    OrchestratorKnowledgeRefreshOwner,
-    initialize_shared_knowledge_managers,
-    shutdown_shared_knowledge_managers,
-)
+from mindroom.knowledge import OrchestratorKnowledgeRefreshOwner
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
@@ -218,10 +213,8 @@ class MultiAgentOrchestrator:
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
-    knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
-    _knowledge_refresh_task: asyncio.Task | None = field(default=None, init=False)
     _config_reload_task: asyncio.Task | None = field(default=None, init=False)
     _config_reload_requested_at: float | None = field(default=None, init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
@@ -244,7 +237,7 @@ class MultiAgentOrchestrator:
             logger=logger,
             background_task_owner=self._event_cache_write_task_owner,
         )
-        self._knowledge_refresh_owner = OrchestratorKnowledgeRefreshOwner(self)
+        self._knowledge_refresh_owner = OrchestratorKnowledgeRefreshOwner()
 
     @property
     def knowledge_refresh_owner(self) -> OrchestratorKnowledgeRefreshOwner:
@@ -361,22 +354,6 @@ class MultiAgentOrchestrator:
             update_runtime_state=update_runtime_state,
         )
 
-    async def _configure_knowledge(self, config: Config, *, start_watcher: bool) -> None:
-        """Initialize or reconfigure knowledge managers for the current config."""
-        self.knowledge_managers = await initialize_shared_knowledge_managers(
-            config=config,
-            runtime_paths=self.runtime_paths,
-            start_watchers=start_watcher,
-            reindex_on_create=False,
-            reconcile_existing_runtime=True,
-        )
-
-    async def _cancel_knowledge_refresh_task(self) -> None:
-        """Cancel any in-flight background knowledge refresh task."""
-        task = self._knowledge_refresh_task
-        self._knowledge_refresh_task = None
-        await cancel_logged_task(task)
-
     async def _cancel_config_reload_task(self) -> None:
         """Cancel any queued config reload task."""
         task = self._config_reload_task
@@ -483,38 +460,6 @@ class MultiAgentOrchestrator:
             self._run_bot_start_retry(entity_name),
             name=f"retry_start_{entity_name}",
             failure_message="Background bot start task failed",
-        )
-
-    async def _run_knowledge_refresh(
-        self,
-        config: Config,
-        *,
-        start_watcher: bool,
-    ) -> None:
-        """Run background knowledge refresh until it succeeds or is cancelled."""
-        current_task = asyncio.current_task()
-        try:
-            await run_with_retry(
-                "Background knowledge refresh",
-                lambda: self._configure_knowledge(config, start_watcher=start_watcher),
-                update_runtime_state=False,
-            )
-        finally:
-            if self._knowledge_refresh_task is current_task:
-                self._knowledge_refresh_task = None
-
-    async def _schedule_knowledge_refresh(
-        self,
-        config: Config,
-        *,
-        start_watcher: bool,
-    ) -> None:
-        """Schedule knowledge refresh in the background, replacing any in-flight run."""
-        await self._cancel_knowledge_refresh_task()
-        self._knowledge_refresh_task = create_logged_task(
-            self._run_knowledge_refresh(config, start_watcher=start_watcher),
-            name="knowledge_refresh",
-            failure_message="Background knowledge refresh failed",
         )
 
     def in_flight_response_count(self) -> int:
@@ -649,18 +594,6 @@ class MultiAgentOrchestrator:
             if self._config_reload_task is current_task:
                 self._config_reload_task = None
 
-    async def _refresh_knowledge_for_runtime(
-        self,
-        config: Config,
-        *,
-        start_watcher: bool,
-    ) -> None:
-        """Refresh knowledge now (startup path) or in background (runtime updates)."""
-        if self.running:
-            await self._schedule_knowledge_refresh(config, start_watcher=start_watcher)
-            return
-        await self._configure_knowledge(config, start_watcher=start_watcher)
-
     async def _sync_runtime_support_services(
         self,
         config: Config,
@@ -668,9 +601,9 @@ class MultiAgentOrchestrator:
         start_watcher: bool,
     ) -> None:
         """Refresh runtime support services that depend on the active config."""
+        _ = start_watcher
         ensure_default_agent_workspaces(config, self.storage_path)
         await self._sync_event_cache_service(config)
-        await self._refresh_knowledge_for_runtime(config, start_watcher=start_watcher)
         await self._sync_memory_auto_flush_worker()
 
     async def _stop_mcp_manager(self) -> None:
@@ -1100,10 +1033,6 @@ class MultiAgentOrchestrator:
         await self._auto_resume_after_restart(interrupted_threads, config)
 
         self.running = True
-
-        # Knowledge refresh is optional for initial availability.
-        set_runtime_starting("Refreshing knowledge bases in background")
-        await self._schedule_knowledge_refresh(config, start_watcher=True)
 
         set_runtime_starting("Starting background workers")
         await self._sync_memory_auto_flush_worker()
@@ -1638,11 +1567,9 @@ class MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         await self._cancel_config_reload_task()
         await self._stop_memory_auto_flush_worker()
-        await self._cancel_knowledge_refresh_task()
+        await self._knowledge_refresh_owner.shutdown()
         await self._cancel_bot_start_tasks()
         await self._stop_mcp_manager()
-        await shutdown_shared_knowledge_managers()
-        self.knowledge_managers = {}
 
         # Cancel sync tasks first so shutdown does not race with active sync loops.
         for entity_name in list(self._sync_tasks.keys()):

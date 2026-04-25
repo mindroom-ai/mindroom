@@ -1,4 +1,4 @@
-"""Background refresh ownership for shared knowledge bases."""
+"""Per-binding background refresh ownership for knowledge snapshots."""
 
 from __future__ import annotations
 
@@ -7,80 +7,114 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
-from mindroom.knowledge.shared_managers import ensure_shared_knowledge_manager
+from mindroom.knowledge.refresh_runner import refresh_knowledge_binding
+from mindroom.knowledge.registry import KnowledgeSnapshotKey, resolve_snapshot_key
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.orchestrator import MultiAgentOrchestrator
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 logger = get_logger(__name__)
 
 
-def _create_logged_task(
-    coro: Coroutine[object, object, None],
-    *,
-    name: str,
-    failure_message: str,
-) -> asyncio.Task[None]:
-    """Create a detached task that logs failures on completion."""
-    task = asyncio.create_task(coro, name=name)
-
-    def _log_failure(completed: asyncio.Task[None]) -> None:
-        try:
-            completed.result()
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.exception(failure_message)
-
-    task.add_done_callback(_log_failure)
-    return task
-
-
 class KnowledgeRefreshOwner(Protocol):
-    """Owns background refresh of shared knowledge bases."""
+    """Owns background refresh tasks keyed by resolved knowledge binding."""
 
-    def schedule_refresh(self, base_id: str) -> None:
-        """Schedule a background refresh for one shared knowledge base."""
+    def schedule_refresh(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> None:
+        """Schedule a background refresh for one resolved knowledge binding."""
         ...
 
-    def schedule_initial_load(self, base_id: str) -> None:
-        """Schedule the first background load for one shared knowledge base."""
+    def schedule_initial_load(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> None:
+        """Schedule the first background load for one resolved knowledge binding."""
         ...
 
-    def is_refreshing(self, base_id: str) -> bool:
-        """Return whether one shared knowledge base is already refreshing."""
+    def is_refreshing(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> bool:
+        """Return whether one resolved knowledge binding is refreshing."""
         ...
 
 
 @dataclass(slots=True)
-class StandaloneKnowledgeRefreshOwner:
-    """Own shared-knowledge refresh in API-only runtimes with no orchestrator.
+class PerBindingKnowledgeRefreshOwner:
+    """Own fire-and-forget refresh tasks without global manager coordination."""
 
-    API-only ``/v1`` mode only performs the initial shared-base load at startup.
-    Restart the API process to pick up later shared-knowledge changes.
-    Matrix/orchestrator-managed runtimes keep ongoing background refresh enabled.
-    """
+    _tasks: dict[KnowledgeSnapshotKey, asyncio.Task[None]] = field(default_factory=dict, init=False)
 
-    load_config: Callable[[], tuple[Config | None, RuntimePaths]]
-    _tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False)
+    def schedule_refresh(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> None:
+        """Schedule a background refresh for one resolved knowledge binding."""
+        self._schedule(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
 
-    def schedule_refresh(self, base_id: str) -> None:
-        """Schedule a background refresh for one shared knowledge base."""
-        self._schedule(base_id)
+    def schedule_initial_load(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> None:
+        """Schedule the first background load for one resolved knowledge binding."""
+        self._schedule(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
 
-    def schedule_initial_load(self, base_id: str) -> None:
-        """Schedule the first background load for one shared knowledge base."""
-        self._schedule(base_id)
-
-    def is_refreshing(self, base_id: str) -> bool:
-        """Return whether one shared knowledge base is already refreshing."""
-        task = self._tasks.get(base_id)
+    def is_refreshing(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> bool:
+        """Return whether one resolved knowledge binding is already refreshing."""
+        try:
+            key = resolve_snapshot_key(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                create=False,
+            )
+        except Exception:
+            return False
+        task = self._tasks.get(key)
         return task is not None and not task.done()
 
     async def shutdown(self) -> None:
@@ -93,66 +127,74 @@ class StandaloneKnowledgeRefreshOwner:
             with suppress(asyncio.CancelledError):
                 await task
 
-    def _schedule(self, base_id: str) -> None:
-        if self.is_refreshing(base_id):
+    def _schedule(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> None:
+        try:
+            key = resolve_snapshot_key(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                create=False,
+            )
+        except Exception:
+            logger.exception("Could not resolve knowledge binding for refresh", base_id=base_id)
             return
-        task = _create_logged_task(
-            self._run_refresh(base_id),
-            name=f"standalone_knowledge_refresh:{base_id}",
-            failure_message="Standalone knowledge refresh failed",
-        )
-        self._tasks[base_id] = task
-        task.add_done_callback(
-            lambda completed, *, refreshed_base_id=base_id: self._clear_task(refreshed_base_id, completed),
-        )
 
-    def _clear_task(self, base_id: str, task: asyncio.Task[None]) -> None:
-        if self._tasks.get(base_id) is task:
-            self._tasks.pop(base_id, None)
-
-    async def _run_refresh(self, base_id: str) -> None:
-        config, runtime_paths = self.load_config()
-        if config is None or base_id not in config.knowledge_bases:
+        task = self._tasks.get(key)
+        if task is not None and not task.done():
             return
-        await ensure_shared_knowledge_manager(
-            base_id,
+
+        captured_config = config.model_copy(deep=True)
+        captured_runtime_paths = runtime_paths
+        captured_execution_identity = execution_identity
+        task = asyncio.create_task(
+            self._run_refresh(
+                key,
+                config=captured_config,
+                runtime_paths=captured_runtime_paths,
+                execution_identity=captured_execution_identity,
+            ),
+            name=f"knowledge_refresh:{base_id}",
+        )
+        self._tasks[key] = task
+        task.add_done_callback(lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed))
+
+    def _handle_done(self, key: KnowledgeSnapshotKey, task: asyncio.Task[None]) -> None:
+        if self._tasks.get(key) is task:
+            self._tasks.pop(key, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Background knowledge refresh failed", base_id=key.base_id)
+
+    async def _run_refresh(
+        self,
+        key: KnowledgeSnapshotKey,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> None:
+        await refresh_knowledge_binding(
+            key.base_id,
             config=config,
             runtime_paths=runtime_paths,
-            start_watchers=False,
-            reindex_on_create=False,
-            reconcile_existing_runtime=True,
+            execution_identity=execution_identity,
         )
 
 
-@dataclass(slots=True)
-class OrchestratorKnowledgeRefreshOwner:
-    """Own shared-knowledge refresh via the running orchestrator."""
+class StandaloneKnowledgeRefreshOwner(PerBindingKnowledgeRefreshOwner):
+    """API/runtime-owned per-binding refresh scheduler."""
 
-    orchestrator: MultiAgentOrchestrator
 
-    def schedule_refresh(self, base_id: str) -> None:
-        """Schedule a background refresh for one shared knowledge base."""
-        self._schedule(base_id)
-
-    def schedule_initial_load(self, base_id: str) -> None:
-        """Schedule the first background load for one shared knowledge base."""
-        self._schedule(base_id)
-
-    def is_refreshing(self, base_id: str) -> bool:
-        """Return whether one shared knowledge base is already refreshing."""
-        _ = base_id
-        task = self.orchestrator._knowledge_refresh_task
-        return task is not None and not task.done()
-
-    def _schedule(self, base_id: str) -> None:
-        config = self.orchestrator.config
-        if config is None or base_id not in config.knowledge_bases or self.is_refreshing(base_id):
-            return
-        _create_logged_task(
-            self.orchestrator._schedule_knowledge_refresh(
-                config,
-                start_watcher=self.orchestrator.running,
-            ),
-            name=f"schedule_knowledge_refresh:{base_id}",
-            failure_message="Background knowledge refresh scheduling failed",
-        )
+class OrchestratorKnowledgeRefreshOwner(PerBindingKnowledgeRefreshOwner):
+    """Orchestrator-owned per-binding refresh scheduler."""

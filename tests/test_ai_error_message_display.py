@@ -342,7 +342,6 @@ class TestAIErrorDisplay:
             )
 
         with (
-            patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
             patch(
                 "mindroom.ai.open_resolved_scope_session_context",
                 new=lambda **_kwargs: nullcontext(
@@ -405,7 +404,6 @@ class TestAIErrorDisplay:
             )
 
         with (
-            patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
             patch(
                 "mindroom.ai.open_resolved_scope_session_context",
                 new=lambda **_kwargs: nullcontext(
@@ -529,17 +527,12 @@ class TestAIErrorDisplay:
         assert content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
     @pytest.mark.asyncio
-    async def test_knowledge_init_failure_falls_back_to_response_without_knowledge(self, tmp_path: Path) -> None:
-        """Matrix reply paths should continue when request-scoped knowledge init fails."""
+    async def test_unavailable_knowledge_falls_back_to_response_without_knowledge(self, tmp_path: Path) -> None:
+        """Matrix reply paths should continue when no published knowledge is available."""
         bot = _mock_bot(tmp_path)
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
 
         with (
-            patch(
-                "mindroom.response_runner.ensure_request_knowledge_managers",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("knowledge init failed"),
-            ),
             patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
                 "mindroom.delivery_gateway.send_message_result",

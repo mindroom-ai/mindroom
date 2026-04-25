@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from agno.knowledge.knowledge import Knowledge
 
-from mindroom.knowledge.shared_managers import (
-    ensure_agent_knowledge_managers,
-    get_published_shared_knowledge_manager,
-    get_shared_knowledge_manager_for_config,
-)
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.registry import get_published_snapshot
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
@@ -25,20 +21,10 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
-
-
-class KnowledgeAvailability(Enum):
-    """Availability state for one shared knowledge base on the request path."""
-
-    READY = "ready"
-    INITIALIZING = "initializing"
-    REFRESH_FAILED = "refresh_failed"
-    CONFIG_MISMATCH = "config_mismatch"
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -66,90 +52,43 @@ class _AsyncKnowledgeVectorDb(_KnowledgeVectorDb, Protocol):
     ) -> list[Document]: ...
 
 
-async def ensure_request_knowledge_managers(
-    agent_names: list[str],
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> dict[str, KnowledgeManager]:
-    """Ensure and collect request-scoped knowledge managers for one agent set."""
-    managers: dict[str, KnowledgeManager] = {}
-    for agent_name in agent_names:
-        managers.update(
-            await ensure_agent_knowledge_managers(
-                agent_name,
-                config,
-                runtime_paths,
-                execution_identity=execution_identity,
-            ),
-        )
-    return managers
-
-
 def _get_knowledge_for_base(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
-    shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
     on_availability: Callable[[KnowledgeAvailability], None] | None = None,
 ) -> Knowledge | None:
     """Resolve one configured base ID to its current Knowledge instance."""
-    request_manager = request_knowledge_managers.get(base_id) if request_knowledge_managers is not None else None
-    if request_manager is not None:
-        return request_manager.get_knowledge()
-    if config.get_private_knowledge_base_agent(base_id):
-        return None
-
-    candidate_manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None
-    published_manager = get_published_shared_knowledge_manager(
-        base_id,
-        candidate_manager=candidate_manager,
-    )
-    if published_manager is None:
+    try:
+        lookup = get_published_snapshot(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
+    except Exception:
+        logger.exception("Knowledge snapshot lookup failed", base_id=base_id)
         if on_availability is not None:
             on_availability(KnowledgeAvailability.INITIALIZING)
         return None
 
-    persisted_state = published_manager._cached_persisted_indexing_state
-    if (
-        persisted_state is not None
-        and persisted_state.availability == KnowledgeAvailability.REFRESH_FAILED.value
-        and on_availability is not None
-    ):
-        on_availability(KnowledgeAvailability.REFRESH_FAILED)
-        return published_manager.get_knowledge()
-    if (
-        persisted_state is None
-        or persisted_state.status != "complete"
-        or persisted_state.availability != KnowledgeAvailability.READY.value
-    ):
-        if on_availability is not None:
-            on_availability(KnowledgeAvailability.INITIALIZING)
+    if on_availability is not None:
+        on_availability(lookup.availability)
+    if lookup.snapshot is None:
         return None
-
-    manager = get_shared_knowledge_manager_for_config(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        candidate_manager=published_manager,
-    )
-    if manager is None and on_availability is not None:
-        on_availability(KnowledgeAvailability.CONFIG_MISMATCH)
-    return published_manager.get_knowledge()
+    return lookup.snapshot.knowledge
 
 
 def get_agent_knowledge(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
-    shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
     on_missing_bases: Callable[[list[str]], None] | None = None,
     on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
     refresh_owner: KnowledgeRefreshOwner | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
     resolved_knowledge: dict[str, tuple[Knowledge | None, KnowledgeAvailability]] = {}
@@ -168,15 +107,24 @@ def get_agent_knowledge(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
-            request_knowledge_managers=request_knowledge_managers,
-            shared_manager_lookup=shared_manager_lookup,
+            execution_identity=execution_identity,
             on_availability=_set_availability,
         )
         if refresh_owner is not None:
             if availability is KnowledgeAvailability.INITIALIZING:
-                refresh_owner.schedule_initial_load(base_id)
+                refresh_owner.schedule_initial_load(
+                    base_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                )
             elif availability is not KnowledgeAvailability.READY:
-                refresh_owner.schedule_refresh(base_id)
+                refresh_owner.schedule_refresh(
+                    base_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                )
         resolved_knowledge[base_id] = (knowledge, availability)
         return resolved_knowledge[base_id]
 
@@ -229,24 +177,17 @@ class KnowledgeAccessSupport:
         self,
         agent_name: str,
         *,
-        request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
         on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
     ) -> Knowledge | None:
         """Return the current knowledge assigned to one or more agent bases."""
         orchestrator = self.runtime.orchestrator
         refresh_owner = orchestrator.knowledge_refresh_owner if orchestrator is not None else None
 
-        def _shared_manager(base_id: str) -> KnowledgeManager | None:
-            if orchestrator is None:
-                return None
-            return orchestrator.knowledge_managers.get(base_id)
-
         return get_agent_knowledge(
             agent_name,
             self.runtime.config,
             self.runtime_paths,
-            request_knowledge_managers=request_knowledge_managers,
-            shared_manager_lookup=_shared_manager,
             on_missing_bases=lambda missing_base_ids: self.logger.warning(
                 "Knowledge bases not available for agent",
                 agent_name=agent_name,
@@ -254,6 +195,7 @@ class KnowledgeAccessSupport:
             ),
             on_unavailable_bases=on_unavailable_bases,
             refresh_owner=refresh_owner,
+            execution_identity=execution_identity,
         )
 
 
@@ -263,12 +205,12 @@ class MultiKnowledgeVectorDb:
 
     Duck-types the vector_db interface expected by agno's ``Knowledge.__post_init__``.
     ``exists()`` returns True and ``create()`` is a no-op so that Knowledge skips its
-    own initialization — the underlying knowledge managers already own the DB lifecycle.
+    own initialization; the underlying snapshots are already-published read handles.
     If agno changes the ``__post_init__`` protocol, this adapter will need updating.
     """
 
     # Agno Knowledge.__post_init__ calls exists()/create(); this adapter intentionally
-    # lies because KnowledgeManager already owns the underlying DB lifecycle.
+    # presents already-published read handles as initialized.
     vector_dbs: list[_KnowledgeVectorDb | Callable[[], _KnowledgeVectorDb | None]]
 
     def _resolved_vector_dbs(self) -> list[_KnowledgeVectorDb]:

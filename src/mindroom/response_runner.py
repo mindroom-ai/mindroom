@@ -43,7 +43,6 @@ from mindroom.hooks import (
 from mindroom.knowledge import (
     KnowledgeAccessSupport,
     KnowledgeAvailability,
-    ensure_request_knowledge_managers,
     format_knowledge_availability_notice,
 )
 from mindroom.logging_config import bound_log_context
@@ -424,7 +423,6 @@ class _PreparedResponseRuntime:
     session_id: str
     model_prompt: str
     tool_dispatch: ToolDispatchContext
-    request_knowledge_managers: dict[str, Any]
     room_mode: bool = False
 
 
@@ -1091,26 +1089,6 @@ class ResponseRunner:
             ),
         )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
-
-    async def _ensure_request_knowledge_managers(
-        self,
-        agent_names: list[str],
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> dict[str, Any]:
-        """Ensure request-scoped knowledge managers for one response execution."""
-        try:
-            return await ensure_request_knowledge_managers(
-                agent_names,
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
-                execution_identity=execution_identity,
-            )
-        except Exception:
-            self.deps.logger.exception(
-                "Failed to initialize request-scoped knowledge managers",
-                agent_names=agent_names,
-            )
-            return {}
 
     async def generate_team_response_helper(
         self,
@@ -1810,10 +1788,6 @@ class ResponseRunner:
             correlation_id=request.correlation_id,
             source_envelope=request.response_envelope,
         )
-        request_knowledge_managers = await self._ensure_request_knowledge_managers(
-            [self.deps.agent_name],
-            tool_dispatch.execution_identity,
-        )
         return _PreparedResponseRuntime(
             resolved_target=resolved_target,
             response_thread_id=response_thread_id,
@@ -1821,7 +1795,6 @@ class ResponseRunner:
             session_id=session_id,
             model_prompt=resolved_model_prompt,
             tool_dispatch=tool_dispatch,
-            request_knowledge_managers=request_knowledge_managers,
             room_mode=room_mode,
         )
 
@@ -1886,7 +1859,7 @@ class ResponseRunner:
             unavailable_bases: dict[str, KnowledgeAvailability] = {}
             knowledge = self.deps.knowledge_access.for_agent(
                 self.deps.agent_name,
-                request_knowledge_managers=runtime.request_knowledge_managers,
+                execution_identity=runtime.tool_dispatch.execution_identity,
                 on_unavailable_bases=unavailable_bases.update,
             )
             system_enrichment_items = _append_knowledge_availability_enrichment(
@@ -1978,7 +1951,7 @@ class ResponseRunner:
         unavailable_bases: dict[str, KnowledgeAvailability] = {}
         knowledge = self.deps.knowledge_access.for_agent(
             self.deps.agent_name,
-            request_knowledge_managers=runtime.request_knowledge_managers,
+            execution_identity=runtime.tool_dispatch.execution_identity,
             on_unavailable_bases=unavailable_bases.update,
         )
         system_enrichment_items = _append_knowledge_availability_enrichment(

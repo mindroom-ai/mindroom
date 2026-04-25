@@ -1,679 +1,185 @@
-"""Tests for knowledge management API routes."""
+"""Tests for non-initializing knowledge management API routes."""
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+import json
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
-import mindroom.api.knowledge as knowledge_api
 from mindroom import constants
 from mindroom.api import main
-from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
-from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import resolve_runtime_paths
-from mindroom.knowledge import initialize_shared_knowledge_managers, shutdown_shared_knowledge_managers
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 
-def _knowledge_config(
-    path: Path,
-    *,
-    base_id: str = "research",
-    with_git: bool = False,
-) -> Config:
-    git_config = (
-        KnowledgeGitConfig(
-            repo_url="https://github.com/example/private-repo.git",
-            branch="main",
-            poll_interval_seconds=300,
-        )
-        if with_git
-        else None
-    )
-    return Config(
-        agents={},
-        models={},
-        knowledge_bases={
-            base_id: KnowledgeBaseConfig(
-                path=str(path),
-                watch=False,
-                git=git_config,
-            ),
-        },
+def _knowledge_config(path: Path, *, extra_base: bool = False) -> Config:
+    knowledge_bases = {
+        "research": KnowledgeBaseConfig(path=str(path), watch=False),
+    }
+    if extra_base:
+        knowledge_bases["unused"] = KnowledgeBaseConfig(path=str(path.parent / "unused"), watch=False)
+    return Config(agents={}, models={}, knowledge_bases=knowledge_bases)
+
+
+def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
     )
 
 
 def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
-    """Publish one committed config snapshot for request-path tests."""
     context = main._app_context(api_app)
     context.config_data = config.authored_model_dump()
     context.runtime_config = config
     context.config_load_result = main.ConfigLoadResult(success=True)
 
 
-class _DummyCollection:
-    def get(self, *, limit: int | None = None, include: list[str] | None = None) -> dict[str, object]:
-        _ = limit, include
-        return {"ids": []}
-
-
-class _DummyClient:
-    def get_collection(self, name: str) -> _DummyCollection:
-        _ = name
-        return _DummyCollection()
-
-
-class _DummyChromaDb:
-    def __init__(self, **_: object) -> None:
-        self.collection_name = "mindroom_knowledge"
-        self.client = _DummyClient()
-
-    def delete(self) -> bool:
-        return True
-
-    def create(self) -> None:
-        return None
-
-    def exists(self) -> bool:
-        return True
-
-
-class _DummyKnowledge:
-    def __init__(self, vector_db: _DummyChromaDb) -> None:
-        self.vector_db = vector_db
-
-
-@pytest.fixture
-def test_client(tmp_path: Path) -> TestClient:
-    """Create an API client bound to explicit runtime paths for this test file."""
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
+def _test_client(tmp_path: Path) -> TestClient:
+    runtime_paths = _runtime_paths(tmp_path)
     main.initialize_api_app(main.app, runtime_paths)
     return TestClient(main.app)
 
 
-def test_knowledge_bases_list_uses_existing_manager_without_initializing(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Base listing should use an existing manager without triggering initialization."""
-    config = _knowledge_config(tmp_path, with_git=True)
-    manager = MagicMock()
-    manager.get_status.return_value = {
-        "indexed_count": 3,
-        "file_count": 4,
-        "git": {
-            "repo_url": "https://github.com/example/private-repo.git",
-            "branch": "main",
-            "lfs": True,
-            "startup_behavior": "background",
-            "syncing": False,
-            "repo_present": True,
-            "initial_sync_complete": True,
-            "last_successful_sync_at": "2026-04-17T12:00:00+00:00",
-            "last_successful_commit": "abc123",
-            "last_error": None,
-            "pending_startup_mode": None,
-        },
-    }
-    _publish_committed_runtime_config(test_client.app, config)
+class _RecordingRefreshOwner:
+    def __init__(self) -> None:
+        self.scheduled: list[tuple[str, Config, RuntimePaths]] = []
 
-    with (
-        patch(
-            "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
-            return_value=manager,
-        ) as get_manager,
-    ):
-        response = test_client.get("/api/knowledge/bases")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["count"] == 1
-    assert payload["bases"][0]["name"] == "research"
-    assert payload["bases"][0]["indexed_count"] == 3
-    assert payload["bases"][0]["file_count"] == 4
-    assert payload["bases"][0]["manager_available"] is True
-    assert payload["bases"][0]["git"] == {
-        "repo_url": "https://github.com/example/private-repo.git",
-        "branch": "main",
-        "lfs": True,
-        "startup_behavior": "background",
-        "syncing": False,
-        "repo_present": True,
-        "initial_sync_complete": True,
-        "last_successful_sync_at": "2026-04-17T12:00:00+00:00",
-        "last_successful_commit": "abc123",
-        "last_error": None,
-        "pending_startup_mode": None,
-    }
-    get_manager.assert_called_once()
+    def schedule_refresh(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: object | None = None,
+    ) -> None:
+        _ = execution_identity
+        self.scheduled.append((base_id, config, runtime_paths))
 
 
-def test_knowledge_root_resolves_relative_path_from_config_dir(
-    tmp_path: Path,
-) -> None:
-    """Knowledge API should resolve relative base paths from the config directory."""
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config = _knowledge_config(path=Path("knowledge"))
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_dir / "config.yaml",
-        storage_path=tmp_path / "storage",
-    )
+def test_knowledge_status_reads_snapshot_metadata_without_initializing(tmp_path: Path) -> None:
+    """Status for a cold base should read files only and avoid refresh/index work."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
 
-    root = knowledge_api._knowledge_root(config, "research", runtime_paths)
-
-    assert root == (config_dir / "knowledge").resolve()
-
-
-def test_knowledge_files_list_uses_manager_filters_when_available(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """File listing should reflect the manager-managed subset of files."""
-    config = _knowledge_config(tmp_path)
-    included_file = tmp_path / "docs" / "guide.md"
-    included_file.parent.mkdir(parents=True, exist_ok=True)
-    included_file.write_text("guide", encoding="utf-8")
-    excluded_file = tmp_path / "src" / "code.py"
-    excluded_file.parent.mkdir(parents=True, exist_ok=True)
-    excluded_file.write_text("print('x')", encoding="utf-8")
-
-    manager = MagicMock()
-    manager.list_files.return_value = [included_file]
-    _publish_committed_runtime_config(test_client.app, config)
-
-    with (
-        patch(
-            "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
-            return_value=manager,
-        ) as get_manager,
-    ):
-        response = test_client.get("/api/knowledge/bases/research/files")
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.get("/api/knowledge/bases/research/status")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["file_count"] == 1
-    assert payload["files"] == [
-        {
-            "name": "guide.md",
-            "path": "docs/guide.md",
-            "size": included_file.stat().st_size,
-            "modified": payload["files"][0]["modified"],
-            "type": "md",
-        },
-    ]
-    assert payload["manager_available"] is True
-    get_manager.assert_called_once()
+    assert payload["indexed_count"] == 0
+    assert payload["manager_available"] is False
+    refresh.assert_not_awaited()
 
 
-def test_knowledge_status_uses_existing_manager_without_initializing(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Status should use an existing manager without triggering initialization."""
-    config = _knowledge_config(tmp_path, with_git=True)
-    manager = MagicMock()
-    manager.get_status.return_value = {
-        "indexed_count": 3,
-        "file_count": 4,
-        "git": {
-            "repo_url": "https://github.com/example/private-repo.git",
-            "branch": "main",
-            "lfs": False,
-            "startup_behavior": "blocking",
-            "syncing": True,
-            "repo_present": False,
-            "initial_sync_complete": False,
-            "last_successful_sync_at": None,
-            "last_successful_commit": None,
-            "last_error": "fetch failed",
-            "pending_startup_mode": "resume",
-        },
-    }
-    _publish_committed_runtime_config(test_client.app, config)
+def test_knowledge_bases_list_does_not_initialize_unused_configured_bases(tmp_path: Path) -> None:
+    """Listing bases should not initialize every configured knowledge base."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(docs, extra_base=True)
+    _publish_committed_runtime_config(client.app, config)
 
-    with (
-        patch(
-            "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
-            return_value=manager,
-        ) as get_manager,
-    ):
-        response = test_client.get("/api/knowledge/bases/research/status")
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.get("/api/knowledge/bases")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "base_id": "research",
-        "folder_path": str(tmp_path.resolve()),
-        "watch": False,
-        "file_count": 4,
-        "indexed_count": 3,
-        "manager_available": True,
-        "git": {
-            "repo_url": "https://github.com/example/private-repo.git",
-            "branch": "main",
-            "lfs": False,
-            "startup_behavior": "blocking",
-            "syncing": True,
-            "repo_present": False,
-            "initial_sync_complete": False,
-            "last_successful_sync_at": None,
-            "last_successful_commit": None,
-            "last_error": "fetch failed",
-            "pending_startup_mode": "resume",
-        },
-    }
-    get_manager.assert_called_once()
+    payload = response.json()
+    assert payload["count"] == 2
+    assert {base["name"] for base in payload["bases"]} == {"research", "unused"}
+    assert all(base["manager_available"] is False for base in payload["bases"])
+    refresh.assert_not_awaited()
 
 
-def test_knowledge_status_falls_back_without_initializing_when_manager_missing(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Status should remain fast and best-effort when no manager exists yet."""
-    config = _knowledge_config(tmp_path)
-    (tmp_path / "note.md").write_text("hello", encoding="utf-8")
-    _publish_committed_runtime_config(test_client.app, config)
+def test_api_lifespan_does_not_schedule_all_configured_knowledge_bases(tmp_path: Path) -> None:
+    """API startup should load config but not warm every configured KB."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _knowledge_config(tmp_path / "docs", extra_base=True)
+    runtime_paths.config_path.write_text(json.dumps(config.authored_model_dump()), encoding="utf-8")
+    main.initialize_api_app(main.app, runtime_paths)
 
     with (
-        patch(
-            "mindroom.api.knowledge.get_shared_knowledge_manager_for_config",
-            return_value=None,
-        ) as get_manager,
+        patch("mindroom.knowledge.refresh_owner.StandaloneKnowledgeRefreshOwner.schedule_initial_load") as schedule,
+        TestClient(main.app) as client,
     ):
-        response = test_client.get("/api/knowledge/bases/research/status")
+        assert client.get("/api/health").status_code == 200
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "base_id": "research",
-        "folder_path": str(tmp_path.resolve()),
-        "watch": False,
-        "file_count": 1,
-        "indexed_count": 0,
-        "manager_available": False,
-    }
-    get_manager.assert_called_once()
+    schedule.assert_not_called()
 
 
-def test_knowledge_upload_rolls_back_on_oversized_file(
-    test_client: TestClient,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When one file is too large, previous files in the same request are removed."""
-    config = _knowledge_config(tmp_path)
-    monkeypatch.setattr("mindroom.api.knowledge._MAX_UPLOAD_BYTES", 5)
-    _publish_committed_runtime_config(test_client.app, config)
+def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> None:
+    """Uploads mutate files and schedule refresh instead of indexing inline."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
 
-    files = [
-        ("files", ("first.txt", b"1234", "text/plain")),
-        ("files", ("second.txt", b"123456", "text/plain")),
-    ]
-    response = test_client.post("/api/knowledge/bases/research/upload", files=files)
-
-    assert response.status_code == 413
-    assert not (tmp_path / "first.txt").exists()
-    assert not (tmp_path / "second.txt").exists()
-
-
-def test_knowledge_upload_initializes_manager_without_forcing_full_reindex(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Upload should let shared-manager bootstrap choose its own startup mode."""
-    config = _knowledge_config(tmp_path)
-    manager = MagicMock()
-    manager.index_file = AsyncMock(return_value=True)
-    _publish_committed_runtime_config(test_client.app, config)
-
-    with (
-        patch(
-            "mindroom.api.knowledge.ensure_shared_knowledge_manager",
-            new=AsyncMock(return_value=manager),
-        ) as ensure_shared_manager,
-    ):
-        response = test_client.post(
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.post(
             "/api/knowledge/bases/research/upload",
-            files=[("files", ("note.txt", b"hello", "text/plain"))],
+            files=[("files", ("guide.md", b"hello", "text/markdown"))],
         )
 
     assert response.status_code == 200
-    assert (tmp_path / "note.txt").exists()
-    ensure_shared_manager.assert_awaited_once_with(
+    assert response.json()["uploaded"] == ["guide.md"]
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+    refresh.assert_not_awaited()
+
+
+def test_delete_schedules_refresh_without_inline_indexing(tmp_path: Path) -> None:
+    """Deletes mutate files and schedule refresh instead of editing vectors inline."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.delete("/api/knowledge/bases/research/files/guide.md")
+
+    assert response.status_code == 200
+    assert not (docs / "guide.md").exists()
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+    refresh.assert_not_awaited()
+
+
+def test_explicit_reindex_uses_refresh_runner(tmp_path: Path) -> None:
+    """Admin reindex remains blocking but uses the same refresh runner."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+
+    with patch(
+        "mindroom.api.knowledge.refresh_knowledge_binding",
+        new=AsyncMock(return_value=SimpleNamespace(indexed_count=7)),
+    ) as refresh:
+        response = client.post("/api/knowledge/bases/research/reindex")
+
+    assert response.status_code == 200
+    assert response.json()["indexed_count"] == 7
+    refresh.assert_awaited_once_with(
         "research",
         config=config,
-        runtime_paths=main._app_runtime_paths(test_client.app),
-        start_watchers=False,
-        reindex_on_create=False,
-        initialize_on_create=True,
+        runtime_paths=main._app_context(client.app).runtime_paths,
     )
-    manager.index_file.assert_awaited_once_with("note.txt", upsert=True)
-
-
-def test_git_knowledge_upload_waits_for_checkout_ready_before_writing(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Git-backed uploads should block until the checkout is ready for direct writes."""
-    config = _knowledge_config(tmp_path, with_git=True)
-    manager = MagicMock()
-    manager.index_file = AsyncMock(return_value=True)
-    checkout_ready = False
-    _publish_committed_runtime_config(test_client.app, config)
-
-    async def _ensure_git_checkout_ready() -> None:
-        nonlocal checkout_ready
-        checkout_ready = True
-
-    async def _stream_upload(
-        upload: object,
-        destination: Path,
-        filename: str,
-    ) -> None:
-        _ = upload, filename
-        assert checkout_ready is True
-        destination.write_bytes(b"hello")
-
-    manager.ensure_git_checkout_ready = AsyncMock(side_effect=_ensure_git_checkout_ready)
-
-    with (
-        patch("mindroom.api.knowledge._ensure_manager", new=AsyncMock(return_value=manager)),
-        patch("mindroom.api.knowledge._stream_upload_to_destination", new=AsyncMock(side_effect=_stream_upload)),
-    ):
-        response = test_client.post(
-            "/api/knowledge/bases/research/upload",
-            files=[("files", ("note.txt", b"hello", "text/plain"))],
-        )
-
-    assert response.status_code == 200
-    manager.ensure_git_checkout_ready.assert_awaited_once_with()
-    manager.index_file.assert_awaited_once_with("note.txt", upsert=True)
-
-
-def test_knowledge_delete_initializes_manager_without_forcing_full_reindex(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Delete should let shared-manager bootstrap choose its own startup mode."""
-    config = _knowledge_config(tmp_path)
-    target = tmp_path / "a.txt"
-    target.write_text("hello", encoding="utf-8")
-    manager = MagicMock()
-    manager.remove_file = AsyncMock(return_value=True)
-    _publish_committed_runtime_config(test_client.app, config)
-
-    with (
-        patch(
-            "mindroom.api.knowledge.ensure_shared_knowledge_manager",
-            new=AsyncMock(return_value=manager),
-        ) as ensure_shared_manager,
-    ):
-        response = test_client.delete("/api/knowledge/bases/research/files/a.txt")
-
-    assert response.status_code == 200
-    assert not target.exists()
-    ensure_shared_manager.assert_awaited_once_with(
-        "research",
-        config=config,
-        runtime_paths=main._app_runtime_paths(test_client.app),
-        start_watchers=False,
-        reindex_on_create=False,
-        initialize_on_create=True,
-    )
-    manager.remove_file.assert_awaited_once_with("a.txt")
-
-
-def test_knowledge_delete_rejects_path_traversal(test_client: TestClient, tmp_path: Path) -> None:
-    """Delete endpoint should reject traversal paths."""
-    config = _knowledge_config(tmp_path)
-    _publish_committed_runtime_config(test_client.app, config)
-
-    response = test_client.delete("/api/knowledge/bases/research/files/..%2Fsecret.txt")
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid path"
-
-
-def test_unknown_knowledge_base_returns_404(test_client: TestClient, tmp_path: Path) -> None:
-    """Endpoints should return 404 for unknown knowledge base IDs."""
-    config = _knowledge_config(tmp_path, base_id="legal")
-    _publish_committed_runtime_config(test_client.app, config)
-
-    response = test_client.get("/api/knowledge/bases/research/status")
-
-    assert response.status_code == 404
-    assert "not found" in response.json()["detail"]
-
-
-def test_reindex_uses_git_startup_finisher_for_git_bases(test_client: TestClient, tmp_path: Path) -> None:
-    """Git-backed bases should delegate direct reindex requests through the manager helper."""
-    config = _knowledge_config(tmp_path, with_git=True)
-    manager = MagicMock()
-    _publish_committed_runtime_config(test_client.app, config)
-    manager.reindex_explicitly = AsyncMock(return_value=2)
-
-    with (
-        patch("mindroom.api.knowledge._ensure_manager_for_explicit_reindex", new=AsyncMock(return_value=manager)),
-    ):
-        response = test_client.post("/api/knowledge/bases/research/reindex")
-
-    assert response.status_code == 200
-    assert response.json()["indexed_count"] == 2
-    manager.reindex_explicitly.assert_awaited_once_with()
-
-
-def test_reindex_finishes_pending_background_startup_for_git_bases(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Git-backed manual reindex should delegate to the manager helper without duplicate work."""
-    config = _knowledge_config(tmp_path, with_git=True)
-    manager = MagicMock()
-    manager.reindex_explicitly = AsyncMock(return_value=5)
-    _publish_committed_runtime_config(test_client.app, config)
-
-    with patch("mindroom.api.knowledge._ensure_manager_for_explicit_reindex", new=AsyncMock(return_value=manager)):
-        response = test_client.post("/api/knowledge/bases/research/reindex")
-
-    assert response.status_code == 200
-    assert response.json()["indexed_count"] == 5
-    manager.reindex_explicitly.assert_awaited_once_with()
-
-
-def test_reindex_restores_deferred_shared_runtime_when_git_reindex_fails(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Explicit Git reindex should surface manager reindex failures."""
-    config = _knowledge_config(tmp_path, with_git=True)
-    manager = MagicMock()
-    manager.reindex_explicitly = AsyncMock(side_effect=RuntimeError("boom"))
-    _publish_committed_runtime_config(test_client.app, config)
-
-    with (
-        patch("mindroom.api.knowledge._ensure_manager_for_explicit_reindex", new=AsyncMock(return_value=manager)),
-        pytest.raises(RuntimeError, match="boom"),
-    ):
-        test_client.post("/api/knowledge/bases/research/reindex")
-
-    manager.reindex_explicitly.assert_awaited_once_with()
-
-
-def test_reindex_cold_local_base_reindexes_only_once(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Cold manual reindex should not do an eager create-time rebuild before the explicit reindex."""
-    config = _knowledge_config(tmp_path)
-    _publish_committed_runtime_config(test_client.app, config)
-    reindex_explicitly = AsyncMock(return_value=4)
-
-    try:
-        with (
-            patch("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb),
-            patch("mindroom.knowledge.manager.Knowledge", _DummyKnowledge),
-            patch("mindroom.knowledge.manager.KnowledgeManager.reindex_explicitly", new=reindex_explicitly),
-        ):
-            response = test_client.post("/api/knowledge/bases/research/reindex")
-
-        assert response.status_code == 200
-        assert response.json()["indexed_count"] == 4
-        reindex_explicitly.assert_awaited_once_with()
-    finally:
-        asyncio.run(shutdown_shared_knowledge_managers())
-
-
-def test_reindex_cold_git_base_syncs_and_reindexes_only_once(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Cold manual Git reindex should perform one explicit reindex pass, not two."""
-    config = _knowledge_config(tmp_path, with_git=True)
-    _publish_committed_runtime_config(test_client.app, config)
-    reindex_explicitly = AsyncMock(return_value=6)
-
-    try:
-        with (
-            patch("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb),
-            patch("mindroom.knowledge.manager.Knowledge", _DummyKnowledge),
-            patch("mindroom.knowledge.manager.KnowledgeManager.reindex_explicitly", new=reindex_explicitly),
-        ):
-            response = test_client.post("/api/knowledge/bases/research/reindex")
-
-        assert response.status_code == 200
-        assert response.json()["indexed_count"] == 6
-        reindex_explicitly.assert_awaited_once_with()
-    finally:
-        asyncio.run(shutdown_shared_knowledge_managers())
-
-
-def test_knowledge_routes_return_runtime_validation_errors(test_client: TestClient) -> None:
-    """Knowledge routes should surface malformed runtime config as 422, not generic 500s."""
-    runtime_paths = main._app_runtime_paths(test_client.app)
-    runtime_paths.config_path.write_text("agents:\n  broken: [\n", encoding="utf-8")
-    assert main.load_api_config_into_app(runtime_paths, test_client.app) is False
-
-    response = test_client.get("/api/knowledge/bases")
-
-    assert response.status_code == 422
-    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
-
-
-def test_knowledge_routes_use_committed_snapshot_until_reload(test_client: TestClient, tmp_path: Path) -> None:
-    """Knowledge routes should ignore newer on-disk edits until a new snapshot is published."""
-    config = _knowledge_config(tmp_path / "published")
-    _publish_committed_runtime_config(test_client.app, config)
-    runtime_paths = main._app_runtime_paths(test_client.app)
-    plugin_root = tmp_path / "plugins" / "bad-name"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        '{"name": "BadName", "tools_module": null, "skills": []}',
-        encoding="utf-8",
-    )
-    runtime_paths.config_path.write_text(
-        (
-            "models:\n"
-            "  default:\n"
-            "    provider: openai\n"
-            "    id: gpt-5.4\n"
-            "router:\n"
-            "  model: default\n"
-            "agents: {}\n"
-            "knowledge_bases:\n"
-            "  changed:\n"
-            "    path: ./other\n"
-            "    watch: false\n"
-            "plugins:\n"
-            "  - ./plugins/bad-name\n"
-        ),
-        encoding="utf-8",
-    )
-
-    response = test_client.get("/api/knowledge/bases")
-
-    assert response.status_code == 200
-    assert response.json()["bases"][0]["name"] == "research"
-
-
-def test_knowledge_routes_ignore_unpublished_plugin_drift(test_client: TestClient, tmp_path: Path) -> None:
-    """Knowledge routes should keep serving the published snapshot when plugin files drift on disk."""
-    runtime_paths = main._app_runtime_paths(test_client.app)
-    plugin_root = runtime_paths.config_path.parent / "plugins" / "demo_plugin"
-    plugin_root.mkdir(parents=True)
-    manifest_path = plugin_root / "mindroom.plugin.json"
-    manifest_path.write_text('{"name": "demo_plugin", "skills": []}', encoding="utf-8")
-    config = _knowledge_config(tmp_path / "published")
-    config.plugins = [PluginEntryConfig(path="./plugins/demo_plugin")]
-    _publish_committed_runtime_config(test_client.app, config)
-    manifest_path.write_text('{"name": "BadName", "skills": []}', encoding="utf-8")
-
-    response = test_client.get("/api/knowledge/bases")
-
-    assert response.status_code == 200
-    assert response.json()["bases"][0]["name"] == "research"
-
-
-def test_ensure_manager_reloads_when_knowledge_base_path_changes(tmp_path: Path) -> None:
-    """The API helper should not reuse a cached manager for an old base path."""
-    storage_path = tmp_path / "storage"
-    old_path = tmp_path / "old"
-    new_path = tmp_path / "new"
-    old_path.mkdir(parents=True, exist_ok=True)
-    new_path.mkdir(parents=True, exist_ok=True)
-
-    config_old = _knowledge_config(old_path)
-    config_new = _knowledge_config(new_path)
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage_path)
-
-    async def _run() -> None:
-        try:
-            await initialize_shared_knowledge_managers(
-                config_old,
-                runtime_paths,
-                start_watchers=False,
-                reindex_on_create=False,
-            )
-            manager = await knowledge_api._ensure_manager(config_new, "research", runtime_paths)
-            assert manager is not None
-            assert manager.knowledge_path == new_path.resolve()
-        finally:
-            await shutdown_shared_knowledge_managers()
-
-    asyncio.run(_run())
-
-
-def test_ensure_manager_initializes_only_requested_shared_base(tmp_path: Path) -> None:
-    """Ensuring one base should not bootstrap every shared knowledge manager."""
-    knowledge_root = tmp_path / "knowledge"
-    knowledge_root.mkdir(parents=True, exist_ok=True)
-    config = _knowledge_config(knowledge_root)
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    manager = MagicMock()
-
-    async def _run() -> None:
-        with (
-            patch(
-                "mindroom.api.knowledge.ensure_shared_knowledge_manager",
-                new=AsyncMock(return_value=manager),
-            ) as ensure_shared_manager,
-        ):
-            result = await knowledge_api._ensure_manager(config, "research", runtime_paths)
-
-        assert result is manager
-        ensure_shared_manager.assert_awaited_once_with(
-            "research",
-            config=config,
-            runtime_paths=runtime_paths,
-            start_watchers=False,
-            reindex_on_create=False,
-            initialize_on_create=True,
-        )
-
-    asyncio.run(_run())

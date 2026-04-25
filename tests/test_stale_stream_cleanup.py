@@ -2051,9 +2051,6 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     async def _resume(_: list[InterruptedThread], __: Config) -> None:
         call_order.append("resume")
 
-    async def _knowledge(*_args: object, **_kwargs: object) -> None:
-        call_order.append("knowledge")
-
     ready = asyncio.Event()
 
     def _mark_ready() -> None:
@@ -2064,7 +2061,6 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
         patch.object(orchestrator, "_cleanup_stale_streams_after_restart", side_effect=_cleanup),
         patch.object(orchestrator, "_auto_resume_after_restart", side_effect=_resume),
-        patch.object(orchestrator, "_schedule_knowledge_refresh", side_effect=_knowledge),
         patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=_mark_ready),
@@ -2080,7 +2076,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
                 with suppress(asyncio.CancelledError):
                     await runtime_task
 
-    assert call_order == ["wait", "setup", "cleanup", "resume", "knowledge"]
+    assert call_order == ["wait", "setup", "cleanup", "resume"]
 
 
 @pytest.mark.asyncio

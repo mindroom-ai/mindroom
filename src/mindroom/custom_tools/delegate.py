@@ -18,8 +18,6 @@ from mindroom.ai import ai_response
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge import (
     KnowledgeAvailability,
-    KnowledgeManager,
-    ensure_request_knowledge_managers,
     format_knowledge_availability_notice,
     get_agent_knowledge,
 )
@@ -102,11 +100,11 @@ class DelegateTools(Toolkit):
             return "Cannot delegate an empty task. Please provide a task description."
 
         try:
-            request_knowledge_managers: dict[str, KnowledgeManager] = await ensure_request_knowledge_managers(
-                [agent_name],
-                config=self._config,
-                runtime_paths=self._runtime_paths,
-                execution_identity=self._execution_identity,
+            session_id = f"delegate:{self._agent_name}:{agent_name}:{uuid4()}"
+            execution_identity = (
+                replace(self._execution_identity, agent_name=agent_name, session_id=session_id)
+                if self._execution_identity is not None
+                else None
             )
 
             unavailable_bases: dict[str, KnowledgeAvailability] = {}
@@ -114,9 +112,9 @@ class DelegateTools(Toolkit):
                 agent_name,
                 self._config,
                 self._runtime_paths,
-                request_knowledge_managers=request_knowledge_managers,
                 on_unavailable_bases=unavailable_bases.update,
                 refresh_owner=self._refresh_owner,
+                execution_identity=execution_identity,
             )
             system_enrichment_items: tuple[EnrichmentItem, ...] = ()
             notice = format_knowledge_availability_notice(unavailable_bases)
@@ -130,12 +128,6 @@ class DelegateTools(Toolkit):
                 to_agent=agent_name,
                 depth=self._delegation_depth + 1,
                 task_preview=task[:100],
-            )
-            session_id = f"delegate:{self._agent_name}:{agent_name}:{uuid4()}"
-            execution_identity = (
-                replace(self._execution_identity, agent_name=agent_name, session_id=session_id)
-                if self._execution_identity is not None
-                else None
             )
             runtime_context = get_tool_runtime_context()
             room_id = _resolve_delegated_room_id(
