@@ -35,7 +35,7 @@ from mindroom.knowledge import (
     refresh_knowledge_binding,
     snapshot_indexed_count,
 )
-from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
+from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature, list_knowledge_files
 from mindroom.knowledge.registry import load_published_indexing_state, resolve_snapshot_key, snapshot_metadata_path
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -209,6 +209,10 @@ def _identity(requester_id: str) -> ToolExecutionIdentity:
     )
 
 
+def _set_git_tracked_files(manager: KnowledgeManager, *relative_paths: str) -> None:
+    manager._git_tracked_relative_paths = set(relative_paths)
+
+
 def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: Path) -> None:
     """A missing published snapshot is advisory and schedules only the referenced base."""
     config = _config(
@@ -257,6 +261,23 @@ def test_config_mismatch_notice_without_snapshot_says_unavailable() -> None:
         {
             "docs": KnowledgeAvailabilityDetail(
                 availability=KnowledgeAvailability.CONFIG_MISMATCH,
+                snapshot_attached=False,
+            ),
+        },
+    )
+
+    assert notice is not None
+    assert "unavailable for semantic search this turn" in notice
+    assert "may be stale" not in notice
+    assert "Do not claim to have searched it." in notice
+
+
+def test_stale_notice_without_snapshot_says_unavailable() -> None:
+    """Stale metadata without a loadable snapshot must not imply semantic search occurred."""
+    notice = knowledge_utils.format_knowledge_availability_notice(
+        {
+            "docs": KnowledgeAvailabilityDetail(
+                availability=KnowledgeAvailability.STALE,
                 snapshot_attached=False,
             ),
         },
@@ -325,8 +346,8 @@ async def test_shared_local_watch_snapshot_refreshes_on_access_without_blocking_
 
 
 @pytest.mark.asyncio
-async def test_shared_local_watch_ready_refresh_is_not_request_cooldowned(tmp_path: Path) -> None:
-    """Local watch=true bases schedule background refresh on access without a stale source scan gate."""
+async def test_shared_local_watch_ready_refresh_on_access_is_throttled(tmp_path: Path) -> None:
+    """Local watch=true bases do not enqueue refresh work on every READY request."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -341,9 +362,10 @@ async def test_shared_local_watch_ready_refresh_is_not_request_cooldowned(tmp_pa
     assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is not None
     doc.write_text("shared local new", encoding="utf-8")
     assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is not None
+    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is not None
 
     owner.schedule_initial_load.assert_not_called()
-    assert owner.schedule_refresh.call_count == 2
+    owner.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -417,6 +439,37 @@ async def test_ready_snapshot_access_never_recomputes_source_signature(
 
     assert get_agent_knowledge("helper", config, runtime_paths) is not None
     assert get_agent_knowledge("helper", config, runtime_paths) is not None
+
+
+def test_knowledge_file_listing_rejects_symlink_file_escape(tmp_path: Path) -> None:
+    """A symlinked file inside the KB must not expose files outside the knowledge root."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    secret = tmp_path / "secret.md"
+    secret.write_text("secret outside root", encoding="utf-8")
+    try:
+        (docs_path / "leak.md").symlink_to(secret)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    assert list_knowledge_files(config, "docs", docs_path) == []
+
+
+def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Path) -> None:
+    """Traversal must not follow symlinked directories out of the knowledge root."""
+    docs_path = tmp_path / "docs"
+    outside = tmp_path / "outside"
+    docs_path.mkdir()
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret through directory", encoding="utf-8")
+    try:
+        (docs_path / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    assert list_knowledge_files(config, "docs", docs_path) == []
 
 
 @pytest.mark.asyncio
@@ -503,14 +556,14 @@ def test_mark_stale_uses_default_collection_for_legacy_metadata_without_collecti
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.write_text(json.dumps(list(key.indexing_settings)), encoding="utf-8")
 
-    marked = knowledge_registry.mark_published_snapshot_stale(
+    marked_base_ids = knowledge_registry.mark_published_snapshot_stale(
         "docs",
         config=config,
         runtime_paths=runtime_paths,
     )
     state = load_published_indexing_state(metadata_path)
 
-    assert marked is True
+    assert marked_base_ids == ("docs",)
     assert _VectorDb.collections[default_collection] == [
         {"content": "legacy delete", "metadata": {"source_path": "guide.md"}},
     ]
@@ -534,7 +587,7 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
     assert beta_lookup.availability is KnowledgeAvailability.READY
     doc.write_text("shared source new", encoding="utf-8")
 
-    marked = knowledge_registry.mark_published_snapshot_stale(
+    marked_base_ids = knowledge_registry.mark_published_snapshot_stale(
         "alpha",
         config=config,
         runtime_paths=runtime_paths,
@@ -543,7 +596,7 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
     beta_state = load_published_indexing_state(snapshot_metadata_path(beta_key))
     refreshed_beta_lookup = get_published_snapshot("beta", config=config, runtime_paths=runtime_paths)
 
-    assert marked is True
+    assert marked_base_ids == ("alpha", "beta")
     assert beta_state is not None
     assert beta_state.availability == KnowledgeAvailability.STALE.value
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
@@ -638,6 +691,7 @@ async def test_git_ready_snapshot_schedules_refresh_after_poll_interval(
     async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
         _ = index_changes
         self._git_last_successful_commit = "rev-a"
+        _set_git_tracked_files(self, "doc.md")
         return {"updated": False, "changed_count": 0, "removed_count": 0}
 
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
@@ -1331,6 +1385,7 @@ async def test_corpus_changing_config_mismatch_returns_no_snapshot(
     async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
         assert index_changes is False
         self._git_last_successful_commit = "rev-a"
+        _set_git_tracked_files(self, "doc.md")
         return {"updated": True, "changed_count": 1, "removed_count": 0}
 
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
@@ -1612,6 +1667,29 @@ async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_refresh_setup_failure_records_failed_availability(tmp_path: Path) -> None:
+    """Manager construction failures are persisted instead of leaving cold metadata initializing."""
+    docs_path = tmp_path / "docs"
+    docs_path.write_text("not a directory", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    with pytest.raises(ValueError, match="must be a directory"):
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+
+    assert state is not None
+    assert state.availability == KnowledgeAvailability.REFRESH_FAILED.value
+    assert state.last_error is not None
+    assert "must be a directory" in state.last_error
+    assert lookup.snapshot is None
+    assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
 
 
 @pytest.mark.asyncio
@@ -2271,6 +2349,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
         assert index_changes is False
         order.append("sync")
         self._git_last_successful_commit = "rev-git"
+        _set_git_tracked_files(self, "doc.md")
         return {"updated": True, "changed_count": 1, "removed_count": 0}
 
     async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
@@ -2289,7 +2368,12 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
     assert order == ["sync", "reindex"]
     assert state is not None
     assert state.published_revision == "rev-git"
-    assert state.source_signature == knowledge_source_signature(config, "docs", docs_path)
+    assert state.source_signature == knowledge_source_signature(
+        config,
+        "docs",
+        docs_path,
+        tracked_relative_paths={"doc.md"},
+    )
     assert "ghp_secret" not in metadata_text
     assert "x-oauth-basic" not in metadata_text
 
@@ -2322,6 +2406,7 @@ async def test_git_noop_refresh_skips_full_reindex_when_snapshot_is_complete(
         assert index_changes is False
         result = sync_results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
+        _set_git_tracked_files(self, "doc.md")
         return result
 
     async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
@@ -2344,11 +2429,11 @@ async def test_git_noop_refresh_skips_full_reindex_when_snapshot_is_complete(
 
 
 @pytest.mark.asyncio
-async def test_git_noop_refresh_rebuilds_when_untracked_indexable_file_changes(
+async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The unchanged Git fast path must still notice local corpus membership changes."""
+    """Git-backed corpora use tracked files only and ignore untracked checkout files."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("git tracked snapshot", encoding="utf-8")
@@ -2371,6 +2456,7 @@ async def test_git_noop_refresh_rebuilds_when_untracked_indexable_file_changes(
         assert index_changes is False
         result = sync_results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
+        _set_git_tracked_files(self, "doc.md")
         return result
 
     async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
@@ -2387,11 +2473,10 @@ async def test_git_noop_refresh_rebuilds_when_untracked_indexable_file_changes(
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert result.published is True
-    assert reindex_count == 2
+    assert reindex_count == 1
     assert lookup.snapshot is not None
     assert [document.content for document in lookup.snapshot.knowledge.search("git", max_results=5)] == [
         "git tracked snapshot",
-        "git untracked local corpus",
     ]
 
 
@@ -2423,6 +2508,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
         assert index_changes is False
         result = sync_results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
+        _set_git_tracked_files(self, "doc.md")
         return result
 
     async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
@@ -2481,6 +2567,7 @@ async def test_git_noop_refresh_rebuilds_after_chunking_config_change(
         assert index_changes is False
         result = sync_results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
+        _set_git_tracked_files(self, "doc.md")
         return result
 
     async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
@@ -2533,6 +2620,7 @@ async def test_force_git_reindex_bypasses_noop_fast_path(
         assert index_changes is False
         result = sync_results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
+        _set_git_tracked_files(self, "doc.md")
         return result
 
     async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
@@ -2585,6 +2673,7 @@ async def test_git_sync_failure_preserves_last_good_snapshot_and_redacts_error(
     async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
         assert index_changes is False
         self._git_last_successful_commit = "rev-ok"
+        _set_git_tracked_files(self, "doc.md")
         return {"updated": True, "changed_count": 1, "removed_count": 0}
 
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)

@@ -143,6 +143,17 @@ def _schedule_refresh(
     )
 
 
+def _schedule_refreshes(
+    config: Config,
+    base_ids: tuple[str, ...],
+    runtime_paths: constants.RuntimePaths,
+    *,
+    request: Request,
+) -> None:
+    for base_id in dict.fromkeys(base_ids):
+        _schedule_refresh(config, base_id, runtime_paths, request=request)
+
+
 def _snapshot_status(
     config: Config,
     base_id: str,
@@ -426,13 +437,13 @@ async def upload_knowledge_files(
 
         _commit_staged_uploads(staged_uploads)
         uploaded = [staged.relative_path for staged in staged_uploads]
-        mark_published_snapshot_stale(
+        affected_base_ids = mark_published_snapshot_stale(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
         )
 
-    _schedule_refresh(config, base_id, runtime_paths, request=request)
+    _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
 
     return {
         "base_id": base_id,
@@ -457,13 +468,13 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
 
         relative_path = target.relative_to(root).as_posix()
         target.unlink()
-        mark_published_snapshot_stale(
+        affected_base_ids = mark_published_snapshot_stale(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
         )
 
-    _schedule_refresh(config, base_id, runtime_paths, request=request)
+    _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
 
     return {
         "success": True,

@@ -22,7 +22,13 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _knowledge_config(path: Path, *, extra_base: bool = False, git: bool = False) -> Config:
+def _knowledge_config(
+    path: Path,
+    *,
+    extra_base: bool = False,
+    duplicate_source_base: bool = False,
+    git: bool = False,
+) -> Config:
     knowledge_bases = {
         "research": KnowledgeBaseConfig(
             path=str(path),
@@ -32,6 +38,8 @@ def _knowledge_config(path: Path, *, extra_base: bool = False, git: bool = False
     }
     if extra_base:
         knowledge_bases["unused"] = KnowledgeBaseConfig(path=str(path.parent / "unused"), watch=False)
+    if duplicate_source_base:
+        knowledge_bases["summary"] = KnowledgeBaseConfig(path=str(path), watch=False, chunk_size=1024)
     return Config(agents={}, models={}, knowledge_bases=knowledge_bases)
 
 
@@ -337,6 +345,33 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     refresh.assert_not_awaited()
 
 
+def test_upload_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path) -> None:
+    """Uploads to a shared source folder refresh every configured base reading that source."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(docs, duplicate_source_base=True)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(config, runtime_paths, base_id="research")
+    _write_snapshot_metadata(config, runtime_paths, base_id="summary", collection="summary_collection")
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", ("guide.md", b"hello", "text/markdown"))],
+        )
+
+    assert response.status_code == 200
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [
+        ("research", config),
+        ("summary", config),
+    ]
+    refresh.assert_not_awaited()
+
+
 def test_git_backed_upload_is_rejected_before_creating_cold_checkout(tmp_path: Path) -> None:
     """Uploads must not create a non-Git directory where a later clone will fail."""
     client = _test_client(tmp_path)
@@ -401,6 +436,31 @@ def test_delete_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     assert response.status_code == 200
     assert not (docs / "guide.md").exists()
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+    refresh.assert_not_awaited()
+
+
+def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path) -> None:
+    """Deletes from a shared source folder refresh every configured base reading that source."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    config = _knowledge_config(docs, duplicate_source_base=True)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(config, runtime_paths, base_id="research")
+    _write_snapshot_metadata(config, runtime_paths, base_id="summary", collection="summary_collection")
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.delete("/api/knowledge/bases/research/files/guide.md")
+
+    assert response.status_code == 200
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [
+        ("research", config),
+        ("summary", config),
+    ]
     refresh.assert_not_awaited()
 
 

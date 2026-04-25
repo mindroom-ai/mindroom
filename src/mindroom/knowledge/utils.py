@@ -187,8 +187,30 @@ def _refresh_cooldown_seconds(
 def _ready_refresh_on_access_cooldown_seconds(lookup: KnowledgeSnapshotLookup, config: Config) -> float:
     """Return READY refresh throttle without request-path source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
-        return 0.0
+        return _REFRESH_RETRY_COOLDOWN_SECONDS
     return _REFRESH_RETRY_COOLDOWN_SECONDS
+
+
+def _refresh_owner_is_refreshing(
+    refresh_owner: KnowledgeRefreshOwner,
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> bool:
+    """Return whether the owner reports an active refresh without requiring a concrete implementation."""
+    try:
+        active = refresh_owner.is_refreshing(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
+    except Exception:
+        logger.debug("Knowledge refresh active check failed", base_id=base_id, exc_info=True)
+        return False
+    return active is True
 
 
 def _schedule_refresh_for_availability(
@@ -206,11 +228,21 @@ def _schedule_refresh_for_availability(
 
     refresh_key = refresh_key_for_snapshot_key(lookup.key)
     if availability is KnowledgeAvailability.READY:
-        if lookup.refresh_on_access and _refresh_schedule_due(
-            refresh_key,
-            KnowledgeAvailability.READY,
-            settings=lookup.key.indexing_settings,
-            cooldown_seconds=_ready_refresh_on_access_cooldown_seconds(lookup, config),
+        if (
+            lookup.refresh_on_access
+            and not _refresh_owner_is_refreshing(
+                refresh_owner,
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+            )
+            and _refresh_schedule_due(
+                refresh_key,
+                KnowledgeAvailability.READY,
+                settings=lookup.key.indexing_settings,
+                cooldown_seconds=_ready_refresh_on_access_cooldown_seconds(lookup, config),
+            )
         ):
             refresh_owner.schedule_refresh(
                 base_id,
@@ -301,6 +333,18 @@ def get_agent_knowledge(
     )
 
 
+def _stale_availability_notice(base_id: str, *, snapshot_attached: bool) -> str:
+    if snapshot_attached:
+        return (
+            f"Knowledge base `{base_id}` may be stale while a refresh is pending this turn. "
+            "Do not claim to have searched the latest contents."
+        )
+    return (
+        f"Knowledge base `{base_id}` is unavailable for semantic search this turn because its stale published snapshot "
+        "could not be loaded. Do not claim to have searched it."
+    )
+
+
 def format_knowledge_availability_notice(
     unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
 ) -> str | None:
@@ -334,10 +378,7 @@ def format_knowledge_availability_notice(
                     "published snapshot does not match current config. Do not claim to have searched it.",
                 )
         elif availability is KnowledgeAvailability.STALE:
-            lines.append(
-                f"Knowledge base `{base_id}` may be stale while a refresh is pending this turn. "
-                "Do not claim to have searched the latest contents.",
-            )
+            lines.append(_stale_availability_notice(base_id, snapshot_attached=snapshot_attached))
         elif availability is KnowledgeAvailability.REFRESH_FAILED:
             if snapshot_attached:
                 lines.append(

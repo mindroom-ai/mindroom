@@ -817,11 +817,12 @@ def mark_published_snapshot_stale(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> bool:
+) -> tuple[str, ...]:
     """Mark metadata stale after a direct source mutation.
 
     Callers that mutate files must hold ``knowledge_binding_mutation_lock`` so
     stale writes stay serialized with refresh publishes for the same binding.
+    Returns the configured base IDs sharing the mutated physical source.
     """
     key = resolve_snapshot_key(
         base_id,
@@ -853,7 +854,6 @@ def mark_published_snapshot_stale(
         if _same_physical_source(candidate_key, key):
             matching_keys.append(candidate_key)
 
-    marked = False
     for matching_key in matching_keys:
         metadata_path = snapshot_metadata_path(matching_key)
         state = load_published_indexing_state(metadata_path)
@@ -867,8 +867,7 @@ def mark_published_snapshot_stale(
         )
         save_published_indexing_state(metadata_path, updated_state)
         _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
-        marked = True
-    return marked
+    return tuple(dict.fromkeys(matching_key.base_id for matching_key in matching_keys))
 
 
 def clear_published_snapshots() -> None:

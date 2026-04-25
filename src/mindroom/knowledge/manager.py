@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 import time
 import uuid
 from contextlib import suppress
@@ -41,7 +42,7 @@ from mindroom.knowledge.redaction import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
@@ -423,30 +424,128 @@ def include_semantic_knowledge_relative_path(config: Config, base_id: str, relat
     return suffix not in exclude_extensions
 
 
+def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
+    try:
+        relative_path = path.relative_to(root)
+    except ValueError:
+        return True
+
+    current = root
+    for part in relative_path.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
 def include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, file_path: Path) -> bool:
     """Return whether a file belongs to the managed semantic file set."""
-    if not file_path.is_file():
-        return False
+    root = knowledge_root.resolve()
+    candidate = file_path if file_path.is_absolute() else root / file_path
     try:
-        relative_path = file_path.relative_to(knowledge_root.resolve())
+        candidate.relative_to(root)
     except ValueError:
         return False
+    if _path_is_symlink_or_under_symlink(root, candidate):
+        return False
+    try:
+        resolved_candidate = candidate.resolve(strict=True)
+        resolved_candidate.relative_to(root)
+    except (OSError, ValueError):
+        return False
+    if not candidate.is_file():
+        return False
+    relative_path = candidate.relative_to(root)
     return include_semantic_knowledge_relative_path(config, base_id, relative_path.as_posix())
 
 
 def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
     """List managed semantic files without constructing a knowledge manager."""
     root = knowledge_root.resolve()
-    if not root.exists():
+    if not root.is_dir():
         return []
-    return sorted(path for path in root.rglob("*") if include_knowledge_file(config, base_id, root, path))
+
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        current_dir = Path(dirpath)
+        dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
+        for filename in filenames:
+            path = current_dir / filename
+            if include_knowledge_file(config, base_id, root, path):
+                files.append(path)
+    return sorted(files)
 
 
-def knowledge_source_signature(config: Config, base_id: str, knowledge_root: Path) -> str:
+def _semantic_file_paths_from_relative_paths(
+    config: Config,
+    base_id: str,
+    knowledge_root: Path,
+    relative_paths: Iterable[str],
+) -> list[Path]:
+    root = knowledge_root.resolve()
+    files: list[Path] = []
+    for relative_path in sorted(set(relative_paths)):
+        path = root / relative_path
+        if include_knowledge_file(config, base_id, root, path):
+            files.append(path)
+    return files
+
+
+def _git_tracked_relative_paths_from_checkout(config: Config, base_id: str, knowledge_root: Path) -> set[str]:
+    git_config = config.get_knowledge_base_config(base_id).git
+    if git_config is None:
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=str(knowledge_root),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=float(git_config.sync_timeout_seconds),
+        )
+    except subprocess.TimeoutExpired as exc:
+        msg = f"Git command timed out after {git_config.sync_timeout_seconds}s: git ls-files -z"
+        raise RuntimeError(msg) from exc
+    except OSError as exc:
+        msg = f"Git command failed: git ls-files -z\n{exc}"
+        raise RuntimeError(msg) from exc
+
+    if result.returncode != 0:
+        details = redact_credentials_in_text((result.stderr or result.stdout).strip())
+        msg = f"Git command failed with exit code {result.returncode}: git ls-files -z"
+        if details:
+            msg = f"{msg}\n{details}"
+        raise RuntimeError(msg)
+
+    return {
+        path
+        for path in result.stdout.split("\x00")
+        if path and include_semantic_knowledge_relative_path(config, base_id, path)
+    }
+
+
+def knowledge_source_signature(
+    config: Config,
+    base_id: str,
+    knowledge_root: Path,
+    *,
+    tracked_relative_paths: Iterable[str] | None = None,
+) -> str:
     """Return a cheap signature for the currently managed local file corpus."""
     root = knowledge_root.resolve()
     digest = hashlib.sha256()
-    for path in list_knowledge_files(config, base_id, root):
+    base_config = config.get_knowledge_base_config(base_id)
+    if base_config.git is None:
+        files = list_knowledge_files(config, base_id, root)
+    else:
+        tracked_paths = (
+            set(tracked_relative_paths)
+            if tracked_relative_paths is not None
+            else _git_tracked_relative_paths_from_checkout(config, base_id, root)
+        )
+        files = _semantic_file_paths_from_relative_paths(config, base_id, root, tracked_paths)
+    for path in files:
         try:
             stat = path.stat()
             relative_path = path.relative_to(root).as_posix()
@@ -504,6 +603,7 @@ class KnowledgeManager:
     _git_last_error: str | None = field(default=None, init=False)
     _git_lfs_checked: bool = field(default=False, init=False)
     _git_lfs_repository_ready: bool = field(default=False, init=False)
+    _git_tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
     _cached_persisted_indexing_state: _PersistedIndexingState | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -822,14 +922,7 @@ class KnowledgeManager:
         return _is_hidden_relative_path(relative_path)
 
     def _include_file(self, file_path: Path) -> bool:
-        if not file_path.is_file():
-            return False
-        try:
-            relative_path = file_path.relative_to(self._knowledge_source_path())
-        except ValueError:
-            return False
-
-        return self._include_semantic_relative_path(relative_path.as_posix())
+        return include_knowledge_file(self.config, self.base_id, self._knowledge_source_path(), file_path)
 
     def _include_semantic_relative_path(self, relative_path: str) -> bool:
         if not self._include_relative_path(relative_path):
@@ -939,7 +1032,9 @@ class KnowledgeManager:
     async def _git_list_tracked_files(self) -> set[str]:
         output = await self._run_git(["ls-files", "-z"])
         raw_paths = [entry for entry in output.split("\x00") if entry]
-        return {path for path in raw_paths if self._include_semantic_relative_path(path)}
+        tracked_files = {path for path in raw_paths if self._include_semantic_relative_path(path)}
+        self._git_tracked_relative_paths = set(tracked_files)
+        return tracked_files
 
     async def _git_dirty_tracked_files(self) -> set[str]:
         output = await self._run_git(["diff", "--name-only", "--no-renames", "HEAD"])
@@ -1050,6 +1145,19 @@ class KnowledgeManager:
     def list_files(self) -> list[Path]:
         """List all files currently present in the knowledge folder."""
         knowledge_root = self._knowledge_source_path()
+        if self._git_config() is not None:
+            if self._git_tracked_relative_paths is None:
+                self._git_tracked_relative_paths = _git_tracked_relative_paths_from_checkout(
+                    self.config,
+                    self.base_id,
+                    knowledge_root,
+                )
+            return _semantic_file_paths_from_relative_paths(
+                self.config,
+                self.base_id,
+                knowledge_root,
+                self._git_tracked_relative_paths,
+            )
         return list_knowledge_files(self.config, self.base_id, knowledge_root)
 
     def resolve_file_path(self, file_path: Path | str) -> Path:
@@ -1651,7 +1759,12 @@ class KnowledgeManager:
                 return indexed_count
 
             candidate_source_signature = _source_signature_from_file_signatures(candidate_signatures)
-            live_source_signature = knowledge_source_signature(self.config, self.base_id, self._knowledge_source_path())
+            live_source_signature = knowledge_source_signature(
+                self.config,
+                self.base_id,
+                self._knowledge_source_path(),
+                tracked_relative_paths=self._git_tracked_relative_paths,
+            )
             if live_source_signature != candidate_source_signature:
                 await asyncio.to_thread(self._delete_vector_db, candidate_vector_db)
                 await _save_refresh_failed_state("Knowledge source changed during refresh; refresh skipped")

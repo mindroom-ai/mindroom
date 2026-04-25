@@ -213,29 +213,33 @@ async def _refresh_knowledge_binding_locked(
     force_reindex: bool = False,
 ) -> KnowledgeRefreshResult:
     base_id = key.base_id
-    binding = resolve_knowledge_binding(
-        base_id,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-        start_watchers=False,
-        create=True,
-    )
-    manager = KnowledgeManager(
-        base_id=base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        storage_path=binding.storage_root,
-        knowledge_path=binding.knowledge_path,
-        git_background_startup_allowed=False,
-    )
+    manager: KnowledgeManager | None = None
     try:
+        binding = resolve_knowledge_binding(
+            base_id,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            start_watchers=False,
+            create=True,
+        )
+        manager = KnowledgeManager(
+            base_id=base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=binding.storage_root,
+            knowledge_path=binding.knowledge_path,
+            git_background_startup_allowed=False,
+        )
         unchanged_result = await _maybe_publish_unchanged_snapshot(manager, key, force_reindex=force_reindex)
         if unchanged_result is not None:
             return unchanged_result
         indexed_count = await _reindex_manager_snapshot(manager, key)
     except Exception as exc:
-        await _mark_refresh_failed(manager, key, config=config, runtime_paths=runtime_paths, error=str(exc))
+        if manager is None:
+            await _mark_refresh_setup_failed(key, config=config, runtime_paths=runtime_paths, error=str(exc))
+        else:
+            await _mark_refresh_failed(manager, key, config=config, runtime_paths=runtime_paths, error=str(exc))
         raise
     if manager._git_config() is not None:
         manager._mark_git_initial_sync_complete()
@@ -360,6 +364,7 @@ async def _publish_unchanged_local_snapshot(
         manager.config,
         manager.base_id,
         manager._knowledge_source_path(),
+        tracked_relative_paths=manager._git_tracked_relative_paths,
     )
     if current_source_signature != state.source_signature:
         return None
@@ -413,6 +418,7 @@ async def _publish_unchanged_git_snapshot(
         manager.config,
         manager.base_id,
         manager._knowledge_source_path(),
+        tracked_relative_paths=manager._git_tracked_relative_paths,
     )
     if current_source_signature != state.source_signature:
         return None
@@ -514,6 +520,47 @@ async def _mark_refresh_failed(
         config=config,
         runtime_paths=runtime_paths,
         metadata_path=snapshot_metadata_path(key),
+    )
+
+
+async def _mark_refresh_setup_failed(
+    key: KnowledgeSnapshotKey,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    error: str,
+) -> None:
+    """Record refresh failure before a KnowledgeManager can be constructed."""
+    redacted_error = redact_credentials_in_text(error)
+    metadata_path = snapshot_metadata_path(key)
+    state = await asyncio.to_thread(load_published_indexing_state, metadata_path)
+    if state is None:
+        failed_state = PublishedIndexingState(
+            settings=key.indexing_settings,
+            status="indexing",
+            availability=KnowledgeAvailability.REFRESH_FAILED.value,
+            last_error=redacted_error,
+            indexed_count=0,
+        )
+    else:
+        failed_state = replace(
+            state,
+            availability=KnowledgeAvailability.REFRESH_FAILED.value,
+            last_error=redacted_error,
+        )
+    await asyncio.to_thread(save_published_indexing_state, metadata_path, failed_state)
+    if failed_state.status != "complete":
+        return
+    if not indexing_settings_snapshot_compatible(failed_state.settings, key.indexing_settings):
+        return
+    if snapshot_availability_for_state(key=key, state=failed_state) is KnowledgeAvailability.CONFIG_MISMATCH:
+        return
+    publish_snapshot_from_state(
+        key,
+        state=failed_state,
+        config=config,
+        runtime_paths=runtime_paths,
+        metadata_path=metadata_path,
     )
 
 
