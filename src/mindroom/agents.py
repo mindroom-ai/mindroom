@@ -39,6 +39,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     resolve_dynamic_toolkit_selection,
     resolve_special_tool_names,
 )
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
@@ -393,8 +394,24 @@ def _build_registered_agent_tool(
         shared_storage_root_path=shared_storage_path,
         worker_tools_override=worker_tools,
         allowed_shared_services=allowed_shared_services,
+        tool_output_workspace_root=workspace_path,
         worker_target=worker_target,
     )
+
+
+def _wrap_direct_agent_toolkit_for_output_files(
+    toolkit: Toolkit,
+    *,
+    agent_runtime: ResolvedAgentRuntime,
+    runtime_paths: constants.RuntimePaths,
+) -> Toolkit:
+    """Apply the central output-file wrapper to MindRoom-owned direct toolkits."""
+    policy = (
+        ToolOutputFilePolicy.from_runtime(agent_runtime.tool_base_dir, runtime_paths)
+        if agent_runtime.tool_base_dir is not None
+        else None
+    )
+    return wrap_toolkit_for_output_files(toolkit, policy)
 
 
 @timed("system_prompt_assembly.agent_create.model_instance")
@@ -451,12 +468,16 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
 
         # MemoryTools resolves the canonical per-agent storage roots internally via the
         # shared memory facade, so it should receive the caller-visible runtime root here.
-        return MemoryTools(
-            agent_name=agent_name,
-            storage_path=storage_path,
-            config=config,
+        return _wrap_direct_agent_toolkit_for_output_files(
+            MemoryTools(
+                agent_name=agent_name,
+                storage_path=storage_path,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+            ),
+            agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
         )
 
     if tool_name == "delegate":
@@ -477,29 +498,41 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
                 max_delegation_depth=delegate.MAX_DELEGATION_DEPTH,
             )
             return None
-        return delegate.DelegateTools(
-            agent_name=agent_name,
-            delegate_to=agent_config.delegate_to,
+        return _wrap_direct_agent_toolkit_for_output_files(
+            delegate.DelegateTools(
+                agent_name=agent_name,
+                delegate_to=agent_config.delegate_to,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                delegation_depth=delegation_depth,
+                refresh_owner=refresh_owner,
+            ),
+            agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            delegation_depth=delegation_depth,
-            refresh_owner=refresh_owner,
         )
 
     if tool_name == "self_config":
         from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
-        return SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths)
+        return _wrap_direct_agent_toolkit_for_output_files(
+            SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths),
+            agent_runtime=agent_runtime,
+            runtime_paths=runtime_paths,
+        )
 
     if tool_name == "compact_context":
         from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
 
-        return CompactContextTools(
-            agent_name=agent_name,
-            config=config,
+        return _wrap_direct_agent_toolkit_for_output_files(
+            CompactContextTools(
+                agent_name=agent_name,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+            ),
+            agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
         )
 
     if tool_name == "dynamic_tools":
@@ -517,10 +550,14 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
                 agent_name,
             )
             return None
-        return DynamicToolsToolkit(
-            agent_name=agent_name,
-            config=config,
-            session_id=session_id,
+        return _wrap_direct_agent_toolkit_for_output_files(
+            DynamicToolsToolkit(
+                agent_name=agent_name,
+                config=config,
+                session_id=session_id,
+            ),
+            agent_runtime=agent_runtime,
+            runtime_paths=runtime_paths,
         )
 
     return _build_registered_agent_tool(
@@ -1123,6 +1160,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
+
+    if agent_runtime.tool_base_dir is not None:
+        instructions.append(agent_prompts.OUTPUT_REDIRECT_PROMPT)
 
     show_tool_calls = show_tool_calls_for_agent(config, agent_name)
     if not show_tool_calls:

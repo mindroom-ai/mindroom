@@ -84,6 +84,11 @@ Do not reference tool calls in your messages (for example, don't say "let me sea
 Simply present your findings naturally, as if you already knew the information.
 """
 
+OUTPUT_REDIRECT_PROMPT = (
+    "To save a tool's full supported output to a file in your workspace instead of returning it, pass "
+    "`mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, or shell tools."
+)
+
 CODE_AGENT_PROMPT = """## Core Expertise
 You are an expert software developer specialized in code generation, file management, and development workflows.
 

@@ -19,6 +19,7 @@ from mindroom.tool_system.dependencies import (
     auto_install_tool_extra,
     check_deps_installed,
 )
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.registry_state import (
     _BUILTIN_TOOL_METADATA,
     _BUILTIN_TOOL_REGISTRY,
@@ -423,6 +424,7 @@ def _build_tool_instance(
     runtime_overrides: dict[str, object] | None = None,
     shared_storage_root_path: Path | None = None,
     allowed_shared_services: frozenset[str] | None = None,
+    tool_output_workspace_root: Path | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
@@ -480,6 +482,12 @@ def _build_tool_instance(
     )
 
     toolkit = cast("Any", tool_class)(**init_kwargs)
+    output_file_policy = (
+        ToolOutputFilePolicy.from_runtime(tool_output_workspace_root, runtime_paths)
+        if tool_output_workspace_root is not None
+        else None
+    )
+    wrap_toolkit_for_output_files(toolkit, output_file_policy)
     if disable_sandbox_proxy:
         return toolkit
     return maybe_wrap_toolkit_for_sandbox_proxy(
@@ -509,6 +517,7 @@ def get_tool_by_name(
     runtime_overrides: dict[str, object] | None = None,
     shared_storage_root_path: Path | None = None,
     allowed_shared_services: frozenset[str] | None = None,
+    tool_output_workspace_root: Path | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
@@ -530,6 +539,7 @@ def get_tool_by_name(
         runtime_overrides=runtime_overrides,
         shared_storage_root_path=shared_storage_root_path,
         allowed_shared_services=allowed_shared_services,
+        tool_output_workspace_root=tool_output_workspace_root,
         worker_target=worker_target,
     )
 

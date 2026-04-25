@@ -13,7 +13,7 @@ import secrets
 import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -27,6 +27,7 @@ from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
 from mindroom.config.main import Config, _normalized_config_data, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
@@ -38,6 +39,7 @@ from mindroom.tool_system.catalog import (
     sanitize_tool_init_overrides,
     validate_authored_tool_entry_overrides,
 )
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.sandbox_proxy import (
     sandbox_proxy_config,
     to_json_compatible,
@@ -431,6 +433,41 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
+def _runtime_paths_for_runner_agent_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
+    """Return runtime paths rooted at the shared storage visible to this runner."""
+    shared_storage_root = sandbox_exec.runner_storage_root(runtime_paths)
+    if shared_storage_root == runtime_paths.storage_root.resolve():
+        return runtime_paths
+    return replace(runtime_paths, storage_root=shared_storage_root)
+
+
+def _runner_tool_output_workspace_root(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    runtime_overrides: dict[str, object] | None,
+    execution_identity: ToolExecutionIdentity | None,
+    routing_agent_name: str | None,
+) -> Path | None:
+    """Return the runner-visible workspace root for redirected tool output."""
+    if routing_agent_name is not None:
+        agent_runtime = resolve_agent_runtime(
+            routing_agent_name,
+            config,
+            _runtime_paths_for_runner_agent_paths(runtime_paths),
+            execution_identity=execution_identity,
+            create=True,
+        )
+        return agent_runtime.tool_base_dir
+
+    base_dir = runtime_overrides.get("base_dir") if runtime_overrides is not None else None
+    if isinstance(base_dir, Path):
+        return base_dir
+    if isinstance(base_dir, str):
+        return Path(base_dir)
+    return None
+
+
 def _resolve_entrypoint(
     *,
     runtime_paths: RuntimePaths,
@@ -445,6 +482,7 @@ def _resolve_entrypoint(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     private_agent_names: frozenset[str] | None = None,
+    tool_output_workspace_root: Path | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
     ensure_registry_loaded_with_config(runtime_paths, config)
     worker_target = build_worker_target_from_runtime_env(
@@ -465,6 +503,7 @@ def _resolve_entrypoint(
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
             allowed_shared_services=(config.get_worker_grantable_credentials() if worker_scope is not None else None),
+            tool_output_workspace_root=tool_output_workspace_root,
             worker_target=worker_target,
         )
     except (ToolConfigOverrideError, ToolInitOverrideError) as exc:
@@ -531,6 +570,17 @@ async def _execute_request_inprocess(
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
+    tool_output_workspace_root = (
+        _runner_tool_output_workspace_root(
+            config=config,
+            runtime_paths=effective_runtime_paths,
+            runtime_overrides=runtime_overrides,
+            execution_identity=execution_identity,
+            routing_agent_name=request.routing_agent_name,
+        )
+        if OUTPUT_PATH_ARGUMENT in request.kwargs
+        else None
+    )
     with (
         tool_execution_identity(
             execution_identity,
@@ -549,6 +599,7 @@ async def _execute_request_inprocess(
             worker_scope=request.worker_scope,
             routing_agent_name=request.routing_agent_name,
             private_agent_names=_request_private_agent_names(request),
+            tool_output_workspace_root=tool_output_workspace_root,
         )
 
         try:

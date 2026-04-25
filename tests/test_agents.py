@@ -20,6 +20,7 @@ from mindroom.agent_storage import get_agent_runtime_sqlite_dbs
 from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
     _PRIVATE_CULTURE_MANAGER_CACHE,
+    build_agent_toolkit,
     create_agent,
     get_agent_toolkit_names,
 )
@@ -36,6 +37,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -477,6 +479,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
         allowed_shared_services: frozenset[str] | None = None,
+        tool_output_workspace_root: object | None = None,
         worker_target: object | None = None,
     ) -> MagicMock:
         del (
@@ -488,6 +491,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             shared_storage_root_path,
             worker_tools_override,
             allowed_shared_services,
+            tool_output_workspace_root,
             worker_target,
         )
         if name == "browser":
@@ -531,6 +535,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
         allowed_shared_services: frozenset[str] | None = None,
+        tool_output_workspace_root: object | None = None,
         worker_target: object | None = None,
     ) -> MagicMock:
         del (
@@ -542,6 +547,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             shared_storage_root_path,
             worker_tools_override,
             allowed_shared_services,
+            tool_output_workspace_root,
             worker_target,
         )
         if name == "stale_tool":
@@ -609,6 +615,35 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["duckduckgo"] is None
+
+
+def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_path: Path) -> None:
+    """MindRoom-owned direct toolkits should use the same central output-file wrapper."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "file"
+    agent_runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        create=True,
+    )
+
+    toolkit = build_agent_toolkit(
+        "memory",
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        worker_tools=[],
+        agent_runtime=agent_runtime,
+        execution_identity=None,
+    )
+
+    assert toolkit is not None
+    function = toolkit.async_functions["list_memories"].model_copy(deep=True)
+    function.process_entrypoint()
+    assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
 
 
 def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(tmp_path: Path) -> None:
@@ -1695,6 +1730,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
         allowed_shared_services: frozenset[str] | None = None,
+        tool_output_workspace_root: object | None = None,
         worker_target: object | None = None,
     ) -> MagicMock:
         del (
@@ -1705,6 +1741,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             shared_storage_root_path,
             worker_tools_override,
             allowed_shared_services,
+            tool_output_workspace_root,
         )
         credentials = load_scoped_credentials(
             tool_name,
