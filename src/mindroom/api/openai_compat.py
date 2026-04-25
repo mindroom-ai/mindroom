@@ -51,6 +51,7 @@ from mindroom.history import (
 )
 from mindroom.knowledge import (
     KnowledgeAvailability,
+    KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
     get_agent_knowledge,
 )
@@ -84,7 +85,7 @@ _TEAM_MODEL_PREFIX = "team/"
 _RESERVED_MODEL_NAMES = {_AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
     from agno.agent import Agent
     from agno.db.sqlite import SqliteDb
@@ -791,14 +792,16 @@ def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]
     )
 
 
-def _knowledge_availability_system_message(unavailable_bases: dict[str, KnowledgeAvailability]) -> str | None:
+def _knowledge_availability_system_message(
+    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
+) -> str | None:
     """Render one OpenAI-compatible system message for unavailable or stale knowledge."""
     return format_knowledge_availability_notice(unavailable_bases)
 
 
 def _prepend_knowledge_availability_notice(
     prompt: str,
-    unavailable_bases: dict[str, KnowledgeAvailability],
+    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
 ) -> str:
     """Prefix the prompt with the degraded-knowledge notice when shared bases are unavailable."""
     availability_hint = _knowledge_availability_system_message(unavailable_bases)
@@ -962,14 +965,14 @@ async def chat_completions(  # noqa: C901, PLR0912
                     )
         else:
             # Resolve knowledge base for this agent
-            unavailable_bases: dict[str, KnowledgeAvailability] = {}
+            unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
             try:
                 knowledge = get_agent_knowledge(
                     agent_name,
                     config,
                     runtime_paths,
                     on_missing_bases=_log_missing_knowledge_bases(agent_name),
-                    on_unavailable_bases=unavailable_bases.update,
+                    on_unavailable_base_details=unavailable_bases.update,
                     refresh_owner=knowledge_refresh_owner,
                     execution_identity=execution_identity,
                 )
@@ -1412,6 +1415,7 @@ def _build_team(
     scope_context: ScopeSessionContext | None = None,
     session_id: str | None = None,
     unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
+    unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] | None = None,
     refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> tuple[list[Agent], Team, TeamMode]:
     """Create member agents and build one agno.Team for a configured team.
@@ -1432,6 +1436,7 @@ def _build_team(
         session_id=session_id,
         include_openai_compat_guidance=True,
         unavailable_bases=unavailable_bases,
+        unavailable_base_details=unavailable_base_details,
         refresh_owner=refresh_owner,
         reason_prefix=f"Team '{team_name}'",
     )
@@ -1530,6 +1535,7 @@ async def _non_stream_team_completion(
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     unavailable_bases: dict[str, KnowledgeAvailability] = {}
+    unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] = {}
     post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     try:
         with open_bound_scope_session_context(
@@ -1550,6 +1556,7 @@ async def _non_stream_team_completion(
                     scope_context,
                     session_id,
                     unavailable_bases,
+                    unavailable_base_details,
                     refresh_owner,
                 )
             except ValueError as e:
@@ -1564,7 +1571,10 @@ async def _non_stream_team_completion(
             )
 
             try:
-                prompt = _prepend_knowledge_availability_notice(prompt, unavailable_bases)
+                prompt = _prepend_knowledge_availability_notice(
+                    prompt,
+                    unavailable_base_details or unavailable_bases,
+                )
                 team_run_input = await _prepare_openai_team_run_input(
                     scope_context=scope_context,
                     team_name=team_name,
@@ -1647,6 +1657,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     scope_context: ScopeSessionContext | None = None
     stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
     unavailable_bases: dict[str, KnowledgeAvailability] = {}
+    unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] = {}
     post_response_compaction_checks: list[PostResponseCompactionCheck] = []
 
     async def _cleanup() -> None:
@@ -1680,6 +1691,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                     scope_context,
                     session_id,
                     unavailable_bases,
+                    unavailable_base_details,
                     refresh_owner,
                 )
         except ValueError as e:
@@ -1695,7 +1707,10 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         )
 
         try:
-            prompt = _prepend_knowledge_availability_notice(prompt, unavailable_bases)
+            prompt = _prepend_knowledge_availability_notice(
+                prompt,
+                unavailable_base_details or unavailable_bases,
+            )
             team_run_input = await _prepare_openai_team_run_input(
                 scope_context=scope_context,
                 team_name=team_name,

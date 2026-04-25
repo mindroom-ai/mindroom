@@ -43,6 +43,7 @@ from mindroom.hooks import (
 from mindroom.knowledge import (
     KnowledgeAccessSupport,
     KnowledgeAvailability,
+    KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
 )
 from mindroom.logging_config import bound_log_context
@@ -127,7 +128,7 @@ _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 def _append_knowledge_availability_enrichment(
     system_enrichment_items: Sequence[EnrichmentItem],
-    unavailable_bases: Mapping[str, KnowledgeAvailability],
+    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
 ) -> tuple[EnrichmentItem, ...]:
     """Append one volatile knowledge-availability notice when needed."""
     notice = format_knowledge_availability_notice(unavailable_bases)
@@ -1856,11 +1857,11 @@ class ResponseRunner:
             turn_recorder.set_run_id(current_run_id)
 
         async def build_response_text() -> str:
-            unavailable_bases: dict[str, KnowledgeAvailability] = {}
+            unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
             knowledge = self.deps.knowledge_access.for_agent(
                 self.deps.agent_name,
                 execution_identity=runtime.tool_dispatch.execution_identity,
-                on_unavailable_bases=unavailable_bases.update,
+                on_unavailable_base_details=unavailable_bases.update,
             )
             system_enrichment_items = _append_knowledge_availability_enrichment(
                 request.system_enrichment_items,
@@ -1948,11 +1949,11 @@ class ResponseRunner:
         def note_visible_response_event_id(response_event_id: str) -> None:
             turn_recorder.set_response_event_id(response_event_id)
 
-        unavailable_bases: dict[str, KnowledgeAvailability] = {}
+        unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
         knowledge = self.deps.knowledge_access.for_agent(
             self.deps.agent_name,
             execution_identity=runtime.tool_dispatch.execution_identity,
-            on_unavailable_bases=unavailable_bases.update,
+            on_unavailable_base_details=unavailable_bases.update,
         )
         system_enrichment_items = _append_knowledge_availability_enrichment(
             request.system_enrichment_items,

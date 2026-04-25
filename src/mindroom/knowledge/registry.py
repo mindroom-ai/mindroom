@@ -37,9 +37,17 @@ class KnowledgeSnapshotKey:
 
 @dataclass(frozen=True)
 class KnowledgeRefreshKey:
-    """Stable key for the physical refresh/write target."""
+    """Stable key for one authored base bound to a physical source."""
 
     base_id: str
+    storage_root: str
+    knowledge_path: str
+
+
+@dataclass(frozen=True)
+class KnowledgeSourceKey:
+    """Stable key for source filesystem mutations shared across duplicate bases."""
+
     storage_root: str
     knowledge_path: str
 
@@ -196,9 +204,25 @@ def resolve_snapshot_key(
 
 
 def refresh_key_for_snapshot_key(key: KnowledgeSnapshotKey) -> KnowledgeRefreshKey:
-    """Return the physical refresh key for one snapshot key."""
+    """Return the authored refresh key for one snapshot key."""
     return KnowledgeRefreshKey(
         base_id=key.base_id,
+        storage_root=key.storage_root,
+        knowledge_path=key.knowledge_path,
+    )
+
+
+def source_key_for_refresh_key(key: KnowledgeRefreshKey) -> KnowledgeSourceKey:
+    """Return the physical source key shared by duplicate configured bases."""
+    return KnowledgeSourceKey(
+        storage_root=key.storage_root,
+        knowledge_path=key.knowledge_path,
+    )
+
+
+def source_key_for_snapshot_key(key: KnowledgeSnapshotKey) -> KnowledgeSourceKey:
+    """Return the physical source key for one snapshot key."""
+    return KnowledgeSourceKey(
         storage_root=key.storage_root,
         knowledge_path=key.knowledge_path,
     )

@@ -357,6 +357,33 @@ def test_git_backed_upload_is_rejected_before_creating_cold_checkout(tmp_path: P
     assert owner.scheduled == []
 
 
+def test_upload_over_existing_directory_is_rejected_before_mutation(tmp_path: Path) -> None:
+    """Uploads must not replace an existing directory with a file."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    target_dir = docs / "guide.md"
+    target_dir.mkdir(parents=True)
+    (target_dir / "nested.txt").write_text("keep me", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", ("guide.md", b"hello", "text/markdown"))],
+        )
+
+    assert response.status_code == 409
+    assert "not a regular file" in response.json()["detail"]
+    assert target_dir.is_dir()
+    assert (target_dir / "nested.txt").read_text(encoding="utf-8") == "keep me"
+    assert list(docs.glob("*.upload.*")) == []
+    assert owner.scheduled == []
+    refresh.assert_not_awaited()
+
+
 def test_delete_schedules_refresh_without_inline_indexing(tmp_path: Path) -> None:
     """Deletes mutate files and schedule refresh instead of editing vectors inline."""
     client = _test_client(tmp_path)
@@ -451,6 +478,35 @@ def test_explicit_reindex_returns_conflict_when_no_snapshot_is_published(tmp_pat
     assert detail["success"] is False
     assert detail["availability"] == "refresh_failed"
     assert detail["last_error"] == "Indexed 0 of 1 managed knowledge files"
+
+
+def test_explicit_reindex_returns_conflict_when_last_good_is_not_ready(tmp_path: Path) -> None:
+    """Admin reindex success requires a newly READY snapshot, not only preserved last-good vectors."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+
+    with patch(
+        "mindroom.api.knowledge.refresh_knowledge_binding",
+        new=AsyncMock(
+            return_value=SimpleNamespace(
+                indexed_count=3,
+                published=True,
+                availability=KnowledgeAvailability.CONFIG_MISMATCH,
+                last_error="chunking config changed",
+            ),
+        ),
+    ):
+        response = client.post("/api/knowledge/bases/research/reindex")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["success"] is False
+    assert detail["base_id"] == "research"
+    assert detail["indexed_count"] == 3
+    assert detail["availability"] == "config_mismatch"
+    assert detail["last_error"] == "chunking config changed"
 
 
 def test_explicit_reindex_returns_structured_failure_when_refresh_raises(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
     KnowledgeRefreshKey,
     KnowledgeSnapshotKey,
+    KnowledgeSourceKey,
     PublishedIndexingState,
     active_snapshot_collection_names,
     clear_stale_ready_snapshot_markers,
@@ -31,6 +32,8 @@ from mindroom.knowledge.registry import (
     snapshot_availability_for_state,
     snapshot_collection_exists_for_state,
     snapshot_metadata_path,
+    source_key_for_refresh_key,
+    source_key_for_snapshot_key,
 )
 from mindroom.runtime_resolution import resolve_knowledge_binding
 
@@ -53,7 +56,7 @@ class KnowledgeRefreshResult:
     last_error: str | None = None
 
 
-_RefreshLockKey = tuple[KnowledgeRefreshKey, int]
+_RefreshLockKey = tuple[KnowledgeSourceKey, int]
 _refresh_locks: dict[_RefreshLockKey, asyncio.Lock] = {}
 _refresh_lock_accessed_at: dict[_RefreshLockKey, float] = {}
 _refresh_locks_guard = Lock()
@@ -69,7 +72,7 @@ def _running_loop_key() -> int:
         return 0
 
 
-def _refresh_lock_for_key(key: KnowledgeRefreshKey) -> asyncio.Lock:
+def _refresh_lock_for_key(key: KnowledgeSourceKey) -> asyncio.Lock:
     lock_key = (key, _running_loop_key())
     with _refresh_locks_guard:
         _refresh_lock_accessed_at[lock_key] = time.monotonic()
@@ -165,7 +168,7 @@ async def knowledge_binding_mutation_lock(
         execution_identity=execution_identity,
         create=create,
     )
-    async with _refresh_lock_for_key(key):
+    async with _refresh_lock_for_key(source_key_for_refresh_key(key)):
         yield
 
 
@@ -188,7 +191,7 @@ async def refresh_knowledge_binding(
     refresh_key = refresh_key_for_snapshot_key(key)
     _mark_refresh_active(refresh_key)
     try:
-        async with _refresh_lock_for_key(refresh_key):
+        async with _refresh_lock_for_key(source_key_for_snapshot_key(key)):
             return await _refresh_knowledge_binding_locked(
                 key,
                 config=config,

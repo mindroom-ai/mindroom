@@ -329,7 +329,7 @@ describe("Knowledge", () => {
         path: "./knowledge_docs/git_docs",
         watch: true,
         git: {
-          repo_url: "https://github.com/org/git-docs",
+          repo_url: "https://token:secret@github.com/org/git-docs",
           branch: "release",
         },
       },
@@ -341,8 +341,40 @@ describe("Knowledge", () => {
 
     const gitCard = screen.getByRole("button", { name: /git_docs/i });
     expect(gitCard).toHaveTextContent("Git");
-    expect(gitCard).toHaveTextContent("https://github.com/org/git-docs");
+    expect(gitCard).toHaveTextContent("https://***@github.com/org/git-docs");
+    expect(gitCard).not.toHaveTextContent("token:secret");
     expect(gitCard).toHaveTextContent("Branch: release");
+  });
+
+  it("describes watch false as advisory instead of manual-only", async () => {
+    mockStore({
+      docs: { path: "./knowledge_docs/docs", watch: false },
+    });
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          folder_path: "./knowledge_docs/docs",
+          watch: false,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    expect(
+      screen.getByText("No periodic refresh; access may refresh"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Manual reindex only")).not.toBeInTheDocument();
   });
 
   it("shows git sync status details from the API", async () => {
@@ -366,7 +398,7 @@ describe("Knowledge", () => {
           file_count: 4,
           indexed_count: 3,
           git: {
-            repo_url: "https://github.com/org/git-docs",
+            repo_url: "https://token:secret@github.com/org/git-docs",
             branch: "release",
             lfs: true,
             startup_behavior: "background",
@@ -392,6 +424,10 @@ describe("Knowledge", () => {
     await screen.findByText("Active: git_docs");
 
     expect(screen.getByText("Git policy: background")).toBeInTheDocument();
+    expect(
+      screen.getByText("https://***@github.com/org/git-docs"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/token:secret/)).not.toBeInTheDocument();
     expect(screen.getByText("Refreshing")).toBeInTheDocument();
     expect(screen.getByText("Repo Present")).toBeInTheDocument();
     expect(screen.getByText("Snapshot Pending")).toBeInTheDocument();

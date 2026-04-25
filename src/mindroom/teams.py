@@ -51,6 +51,7 @@ from mindroom.history.interrupted_replay import split_interrupted_tool_trace, to
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import (
     KnowledgeAvailability,
+    KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
     get_agent_knowledge,
 )
@@ -106,7 +107,7 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
 
 def _append_knowledge_availability_enrichment(
     system_enrichment_items: Sequence[EnrichmentItem],
-    unavailable_bases: Mapping[str, KnowledgeAvailability],
+    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
 ) -> tuple[EnrichmentItem, ...]:
     """Append one volatile knowledge-availability notice when needed."""
     notice = format_knowledge_availability_notice(unavailable_bases)
@@ -1174,6 +1175,7 @@ def materialize_exact_team_members(
     include_openai_compat_guidance: bool = False,
     materializable_agent_names: set[str] | None = None,
     unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
+    unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] | None = None,
     refresh_owner: KnowledgeRefreshOwner | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
@@ -1195,6 +1197,9 @@ def materialize_exact_team_members(
             runtime_paths,
             on_missing_bases=_on_missing_agent_bases,
             on_unavailable_bases=unavailable_bases.update if unavailable_bases is not None else None,
+            on_unavailable_base_details=(
+                unavailable_base_details.update if unavailable_base_details is not None else None
+            ),
             refresh_owner=refresh_owner,
             execution_identity=execution_identity,
         )
@@ -1243,6 +1248,7 @@ def _materialize_team_members(
     *,
     session_id: str | None = None,
     unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
+    unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact requested team-member set without silent fallback."""
@@ -1257,6 +1263,7 @@ def _materialize_team_members(
         session_id=session_id,
         materializable_agent_names=resolve_live_shared_agent_names(orchestrator),
         unavailable_bases=unavailable_bases,
+        unavailable_base_details=unavailable_base_details,
         refresh_owner=orchestrator.knowledge_refresh_owner,
         reason_prefix=reason_prefix,
     )
@@ -1498,14 +1505,14 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     assert orchestrator.config is not None
     requested_agent_names = _requested_team_agent_names(agent_names)
     orchestrator.config.assert_team_agents_supported(requested_agent_names)
-    unavailable_bases: dict[str, KnowledgeAvailability] = {}
+    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         team_members = _materialize_team_members(
             agent_names,
             orchestrator,
             execution_identity,
             session_id=session_id,
-            unavailable_bases=unavailable_bases,
+            unavailable_base_details=unavailable_bases,
             reason_prefix=reason_prefix,
         )
     except ValueError as exc:
@@ -1855,14 +1862,14 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         [mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids],
     )
     orchestrator.config.assert_team_agents_supported(requested_agent_names)
-    unavailable_bases: dict[str, KnowledgeAvailability] = {}
+    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         team_members = _materialize_team_members(
             requested_agent_names,
             orchestrator,
             execution_identity,
             session_id=session_id,
-            unavailable_bases=unavailable_bases,
+            unavailable_base_details=unavailable_bases,
             reason_prefix=reason_prefix,
         )
     except ValueError as exc:

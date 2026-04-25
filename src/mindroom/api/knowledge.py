@@ -290,6 +290,14 @@ def _upload_temp_path(destination: Path) -> Path:
     return destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.upload.tmp")
 
 
+def _reject_non_file_upload_destination(destination: Path, relative_path: str) -> None:
+    if destination.exists() and not destination.is_file():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Upload destination '{relative_path}' already exists and is not a regular file",
+        )
+
+
 async def _stage_upload(upload: UploadFile, destination: Path, filename: str, root: Path) -> _StagedUpload:
     _validate_upload_size_hint(upload, filename)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -406,6 +414,8 @@ async def upload_knowledge_files(
 
                 try:
                     destination = _resolve_within_root(root, filename)
+                    relative_path = destination.relative_to(root).as_posix()
+                    _reject_non_file_upload_destination(destination, relative_path)
                     staged_uploads.append(await _stage_upload(upload, destination, filename, root))
                 finally:
                     await upload.close()
@@ -520,7 +530,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
                 "last_error": state.last_error if state is not None else redact_credentials_in_text(str(exc)),
             },
         ) from exc
-    if not result.published:
+    if not (result.published and result.availability is KnowledgeAvailability.READY):
         raise HTTPException(
             status_code=409,
             detail={

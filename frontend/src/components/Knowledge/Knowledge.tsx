@@ -119,6 +119,18 @@ function formatModifiedDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function redactUrlCredentials(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if (!parsed.username && !parsed.password) {
+      return value;
+    }
+    return `${parsed.protocol}//***@${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return value.replace(/^([a-z][a-z0-9+.-]*:\/\/)([^@\s]+)@/i, "$1***@");
+  }
+}
+
 function formatStartupMode(value: "resume" | "incremental"): string {
   switch (value) {
     case "resume":
@@ -900,8 +912,11 @@ export function Knowledge() {
                           {baseSourceType === "git" ? (
                             <>
                               <p className="mt-1 truncate text-xs font-mono text-muted-foreground">
-                                {baseConfig?.git?.repo_url ||
-                                  "Repository URL not configured"}
+                                {baseConfig?.git?.repo_url
+                                  ? redactUrlCredentials(
+                                      baseConfig.git.repo_url,
+                                    )
+                                  : "Repository URL not configured"}
                               </p>
                               <p className="mt-1 text-xs text-muted-foreground">
                                 Branch: {baseConfig?.git?.branch || "main"}
@@ -915,8 +930,8 @@ export function Knowledge() {
                               </p>
                               <p className="mt-1 text-xs text-muted-foreground">
                                 {baseConfig?.watch
-                                  ? "Refresh on access"
-                                  : "Manual reindex only"}
+                                  ? "Advisory refresh on access"
+                                  : "No periodic refresh; access may refresh"}
                               </p>
                             </>
                           )}
@@ -1522,7 +1537,8 @@ export function Knowledge() {
                 {status?.git ? (
                   <div className="mt-2 space-y-1 text-sm text-muted-foreground">
                     <p>
-                      Repo: <code>{status.git.repo_url}</code> (
+                      Repo:{" "}
+                      <code>{redactUrlCredentials(status.git.repo_url)}</code> (
                       {status.git.branch})
                     </p>
                     {status.git.last_successful_commit ? (

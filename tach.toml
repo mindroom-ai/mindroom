@@ -1800,6 +1800,7 @@ expose = [
     "get_agent_knowledge",
     "get_published_snapshot",
     "KnowledgeAvailability",
+    "KnowledgeAvailabilityDetail",
     "credential_free_url_identity",
     "knowledge_binding_mutation_lock",
     "knowledge_source_signature",

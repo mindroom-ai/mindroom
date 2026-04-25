@@ -24,11 +24,13 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge import (
     KnowledgeAvailability,
+    KnowledgeAvailabilityDetail,
     PerBindingKnowledgeRefreshOwner,
     clear_published_snapshots,
     credential_free_url_identity,
     get_agent_knowledge,
     get_published_snapshot,
+    knowledge_binding_mutation_lock,
     redact_url_credentials,
     refresh_knowledge_binding,
     snapshot_indexed_count,
@@ -232,6 +234,40 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
     assert owner.schedule_refresh.call_count == 0
 
 
+def test_failed_notice_without_snapshot_says_unavailable() -> None:
+    """Cold failed knowledge must not be described as stale when no snapshot is attached."""
+    notice = knowledge_utils.format_knowledge_availability_notice(
+        {
+            "docs": KnowledgeAvailabilityDetail(
+                availability=KnowledgeAvailability.REFRESH_FAILED,
+                snapshot_attached=False,
+            ),
+        },
+    )
+
+    assert notice is not None
+    assert "unavailable for semantic search this turn" in notice
+    assert "may be stale" not in notice
+    assert "Do not claim to have searched it." in notice
+
+
+def test_config_mismatch_notice_without_snapshot_says_unavailable() -> None:
+    """Cold config-mismatched knowledge must not imply stale semantic search occurred."""
+    notice = knowledge_utils.format_knowledge_availability_notice(
+        {
+            "docs": KnowledgeAvailabilityDetail(
+                availability=KnowledgeAvailability.CONFIG_MISMATCH,
+                snapshot_attached=False,
+            ),
+        },
+    )
+
+    assert notice is not None
+    assert "unavailable for semantic search this turn" in notice
+    assert "may be stale" not in notice
+    assert "Do not claim to have searched it." in notice
+
+
 @pytest.mark.asyncio
 async def test_ready_snapshot_access_does_not_refresh_unchanged_sources(tmp_path: Path) -> None:
     """A ready snapshot is returned immediately without churn when sources are unchanged."""
@@ -286,6 +322,28 @@ async def test_shared_local_watch_snapshot_refreshes_on_access_without_blocking_
             pytest.fail("background on-access refresh did not publish the edited local source")
     finally:
         await owner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shared_local_watch_ready_refresh_is_not_request_cooldowned(tmp_path: Path) -> None:
+    """Local watch=true bases schedule background refresh on access without a stale source scan gate."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("shared local old", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], watch=True)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+
+    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is not None
+    doc.write_text("shared local new", encoding="utf-8")
+    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is not None
+
+    owner.schedule_initial_load.assert_not_called()
+    assert owner.schedule_refresh.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -774,6 +832,54 @@ async def test_same_physical_binding_refreshes_are_serialized_across_config_chan
 
     assert second_entered.is_set()
     assert max_active_refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_shared_source_mutation_waits_for_duplicate_base_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate bases sharing one source folder must serialize refreshes and source mutations."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("snapshot", encoding="utf-8")
+    config = _config(tmp_path, bases={"alpha": docs_path, "beta": docs_path}, agent_bases=["alpha", "beta"])
+    runtime_paths = runtime_paths_for(config)
+    refresh_entered = asyncio.Event()
+    release_refresh = asyncio.Event()
+    mutation_entered = asyncio.Event()
+
+    async def _blocked_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
+        _ = (self, protected_collections)
+        refresh_entered.set()
+        await release_refresh.wait()
+        return 0
+
+    async def _mutate_shared_source() -> None:
+        async with knowledge_binding_mutation_lock("beta", config=config, runtime_paths=runtime_paths):
+            mutation_entered.set()
+            doc.write_text("mutated", encoding="utf-8")
+            knowledge_registry.mark_published_snapshot_stale(
+                "beta",
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", _blocked_reindex)
+
+    refresh_task = asyncio.create_task(refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths))
+    await refresh_entered.wait()
+    mutation_task = asyncio.create_task(_mutate_shared_source())
+    await asyncio.sleep(0)
+
+    assert not mutation_entered.is_set()
+
+    release_refresh.set()
+    await asyncio.gather(refresh_task, mutation_task)
+
+    assert mutation_entered.is_set()
+    assert doc.read_text(encoding="utf-8") == "mutated"
 
 
 @pytest.mark.asyncio

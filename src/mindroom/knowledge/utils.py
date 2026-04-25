@@ -39,6 +39,14 @@ _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
 _refresh_scheduled_at: dict[tuple[KnowledgeRefreshKey, KnowledgeAvailability, tuple[str, ...] | None], float] = {}
 
 
+@dataclass(frozen=True)
+class KnowledgeAvailabilityDetail:
+    """Availability plus whether this turn received a last-good snapshot."""
+
+    availability: KnowledgeAvailability
+    snapshot_attached: bool
+
+
 class _KnowledgeVectorDb(Protocol):
     """Subset of vector DB interface this module requires."""
 
@@ -176,6 +184,13 @@ def _refresh_cooldown_seconds(
     return max(poll_interval_seconds, 1.0)
 
 
+def _ready_refresh_on_access_cooldown_seconds(lookup: KnowledgeSnapshotLookup, config: Config) -> float:
+    """Return READY refresh throttle without request-path source scans."""
+    if config.get_knowledge_base_config(lookup.key.base_id).git is None:
+        return 0.0
+    return _REFRESH_RETRY_COOLDOWN_SECONDS
+
+
 def _schedule_refresh_for_availability(
     refresh_owner: KnowledgeRefreshOwner,
     base_id: str,
@@ -195,6 +210,7 @@ def _schedule_refresh_for_availability(
             refresh_key,
             KnowledgeAvailability.READY,
             settings=lookup.key.indexing_settings,
+            cooldown_seconds=_ready_refresh_on_access_cooldown_seconds(lookup, config),
         ):
             refresh_owner.schedule_refresh(
                 base_id,
@@ -234,6 +250,7 @@ def get_agent_knowledge(
     runtime_paths: RuntimePaths,
     on_missing_bases: Callable[[list[str]], None] | None = None,
     on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
+    on_unavailable_base_details: Callable[[Mapping[str, KnowledgeAvailabilityDetail]], None] | None = None,
     refresh_owner: KnowledgeRefreshOwner | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> Knowledge | None:
@@ -280,38 +297,58 @@ def get_agent_knowledge(
         on_missing_bases=on_missing_bases,
         get_availability=lambda base_id: _resolve(base_id)[1],
         on_unavailable_bases=on_unavailable_bases,
+        on_unavailable_base_details=on_unavailable_base_details,
     )
 
 
 def format_knowledge_availability_notice(
-    unavailable_bases: Mapping[str, KnowledgeAvailability],
+    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
 ) -> str | None:
     """Render one user-facing notice for unavailable or stale knowledge bases."""
     if not unavailable_bases:
         return None
 
     lines: list[str] = []
-    for base_id, availability in sorted(unavailable_bases.items()):
+    for base_id, availability_value in sorted(unavailable_bases.items()):
+        if isinstance(availability_value, KnowledgeAvailabilityDetail):
+            availability = availability_value.availability
+            snapshot_attached = availability_value.snapshot_attached
+        else:
+            availability = availability_value
+            snapshot_attached = True
+
         if availability is KnowledgeAvailability.INITIALIZING:
             lines.append(
                 f"Knowledge base `{base_id}` is initializing and unavailable for semantic search this turn. "
                 "Do not claim to have searched it.",
             )
         elif availability is KnowledgeAvailability.CONFIG_MISMATCH:
-            lines.append(
-                f"Knowledge base `{base_id}` is refreshing against newer config and may be stale this turn. "
-                "Do not claim to have searched the latest contents.",
-            )
+            if snapshot_attached:
+                lines.append(
+                    f"Knowledge base `{base_id}` is refreshing against newer config and may be stale this turn. "
+                    "Do not claim to have searched the latest contents.",
+                )
+            else:
+                lines.append(
+                    f"Knowledge base `{base_id}` is unavailable for semantic search this turn because its "
+                    "published snapshot does not match current config. Do not claim to have searched it.",
+                )
         elif availability is KnowledgeAvailability.STALE:
             lines.append(
                 f"Knowledge base `{base_id}` may be stale while a refresh is pending this turn. "
                 "Do not claim to have searched the latest contents.",
             )
         elif availability is KnowledgeAvailability.REFRESH_FAILED:
-            lines.append(
-                f"Knowledge base `{base_id}` had a recent refresh failure and may be stale this turn. "
-                "Do not claim to have searched the latest contents.",
-            )
+            if snapshot_attached:
+                lines.append(
+                    f"Knowledge base `{base_id}` had a recent refresh failure and may be stale this turn. "
+                    "Do not claim to have searched the latest contents.",
+                )
+            else:
+                lines.append(
+                    f"Knowledge base `{base_id}` is unavailable for semantic search this turn after a refresh "
+                    "failure. Do not claim to have searched it.",
+                )
     return "\n".join(lines) if lines else None
 
 
@@ -329,6 +366,7 @@ class KnowledgeAccessSupport:
         *,
         execution_identity: ToolExecutionIdentity | None = None,
         on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
+        on_unavailable_base_details: Callable[[Mapping[str, KnowledgeAvailabilityDetail]], None] | None = None,
     ) -> Knowledge | None:
         """Return the current knowledge assigned to one or more agent bases."""
         orchestrator = self.runtime.orchestrator
@@ -344,6 +382,7 @@ class KnowledgeAccessSupport:
                 knowledge_bases=missing_base_ids,
             ),
             on_unavailable_bases=on_unavailable_bases,
+            on_unavailable_base_details=on_unavailable_base_details,
             refresh_owner=refresh_owner,
             execution_identity=execution_identity,
         )
@@ -484,6 +523,7 @@ def resolve_agent_knowledge(
     on_missing_bases: Callable[[list[str]], None] | None = None,
     get_availability: Callable[[str], KnowledgeAvailability] | None = None,
     on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
+    on_unavailable_base_details: Callable[[Mapping[str, KnowledgeAvailabilityDetail]], None] | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for an agent into one Knowledge instance."""
     base_ids = config.get_agent_knowledge_base_ids(agent_name)
@@ -492,6 +532,7 @@ def resolve_agent_knowledge(
 
     missing_base_ids: list[str] = []
     unavailable_base_ids: dict[str, KnowledgeAvailability] = {}
+    unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] = {}
     knowledges: list[Knowledge] = []
     for base_id in base_ids:
         knowledge = get_knowledge(base_id)
@@ -499,6 +540,10 @@ def resolve_agent_knowledge(
             availability = get_availability(base_id)
             if availability is not KnowledgeAvailability.READY:
                 unavailable_base_ids[base_id] = availability
+                unavailable_base_details[base_id] = KnowledgeAvailabilityDetail(
+                    availability=availability,
+                    snapshot_attached=knowledge is not None,
+                )
         if knowledge is None:
             missing_base_ids.append(base_id)
             continue
@@ -508,5 +553,7 @@ def resolve_agent_knowledge(
         on_missing_bases(missing_base_ids)
     if unavailable_base_ids and on_unavailable_bases is not None:
         on_unavailable_bases(unavailable_base_ids)
+    if unavailable_base_details and on_unavailable_base_details is not None:
+        on_unavailable_base_details(unavailable_base_details)
 
     return _merge_knowledge(agent_name, knowledges)

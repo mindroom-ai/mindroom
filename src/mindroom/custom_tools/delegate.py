@@ -17,7 +17,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import ai_response
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge import (
-    KnowledgeAvailability,
+    KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
     get_agent_knowledge,
 )
@@ -107,12 +107,12 @@ class DelegateTools(Toolkit):
                 else None
             )
 
-            unavailable_bases: dict[str, KnowledgeAvailability] = {}
+            unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
             knowledge = get_agent_knowledge(
                 agent_name,
                 self._config,
                 self._runtime_paths,
-                on_unavailable_bases=unavailable_bases.update,
+                on_unavailable_base_details=unavailable_bases.update,
                 refresh_owner=self._refresh_owner,
                 execution_identity=execution_identity,
             )
