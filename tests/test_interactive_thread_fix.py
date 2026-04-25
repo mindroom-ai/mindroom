@@ -324,3 +324,85 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         registered_thread_id = call_args[2]
         assert registered_event_id == "$standalone_message"
         assert registered_thread_id is None
+
+
+@pytest.mark.asyncio
+async def test_interactive_question_with_existing_event_in_non_streaming(tmp_path: Path) -> None:
+    """Non-streaming edits should still register interactive questions after final delivery."""
+    with (
+        patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai_response,
+        patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+        patch(
+            "mindroom.delivery_gateway.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ),
+        patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive") as mock_parse,
+        patch("mindroom.post_response_effects.interactive.register_interactive_question") as mock_register,
+        patch("mindroom.post_response_effects.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_reactions,
+    ):
+        mock_ai_response.return_value = "Raw response with interactive block"
+
+        mock_response = MagicMock()
+        mock_response.formatted_text = "Formatted response with options"
+        mock_response.option_map = {"1": "ore_walkthrough", "🔄": "ore_walkthrough"}
+        mock_response.options_list = [
+            {
+                "emoji": "🔄",
+                "label": "Convert this circuit to Ore and walk through it",
+                "value": "ore_walkthrough",
+            },
+        ]
+        mock_parse.return_value = mock_response
+
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General")}),
+            test_runtime_paths(tmp_path),
+        )
+        config.memory.backend = "file"
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="GeneralAgent",
+            password="test_password",  # noqa: S106
+        )
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:localhost"],
+        )
+
+        client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
+        client.user_id = "@mindroom_general:localhost"
+        bot.client = client
+        install_runtime_cache_support(bot)
+
+        room_id = "!test:localhost"
+        thinking_message_id = "$thinking_message"
+
+        event_id = await bot._generate_response(
+            room_id=room_id,
+            prompt="Test prompt",
+            reply_to_event_id="$some_message",
+            thread_id=None,
+            thread_history=[],
+            existing_event_id=thinking_message_id,
+            user_id="@user:localhost",
+        )
+
+        assert event_id == thinking_message_id
+        mock_parse.assert_called_once_with("Raw response with interactive block", extract_mapping=True)
+        mock_register.assert_called_once_with(
+            thinking_message_id,
+            room_id,
+            None,
+            mock_response.option_map,
+            "general",
+        )
+        mock_add_reactions.assert_awaited_once_with(
+            bot.client,
+            room_id,
+            thinking_message_id,
+            mock_response.options_list,
+        )

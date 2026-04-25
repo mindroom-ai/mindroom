@@ -147,7 +147,7 @@ async def test_edit_message_with_lower_threshold() -> None:
     # Should be truncated due to edit limit
     # For edits, check m.new_content
     assert "m.new_content" in sent_content
-    assert sent_content["m.new_content"]["msgtype"] == "m.file"
+    assert sent_content["m.new_content"]["msgtype"] == "m.text"
     assert "io.mindroom.long_text" in sent_content["m.new_content"]
     assert len(sent_content["m.new_content"]["body"]) < len(text)
 
@@ -175,7 +175,7 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
     assert "m.new_content" in sent_content
-    assert sent_content["m.new_content"]["msgtype"] == "m.file"
+    assert sent_content["m.new_content"]["msgtype"] == "m.text"
     for key, value in extra_content.items():
         assert sent_content[key] == value
         assert sent_content["m.new_content"][key] == value
@@ -344,7 +344,7 @@ async def test_streaming_edit_grows_over_limit() -> None:
 
     # Edit should have large message handling
     assert "m.new_content" in edit_content
-    assert edit_content["m.new_content"]["msgtype"] == "m.file"
+    assert edit_content["m.new_content"]["msgtype"] == "m.text"
     assert "io.mindroom.long_text" in edit_content["m.new_content"]
     assert len(edit_content["m.new_content"]["body"]) < 35000
 
@@ -427,7 +427,7 @@ async def test_streaming_multiple_edits_with_growth() -> None:
         content = client.messages_sent[i][2]
         # These are edits, so check m.new_content
         if "m.new_content" in content:
-            assert content["m.new_content"]["msgtype"] == "m.file"
+            assert content["m.new_content"]["msgtype"] == "m.text"
             assert "io.mindroom.long_text" in content["m.new_content"], (
                 f"Message {i} should have large message handling"
             )
