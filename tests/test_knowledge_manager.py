@@ -21,6 +21,7 @@ from mindroom.knowledge import (
     clear_published_snapshots,
     get_agent_knowledge,
     get_published_snapshot,
+    redact_url_credentials,
     refresh_knowledge_binding,
 )
 from mindroom.knowledge.manager import KnowledgeManager
@@ -177,8 +178,8 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_ready_snapshot_access_schedules_per_binding_refresh(tmp_path: Path) -> None:
-    """A ready last-good snapshot is returned immediately while its own base refreshes in the background."""
+async def test_ready_snapshot_access_schedules_debounced_refresh(tmp_path: Path) -> None:
+    """A ready snapshot is returned immediately and refresh scheduling is cooldown-gated."""
     docs_path = tmp_path / "docs"
     unused_path = tmp_path / "unused"
     docs_path.mkdir()
@@ -191,8 +192,10 @@ async def test_ready_snapshot_access_schedules_per_binding_refresh(tmp_path: Pat
     owner.schedule_refresh = MagicMock()
 
     knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
+    second_knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
 
     assert knowledge is not None
+    assert second_knowledge is not None
     assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["ready snapshot"]
     owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
@@ -255,15 +258,17 @@ async def test_existing_published_snapshot_is_used_while_refresh_runs(
 
 
 @pytest.mark.asyncio
-async def test_same_binding_refreshes_are_serialized_across_entrypoints(
+async def test_same_physical_binding_refreshes_are_serialized_across_config_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Direct refresh callers for the same binding share the process-local refresh lock."""
+    """Refresh writes are serialized by physical storage target, not settings-sensitive snapshot key."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("snapshot", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    changed_config = config.model_copy(deep=True)
+    changed_config.knowledge_bases["docs"].chunk_size = 1024
     runtime_paths = runtime_paths_for(config)
     first_entered = asyncio.Event()
     release_first = asyncio.Event()
@@ -292,7 +297,9 @@ async def test_same_binding_refreshes_are_serialized_across_entrypoints(
 
     first_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
     await first_entered.wait()
-    second_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
+    second_task = asyncio.create_task(
+        refresh_knowledge_binding("docs", config=changed_config, runtime_paths=runtime_paths),
+    )
     await asyncio.sleep(0)
 
     assert not second_entered.is_set()
@@ -303,6 +310,36 @@ async def test_same_binding_refreshes_are_serialized_across_entrypoints(
 
     assert second_entered.is_set()
     assert max_active_refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_published_snapshot_handle_survives_later_refresh_generations(tmp_path: Path) -> None:
+    """Already-returned read handles remain valid across later refresh generations."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("generation one", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    first_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert first_lookup.snapshot is not None
+    first_knowledge = first_lookup.snapshot.knowledge
+    first_collection = first_knowledge.vector_db.collection_name
+
+    doc.write_text("generation two", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    doc.write_text("generation three", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert first_collection in _VectorDb.collections
+    assert [document.content for document in first_knowledge.search("generation", max_results=5)] == ["generation one"]
+    latest = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert latest.snapshot is not None
+    assert [document.content for document in latest.snapshot.knowledge.search("generation", max_results=5)] == [
+        "generation three",
+    ]
 
 
 @pytest.mark.asyncio
@@ -506,6 +543,45 @@ async def test_first_time_partial_refresh_does_not_publish_ready_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_embedder_changing_partial_refresh_does_not_publish_old_snapshot_under_new_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial refresh cannot cache old incompatible vectors under a new snapshot key."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("old embedder snapshot", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    doc.write_text("new embedder candidate", encoding="utf-8")
+    changed_config = config.model_copy(deep=True)
+    changed_config.memory.embedder.config.model = "text-embedding-3-large"
+
+    async def _partial_candidate(
+        self: KnowledgeManager,
+        resolved_path: Path,
+        *,
+        upsert: bool,
+        knowledge: object | None = None,
+        indexed_files: set[str] | None = None,
+        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+    ) -> bool:
+        _ = (self, resolved_path, upsert, knowledge, indexed_files, indexed_signatures)
+        return False
+
+    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _partial_candidate)
+
+    result = await refresh_knowledge_binding("docs", config=changed_config, runtime_paths=runtime_paths)
+    lookup = get_published_snapshot("docs", config=changed_config, runtime_paths=runtime_paths)
+
+    assert result.indexed_count == 0
+    assert lookup.snapshot is None
+    assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
+
+
+@pytest.mark.asyncio
 async def test_refresh_owner_runs_independent_per_binding_tasks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -543,6 +619,72 @@ async def test_refresh_owner_runs_independent_per_binding_tasks(
     await owner.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_refresh_owner_runs_one_pending_refresh_after_active_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schedules received during an active refresh run once more after the active task."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    owner = PerBindingKnowledgeRefreshOwner()
+    started_count = 0
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def _fake_refresh(base_id: str, **_kwargs: object) -> object:
+        _ = base_id
+        nonlocal started_count
+        started_count += 1
+        if started_count == 1:
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_started.set()
+        return object()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+
+    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await first_started.wait()
+    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await asyncio.sleep(0)
+
+    assert started_count == 1
+
+    release_first.set()
+    await second_started.wait()
+    await owner.shutdown()
+
+    assert started_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_owner_shutdown_suppresses_completed_refresh_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown drains fire-and-forget refresh task failures instead of re-raising them."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    owner = PerBindingKnowledgeRefreshOwner()
+
+    async def _fake_refresh(base_id: str, **_kwargs: object) -> object:
+        _ = base_id
+        msg = "refresh failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+
+    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await asyncio.sleep(0)
+    await owner.shutdown()
+
+
 def test_snapshot_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
     """The same base id resolves to separate refresh keys when storage binding differs."""
     path = tmp_path / "docs"
@@ -554,3 +696,13 @@ def test_snapshot_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
 
     assert key_a.base_id == key_b.base_id == "docs"
     assert key_a != key_b
+
+
+def test_redact_url_credentials_hides_entire_http_userinfo() -> None:
+    """Knowledge Git URL redaction must not leak token usernames."""
+    assert redact_url_credentials("https://user:password@example.com/repo.git") == "https://***@example.com/repo.git"
+    assert redact_url_credentials("https://ghp_secret:x-oauth-basic@example.com/repo.git") == (
+        "https://***@example.com/repo.git"
+    )
+    assert redact_url_credentials("https://username@example.com/repo.git") == "https://***@example.com/repo.git"
+    assert redact_url_credentials("ssh://git@example.com/repo.git") == "ssh://git@example.com/repo.git"

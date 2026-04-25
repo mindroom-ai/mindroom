@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from agno.knowledge.knowledge import Knowledge
 
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.registry import get_published_snapshot
+from mindroom.knowledge.registry import KnowledgeRefreshKey, get_published_snapshot, resolve_refresh_key
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+_READY_REFRESH_COOLDOWN_SECONDS = 300.0
+_ready_refresh_scheduled_at: dict[KnowledgeRefreshKey, float] = {}
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -81,6 +84,32 @@ def _get_knowledge_for_base(
     return lookup.snapshot.knowledge
 
 
+def _ready_refresh_due(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> bool:
+    try:
+        key = resolve_refresh_key(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            create=False,
+        )
+    except Exception:
+        logger.exception("Knowledge refresh key lookup failed", base_id=base_id)
+        return False
+    now = time.monotonic()
+    last_scheduled_at = _ready_refresh_scheduled_at.get(key)
+    if last_scheduled_at is not None and now - last_scheduled_at < _READY_REFRESH_COOLDOWN_SECONDS:
+        return False
+    _ready_refresh_scheduled_at[key] = now
+    return True
+
+
 def get_agent_knowledge(
     agent_name: str,
     config: Config,
@@ -118,6 +147,19 @@ def get_agent_knowledge(
                     runtime_paths=runtime_paths,
                     execution_identity=execution_identity,
                 )
+            elif availability is KnowledgeAvailability.READY:
+                if _ready_refresh_due(
+                    base_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                ):
+                    refresh_owner.schedule_refresh(
+                        base_id,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        execution_identity=execution_identity,
+                    )
             else:
                 refresh_owner.schedule_refresh(
                     base_id,

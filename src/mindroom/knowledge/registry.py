@@ -30,6 +30,15 @@ class KnowledgeSnapshotKey:
 
 
 @dataclass(frozen=True)
+class KnowledgeRefreshKey:
+    """Stable key for the physical refresh/write target."""
+
+    base_id: str
+    storage_root: str
+    knowledge_path: str
+
+
+@dataclass(frozen=True)
 class PublishedIndexingState:
     """Metadata for the currently published collection on disk."""
 
@@ -39,6 +48,7 @@ class PublishedIndexingState:
     availability: str | None = None
     last_published_at: str | None = None
     published_revision: str | None = None
+    last_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +139,35 @@ def resolve_snapshot_key(
     )
 
 
+def refresh_key_for_snapshot_key(key: KnowledgeSnapshotKey) -> KnowledgeRefreshKey:
+    """Return the physical refresh key for one snapshot key."""
+    return KnowledgeRefreshKey(
+        base_id=key.base_id,
+        storage_root=key.storage_root,
+        knowledge_path=key.knowledge_path,
+    )
+
+
+def resolve_refresh_key(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+    create: bool = False,
+) -> KnowledgeRefreshKey:
+    """Resolve one base ID to its physical refresh/write key."""
+    return refresh_key_for_snapshot_key(
+        resolve_snapshot_key(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            create=create,
+        ),
+    )
+
+
 def snapshot_base_storage_path(key: KnowledgeSnapshotKey) -> Path:
     """Return the storage directory for one resolved snapshot key."""
     knowledge_path = Path(key.knowledge_path)
@@ -157,6 +196,7 @@ def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState
     availability: str | None = None
     last_published_at: str | None = None
     published_revision: str | None = None
+    last_error: str | None = None
     if isinstance(payload, list):
         if all(isinstance(item, str) for item in payload):
             settings = tuple(payload)
@@ -183,6 +223,8 @@ def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState
             published_revision = (
                 raw_published_revision if isinstance(raw_published_revision, str) and raw_published_revision else None
             )
+            raw_last_error = payload.get("last_error")
+            last_error = raw_last_error if isinstance(raw_last_error, str) and raw_last_error else None
 
     if settings is None or status is None:
         return None
@@ -193,6 +235,7 @@ def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState
         availability=availability,
         last_published_at=last_published_at,
         published_revision=published_revision,
+        last_error=last_error,
     )
 
 
@@ -275,6 +318,13 @@ def _load_queryable_snapshot_from_state(
     return _build_snapshot_knowledge(key, state, config=config, runtime_paths=runtime_paths)
 
 
+def _cached_snapshot_still_queryable(snapshot: PublishedKnowledgeSnapshot) -> bool:
+    if not _snapshot_state_queryable(snapshot.key, snapshot.state):
+        return False
+    vector_db = cast("_SnapshotVectorDb | None", snapshot.knowledge.vector_db)
+    return vector_db is not None and vector_db.exists()
+
+
 def _snapshot_availability(
     *,
     key: KnowledgeSnapshotKey,
@@ -308,6 +358,16 @@ def get_published_snapshot(
     )
     snapshot = _published_snapshots.get(key)
     if snapshot is not None:
+        if not _cached_snapshot_still_queryable(snapshot):
+            _published_snapshots.pop(key, None)
+            availability = _snapshot_availability(key=key, state=snapshot.state)
+            if availability is KnowledgeAvailability.READY:
+                availability = KnowledgeAvailability.REFRESH_FAILED
+            return KnowledgeSnapshotLookup(
+                key=key,
+                snapshot=None,
+                availability=availability,
+            )
         return KnowledgeSnapshotLookup(
             key=key,
             snapshot=snapshot,

@@ -15,7 +15,7 @@ class KnowledgeGitConfig(BaseModel):
     poll_interval_seconds: int = Field(
         default=300,
         ge=5,
-        description="How often to poll the remote repository for updates",
+        description="Reserved legacy setting; Git sync now runs during scheduled or explicit knowledge refreshes",
     )
     credentials_service: str | None = Field(
         default=None,
@@ -27,7 +27,7 @@ class KnowledgeGitConfig(BaseModel):
     )
     startup_behavior: Literal["blocking", "background"] = Field(
         default="blocking",
-        description="Whether startup should wait for Git sync or schedule it in the background",
+        description="Reserved legacy setting; startup no longer blocks on or schedules Git knowledge sync",
     )
     sync_timeout_seconds: int = Field(
         default=3600,
@@ -52,7 +52,10 @@ class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
-    watch: bool = Field(default=True, description="Watch folder for changes")
+    watch: bool = Field(
+        default=True,
+        description="Reserved legacy setting; knowledge refresh is scheduled on access or through explicit API actions",
+    )
     chunk_size: int = Field(
         default=5000,
         ge=128,

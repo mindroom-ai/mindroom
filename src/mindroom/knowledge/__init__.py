@@ -3,6 +3,7 @@
 # ruff: noqa: RUF022
 
 from mindroom.knowledge.manager import KnowledgeManager, list_knowledge_files
+from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
 from mindroom.knowledge.refresh_owner import (
     KnowledgeRefreshOwner,
     OrchestratorKnowledgeRefreshOwner,
@@ -11,6 +12,7 @@ from mindroom.knowledge.refresh_owner import (
 )
 from mindroom.knowledge.refresh_runner import refresh_knowledge_binding
 from mindroom.knowledge.registry import (
+    KnowledgeRefreshKey,
     KnowledgeSnapshotKey,
     KnowledgeSnapshotLookup,
     PublishedIndexingState,
@@ -19,6 +21,7 @@ from mindroom.knowledge.registry import (
     get_published_snapshot,
     load_published_indexing_state,
     publish_snapshot,
+    resolve_refresh_key,
     resolve_snapshot_key,
     snapshot_indexed_count,
     snapshot_metadata_path,
@@ -41,6 +44,7 @@ __all__ = [
     "PerBindingKnowledgeRefreshOwner",
     "StandaloneKnowledgeRefreshOwner",
     "KnowledgeSnapshotKey",
+    "KnowledgeRefreshKey",
     "KnowledgeSnapshotLookup",
     "PublishedIndexingState",
     "PublishedKnowledgeSnapshot",
@@ -48,9 +52,12 @@ __all__ = [
     "load_published_indexing_state",
     "publish_snapshot",
     "resolve_snapshot_key",
+    "resolve_refresh_key",
     "snapshot_metadata_path",
     "snapshot_indexed_count",
     "clear_published_snapshots",
     "refresh_knowledge_binding",
     "list_knowledge_files",
+    "redact_credentials_in_text",
+    "redact_url_credentials",
 ]

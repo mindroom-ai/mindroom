@@ -73,7 +73,10 @@ class AgentPrivateKnowledgeConfig(BaseModel):
         default=None,
         description="Path to a private knowledge directory relative to the private root",
     )
-    watch: bool = Field(default=True, description="Watch the private knowledge directory for changes")
+    watch: bool = Field(
+        default=True,
+        description="Reserved legacy setting; private knowledge refresh is scheduled on access",
+    )
     chunk_size: int = Field(
         default=5000,
         ge=128,

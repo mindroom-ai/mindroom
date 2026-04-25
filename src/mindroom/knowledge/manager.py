@@ -6,8 +6,8 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import time
+import uuid
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -33,6 +33,7 @@ from mindroom.embeddings import (
     effective_knowledge_embedder_signature,
 )
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
+from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -45,7 +46,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
-_URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 _SOURCE_PATH_KEY = "source_path"
 _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
@@ -128,6 +128,7 @@ class _PersistedIndexingState:
     availability: str | None = None
     last_published_at: str | None = None
     published_revision: str | None = None
+    last_error: str | None = None
 
 
 def _resolve_knowledge_path(
@@ -281,26 +282,6 @@ def _authenticated_repo_url(
     hostname = parsed.netloc.split("@")[-1]
     auth_netloc = f"{quote(username, safe='')}:{quote(secret, safe='')}@{hostname}"
     return urlunparse(parsed._replace(netloc=auth_netloc))
-
-
-def _redact_url_credentials(value: str) -> str:
-    """Redact password/token information from an HTTP(S) URL."""
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or "@" not in parsed.netloc:
-        return value
-
-    userinfo, host = parsed.netloc.rsplit("@", 1)
-    if ":" in userinfo:
-        username = userinfo.split(":", 1)[0]
-        redacted_userinfo = f"{username}:***"
-    else:
-        redacted_userinfo = "***"
-    return urlunparse(parsed._replace(netloc=f"{redacted_userinfo}@{host}"))
-
-
-def _redact_credentials_in_text(value: str) -> str:
-    """Redact credential-bearing URLs embedded inside free-form text."""
-    return _URL_PATTERN.sub(lambda match: _redact_url_credentials(match.group(0)), value)
 
 
 def _split_posix_parts(value: str) -> tuple[str, ...]:
@@ -524,6 +505,7 @@ class KnowledgeManager:
         availability: str | None = None
         last_published_at: str | None = None
         published_revision: str | None = None
+        last_error: str | None = None
         if isinstance(payload, list):
             if all(isinstance(item, str) for item in payload):
                 settings = tuple(payload)
@@ -552,6 +534,8 @@ class KnowledgeManager:
                     if isinstance(raw_published_revision, str) and raw_published_revision
                     else None
                 )
+                raw_last_error = payload.get("last_error")
+                last_error = raw_last_error if isinstance(raw_last_error, str) and raw_last_error else None
 
         if settings is None or status is None:
             return None
@@ -562,6 +546,7 @@ class KnowledgeManager:
             availability=availability,
             last_published_at=last_published_at,
             published_revision=published_revision,
+            last_error=last_error,
         )
 
     def _load_persisted_indexing_settings(self) -> tuple[str, ...] | None:
@@ -577,6 +562,7 @@ class KnowledgeManager:
         availability: str | None = None,
         last_published_at: str | None = None,
         published_revision: str | None = None,
+        last_error: str | None = None,
     ) -> None:
         persisted_settings = settings or self._indexing_settings
         payload: dict[str, object] = {
@@ -591,6 +577,8 @@ class KnowledgeManager:
             payload["last_published_at"] = last_published_at
         if published_revision is not None:
             payload["published_revision"] = published_revision
+        if last_error is not None:
+            payload["last_error"] = last_error
         tmp_path = self._indexing_settings_path.with_suffix(f"{self._indexing_settings_path.suffix}.tmp")
         tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         tmp_path.replace(self._indexing_settings_path)
@@ -601,6 +589,7 @@ class KnowledgeManager:
             availability=availability,
             last_published_at=last_published_at,
             published_revision=published_revision,
+            last_error=last_error,
         )
 
     def _save_persisted_indexing_settings(self) -> None:
@@ -761,7 +750,7 @@ class KnowledgeManager:
                 process.kill()
             with suppress(ProcessLookupError):
                 await process.wait()
-            command = " ".join(["git", *(_redact_url_credentials(arg) for arg in args)])
+            command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
             msg = f"Git command timed out after {timeout_seconds:.0f}s: {command}"
             raise RuntimeError(msg) from exc
 
@@ -770,8 +759,8 @@ class KnowledgeManager:
 
         stdout_text = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
-        details = _redact_credentials_in_text(stderr_text or stdout_text)
-        command = " ".join(["git", *(_redact_url_credentials(arg) for arg in args)])
+        details = redact_credentials_in_text(stderr_text or stdout_text)
+        command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
         msg = f"Git command failed with exit code {process.returncode}: {command}"
         if details:
             msg = f"{msg}\n{details}"
@@ -1076,10 +1065,8 @@ class KnowledgeManager:
             return vector_db.collection_name
         return self._default_collection_name()
 
-    def _shadow_collection_name(self, live_collection_name: str) -> str:
-        default_collection = self._default_collection_name()
-        pending_collection = f"{default_collection}_pending"
-        return pending_collection if live_collection_name == default_collection else default_collection
+    def _candidate_collection_name(self) -> str:
+        return f"{self._default_collection_name()}_candidate_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
 
     def _build_vector_db(self, collection_name: str) -> ChromaDb:
         return ChromaDb(
@@ -1251,7 +1238,7 @@ class KnowledgeManager:
             current_head = await self._git_rev_parse("HEAD")
         except Exception as exc:
             self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
-            self._git_last_error = _redact_credentials_in_text(str(exc))
+            self._git_last_error = redact_credentials_in_text(str(exc))
             raise
         finally:
             self._git_syncing = False
@@ -1273,7 +1260,7 @@ class KnowledgeManager:
             logger.info(
                 "Knowledge Git repository synchronized",
                 base_id=self.base_id,
-                repo_url=_redact_url_credentials(git_config.repo_url),
+                repo_url=redact_url_credentials(git_config.repo_url),
                 branch=git_config.branch,
                 changed_count=len(changed_files),
                 removed_count=len(removed_files),
@@ -1399,84 +1386,62 @@ class KnowledgeManager:
                 and persisted_state.status == _INDEXING_STATUS_COMPLETE
                 and await asyncio.to_thread(self._has_existing_index)
             )
-            if not has_published_snapshot:
-                await asyncio.to_thread(
-                    self._save_persisted_indexing_state,
-                    _INDEXING_STATUS_RESETTING,
-                    collection=live_collection_name,
-                    availability=_INDEXING_AVAILABILITY_INITIALIZING,
-                )
-                await asyncio.to_thread(self._reset_collection)
-                async with self._state_lock:
-                    self._indexed_files.clear()
-                    self._indexed_signatures.clear()
+            candidate_knowledge = self._build_knowledge(self._candidate_collection_name())
+            candidate_vector_db = candidate_knowledge.vector_db
+            if not isinstance(candidate_vector_db, ChromaDb):
+                msg = "Knowledge reindex candidate collection requires a ChromaDb vector database"
+                raise TypeError(msg)
+
+            await asyncio.to_thread(self._reset_vector_db, candidate_vector_db)
+            candidate_indexed_files: set[str] = set()
+            candidate_indexed_signatures: dict[str, tuple[int, int] | None] = {}
+            last_published_at = persisted_state.last_published_at if persisted_state is not None else None
+            published_revision = persisted_state.published_revision if persisted_state is not None else None
+
+            async def _save_refresh_failed_state(error: str) -> None:
+                if has_published_snapshot and persisted_state is not None:
+                    await asyncio.to_thread(
+                        self._save_persisted_indexing_state,
+                        _INDEXING_STATUS_COMPLETE,
+                        settings=persisted_state.settings,
+                        collection=live_collection_name,
+                        availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
+                        last_published_at=last_published_at,
+                        published_revision=published_revision,
+                        last_error=error,
+                    )
+                    return
                 await asyncio.to_thread(
                     self._save_persisted_indexing_state,
                     _INDEXING_STATUS_INDEXING,
-                    collection=live_collection_name,
-                    availability=_INDEXING_AVAILABILITY_INITIALIZING,
+                    collection=candidate_vector_db.collection_name,
+                    availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
+                    last_error=error,
                 )
-                indexed_count = await self._reindex_files_locked(files)
-                if indexed_count != len(files):
-                    await asyncio.to_thread(
-                        self._save_persisted_indexing_state,
-                        _INDEXING_STATUS_INDEXING,
-                        collection=live_collection_name,
-                        availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
-                    )
-                    return indexed_count
-                await asyncio.to_thread(self._save_persisted_indexing_settings)
-                return indexed_count
 
-            shadow_knowledge = self._build_knowledge(self._shadow_collection_name(live_collection_name))
-            shadow_vector_db = shadow_knowledge.vector_db
-            if not isinstance(shadow_vector_db, ChromaDb):
-                msg = "Knowledge reindex shadow collection requires a ChromaDb vector database"
-                raise TypeError(msg)
-            assert persisted_state is not None
-            await asyncio.to_thread(self._reset_vector_db, shadow_vector_db)
-            shadow_indexed_files: set[str] = set()
-            shadow_indexed_signatures: dict[str, tuple[int, int] | None] = {}
-            last_published_at = persisted_state.last_published_at
-            published_revision = persisted_state.published_revision
             try:
                 indexed_count = await self._reindex_files_locked(
                     files,
-                    knowledge=shadow_knowledge,
-                    indexed_files=shadow_indexed_files,
-                    indexed_signatures=shadow_indexed_signatures,
+                    knowledge=candidate_knowledge,
+                    indexed_files=candidate_indexed_files,
+                    indexed_signatures=candidate_indexed_signatures,
                 )
-            except Exception:
-                await asyncio.to_thread(self._delete_vector_db, shadow_vector_db)
-                await asyncio.to_thread(
-                    self._save_persisted_indexing_state,
-                    _INDEXING_STATUS_COMPLETE,
-                    settings=persisted_state.settings,
-                    collection=live_collection_name,
-                    availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
-                    last_published_at=last_published_at,
-                    published_revision=published_revision,
-                )
+            except Exception as exc:
+                await asyncio.to_thread(self._delete_vector_db, candidate_vector_db)
+                await _save_refresh_failed_state(redact_credentials_in_text(str(exc)))
                 raise
 
             if indexed_count != len(files):
-                await asyncio.to_thread(self._delete_vector_db, shadow_vector_db)
-                await asyncio.to_thread(
-                    self._save_persisted_indexing_state,
-                    _INDEXING_STATUS_COMPLETE,
-                    settings=persisted_state.settings,
-                    collection=live_collection_name,
-                    availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
-                    last_published_at=last_published_at,
-                    published_revision=published_revision,
+                await asyncio.to_thread(self._delete_vector_db, candidate_vector_db)
+                await _save_refresh_failed_state(
+                    f"Indexed {indexed_count} of {len(files)} managed knowledge files",
                 )
                 return indexed_count
 
-            # Keep the Knowledge object stable so any already-resolved handles see the swap atomically.
-            self._knowledge.vector_db = shadow_vector_db
+            self._knowledge.vector_db = candidate_vector_db
             async with self._state_lock:
-                self._indexed_files = shadow_indexed_files
-                self._indexed_signatures = shadow_indexed_signatures
+                self._indexed_files = candidate_indexed_files
+                self._indexed_signatures = candidate_indexed_signatures
             await asyncio.to_thread(self._save_persisted_indexing_settings)
             return indexed_count
 
@@ -1522,7 +1487,7 @@ class KnowledgeManager:
         git_config = self._git_config()
         if git_config is not None:
             status["git"] = {
-                "repo_url": _redact_url_credentials(git_config.repo_url),
+                "repo_url": redact_url_credentials(git_config.repo_url),
                 "branch": git_config.branch,
                 "lfs": git_config.lfs,
                 "startup_behavior": git_config.startup_behavior,

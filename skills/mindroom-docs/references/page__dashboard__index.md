@@ -91,8 +91,8 @@ Per-agent overrides are configured from the **Agents** tab using the **Memory ba
 
 Manage file-backed RAG knowledge bases:
 
-- **Create/edit/delete knowledge bases** with `path` and `watch` settings
-- **Upload and remove files** per knowledge base
+- **Create/edit/delete knowledge bases** with `path` and legacy/advisory `watch` settings
+- **Upload and remove files** for non-Git-backed knowledge bases
 - **Reindex** a knowledge base on demand
 - **Track index status** (`file_count` and `indexed_count`)
 - **Assign agents** to a specific knowledge base from the Agents tab
@@ -102,8 +102,8 @@ Git-backed knowledge bases are supported, but Git settings are currently configu
 - The dashboard preserves existing `git` settings when you edit `path`/`watch`.
 - `/api/knowledge/bases/{base_id}/files` reflects the manager's filtered file set (for example `include_patterns`/`exclude_patterns`).
 - Private HTTPS repo auth can be managed in the **Credentials** tab, then referenced by `knowledge_bases.<id>.git.credentials_service`.
-- In API-only mode, Git-backed bases are cloned/synced/indexed automatically on first manager initialization.
 - `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases before rebuilding the index.
+- Chat/runtime requests use already-published last-good snapshots and do not wait for indexing or Git sync.
 
 ### Credentials
 
@@ -223,14 +223,14 @@ Credentials support scoping via query parameters:
 
 ### Knowledge
 
-| Method | Endpoint                                      | Description                       |
-| ------ | --------------------------------------------- | --------------------------------- |
-| GET    | `/api/knowledge/bases`                        | List configured knowledge bases   |
-| GET    | `/api/knowledge/bases/{base_id}/files`        | List files in a knowledge base    |
-| POST   | `/api/knowledge/bases/{base_id}/upload`       | Upload one or more files          |
-| DELETE | `/api/knowledge/bases/{base_id}/files/{path}` | Delete a file from disk and index |
-| GET    | `/api/knowledge/bases/{base_id}/status`       | Get indexing status               |
-| POST   | `/api/knowledge/bases/{base_id}/reindex`      | Rebuild the index for a base      |
+| Method | Endpoint                                      | Description                                                            |
+| ------ | --------------------------------------------- | ---------------------------------------------------------------------- |
+| GET    | `/api/knowledge/bases`                        | List configured knowledge bases                                        |
+| GET    | `/api/knowledge/bases/{base_id}/files`        | List files in a knowledge base                                         |
+| POST   | `/api/knowledge/bases/{base_id}/upload`       | Upload one or more files for a non-Git-backed base                     |
+| DELETE | `/api/knowledge/bases/{base_id}/files/{path}` | Delete a file from disk for a non-Git-backed base and schedule refresh |
+| GET    | `/api/knowledge/bases/{base_id}/status`       | Get indexing status                                                    |
+| POST   | `/api/knowledge/bases/{base_id}/reindex`      | Rebuild the index for a base                                           |
 
 ### Skills
 

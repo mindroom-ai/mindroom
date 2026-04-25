@@ -57,6 +57,7 @@ def _write_snapshot_metadata(
     collection: str = "published_collection",
     revision: str | None = None,
     published_at: str | None = None,
+    last_error: str | None = None,
 ) -> None:
     key = resolve_snapshot_key(base_id, config=config, runtime_paths=runtime_paths)
     metadata_path = snapshot_metadata_path(key)
@@ -71,6 +72,9 @@ def _write_snapshot_metadata(
         payload["published_revision"] = revision
     if published_at is not None:
         payload["last_published_at"] = published_at
+    if last_error is not None:
+        payload["availability"] = "refresh_failed"
+        payload["last_error"] = last_error
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
 
@@ -199,6 +203,23 @@ def test_git_status_reads_disk_and_snapshot_metadata(tmp_path: Path) -> None:
     assert git_status["initial_sync_complete"] is True
     assert git_status["last_successful_commit"] == "abc123"
     assert git_status["last_successful_sync_at"] == "2026-04-24T12:34:56+00:00"
+
+
+def test_git_status_surfaces_last_refresh_error_from_snapshot_metadata(tmp_path: Path) -> None:
+    """Git refresh failures should remain observable through status after the manager disappears."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs, git=True)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(config, runtime_paths, last_error="Git command failed: https://***@example.com/repo.git")
+
+    response = client.get("/api/knowledge/bases/research/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["last_error"] == "Git command failed: https://***@example.com/repo.git"
+    assert payload["git"]["last_error"] == "Git command failed: https://***@example.com/repo.git"
 
 
 def test_api_lifespan_does_not_schedule_all_configured_knowledge_bases(tmp_path: Path) -> None:

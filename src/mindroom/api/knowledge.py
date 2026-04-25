@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import unquote
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
@@ -16,6 +16,7 @@ from mindroom.knowledge import (
     PublishedIndexingState,
     get_published_snapshot,
     load_published_indexing_state,
+    redact_url_credentials,
     refresh_knowledge_binding,
     resolve_snapshot_key,
     snapshot_indexed_count,
@@ -38,21 +39,6 @@ _UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB
 def _ensure_base_exists(config: Config, base_id: str) -> None:
     if base_id not in config.knowledge_bases:
         raise HTTPException(status_code=404, detail=f"Knowledge base '{base_id}' not found")
-
-
-def _redact_url_credentials(value: str) -> str:
-    """Redact password/token information from an HTTP(S) URL."""
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or "@" not in parsed.netloc:
-        return value
-
-    userinfo, host = parsed.netloc.rsplit("@", 1)
-    if ":" in userinfo:
-        username = userinfo.split(":", 1)[0]
-        redacted_userinfo = f"{username}:***"
-    else:
-        redacted_userinfo = "***"
-    return urlunparse(parsed._replace(netloc=f"{redacted_userinfo}@{host}"))
 
 
 def _knowledge_root(
@@ -183,7 +169,7 @@ def _git_status(
     state = _snapshot_state(config, base_id, runtime_paths)
     owner = _request_refresh_owner(request)
     return {
-        "repo_url": _redact_url_credentials(git_config.repo_url),
+        "repo_url": redact_url_credentials(git_config.repo_url),
         "branch": git_config.branch,
         "lfs": git_config.lfs,
         "startup_behavior": git_config.startup_behavior,
@@ -202,7 +188,7 @@ def _git_status(
         ),
         "last_successful_sync_at": state.last_published_at if state is not None else None,
         "last_successful_commit": state.published_revision if state is not None else None,
-        "last_error": None,
+        "last_error": state.last_error if state is not None else None,
     }
 
 
@@ -381,6 +367,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
     snapshot_available, indexed_count = _snapshot_status(config, base_id, runtime_paths)
+    state = _snapshot_state(config, base_id, runtime_paths)
     file_count = len(_list_file_info(config, base_id, root)[0])
     git_status = _git_status(config, base_id, runtime_paths, request=request)
 
@@ -391,6 +378,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "file_count": file_count,
         "indexed_count": indexed_count,
         "manager_available": snapshot_available,
+        "last_error": state.last_error if state is not None else None,
     }
     if git_status is not None:
         payload["git"] = git_status

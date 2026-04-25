@@ -10,14 +10,14 @@ Knowledge bases give your agents access to your own documents through RAG (Retri
 1. When the agent uses the tool, relevant document chunks are included in its context
 
 ```
-Indexing (startup + file changes):
+Indexing (scheduled refresh):
 
   ┌──────────────┐      ┌──────────┐      ┌──────────┐
   │ Files/Folder │ ───▶ │ Embedder │ ───▶ │ ChromaDB │
   └──────────────┘      └──────────┘      └──────────┘
          ▲
-         │ file watcher
-         │ git sync
+         │ on-access/API refresh
+         │ git sync during refresh
 
 Querying (agentic RAG):
 
@@ -46,7 +46,7 @@ agents:
     knowledge_bases: [docs]
 ```
 
-Place files in `./knowledge_docs/` and they'll be indexed automatically on startup. When `watch: true`, new or modified files are re-indexed in real time. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
+Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom schedule a refresh when an assigned agent first needs that base. Chat uses the last successfully published snapshot and continues without blocking when a base is missing, stale, or failed. The `watch` field is retained for config compatibility but no longer starts a realtime filesystem watcher. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
 
 ## Configuration
 
@@ -56,18 +56,18 @@ Place files in `./knowledge_docs/` and they'll be indexed automatically on start
 knowledge_bases:
   my_docs:
     path: ./knowledge_docs/my_docs   # Folder containing documents
-    watch: true                       # Auto-reindex on file changes
+    watch: true                       # Legacy/advisory; refresh is scheduled on access or by API actions
     chunk_size: 5000                  # Max characters per chunk
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
 
-| Field           | Type   | Default            | Description                                                         |
-| --------------- | ------ | ------------------ | ------------------------------------------------------------------- |
-| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)     |
-| `watch`         | bool   | `true`             | Watch for filesystem changes and reindex automatically              |
-| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)   |
-| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`) |
-| `git`           | object | `null`             | Optional Git repository sync settings                               |
+| Field           | Type   | Default            | Description                                                                                                                            |
+| --------------- | ------ | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)                                                                        |
+| `watch`         | bool   | `true`             | Legacy/advisory flag. Refresh is scheduled on access when knowledge is missing/stale/failed, or through explicit dashboard/API actions |
+| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                      |
+| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                    |
+| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                  |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits. If chunking is too large, indexing retries will fail with embedder 500 errors.
 
@@ -96,16 +96,16 @@ agents:
     knowledge_bases: [company_docs]
 ```
 
-With this configuration, each requester's private knowledge path becomes `<their private root>/memory`. The template source is explicit, so you can see and edit the files being copied into each requester's private root. `private.template_dir` only copies files. Requester-local knowledge is enabled only when you explicitly configure `private.knowledge.path`. `private.knowledge.path` must be relative to the private root and cannot be absolute or escape with `..`. `private.knowledge.path` can point to any folder inside the private root, including `.` for the private root itself. MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime. For isolating scopes such as `user` and `user_agent`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root. Git-backed knowledge still keeps the repository fresh when `watch: false`; that flag only disables filesystem watchers. Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge. This requester-local private knowledge flow applies to the normal agent runtime path, not the OpenAI-compatible `/v1` API. If you enable `private.knowledge.git`, use a dedicated subtree such as `kb_repo`. Do not point Git-backed private knowledge at `.` or `memory/`, and do not use a Git checkout path that your template or private file memory also writes into.
+With this configuration, each requester's private knowledge path becomes `<their private root>/memory`. The template source is explicit, so you can see and edit the files being copied into each requester's private root. `private.template_dir` only copies files. Requester-local knowledge is enabled only when you explicitly configure `private.knowledge.path`. `private.knowledge.path` must be relative to the private root and cannot be absolute or escape with `..`. `private.knowledge.path` can point to any folder inside the private root, including `.` for the private root itself. MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime. For isolating scopes such as `user` and `user_agent`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root. Git-backed knowledge syncs during scheduled or explicit refreshes. Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge. This requester-local private knowledge flow applies to the normal agent runtime path, not the OpenAI-compatible `/v1` API. If you enable `private.knowledge.git`, use a dedicated subtree such as `kb_repo`. Do not point Git-backed private knowledge at `.` or `memory/`, and do not use a Git checkout path that your template or private file memory also writes into.
 
-| Field                             | Type   | Default | Description                                                                                                                                                                                                      |
-| --------------------------------- | ------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `private.knowledge.enabled`       | bool   | `true`  | Whether requester-local knowledge indexing is active for this agent                                                                                                                                              |
-| `private.knowledge.path`          | string | `null`  | Private-root-relative folder to index. Required when `private.knowledge.enabled` is `true`; set `enabled: false` to disable private knowledge                                                                    |
-| `private.knowledge.watch`         | bool   | `true`  | Whether local filesystem changes should be watched. For isolating scopes, MindRoom refreshes on access instead of keeping a background watcher per requester root. Git sync still runs even when this is `false` |
-| `private.knowledge.chunk_size`    | int    | `5000`  | Maximum characters per indexed chunk                                                                                                                                                                             |
-| `private.knowledge.chunk_overlap` | int    | `0`     | Overlap characters between adjacent chunks. Must be smaller than `chunk_size`                                                                                                                                    |
-| `private.knowledge.git`           | object | `null`  | Optional Git sync configuration for requester-local knowledge. Git-backed private knowledge must use a dedicated subtree outside requester-writable memory/template content                                      |
+| Field                             | Type   | Default | Description                                                                                                                                                                 |
+| --------------------------------- | ------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `private.knowledge.enabled`       | bool   | `true`  | Whether requester-local knowledge indexing is active for this agent                                                                                                         |
+| `private.knowledge.path`          | string | `null`  | Private-root-relative folder to index. Required when `private.knowledge.enabled` is `true`; set `enabled: false` to disable private knowledge                               |
+| `private.knowledge.watch`         | bool   | `true`  | Legacy/advisory flag. Private knowledge refresh is scheduled on access instead of keeping a watcher per requester root                                                      |
+| `private.knowledge.chunk_size`    | int    | `5000`  | Maximum characters per indexed chunk                                                                                                                                        |
+| `private.knowledge.chunk_overlap` | int    | `0`     | Overlap characters between adjacent chunks. Must be smaller than `chunk_size`                                                                                               |
+| `private.knowledge.git`           | object | `null`  | Optional Git sync configuration for requester-local knowledge. Git-backed private knowledge must use a dedicated subtree outside requester-writable memory/template content |
 
 Use `private.knowledge` when the data itself should be private to that requester's private instance. Use top-level `knowledge_bases` when the same documents should stay shared across agents or users.
 
@@ -152,7 +152,7 @@ When an agent has multiple knowledge bases, results are interleaved fairly so no
 
 ## Git-Backed Knowledge Bases
 
-Knowledge bases can sync from a Git repository. MindRoom clones the repo on first run and periodically pulls updates.
+Knowledge bases can sync from a Git repository. MindRoom clones or fetches the repo during scheduled or explicit refreshes, not during global startup.
 
 ```
 knowledge_bases:
@@ -174,34 +174,30 @@ knowledge_bases:
 
 ### Git Configuration Fields
 
-| Field                   | Type   | Default    | Description                                                                                                  |
-| ----------------------- | ------ | ---------- | ------------------------------------------------------------------------------------------------------------ |
-| `repo_url`              | string | *required* | HTTPS repository URL to clone/fetch                                                                          |
-| `branch`                | string | `main`     | Branch to track                                                                                              |
-| `poll_interval_seconds` | int    | `300`      | How often to check for updates (minimum: 5)                                                                  |
-| `credentials_service`   | string | `null`     | Service name in CredentialsManager for private repos                                                         |
-| `lfs`                   | bool   | `false`    | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom |
-| `startup_behavior`      | string | `blocking` | `blocking` waits for startup sync, `background` defers sync to the background loop                           |
-| `sync_timeout_seconds`  | int    | `3600`     | Abort one Git command if it exceeds this timeout                                                             |
-| `skip_hidden`           | bool   | `true`     | Skip files/folders starting with `.`                                                                         |
-| `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                                                       |
-| `exclude_patterns`      | list   | `[]`       | Root-anchored glob patterns to exclude                                                                       |
+| Field                   | Type   | Default    | Description                                                                                                      |
+| ----------------------- | ------ | ---------- | ---------------------------------------------------------------------------------------------------------------- |
+| `repo_url`              | string | *required* | HTTPS repository URL to clone/fetch                                                                              |
+| `branch`                | string | `main`     | Branch to track                                                                                                  |
+| `poll_interval_seconds` | int    | `300`      | Legacy/advisory setting. Git polling loops are not started; Git sync runs during scheduled or explicit refreshes |
+| `credentials_service`   | string | `null`     | Service name in CredentialsManager for private repos                                                             |
+| `lfs`                   | bool   | `false`    | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom     |
+| `startup_behavior`      | string | `blocking` | Legacy/advisory setting. Startup no longer blocks on or schedules Git knowledge sync                             |
+| `sync_timeout_seconds`  | int    | `3600`     | Abort one Git command if it exceeds this timeout                                                                 |
+| `skip_hidden`           | bool   | `true`     | Skip files/folders starting with `.`                                                                             |
+| `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                                                           |
+| `exclude_patterns`      | list   | `[]`       | Root-anchored glob patterns to exclude                                                                           |
 
 When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows. Bundled container images already include it.
 
 ### Sync Behavior
 
-- On startup, the repo is cloned (or fetched if it already exists)
-- When `startup_behavior: background`, manager initialization loads the existing index immediately and lets resume/incremental repo sync continue in the background
-- Required full reindexes still run blocking before the manager is exposed
-- Request-scoped private knowledge roots do not keep background startup alive between requests, so they effectively fall back to on-access blocking sync behavior even if `startup_behavior: background` is configured
-- Every `poll_interval_seconds`, MindRoom runs `git fetch` + `git reset --hard origin/<branch>`
-- When `lfs: true`, MindRoom runs `git lfs pull origin <branch>` when a checkout is first hydrated or when sync advances to a new Git head
-- Local edits to Git-tracked files are discarded on each sync, and tracked deletions are restored from the remote checkout
-- Untracked local files, including uploaded files, are preserved across syncs unless they overwrite a Git-tracked path, which will be reset on the next sync
-- Only changed files are re-indexed (not the entire repo each time)
-- Deleted files are automatically removed from the index
-- Git polling runs regardless of the `watch` setting — `watch` controls only local filesystem events
+- Chat and runtime requests never wait for Git sync or indexing.
+- Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
+- Explicit dashboard/API reindex runs Git sync first for Git-backed bases and then rebuilds a candidate index.
+- When `lfs: true`, MindRoom runs `git lfs pull origin <branch>` when a checkout is first hydrated or when sync advances to a new Git head.
+- Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
+- Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and reindex instead.
+- Successful refresh publishes a new last-good snapshot while failed refresh preserves the previous one and records the error in status metadata.
 
 ### File Filtering with Patterns
 
@@ -278,7 +274,7 @@ memory:
 
 ## Storage
 
-Knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<sanitized_base_id>_<hash>`, where the base ID is sanitized to alphanumerics, hyphens, and underscores only, and the hash is a digest of the resolved knowledge path. For requester-private agent knowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
+Knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`. Each successful refresh publishes a generation-specific ChromaDB collection whose name begins with `mindroom_knowledge_<sanitized_base_id>_<hash>`. The base ID is sanitized to alphanumerics, hyphens, and underscores only, and the hash is a digest of the resolved knowledge path. For requester-private agent knowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
@@ -289,7 +285,7 @@ The web dashboard provides a Knowledge tab for managing knowledge bases without 
 - Create, edit, and delete knowledge bases
 - Configure chunk size and overlap per knowledge base
 - Configure Git sync settings
-- Upload and remove files
+- Upload and remove files for non-Git-backed bases
 - Trigger a full reindex on demand
 - Monitor indexing status (file count vs. indexed count)
 - Assign knowledge bases to agents from the Agents tab
@@ -300,10 +296,4 @@ See the [Dashboard API reference](https://docs.mindroom.chat/dashboard/#knowledg
 
 ## Hot Reload
 
-Knowledge base configuration supports hot reload. When you change `config.yaml`:
-
-- New knowledge bases are created and indexed
-- Removed knowledge bases are stopped and cleaned up
-- Changed settings (path, chunking, embedder, git config) trigger a re-initialization
-- Unchanged knowledge bases continue running without interruption
-- Background watchers are preserved across reloads when that knowledge base actually runs a watcher
+Knowledge base configuration supports hot reload. Changing `config.yaml` does not initialize every configured knowledge base. Agents keep using already-published last-good snapshots until a refresh for their resolved binding succeeds. Changed settings make existing snapshots stale or unavailable depending on query compatibility, and scheduled refresh rebuilds the affected binding in the background.

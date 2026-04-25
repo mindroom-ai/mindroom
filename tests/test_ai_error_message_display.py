@@ -553,4 +553,4 @@ class TestAIErrorDisplay:
 
         assert delivery.event_id == "$response_id"
         assert mock_ai.call_args.kwargs["knowledge"] is None
-        bot.logger.exception.assert_called_once()
+        bot.logger.exception.assert_not_called()

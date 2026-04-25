@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.knowledge.refresh_runner import refresh_knowledge_binding
-from mindroom.knowledge.registry import KnowledgeSnapshotKey, resolve_snapshot_key
+from mindroom.knowledge.registry import KnowledgeRefreshKey, resolve_refresh_key
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -58,10 +58,22 @@ class KnowledgeRefreshOwner(Protocol):
 
 
 @dataclass(slots=True)
+class _ScheduledRefresh:
+    """Captured inputs for one refresh task."""
+
+    base_id: str
+    config: Config
+    runtime_paths: RuntimePaths
+    execution_identity: ToolExecutionIdentity | None
+
+
+@dataclass(slots=True)
 class PerBindingKnowledgeRefreshOwner:
     """Own fire-and-forget refresh tasks without global manager coordination."""
 
-    _tasks: dict[KnowledgeSnapshotKey, asyncio.Task[None]] = field(default_factory=dict, init=False)
+    _tasks: dict[KnowledgeRefreshKey, asyncio.Task[None]] = field(default_factory=dict, init=False)
+    _pending: dict[KnowledgeRefreshKey, _ScheduledRefresh] = field(default_factory=dict, init=False)
+    _shutting_down: bool = field(default=False, init=False)
 
     def schedule_refresh(
         self,
@@ -105,7 +117,7 @@ class PerBindingKnowledgeRefreshOwner:
     ) -> bool:
         """Return whether one resolved knowledge binding is already refreshing."""
         try:
-            key = resolve_snapshot_key(
+            key = resolve_refresh_key(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -119,12 +131,14 @@ class PerBindingKnowledgeRefreshOwner:
 
     async def shutdown(self) -> None:
         """Cancel any in-flight background refresh tasks."""
+        self._shutting_down = True
+        self._pending.clear()
         tasks = list(self._tasks.values())
         self._tasks.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:
-            with suppress(asyncio.CancelledError):
+            with suppress(asyncio.CancelledError, Exception):
                 await task
 
     def _schedule(
@@ -136,7 +150,7 @@ class PerBindingKnowledgeRefreshOwner:
         execution_identity: ToolExecutionIdentity | None,
     ) -> None:
         try:
-            key = resolve_snapshot_key(
+            key = resolve_refresh_key(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -147,48 +161,53 @@ class PerBindingKnowledgeRefreshOwner:
             logger.exception("Could not resolve knowledge binding for refresh", base_id=base_id)
             return
 
+        request = _ScheduledRefresh(
+            base_id=base_id,
+            config=config.model_copy(deep=True),
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
         task = self._tasks.get(key)
         if task is not None and not task.done():
+            self._pending[key] = request
             return
 
-        captured_config = config.model_copy(deep=True)
-        captured_runtime_paths = runtime_paths
-        captured_execution_identity = execution_identity
+        self._start_task(key, request)
+
+    def _start_task(self, key: KnowledgeRefreshKey, request: _ScheduledRefresh) -> None:
         task = asyncio.create_task(
-            self._run_refresh(
-                key,
-                config=captured_config,
-                runtime_paths=captured_runtime_paths,
-                execution_identity=captured_execution_identity,
-            ),
-            name=f"knowledge_refresh:{base_id}",
+            self._run_refresh(key, request=request),
+            name=f"knowledge_refresh:{request.base_id}",
         )
         self._tasks[key] = task
         task.add_done_callback(lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed))
 
-    def _handle_done(self, key: KnowledgeSnapshotKey, task: asyncio.Task[None]) -> None:
+    def _handle_done(self, key: KnowledgeRefreshKey, task: asyncio.Task[None]) -> None:
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
         try:
             task.result()
         except asyncio.CancelledError:
-            return
+            pass
         except Exception:
             logger.exception("Background knowledge refresh failed", base_id=key.base_id)
+        if self._shutting_down:
+            return
+        pending = self._pending.pop(key, None)
+        if pending is not None:
+            self._start_task(key, pending)
 
     async def _run_refresh(
         self,
-        key: KnowledgeSnapshotKey,
+        key: KnowledgeRefreshKey,
         *,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        execution_identity: ToolExecutionIdentity | None,
+        request: _ScheduledRefresh,
     ) -> None:
         await refresh_knowledge_binding(
             key.base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
+            config=request.config,
+            runtime_paths=request.runtime_paths,
+            execution_identity=request.execution_identity,
         )
 
 

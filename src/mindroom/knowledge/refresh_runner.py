@@ -8,12 +8,15 @@ from threading import Lock
 from typing import TYPE_CHECKING
 
 from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
+    KnowledgeRefreshKey,
     KnowledgeSnapshotKey,
     PublishedIndexingState,
     indexing_settings_query_compatible,
     load_published_indexing_state,
     publish_snapshot,
+    refresh_key_for_snapshot_key,
     resolve_snapshot_key,
     snapshot_metadata_path,
 )
@@ -33,11 +36,11 @@ class KnowledgeRefreshResult:
     indexed_count: int
 
 
-_refresh_locks: dict[KnowledgeSnapshotKey, asyncio.Lock] = {}
+_refresh_locks: dict[KnowledgeRefreshKey, asyncio.Lock] = {}
 _refresh_locks_guard = Lock()
 
 
-def _refresh_lock_for_key(key: KnowledgeSnapshotKey) -> asyncio.Lock:
+def _refresh_lock_for_key(key: KnowledgeRefreshKey) -> asyncio.Lock:
     with _refresh_locks_guard:
         lock = _refresh_locks.get(key)
         if lock is None:
@@ -61,7 +64,7 @@ async def refresh_knowledge_binding(
         execution_identity=execution_identity,
         create=True,
     )
-    async with _refresh_lock_for_key(key):
+    async with _refresh_lock_for_key(refresh_key_for_snapshot_key(key)):
         return await _refresh_knowledge_binding_locked(
             key,
             config=config,
@@ -98,8 +101,8 @@ async def _refresh_knowledge_binding_locked(
         if manager._git_config() is not None:
             await manager.sync_git_repository(index_changes=False)
         indexed_count = await manager.reindex_all()
-    except Exception:
-        await _mark_refresh_failed_if_snapshot_exists(manager, key)
+    except Exception as exc:
+        await _mark_refresh_failed(manager, key, error=str(exc))
         raise
     if manager._git_config() is not None:
         manager._mark_git_initial_sync_complete()
@@ -114,6 +117,8 @@ async def _refresh_knowledge_binding_locked(
             collection=manager._current_collection_name(),
             availability="ready",
         )
+    if not indexing_settings_query_compatible(state.settings, key.indexing_settings):
+        return KnowledgeRefreshResult(key=key, indexed_count=indexed_count)
     publish_snapshot(
         key,
         knowledge=manager.get_knowledge(),
@@ -123,10 +128,29 @@ async def _refresh_knowledge_binding_locked(
     return KnowledgeRefreshResult(key=key, indexed_count=indexed_count)
 
 
-async def _mark_refresh_failed_if_snapshot_exists(manager: KnowledgeManager, key: KnowledgeSnapshotKey) -> None:
-    """Record refresh failure while preserving the last complete collection."""
+async def _mark_refresh_failed(manager: KnowledgeManager, key: KnowledgeSnapshotKey, *, error: str) -> None:
+    """Record refresh failure while preserving any last complete collection."""
+    redacted_error = redact_credentials_in_text(error)
     state = await asyncio.to_thread(manager._load_persisted_indexing_state)
-    if state is None or state.status != "complete":
+    if state is None:
+        await asyncio.to_thread(
+            manager._save_persisted_indexing_state,
+            "indexing",
+            availability="refresh_failed",
+            last_error=redacted_error,
+        )
+        return
+    if state.status != "complete":
+        await asyncio.to_thread(
+            manager._save_persisted_indexing_state,
+            state.status,
+            settings=state.settings,
+            collection=state.collection,
+            availability="refresh_failed",
+            last_published_at=state.last_published_at,
+            published_revision=state.published_revision,
+            last_error=redacted_error,
+        )
         return
     await asyncio.to_thread(
         manager._save_persisted_indexing_state,
@@ -136,6 +160,7 @@ async def _mark_refresh_failed_if_snapshot_exists(manager: KnowledgeManager, key
         availability="refresh_failed",
         last_published_at=state.last_published_at,
         published_revision=state.published_revision,
+        last_error=redacted_error,
     )
     refreshed_state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
     if refreshed_state is None:

@@ -1627,6 +1627,7 @@ path = "mindroom.knowledge"
 depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
+    "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_owner",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
@@ -1654,7 +1655,12 @@ path = "mindroom.knowledge.manager"
 depends_on = [
     "mindroom.constants",
     "mindroom.knowledge.chunking",
+    "mindroom.knowledge.redaction",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.redaction"
+depends_on = []
 
 [[modules]]
 path = "mindroom.knowledge.refresh_owner"
@@ -1668,6 +1674,7 @@ depends_on = [
 path = "mindroom.knowledge.refresh_runner"
 depends_on = [
     "mindroom.knowledge.manager",
+    "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",
     "mindroom.runtime_resolution",
 ]
@@ -1780,6 +1787,7 @@ from = ["mindroom.model_loading"]
 expose = [
     "KnowledgeAccessSupport",
     "KnowledgeSnapshotKey",
+    "KnowledgeRefreshKey",
     "KnowledgeSnapshotLookup",
     "KnowledgeManager",
     "KnowledgeRefreshOwner",
@@ -1795,7 +1803,10 @@ expose = [
     "OrchestratorKnowledgeRefreshOwner",
     "PerBindingKnowledgeRefreshOwner",
     "publish_snapshot",
+    "redact_credentials_in_text",
+    "redact_url_credentials",
     "refresh_knowledge_binding",
+    "resolve_refresh_key",
     "resolve_snapshot_key",
     "snapshot_indexed_count",
     "snapshot_metadata_path",
