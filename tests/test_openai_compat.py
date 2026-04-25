@@ -2091,6 +2091,55 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
 
 
 @pytest.mark.asyncio
+async def test_openai_stream_response_skips_background_on_asgi20_disconnect_before_done() -> None:
+    """ASGI 2.0 disconnect can return normally but still must not compact."""
+    from starlette.background import BackgroundTask  # noqa: PLC0415
+
+    events: list[str] = []
+    partial_sent = asyncio.Event()
+    continue_stream = asyncio.Event()
+    done_sent = False
+    completion_lock = asyncio.Lock()
+    await completion_lock.acquire()
+
+    async def body() -> AsyncIterator[str]:
+        nonlocal done_sent
+        yield "data: partial\n\n"
+        await continue_stream.wait()
+        yield "data: [DONE]\n\n"
+        done_sent = True
+
+    async def background() -> None:
+        events.append("compact")
+
+    streaming_response = openai_compat._OpenAIStreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        background=BackgroundTask(background),
+    )
+    streaming_response.completion_predicate = lambda: done_sent
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock)
+
+    async def receive() -> dict[str, str]:
+        await partial_sent.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.body" and message.get("body") == b"data: partial\n\n":
+            partial_sent.set()
+
+    await response(
+        {"type": "http", "asgi": {"spec_version": "2.0"}},
+        receive,
+        send,
+    )
+
+    assert done_sent is False
+    assert events == []
+    assert not completion_lock.locked()
+
+
+@pytest.mark.asyncio
 async def test_openai_json_response_skips_background_when_send_fails() -> None:
     """JSON send failures should release the lock without compacting an undelivered response."""
     from starlette.background import BackgroundTask  # noqa: PLC0415

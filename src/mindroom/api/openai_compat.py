@@ -185,7 +185,7 @@ class _OpenAIStreamingResponse(StreamingResponse):
             response_error = error
             completed = self.completion_predicate() if self.completion_predicate is not None else False
         else:
-            completed = True
+            completed = self.completion_predicate() if self.completion_predicate is not None else True
         await _run_openai_response_backgrounds(
             completed=completed,
             response_error=response_error,
