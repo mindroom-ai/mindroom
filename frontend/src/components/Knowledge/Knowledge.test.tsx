@@ -29,6 +29,8 @@ type KnowledgeApiPayloads = {
     file_count: number;
     indexed_count: number;
     refreshing?: boolean;
+    file_listing_degraded?: boolean;
+    file_listing_error?: string | null;
     git?: {
       repo_url: string;
       branch: string;
@@ -54,6 +56,8 @@ type KnowledgeApiPayloads = {
     }>;
     total_size: number;
     file_count: number;
+    file_listing_degraded?: boolean;
+    file_listing_error?: string | null;
   };
 };
 
@@ -436,6 +440,61 @@ describe("Knowledge", () => {
     expect(screen.getByText("Git Error")).toBeInTheDocument();
     expect(screen.getByText(/Last Commit:/)).toHaveTextContent("abc123");
     expect(screen.getByText(/Git Error:/)).toHaveTextContent("fetch failed");
+  });
+
+  it("shows degraded git file-listing details from the API", async () => {
+    mockStore({
+      git_docs: {
+        path: "./knowledge_docs/git_docs",
+        watch: true,
+        git: {
+          repo_url: "https://github.com/org/git-docs",
+          branch: "release",
+        },
+      },
+    });
+    setKnowledgeApiMock({
+      git_docs: {
+        status: {
+          base_id: "git_docs",
+          folder_path: "./knowledge_docs/git_docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+          file_listing_degraded: true,
+          file_listing_error:
+            "Git command timed out after 0.01s: git ls-files -z",
+          git: {
+            repo_url: "https://github.com/org/git-docs",
+            branch: "release",
+            lfs: false,
+            startup_behavior: "blocking",
+            syncing: false,
+            repo_present: true,
+            initial_sync_complete: true,
+            last_successful_sync_at: null,
+            last_successful_commit: null,
+            last_error: null,
+            pending_startup_mode: null,
+          },
+        },
+        files: {
+          base_id: "git_docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+          file_listing_degraded: true,
+          file_listing_error:
+            "Git command timed out after 0.01s: git ls-files -z",
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: git_docs");
+
+    expect(screen.getByText("File Listing Degraded")).toBeInTheDocument();
+    expect(screen.getByText(/Git command timed out/)).toBeInTheDocument();
   });
 
   it("hides upload, drop, and file delete controls for git knowledge bases", async () => {

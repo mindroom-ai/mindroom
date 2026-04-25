@@ -845,6 +845,68 @@ async def test_private_git_ready_refresh_on_access_honors_poll_interval(
 
 
 @pytest.mark.asyncio
+async def test_private_git_updated_refresh_preserves_execution_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Private Git updates must mark stale and rebuild through the requester binding."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        knowledge=AgentPrivateKnowledgeConfig(path="knowledge", git=git_config),
+                    ),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths,
+    )
+    base_id = config.get_agent_private_knowledge_base_id("helper")
+    assert base_id is not None
+    identity = _identity("@alice:localhost")
+    key = resolve_snapshot_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    knowledge_path = Path(key.knowledge_path)
+    knowledge_path.mkdir(parents=True, exist_ok=True)
+    (knowledge_path / "note.md").write_text("alice private git updated", encoding="utf-8")
+
+    async def _sync_updated(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        assert index_changes is False
+        self._git_last_successful_commit = "rev-private"
+        _set_git_tracked_files(self, "note.md")
+        return {"updated": True, "changed_count": 1, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_updated)
+
+    result = await refresh_knowledge_binding(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
+    lookup = get_published_snapshot(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
+
+    assert result.published is True
+    assert lookup.snapshot is not None
+    assert lookup.availability is KnowledgeAvailability.READY
+    assert [document.content for document in lookup.snapshot.knowledge.search("updated", max_results=5)] == [
+        "alice private git updated",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_existing_published_snapshot_is_used_while_refresh_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2108,6 +2170,106 @@ async def test_refresh_owner_runs_one_pending_refresh_after_active_task(
     await owner.shutdown()
 
     assert started_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_owner_superseded_manual_waiters_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multiple queued manual refreshes should share the eventual refresh result."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    owner = PerBindingKnowledgeRefreshOwner()
+    started_count = 0
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def _fake_refresh(base_id: str, **kwargs: object) -> object:
+        assert base_id == "docs"
+        refresh_config = kwargs["config"]
+        assert isinstance(refresh_config, Config)
+        nonlocal started_count
+        started_count += 1
+        if started_count == 1:
+            first_started.set()
+            await release_first.wait()
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=resolve_snapshot_key("docs", config=refresh_config, runtime_paths=runtime_paths),
+            indexed_count=started_count,
+            published=True,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+
+    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await first_started.wait()
+    manual_b = asyncio.create_task(
+        owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
+    )
+    manual_c = asyncio.create_task(
+        owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
+    )
+    await asyncio.sleep(0)
+
+    release_first.set()
+    result_b, result_c = await asyncio.wait_for(asyncio.gather(manual_b, manual_c), timeout=1)
+    await owner.shutdown()
+
+    assert started_count == 2
+    assert result_b.indexed_count == 2
+    assert result_c.indexed_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_owner_schedule_does_not_orphan_manual_waiter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fire-and-forget refreshes must not overwrite an awaited pending reindex future."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    stale_config = config.model_copy(deep=True)
+    stale_config.knowledge_bases["docs"].chunk_size = 1024
+    runtime_paths = runtime_paths_for(config)
+    owner = PerBindingKnowledgeRefreshOwner()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    seen: list[tuple[int, bool]] = []
+
+    async def _fake_refresh(base_id: str, **kwargs: object) -> object:
+        assert base_id == "docs"
+        refresh_config = kwargs["config"]
+        assert isinstance(refresh_config, Config)
+        force_reindex = bool(kwargs.get("force_reindex", False))
+        seen.append((refresh_config.knowledge_bases["docs"].chunk_size, force_reindex))
+        if len(seen) == 1:
+            first_started.set()
+            await release_first.wait()
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=resolve_snapshot_key("docs", config=refresh_config, runtime_paths=runtime_paths),
+            indexed_count=len(seen),
+            published=True,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+
+    owner.schedule_refresh("docs", config=stale_config, runtime_paths=runtime_paths)
+    await first_started.wait()
+    manual_task = asyncio.create_task(
+        owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
+    )
+    await asyncio.sleep(0)
+    owner.schedule_refresh("docs", config=stale_config, runtime_paths=runtime_paths)
+    release_first.set()
+    result = await asyncio.wait_for(manual_task, timeout=1)
+    await owner.shutdown()
+
+    assert result.indexed_count == 2
+    assert seen == [(1024, False), (5000, True)]
 
 
 @pytest.mark.asyncio

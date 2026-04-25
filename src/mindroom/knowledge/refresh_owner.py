@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.knowledge.refresh_runner import (
@@ -84,7 +84,7 @@ class _ScheduledRefresh:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
     force_reindex: bool = False
-    completion: asyncio.Future[KnowledgeRefreshResult] | None = None
+    completions: list[asyncio.Future[KnowledgeRefreshResult]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -181,11 +181,11 @@ class PerBindingKnowledgeRefreshOwner:
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
             force_reindex=force_reindex,
-            completion=completion,
+            completions=[completion],
         )
         task = self._tasks.get(key)
         if task is not None:
-            self._pending[key] = request
+            self._queue_pending(key, request)
         else:
             self._start_task(key, request)
         return await completion
@@ -196,8 +196,7 @@ class PerBindingKnowledgeRefreshOwner:
         pending = list(self._pending.values())
         self._pending.clear()
         for request in pending:
-            if request.completion is not None and not request.completion.done():
-                request.completion.set_exception(asyncio.CancelledError())
+            _complete_request_exception(request, asyncio.CancelledError())
         tasks = list(self._tasks.values())
         self._tasks.clear()
         for task in tasks:
@@ -237,10 +236,24 @@ class PerBindingKnowledgeRefreshOwner:
         )
         task = self._tasks.get(key)
         if task is not None:
-            self._pending[key] = request
+            self._queue_pending(key, request)
             return
 
         self._start_task(key, request)
+
+    def _queue_pending(self, key: KnowledgeRefreshKey, request: _ScheduledRefresh) -> None:
+        existing = self._pending.get(key)
+        if existing is None:
+            self._pending[key] = request
+            return
+
+        completions = [*existing.completions, *request.completions]
+        replacement = request if request.completions or not existing.completions else existing
+        self._pending[key] = replace(
+            replacement,
+            force_reindex=existing.force_reindex or request.force_reindex,
+            completions=completions,
+        )
 
     def _start_task(self, key: KnowledgeRefreshKey, request: _ScheduledRefresh) -> None:
         mark_refresh_active(key)
@@ -282,16 +295,26 @@ class PerBindingKnowledgeRefreshOwner:
                 force_reindex=request.force_reindex,
             )
         except asyncio.CancelledError as exc:
-            if request.completion is not None and not request.completion.done():
-                request.completion.set_exception(exc)
+            _complete_request_exception(request, exc)
             raise
         except Exception as exc:
-            if request.completion is not None and not request.completion.done():
-                request.completion.set_exception(exc)
+            if request.completions:
+                _complete_request_exception(request, exc)
                 return
             raise
-        if request.completion is not None and not request.completion.done():
-            request.completion.set_result(result)
+        _complete_request_result(request, result)
+
+
+def _complete_request_result(request: _ScheduledRefresh, result: KnowledgeRefreshResult) -> None:
+    for completion in request.completions:
+        if not completion.done():
+            completion.set_result(result)
+
+
+def _complete_request_exception(request: _ScheduledRefresh, exc: BaseException) -> None:
+    for completion in request.completions:
+        if not completion.done():
+            completion.set_exception(exc)
 
 
 StandaloneKnowledgeRefreshOwner = PerBindingKnowledgeRefreshOwner

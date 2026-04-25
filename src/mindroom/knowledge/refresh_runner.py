@@ -241,7 +241,12 @@ async def _refresh_knowledge_binding_locked(
             knowledge_path=binding.knowledge_path,
             git_background_startup_allowed=False,
         )
-        unchanged_result = await _maybe_publish_unchanged_snapshot(manager, key, force_reindex=force_reindex)
+        unchanged_result = await _maybe_publish_unchanged_snapshot(
+            manager,
+            key,
+            execution_identity=execution_identity,
+            force_reindex=force_reindex,
+        )
         if unchanged_result is not None:
             return unchanged_result
         indexed_count = await _reindex_manager_snapshot(manager, key)
@@ -267,6 +272,7 @@ async def _maybe_publish_unchanged_snapshot(
     manager: KnowledgeManager,
     key: KnowledgeSnapshotKey,
     *,
+    execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
 ) -> KnowledgeRefreshResult | None:
     if manager._git_config() is not None:
@@ -278,6 +284,7 @@ async def _maybe_publish_unchanged_snapshot(
                     key.base_id,
                     config=manager.config,
                     runtime_paths=manager.runtime_paths,
+                    execution_identity=execution_identity,
                 )
             return None
         return await _publish_unchanged_snapshot(

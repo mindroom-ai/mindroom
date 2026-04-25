@@ -63,6 +63,8 @@ interface KnowledgeStatus {
   file_count: number;
   indexed_count: number;
   refreshing?: boolean;
+  file_listing_degraded?: boolean;
+  file_listing_error?: string | null;
   git?: {
     repo_url: string;
     branch: string;
@@ -83,6 +85,8 @@ interface KnowledgeFilesResponse {
   files: KnowledgeFile[];
   total_size: number;
   file_count: number;
+  file_listing_degraded?: boolean;
+  file_listing_error?: string | null;
 }
 
 const MIN_CHUNK_SIZE = 128;
@@ -348,7 +352,13 @@ export function Knowledge() {
         ),
       ]);
 
-      setStatus(statusData);
+      setStatus({
+        ...statusData,
+        file_listing_degraded:
+          filesData.file_listing_degraded ?? statusData.file_listing_degraded,
+        file_listing_error:
+          filesData.file_listing_error ?? statusData.file_listing_error ?? null,
+      });
       setFiles(filesData.files);
       setTotalSize(filesData.total_size);
     } catch (err) {
@@ -1528,6 +1538,11 @@ export function Knowledge() {
                       {status.git.last_error ? (
                         <Badge variant="destructive">Git Error</Badge>
                       ) : null}
+                      {status.file_listing_degraded ? (
+                        <Badge variant="destructive">
+                          File Listing Degraded
+                        </Badge>
+                      ) : null}
                     </>
                   ) : null}
                 </div>
@@ -1555,6 +1570,13 @@ export function Knowledge() {
                     ) : null}
                     {status.git.last_error ? (
                       <p>Git Error: {status.git.last_error}</p>
+                    ) : null}
+                    {status.file_listing_degraded ? (
+                      <p className="text-destructive">
+                        File Listing:{" "}
+                        {status.file_listing_error ??
+                          "Repository file listing is incomplete."}
+                      </p>
                     ) : null}
                   </div>
                 ) : null}
