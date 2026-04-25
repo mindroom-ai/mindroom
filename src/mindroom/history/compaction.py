@@ -459,6 +459,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
 
     if total_compacted_run_count == 0:
         return None
+    for run in runs_for_scope(completed_top_level_runs(working_session), scope):
+        _strip_stale_anthropic_replay_fields(run.messages or [])
     return _CompactionRewriteResult(
         summary_text=final_summary_text,
         compacted_run_count=total_compacted_run_count,
@@ -1158,6 +1160,29 @@ def estimate_history_messages_tokens(messages: list[Message]) -> int:
     return sum(_estimated_message_chars(message) for message in messages) // 4
 
 
+def _strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
+    """Strip stale Anthropic thinking replay fields from completed turns."""
+    last_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].role == "user":
+            last_user_idx = i
+            break
+    if last_user_idx < 0:
+        return 0
+    modified = 0
+    for msg in messages[:last_user_idx]:
+        if msg.role != "assistant":
+            continue
+        pd = msg.provider_data
+        if not isinstance(pd, dict) or "signature" not in pd:
+            continue
+        msg.reasoning_content = None
+        msg.redacted_reasoning_content = None
+        del pd["signature"]
+        modified += 1
+    return modified
+
+
 def _select_runs_to_compact(
     *,
     visible_runs: list[RunOutput | TeamRunOutput],
@@ -1195,6 +1220,7 @@ def _history_messages_for_session(
     history_messages = [deepcopy(message) for message in session_messages]
     if history_settings.max_tool_calls_from_history is not None and history_messages:
         filter_tool_calls(history_messages, history_settings.max_tool_calls_from_history)
+    _strip_stale_anthropic_replay_fields(history_messages)
     return history_messages
 
 
