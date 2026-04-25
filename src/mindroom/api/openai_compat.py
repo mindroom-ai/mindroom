@@ -1215,7 +1215,16 @@ def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> 
     return _format_stream_tool_event(event, tool_state)
 
 
-async def _stream_completion(  # noqa: C901
+def _extract_agent_stream_failure(event: AIStreamChunk) -> str | None:
+    """Return terminal agent-stream failure text when the chunk represents one."""
+    if isinstance(event, RunErrorEvent):
+        return str(event.content or "Agent execution failed.")
+    if isinstance(event, str) and _is_error_response(event):
+        return event
+    return None
+
+
+async def _stream_completion(  # noqa: C901, PLR0915
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1259,17 +1268,24 @@ async def _stream_completion(  # noqa: C901
         await stream.aclose()
         return _error_response(500, "Agent returned empty response", error_type="server_error")
 
-    if isinstance(first_event, str) and _is_error_response(first_event):
-        logger.warning("Stream returned error", model=agent_name, session_id=session_id, error=first_event)
+    first_error = _extract_agent_stream_failure(first_event)
+    if first_error is not None:
+        logger.warning(
+            "Stream returned error",
+            model=agent_name,
+            session_id=session_id,
+            error=first_error,
+        )
         await stream.aclose()
         return _error_response(500, "Agent execution failed", error_type="server_error")
 
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
     stream_completed = False
+    stream_failed = False
 
     async def event_generator() -> AsyncIterator[str]:
-        nonlocal stream_completed
+        nonlocal stream_completed, stream_failed
         tool_state = _ToolStreamState()
         saw_text_delta = False
         completed_body: str | None = None
@@ -1294,13 +1310,24 @@ async def _stream_completion(  # noqa: C901
                 if isinstance(event, RunCompletedEvent):
                     completed_body = str(event.content) if event.content is not None else completed_body
                     continue
+                failure_text = _extract_agent_stream_failure(event)
+                if failure_text is not None:
+                    stream_failed = True
+                    logger.warning(
+                        "Stream emitted terminal failure",
+                        model=agent_name,
+                        session_id=session_id,
+                        error=failure_text,
+                    )
+                    yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': failure_text})}\n\n"
+                    break
                 text = _extract_stream_text(event, tool_state)
                 if text:
                     if isinstance(event, (RunContentEvent, str)):
                         saw_text_delta = True
                     yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
-            if completed_body and not saw_text_delta:
+            if completed_body and not saw_text_delta and not stream_failed:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': completed_body})}\n\n"
 
             # 4. Final chunk with finish_reason
@@ -1309,7 +1336,7 @@ async def _stream_completion(  # noqa: C901
 
             # 5. Stream terminator
             yield "data: [DONE]\n\n"
-            stream_completed = True
+            stream_completed = not stream_failed
         finally:
             await stream.aclose()
 
@@ -1718,6 +1745,11 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         completion_id = f"chatcmpl-{uuid4().hex[:12]}"
         created = int(time.time())
         stream_completed = False
+        stream_failed = False
+
+        def mark_stream_failed() -> None:
+            nonlocal stream_failed
+            stream_failed = True
 
         async def _event_generator() -> AsyncGenerator[str, None]:
             nonlocal stream_completed
@@ -1729,9 +1761,10 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                     created=created,
                     model_id=model_id,
                     team_name=team_name,
+                    mark_stream_failed=mark_stream_failed,
                 ):
                     yield chunk
-                    if chunk == "data: [DONE]\n\n":
+                    if chunk == "data: [DONE]\n\n" and not stream_failed:
                         stream_completed = True
             finally:
                 await _cleanup()
@@ -1746,7 +1779,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 execution_identity=execution_identity,
             ),
         )
-        response.completion_predicate = lambda: stream_completed
+        response.completion_predicate = lambda: stream_completed and not stream_failed
     except Exception:
         stack.close()
         close_team_runtime_sqlite_dbs(
@@ -1820,6 +1853,7 @@ async def _team_stream_event_generator(
     created: int,
     model_id: str,
     team_name: str,
+    mark_stream_failed: Callable[[], None],
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses.
 
@@ -1849,6 +1883,7 @@ async def _team_stream_event_generator(
         async for event in stream:
             if _extract_team_stream_failure(event) is not None:
                 logger.warning("Team stream emitted terminal failure", team=team_name)
+                mark_stream_failed()
                 pending = _finalize_pending_tools(tool_state)
                 if pending:
                     yield _chunk(pending)
@@ -1860,6 +1895,7 @@ async def _team_stream_event_generator(
                 yield _chunk(text)
     except Exception:
         logger.exception("Team stream failed during iteration", team=team_name)
+        mark_stream_failed()
         pending = _finalize_pending_tools(tool_state)
         if pending:
             yield _chunk(pending)

@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import inspect
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,29 +13,41 @@ from agno.models.message import Message
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
-from mindroom import ai as ai_module
-from mindroom import delivery_gateway, post_response_effects
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.history import policy as policy_module
 from mindroom.history.compaction import (
     compute_prompt_token_breakdown,
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
-from mindroom.history.types import CompactionOutcome, PostResponseCompactionCheck, ResolvedHistoryExecutionPlan, _to_k
+from mindroom.history.policy import classify_compaction_decision
+from mindroom.history.types import (
+    CompactionLifecycle,
+    CompactionLifecycleStart,
+    CompactionOutcome,
+    PostResponseCompactionCheck,
+    ResolvedHistoryExecutionPlan,
+    _to_k,
+)
 from mindroom.memory import MemoryPromptParts
-from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
+from mindroom.message_target import MessageTarget
+from mindroom.post_response_effects import (
+    PostResponseEffectsDeps,
+    PostResponseEffectsSupport,
+    ResponseOutcome,
+    apply_post_response_effects,
+)
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.delivery_gateway import DeliveryGateway
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -126,18 +138,106 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     return config, runtime_paths
 
 
-def test_compaction_lifecycle_uses_one_matrix_adapter() -> None:
-    """Foreground and post-response compaction should share one Matrix lifecycle adapter."""
-    assert hasattr(delivery_gateway, "MatrixCompactionLifecycle")
-    assert "_PostResponseCompactionLifecycle" not in inspect.getsource(post_response_effects)
-    assert "_active_post_response_compaction_jobs" not in inspect.getsource(post_response_effects)
-    assert "history_compaction_" not in inspect.getsource(post_response_effects)
+@pytest.mark.asyncio
+async def test_post_response_compaction_uses_matrix_lifecycle_adapter(tmp_path: Path) -> None:
+    """Post-response compaction should send lifecycle notices through the Matrix adapter."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+    sent_starts: list[dict[str, object]] = []
+
+    class FakeDeliveryGateway:
+        async def send_compaction_lifecycle_start(
+            self,
+            *,
+            target: MessageTarget,
+            reply_to_event_id: str,
+            event: CompactionLifecycleStart,
+        ) -> str:
+            sent_starts.append(
+                {
+                    "target": target,
+                    "reply_to_event_id": reply_to_event_id,
+                    "event": event,
+                },
+            )
+            return "$notice"
+
+    support = PostResponseEffectsSupport(
+        runtime=SimpleNamespace(config=config, client=None),
+        logger=MagicMock(),
+        runtime_paths=runtime_paths,
+        delivery_gateway=cast("DeliveryGateway", FakeDeliveryGateway()),
+        conversation_cache=MagicMock(),
+    )
+    check = _make_post_response_check()
+    target = MessageTarget.resolve(
+        room_id="!room:test",
+        thread_id="$thread",
+        reply_to_event_id="$response",
+    )
+
+    async def fake_run_compaction(**kwargs: object) -> None:
+        lifecycle = cast("CompactionLifecycle", kwargs["compaction_lifecycle"])
+        notice_id = await lifecycle.start(
+            CompactionLifecycleStart(
+                mode="auto",
+                session_id=check.session_id,
+                scope=check.scope.key,
+                summary_model=check.execution_plan.compaction_model_name,
+                before_tokens=14_000,
+                history_budget_tokens=check.execution_plan.replay_budget_tokens,
+                runs_before=8,
+            ),
+        )
+        assert notice_id == "$notice"
+
+    await support.run_post_response_compactions(
+        [check],
+        execution_identity=None,
+        target=target,
+        reply_to_event_id="$response",
+        run_compaction=fake_run_compaction,
+    )
+
+    assert len(sent_starts) == 1
+    assert sent_starts[0]["target"] == target
+    assert sent_starts[0]["reply_to_event_id"] == "$response"
+    assert sent_starts[0]["event"] == CompactionLifecycleStart(
+        mode="auto",
+        session_id="session-1",
+        scope="agent:test_agent",
+        summary_model="summary-model",
+        before_tokens=14_000,
+        history_budget_tokens=10_000,
+        runs_before=8,
+    )
 
 
-def test_compaction_policy_has_no_legacy_passthrough_wrappers() -> None:
-    """Compaction decisions should expose one policy surface without pass-through wrappers."""
-    assert not hasattr(ai_module, "run_post_response_history_compaction")
-    assert not hasattr(policy_module, "should_attempt_destructive_compaction")
+def test_compaction_policy_classifies_trigger_and_required_modes() -> None:
+    """The policy surface should classify post-response and foreground compaction modes."""
+    plan = _make_post_response_check().execution_plan
+
+    opportunistic = classify_compaction_decision(
+        plan=plan,
+        force_compact_before_next_run=False,
+        current_history_tokens=12_001,
+    )
+    required = classify_compaction_decision(
+        plan=plan,
+        force_compact_before_next_run=False,
+        current_history_tokens=60_000,
+    )
+    forced = classify_compaction_decision(
+        plan=plan,
+        force_compact_before_next_run=True,
+        current_history_tokens=5_000,
+    )
+
+    assert opportunistic.mode == "opportunistic"
+    assert opportunistic.reason == "over_trigger_fits_hard_budget"
+    assert required.mode == "required"
+    assert required.reason == "history_exceeds_hard_budget"
+    assert forced.mode == "required"
+    assert forced.reason == "forced"
 
 
 # ---------------------------------------------------------------------------
