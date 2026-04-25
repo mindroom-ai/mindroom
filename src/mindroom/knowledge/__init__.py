@@ -2,7 +2,7 @@
 
 # ruff: noqa: RUF022
 
-from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.manager import KnowledgeManager, list_knowledge_files
 from mindroom.knowledge.refresh_owner import (
     KnowledgeRefreshOwner,
     OrchestratorKnowledgeRefreshOwner,
@@ -13,12 +13,15 @@ from mindroom.knowledge.refresh_runner import refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     KnowledgeSnapshotKey,
     KnowledgeSnapshotLookup,
+    PublishedIndexingState,
     PublishedKnowledgeSnapshot,
     clear_published_snapshots,
     get_published_snapshot,
+    load_published_indexing_state,
     publish_snapshot,
     resolve_snapshot_key,
     snapshot_indexed_count,
+    snapshot_metadata_path,
 )
 from mindroom.knowledge.utils import (
     KnowledgeAccessSupport,
@@ -39,11 +42,15 @@ __all__ = [
     "StandaloneKnowledgeRefreshOwner",
     "KnowledgeSnapshotKey",
     "KnowledgeSnapshotLookup",
+    "PublishedIndexingState",
     "PublishedKnowledgeSnapshot",
     "get_published_snapshot",
+    "load_published_indexing_state",
     "publish_snapshot",
     "resolve_snapshot_key",
+    "snapshot_metadata_path",
     "snapshot_indexed_count",
     "clear_published_snapshots",
     "refresh_knowledge_binding",
+    "list_knowledge_files",
 ]

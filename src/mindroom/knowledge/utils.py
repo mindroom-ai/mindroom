@@ -118,7 +118,7 @@ def get_agent_knowledge(
                     runtime_paths=runtime_paths,
                     execution_identity=execution_identity,
                 )
-            elif availability is not KnowledgeAvailability.READY:
+            else:
                 refresh_owner.schedule_refresh(
                     base_id,
                     config=config,

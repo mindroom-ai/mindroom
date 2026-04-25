@@ -13,9 +13,16 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.knowledge import (
     KnowledgeAvailability,
+    PublishedIndexingState,
     get_published_snapshot,
+    load_published_indexing_state,
     refresh_knowledge_binding,
+    resolve_snapshot_key,
     snapshot_indexed_count,
+    snapshot_metadata_path,
+)
+from mindroom.knowledge import (
+    list_knowledge_files as list_managed_knowledge_files,
 )
 
 if TYPE_CHECKING:
@@ -75,17 +82,21 @@ def _resolve_within_root(root: Path, relative_path: str) -> Path:
     return resolved
 
 
-def _list_file_info(root: Path, file_paths: list[Path] | None = None) -> tuple[list[dict[str, Any]], int]:
+def _list_file_info(
+    config: Config,
+    base_id: str,
+    root: Path,
+    file_paths: list[Path] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     files: list[dict[str, Any]] = []
     total_size = 0
 
     if not root.is_dir():
         return files, total_size
 
+    managed_paths = set(list_managed_knowledge_files(config, base_id, root))
     paths = (
-        sorted(path for path in root.rglob("*") if path.is_file())
-        if file_paths is None
-        else sorted(path for path in file_paths if path.is_file())
+        sorted(managed_paths) if file_paths is None else sorted(path for path in file_paths if path in managed_paths)
     )
     for file_path in paths:
         stat = file_path.stat()
@@ -144,22 +155,67 @@ def _snapshot_status(
     return lookup.availability is not KnowledgeAvailability.INITIALIZING, snapshot_indexed_count(lookup.snapshot)
 
 
-def _git_status(config: Config, base_id: str) -> dict[str, Any] | None:
+def _snapshot_state(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+) -> PublishedIndexingState | None:
+    key = resolve_snapshot_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        create=False,
+    )
+    return load_published_indexing_state(snapshot_metadata_path(key))
+
+
+def _git_status(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    request: Request,
+) -> dict[str, Any] | None:
     git_config = config.knowledge_bases[base_id].git
     if git_config is None:
         return None
+    root = _knowledge_root(config, base_id, runtime_paths)
+    state = _snapshot_state(config, base_id, runtime_paths)
+    owner = _request_refresh_owner(request)
     return {
         "repo_url": _redact_url_credentials(git_config.repo_url),
         "branch": git_config.branch,
         "lfs": git_config.lfs,
         "startup_behavior": git_config.startup_behavior,
-        "syncing": False,
-        "repo_present": False,
-        "initial_sync_complete": False,
-        "last_successful_sync_at": None,
-        "last_successful_commit": None,
+        "syncing": (
+            owner.is_refreshing(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+            if owner is not None
+            else None
+        ),
+        "repo_present": (root / ".git").is_dir(),
+        "initial_sync_complete": (
+            state is not None and state.status == "complete" and state.published_revision is not None
+        ),
+        "last_successful_sync_at": state.last_published_at if state is not None else None,
+        "last_successful_commit": state.published_revision if state is not None else None,
         "last_error": None,
     }
+
+
+def _reject_git_file_mutation(config: Config, base_id: str) -> None:
+    if config.knowledge_bases[base_id].git is None:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Knowledge base '{base_id}' is Git-backed. "
+            "Update the configured repository and reindex instead of mutating files through this API."
+        ),
+    )
 
 
 def _rollback_uploaded_files(uploaded_paths: list[Path]) -> None:
@@ -210,9 +266,9 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
     for base_id in sorted(config.knowledge_bases):
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
-        file_count = len(_list_file_info(root)[0])
+        file_count = len(_list_file_info(config, base_id, root)[0])
         snapshot_available, indexed_count = _snapshot_status(config, base_id, runtime_paths)
-        git_status = _git_status(config, base_id)
+        git_status = _git_status(config, base_id, runtime_paths, request=request)
 
         base_entry = {
             "name": base_id,
@@ -238,7 +294,7 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
     snapshot_available, _indexed_count = _snapshot_status(config, base_id, runtime_paths)
-    files, total_size = _list_file_info(root)
+    files, total_size = _list_file_info(config, base_id, root)
 
     return {
         "base_id": base_id,
@@ -257,6 +313,8 @@ async def upload_knowledge_files(
 ) -> dict[str, Any]:
     """Upload one or more files into a knowledge base folder."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    _ensure_base_exists(config, base_id)
+    _reject_git_file_mutation(config, base_id)
     root = _knowledge_root(config, base_id, runtime_paths, create=True)
 
     uploaded: list[str] = []
@@ -296,6 +354,8 @@ async def upload_knowledge_files(
 async def delete_knowledge_file(base_id: str, path: str, request: Request) -> dict[str, Any]:
     """Delete one knowledge file from disk and from the vector index."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    _ensure_base_exists(config, base_id)
+    _reject_git_file_mutation(config, base_id)
     root = _knowledge_root(config, base_id, runtime_paths)
     decoded_path = unquote(path)
     target = _resolve_within_root(root, decoded_path)
@@ -321,8 +381,8 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
     snapshot_available, indexed_count = _snapshot_status(config, base_id, runtime_paths)
-    file_count = len(_list_file_info(root)[0])
-    git_status = _git_status(config, base_id)
+    file_count = len(_list_file_info(config, base_id, root)[0])
+    git_status = _git_status(config, base_id, runtime_paths, request=request)
 
     payload = {
         "base_id": base_id,

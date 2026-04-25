@@ -349,6 +349,67 @@ def _matches_root_glob(relative_path: str, pattern: str) -> bool:
     return _match(0, 0)
 
 
+def _is_hidden_relative_path(relative_path: Path) -> bool:
+    return any(part.startswith(".") for part in relative_path.parts)
+
+
+def include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
+    """Return whether a relative path is managed by the base path filters."""
+    path_obj = Path(relative_path)
+    if path_obj.is_absolute() or ".." in path_obj.parts:
+        return False
+
+    base_config = config.get_knowledge_base_config(base_id)
+    git_config = base_config.git
+    if git_config is not None and git_config.skip_hidden and _is_hidden_relative_path(path_obj):
+        return False
+
+    if git_config is None:
+        return True
+
+    if git_config.include_patterns and not any(
+        _matches_root_glob(relative_path, pattern) for pattern in git_config.include_patterns
+    ):
+        return False
+
+    return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
+
+
+def include_semantic_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
+    """Return whether a relative path is semantically indexable for one base."""
+    if not include_knowledge_relative_path(config, base_id, relative_path):
+        return False
+
+    base_config = config.get_knowledge_base_config(base_id)
+    include_extensions = set(base_config.include_extensions) if base_config.include_extensions is not None else None
+    exclude_extensions = set(base_config.exclude_extensions)
+    allowed_extensions = include_extensions if include_extensions is not None else _TEXT_LIKE_EXTENSIONS
+
+    suffix = Path(relative_path).suffix.lower()
+    if suffix not in allowed_extensions:
+        return False
+    return suffix not in exclude_extensions
+
+
+def include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, file_path: Path) -> bool:
+    """Return whether a file belongs to the managed semantic file set."""
+    if not file_path.is_file():
+        return False
+    try:
+        relative_path = file_path.relative_to(knowledge_root.resolve())
+    except ValueError:
+        return False
+    return include_semantic_knowledge_relative_path(config, base_id, relative_path.as_posix())
+
+
+def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
+    """List managed semantic files without constructing a knowledge manager."""
+    root = knowledge_root.resolve()
+    if not root.exists():
+        return []
+    return sorted(path for path in root.rglob("*") if include_knowledge_file(config, base_id, root, path))
+
+
 @dataclass
 class KnowledgeManager:
     """Manage indexing for one knowledge base folder."""
@@ -511,13 +572,15 @@ class KnowledgeManager:
         self,
         status: Literal["resetting", "indexing", "complete"],
         *,
+        settings: tuple[str, ...] | None = None,
         collection: str | None = None,
         availability: str | None = None,
         last_published_at: str | None = None,
         published_revision: str | None = None,
     ) -> None:
+        persisted_settings = settings or self._indexing_settings
         payload: dict[str, object] = {
-            "settings": list(self._indexing_settings),
+            "settings": list(persisted_settings),
             "status": status,
         }
         if collection is not None:
@@ -532,7 +595,7 @@ class KnowledgeManager:
         tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         tmp_path.replace(self._indexing_settings_path)
         self._cached_persisted_indexing_state = _PersistedIndexingState(
-            settings=self._indexing_settings,
+            settings=persisted_settings,
             status=status,
             collection=collection,
             availability=availability,
@@ -564,12 +627,7 @@ class KnowledgeManager:
 
     def _has_existing_index(self) -> bool:
         vector_db = self._knowledge.vector_db
-        if not isinstance(vector_db, ChromaDb) or not vector_db.exists():
-            return False
-        collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        result = collection.get(limit=1, include=[])
-        ids = result.get("ids", []) or []
-        return bool(ids)
+        return isinstance(vector_db, ChromaDb) and vector_db.exists()
 
     def _startup_index_mode(self) -> Literal["full_reindex", "resume", "incremental"]:
         persisted_state = self._load_persisted_indexing_state()
@@ -649,7 +707,7 @@ class KnowledgeManager:
         return bool(git_config and git_config.skip_hidden)
 
     def _is_hidden_relative_path(self, relative_path: Path) -> bool:
-        return any(part.startswith(".") for part in relative_path.parts)
+        return _is_hidden_relative_path(relative_path)
 
     def _include_file(self, file_path: Path) -> bool:
         if not file_path.is_file():
@@ -665,33 +723,10 @@ class KnowledgeManager:
         if not self._include_relative_path(relative_path):
             return False
 
-        base_config = self.config.get_knowledge_base_config(self.base_id)
-        include_extensions = set(base_config.include_extensions) if base_config.include_extensions is not None else None
-        exclude_extensions = set(base_config.exclude_extensions)
-        allowed_extensions = include_extensions if include_extensions is not None else _TEXT_LIKE_EXTENSIONS
-
-        suffix = Path(relative_path).suffix.lower()
-        if suffix not in allowed_extensions:
-            return False
-        return suffix not in exclude_extensions
+        return include_semantic_knowledge_relative_path(self.config, self.base_id, relative_path)
 
     def _include_relative_path(self, relative_path: str) -> bool:
-        path_obj = Path(relative_path)
-        if path_obj.is_absolute() or ".." in path_obj.parts:
-            return False
-        if self._skip_hidden_paths() and self._is_hidden_relative_path(path_obj):
-            return False
-
-        git_config = self._git_config()
-        if git_config is None:
-            return True
-
-        if git_config.include_patterns and not any(
-            _matches_root_glob(relative_path, pattern) for pattern in git_config.include_patterns
-        ):
-            return False
-
-        return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
+        return include_knowledge_relative_path(self.config, self.base_id, relative_path)
 
     async def _run_git(
         self,
@@ -903,9 +938,7 @@ class KnowledgeManager:
     def list_files(self) -> list[Path]:
         """List all files currently present in the knowledge folder."""
         knowledge_root = self._knowledge_source_path()
-        if not knowledge_root.exists():
-            return []
-        return sorted(path for path in knowledge_root.rglob("*") if self._include_file(path))
+        return list_knowledge_files(self.config, self.base_id, knowledge_root)
 
     def resolve_file_path(self, file_path: Path | str) -> Path:
         """Resolve a path and ensure it stays inside the knowledge folder."""
@@ -1384,6 +1417,14 @@ class KnowledgeManager:
                     availability=_INDEXING_AVAILABILITY_INITIALIZING,
                 )
                 indexed_count = await self._reindex_files_locked(files)
+                if indexed_count != len(files):
+                    await asyncio.to_thread(
+                        self._save_persisted_indexing_state,
+                        _INDEXING_STATUS_INDEXING,
+                        collection=live_collection_name,
+                        availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
+                    )
+                    return indexed_count
                 await asyncio.to_thread(self._save_persisted_indexing_settings)
                 return indexed_count
 
@@ -1410,6 +1451,7 @@ class KnowledgeManager:
                 await asyncio.to_thread(
                     self._save_persisted_indexing_state,
                     _INDEXING_STATUS_COMPLETE,
+                    settings=persisted_state.settings,
                     collection=live_collection_name,
                     availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
                     last_published_at=last_published_at,
@@ -1422,6 +1464,7 @@ class KnowledgeManager:
                 await asyncio.to_thread(
                     self._save_persisted_indexing_state,
                     _INDEXING_STATUS_COMPLETE,
+                    settings=persisted_state.settings,
                     collection=live_collection_name,
                     availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
                     last_published_at=last_published_at,

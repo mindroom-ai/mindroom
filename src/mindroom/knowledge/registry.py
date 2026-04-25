@@ -94,6 +94,7 @@ class _SnapshotVectorDb(Protocol):
 
 
 _published_snapshots: dict[KnowledgeSnapshotKey, PublishedKnowledgeSnapshot] = {}
+_QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH = 7
 
 
 def resolve_snapshot_key(
@@ -206,14 +207,72 @@ def _build_snapshot_knowledge(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> Knowledge:
-    collection_name = state.collection or _default_collection_name(key)
-    vector_db = manager_module.ChromaDb(
-        collection=collection_name,
-        path=str(snapshot_base_storage_path(key)),
-        persistent_client=True,
-        embedder=manager_module._create_embedder(config, runtime_paths),
-    )
+    vector_db = _build_snapshot_vector_db(key, state, config=config, runtime_paths=runtime_paths)
     return manager_module.Knowledge(vector_db=vector_db)
+
+
+def _build_snapshot_vector_db(
+    key: KnowledgeSnapshotKey,
+    state: PublishedIndexingState,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> _SnapshotVectorDb:
+    collection_name = state.collection or _default_collection_name(key)
+    return cast(
+        "_SnapshotVectorDb",
+        manager_module.ChromaDb(
+            collection=collection_name,
+            path=str(snapshot_base_storage_path(key)),
+            persistent_client=True,
+            embedder=manager_module._create_embedder(config, runtime_paths),
+        ),
+    )
+
+
+def _snapshot_collection_exists(
+    key: KnowledgeSnapshotKey,
+    state: PublishedIndexingState,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    vector_db = _build_snapshot_vector_db(key, state, config=config, runtime_paths=runtime_paths)
+    return vector_db.exists()
+
+
+def indexing_settings_query_compatible(
+    published_settings: tuple[str, ...],
+    current_settings: tuple[str, ...],
+) -> bool:
+    """Return whether current queries can use a collection from published settings."""
+    if (
+        len(published_settings) < _QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH
+        or len(current_settings) < _QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH
+    ):
+        return published_settings == current_settings
+    return (
+        published_settings[:_QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH]
+        == current_settings[:_QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH]
+    )
+
+
+def _snapshot_state_queryable(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> bool:
+    return state.status == "complete" and indexing_settings_query_compatible(state.settings, key.indexing_settings)
+
+
+def _load_queryable_snapshot_from_state(
+    key: KnowledgeSnapshotKey,
+    state: PublishedIndexingState,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> Knowledge | None:
+    if not _snapshot_state_queryable(key, state):
+        return None
+    if not _snapshot_collection_exists(key, state, config=config, runtime_paths=runtime_paths):
+        return None
+    return _build_snapshot_knowledge(key, state, config=config, runtime_paths=runtime_paths)
 
 
 def _snapshot_availability(
@@ -223,10 +282,10 @@ def _snapshot_availability(
 ) -> KnowledgeAvailability:
     if state is None or state.status != "complete":
         return KnowledgeAvailability.INITIALIZING
-    if state.availability == KnowledgeAvailability.REFRESH_FAILED.value:
-        return KnowledgeAvailability.REFRESH_FAILED
     if state.settings != key.indexing_settings:
         return KnowledgeAvailability.CONFIG_MISMATCH
+    if state.availability == KnowledgeAvailability.REFRESH_FAILED.value:
+        return KnowledgeAvailability.REFRESH_FAILED
     if state.availability in {None, "", KnowledgeAvailability.READY.value}:
         return KnowledgeAvailability.READY
     return KnowledgeAvailability.INITIALIZING
@@ -261,7 +320,12 @@ def get_published_snapshot(
     if state is None or state.status != "complete":
         return KnowledgeSnapshotLookup(key=key, snapshot=None, availability=availability)
 
-    knowledge = _build_snapshot_knowledge(key, state, config=config, runtime_paths=runtime_paths)
+    knowledge = _load_queryable_snapshot_from_state(key, state, config=config, runtime_paths=runtime_paths)
+    if knowledge is None:
+        if availability is KnowledgeAvailability.READY:
+            availability = KnowledgeAvailability.REFRESH_FAILED
+        return KnowledgeSnapshotLookup(key=key, snapshot=None, availability=availability)
+
     snapshot = PublishedKnowledgeSnapshot(
         key=key,
         knowledge=knowledge,
