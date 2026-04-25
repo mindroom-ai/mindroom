@@ -1638,12 +1638,15 @@ async def _run_api_server(
     port: int,
     log_level: str,
     runtime_paths: RuntimePaths,
+    knowledge_refresh_owner: OrchestratorKnowledgeRefreshOwner | None = None,
     shutdown_requested: asyncio.Event | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
 
     api_main.initialize_api_app(api_main.app, runtime_paths)
+    if knowledge_refresh_owner is not None:
+        api_main.app.state.orchestrator_knowledge_refresh_owner = knowledge_refresh_owner
     config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
     server = _SignalAwareUvicornServer(config, shutdown_requested)
     await server.serve()
@@ -1731,7 +1734,14 @@ async def main(
             auxiliary_specs.append(
                 (
                     "bundled API server",
-                    lambda: _run_api_server(api_host, api_port, log_level, runtime_paths, shutdown_requested),
+                    lambda: _run_api_server(
+                        api_host,
+                        api_port,
+                        log_level,
+                        runtime_paths,
+                        orchestrator.knowledge_refresh_owner,
+                        shutdown_requested,
+                    ),
                     "api_server_supervisor",
                 ),
             )

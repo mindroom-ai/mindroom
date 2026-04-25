@@ -230,9 +230,9 @@ def _schedule_refresh_for_availability(
     execution_identity: ToolExecutionIdentity | None,
     lookup: KnowledgeSnapshotLookup | None,
     availability: KnowledgeAvailability,
-) -> None:
+) -> KnowledgeAvailability:
     if lookup is None:
-        return
+        return availability
 
     refresh_key = refresh_key_for_snapshot_key(lookup.key)
     if availability is KnowledgeAvailability.READY:
@@ -259,7 +259,8 @@ def _schedule_refresh_for_availability(
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             )
-        return
+            return KnowledgeAvailability.STALE
+        return availability
 
     if availability is KnowledgeAvailability.INITIALIZING:
         if _refresh_schedule_due(refresh_key, availability, settings=lookup.key.indexing_settings):
@@ -269,7 +270,7 @@ def _schedule_refresh_for_availability(
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             )
-        return
+        return availability
 
     if _refresh_schedule_due(
         refresh_key,
@@ -287,6 +288,7 @@ def _schedule_refresh_for_availability(
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         )
+    return availability
 
 
 def get_agent_knowledge(
@@ -323,7 +325,7 @@ def get_agent_knowledge(
             availability = _ready_snapshot_effective_availability(lookup, config)
         knowledge = lookup.snapshot.knowledge if lookup is not None and lookup.snapshot is not None else None
         if refresh_owner is not None:
-            _schedule_refresh_for_availability(
+            availability = _schedule_refresh_for_availability(
                 refresh_owner,
                 base_id,
                 config=config,

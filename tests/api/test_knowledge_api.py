@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from contextlib import suppress
 from io import BytesIO
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -392,6 +393,27 @@ def test_api_lifespan_does_not_schedule_all_configured_knowledge_bases(tmp_path:
         assert client.get("/api/health").status_code == 200
 
     schedule.assert_not_called()
+
+
+def test_api_lifespan_prefers_orchestrator_refresh_owner(tmp_path: Path) -> None:
+    """Bundled API should share the orchestrator owner instead of creating a second scheduler."""
+    runtime_paths = _runtime_paths(tmp_path)
+    owner = _RecordingRefreshOwner()
+    main.initialize_api_app(main.app, runtime_paths)
+    main.app.state.orchestrator_knowledge_refresh_owner = owner
+
+    try:
+        with (
+            patch("mindroom.api.main.StandaloneKnowledgeRefreshOwner") as standalone_owner,
+            TestClient(main.app) as client,
+        ):
+            assert client.get("/api/health").status_code == 200
+            assert client.app.state.knowledge_refresh_owner is owner
+        standalone_owner.assert_not_called()
+    finally:
+        main.app.state.knowledge_refresh_owner = None
+        with suppress(AttributeError):
+            del main.app.state.orchestrator_knowledge_refresh_owner
 
 
 def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> None:

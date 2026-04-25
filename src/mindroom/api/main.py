@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from mindroom.config.main import Config
+    from mindroom.knowledge import KnowledgeRefreshOwner
 
 logger = get_logger(__name__)
 _UNSET = object()
@@ -351,6 +352,15 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     config_lifecycle.register_api_app(api_app)
 
 
+def _orchestrator_knowledge_refresh_owner(api_app: FastAPI) -> KnowledgeRefreshOwner | None:
+    """Return an orchestrator-provided refresh owner when the bundled API is running."""
+    try:
+        owner = api_app.state.orchestrator_knowledge_refresh_owner
+    except AttributeError:
+        return None
+    return cast("KnowledgeRefreshOwner | None", owner)
+
+
 def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
     return _ApiAuthSettings(
@@ -451,7 +461,11 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("Syncing API credentials from runtime env")
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
-    knowledge_refresh_owner = StandaloneKnowledgeRefreshOwner()
+    standalone_knowledge_refresh_owner: StandaloneKnowledgeRefreshOwner | None = None
+    knowledge_refresh_owner = _orchestrator_knowledge_refresh_owner(_app)
+    if knowledge_refresh_owner is None:
+        standalone_knowledge_refresh_owner = StandaloneKnowledgeRefreshOwner()
+        knowledge_refresh_owner = standalone_knowledge_refresh_owner
     _app.state.knowledge_refresh_owner = knowledge_refresh_owner
     logger.info(
         "Knowledge snapshots are not warmed during API startup; refresh is scheduled on access or explicit API actions",
@@ -470,7 +484,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await watch_task
     with suppress(asyncio.CancelledError):
         await worker_cleanup_task
-    await knowledge_refresh_owner.shutdown()
+    if standalone_knowledge_refresh_owner is not None:
+        await standalone_knowledge_refresh_owner.shutdown()
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)

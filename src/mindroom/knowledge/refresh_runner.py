@@ -279,8 +279,7 @@ async def _maybe_publish_unchanged_snapshot(
         git_sync_result = await manager.sync_git_repository(index_changes=False)
         if force_reindex or git_sync_result.get("updated", False):
             if git_sync_result.get("updated", False):
-                await asyncio.to_thread(
-                    mark_published_snapshot_stale,
+                mark_published_snapshot_stale(
                     key.base_id,
                     config=manager.config,
                     runtime_paths=manager.runtime_paths,

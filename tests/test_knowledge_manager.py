@@ -384,12 +384,51 @@ async def test_shared_local_watch_ready_refresh_on_access_is_throttled(tmp_path:
     owner = MagicMock()
     owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
+    unavailable: dict[str, KnowledgeAvailability] = {}
+    unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
 
-    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is not None
+    assert (
+        get_agent_knowledge(
+            "helper",
+            config,
+            runtime_paths,
+            refresh_owner=owner,
+            on_unavailable_bases=unavailable.update,
+            on_unavailable_base_details=unavailable_details.update,
+        )
+        is not None
+    )
     doc.write_text("shared local new", encoding="utf-8")
-    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is not None
-    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is not None
+    assert (
+        get_agent_knowledge(
+            "helper",
+            config,
+            runtime_paths,
+            refresh_owner=owner,
+            on_unavailable_bases=unavailable.update,
+            on_unavailable_base_details=unavailable_details.update,
+        )
+        is not None
+    )
+    assert (
+        get_agent_knowledge(
+            "helper",
+            config,
+            runtime_paths,
+            refresh_owner=owner,
+            on_unavailable_bases=unavailable.update,
+            on_unavailable_base_details=unavailable_details.update,
+        )
+        is not None
+    )
 
+    assert unavailable == {"docs": KnowledgeAvailability.STALE}
+    assert unavailable_details == {
+        "docs": KnowledgeAvailabilityDetail(
+            availability=KnowledgeAvailability.STALE,
+            snapshot_attached=True,
+        ),
+    }
     owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
@@ -626,6 +665,19 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
     assert beta_state is not None
     assert beta_state.availability == KnowledgeAvailability.STALE.value
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
+
+
+def test_config_rejects_parent_child_knowledge_roots(tmp_path: Path) -> None:
+    """Configured local knowledge roots may be exact aliases, but not overlapping subtrees."""
+    parent = tmp_path / "docs"
+    child = parent / "nested"
+
+    with pytest.raises(ValueError, match="knowledge_bases paths must not overlap"):
+        _config(
+            tmp_path,
+            bases={"parent": parent, "child": child},
+            agent_bases=["parent"],
+        )
 
 
 def test_legacy_git_raw_url_metadata_is_compatible_with_redacted_identity(tmp_path: Path) -> None:
@@ -2228,11 +2280,13 @@ async def test_refresh_owner_schedule_does_not_orphan_manual_waiter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fire-and-forget refreshes must not overwrite an awaited pending reindex future."""
+    """Newest queued refresh payload should run while preserving awaited pending futures."""
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     stale_config = config.model_copy(deep=True)
     stale_config.knowledge_bases["docs"].chunk_size = 1024
+    newer_config = config.model_copy(deep=True)
+    newer_config.knowledge_bases["docs"].chunk_size = 2048
     runtime_paths = runtime_paths_for(config)
     owner = PerBindingKnowledgeRefreshOwner()
     first_started = asyncio.Event()
@@ -2263,13 +2317,13 @@ async def test_refresh_owner_schedule_does_not_orphan_manual_waiter(
         owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
     )
     await asyncio.sleep(0)
-    owner.schedule_refresh("docs", config=stale_config, runtime_paths=runtime_paths)
+    owner.schedule_refresh("docs", config=newer_config, runtime_paths=runtime_paths)
     release_first.set()
     result = await asyncio.wait_for(manual_task, timeout=1)
     await owner.shutdown()
 
     assert result.indexed_count == 2
-    assert seen == [(1024, False), (5000, True)]
+    assert seen == [(1024, False), (2048, True)]
 
 
 @pytest.mark.asyncio
@@ -2510,6 +2564,7 @@ async def test_private_request_scoped_knowledge_schedules_refresh_when_source_ch
     owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
+    unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
 
     def _unexpected_signature(*_args: object, **_kwargs: object) -> str:
         msg = "private READY access should not scan the local corpus"
@@ -2525,11 +2580,18 @@ async def test_private_request_scoped_knowledge_schedules_refresh_when_source_ch
         execution_identity=identity,
         refresh_owner=owner,
         on_unavailable_bases=unavailable.update,
+        on_unavailable_base_details=unavailable_details.update,
     )
 
     assert knowledge is not None
     assert [document.content for document in knowledge.search("private", max_results=5)] == ["alice private old"]
-    assert unavailable == {}
+    assert unavailable == {base_id: KnowledgeAvailability.STALE}
+    assert unavailable_details == {
+        base_id: KnowledgeAvailabilityDetail(
+            availability=KnowledgeAvailability.STALE,
+            snapshot_attached=True,
+        ),
+    }
     owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
@@ -3417,6 +3479,93 @@ async def test_git_credentials_service_token_stays_out_of_git_config_and_metadat
 
 
 @pytest.mark.asyncio
+async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """URL query and fragment secrets should be transient auth only, never persisted."""
+    docs_path = tmp_path / "docs"
+    raw_url = "https://example.com/org/private.git?token=query-secret#frag-secret"
+    clean_url = "https://example.com/org/private.git"
+    git_config = KnowledgeGitConfig(repo_url=raw_url, branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    clone_envs: list[dict[str, str] | None] = []
+
+    async def _fake_run_git(
+        self: KnowledgeManager,
+        args: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        _ = self
+        if args[0] == "clone":
+            clone_envs.append(env)
+            assert args[-2] == clean_url
+            target = Path(args[-1])
+            target.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                subprocess.run,
+                ["git", "init"],
+                cwd=target,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            await asyncio.to_thread(
+                subprocess.run,
+                ["git", "remote", "add", "origin", args[-2]],
+                cwd=target,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (target / "doc.md").write_text("query credential content", encoding="utf-8")
+            return ""
+        if args == ["remote", "set-url", "origin", clean_url]:
+            assert cwd is not None
+            await asyncio.to_thread(
+                subprocess.run,
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return ""
+        if args == ["ls-files", "-z"]:
+            return "doc.md\x00"
+        if args == ["rev-parse", "HEAD"]:
+            return "rev-query\n"
+        return ""
+
+    monkeypatch.setattr(KnowledgeManager, "_run_git", _fake_run_git)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_text = snapshot_metadata_path(key).read_text(encoding="utf-8")
+    git_config_text = (docs_path / ".git" / "config").read_text(encoding="utf-8")
+    status = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths).get_status()
+
+    assert result.published is True
+    assert clone_envs
+    assert "query-secret" in str(clone_envs[0])
+    assert "frag-secret" in str(clone_envs[0])
+    assert clean_url in git_config_text
+    assert "query-secret" not in git_config_text
+    assert "frag-secret" not in git_config_text
+    assert "query-secret" not in metadata_text
+    assert "frag-secret" not in metadata_text
+    assert status["git"]["repo_url"] == clean_url
+
+
+@pytest.mark.asyncio
 async def test_existing_single_branch_checkout_switches_to_new_remote_branch(tmp_path: Path) -> None:
     """A checkout cloned for one branch should fetch and switch to another configured branch."""
     remote_work = tmp_path / "remote-work"
@@ -3511,6 +3660,44 @@ async def test_index_file_hashes_content_off_event_loop(
 
     assert signature_threads
     assert all(thread_id != event_loop_thread for thread_id in signature_threads)
+
+
+@pytest.mark.asyncio
+async def test_git_updated_stale_registry_mark_stays_on_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registry globals must be marked stale on the event-loop thread."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("git updated", encoding="utf-8")
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    event_loop_thread = get_ident()
+    mark_threads: list[int] = []
+
+    async def _sync_updated(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        assert index_changes is False
+        self._git_last_successful_commit = "rev-updated"
+        _set_git_tracked_files(self, "doc.md")
+        return {"updated": True, "changed_count": 1, "removed_count": 0}
+
+    def _record_mark_thread(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        mark_threads.append(get_ident())
+        return ("docs",)
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_updated)
+    monkeypatch.setattr(knowledge_refresh_runner, "mark_published_snapshot_stale", _record_mark_thread)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert mark_threads == [event_loop_thread]
 
 
 @pytest.mark.asyncio
@@ -3899,7 +4086,7 @@ async def test_run_git_cancellation_kills_subprocess(
 
 
 def test_redact_url_credentials_hides_entire_http_userinfo() -> None:
-    """Knowledge Git URL redaction must not leak token usernames."""
+    """Knowledge Git URL redaction must not leak token usernames or URL parameters."""
     assert redact_url_credentials("https://user:password@example.com/repo.git") == "https://***@example.com/repo.git"
     assert redact_url_credentials("https://ghp_secret:x-oauth-basic@example.com/repo.git") == (
         "https://***@example.com/repo.git"
@@ -3909,6 +4096,15 @@ def test_redact_url_credentials_hides_entire_http_userinfo() -> None:
     assert redact_url_credentials("ssh://user:pass@example.com/repo.git") == "ssh://***@example.com/repo.git"
     assert redact_url_credentials("git+https://user:pass@example.com/repo.git") == (
         "git+https://***@example.com/repo.git"
+    )
+    assert redact_url_credentials("https://example.com/repo.git?token=secret#frag-secret") == (
+        "https://example.com/repo.git"
+    )
+    assert (
+        knowledge_manager_module._credential_free_repo_url(
+            "https://user:password@example.com/repo.git?token=secret#frag-secret",
+        )
+        == "https://example.com/repo.git"
     )
 
 

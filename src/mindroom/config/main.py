@@ -694,6 +694,29 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_knowledge_base_paths_do_not_overlap(self, info: ValidationInfo) -> Config:
+        """Reject parent/child top-level knowledge roots while allowing exact aliases."""
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        if runtime_paths is None or len(self.knowledge_bases) < 2:
+            return self
+
+        resolved_paths = [
+            (base_id, resolve_config_relative_path(base_config.path, runtime_paths).resolve())
+            for base_id, base_config in self.knowledge_bases.items()
+        ]
+        for index, (base_id, root) in enumerate(resolved_paths):
+            for other_base_id, other_root in resolved_paths[index + 1 :]:
+                if root == other_root:
+                    continue
+                if root.is_relative_to(other_root) or other_root.is_relative_to(root):
+                    msg = (
+                        "knowledge_bases paths must not overlap unless they are exact duplicate aliases; "
+                        f"'{base_id}' resolves to '{root}' and '{other_base_id}' resolves to '{other_root}'"
+                    )
+                    raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_private_knowledge(self) -> Config:
         """Ensure enabled private knowledge declares an explicit path."""
         invalid_private_knowledge = [

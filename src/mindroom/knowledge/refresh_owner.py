@@ -248,9 +248,8 @@ class PerBindingKnowledgeRefreshOwner:
             return
 
         completions = [*existing.completions, *request.completions]
-        replacement = request if request.completions or not existing.completions else existing
         self._pending[key] = replace(
-            replacement,
+            request,
             force_reindex=existing.force_reindex or request.force_reindex,
             completions=completions,
         )

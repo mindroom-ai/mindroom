@@ -302,10 +302,10 @@ def _coerce_int(value: object) -> int | None:
 def _credential_free_repo_url(repo_url: str) -> str:
     """Return a repository URL suitable for persistent Git config."""
     parsed = urlparse(repo_url)
-    if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+    if not parsed.scheme or not parsed.netloc:
         return repo_url
     hostname = parsed.netloc.rsplit("@", 1)[-1]
-    return urlunparse(parsed._replace(netloc=hostname))
+    return urlunparse(parsed._replace(netloc=hostname, query="", fragment=""))
 
 
 def _authenticated_repo_url(
