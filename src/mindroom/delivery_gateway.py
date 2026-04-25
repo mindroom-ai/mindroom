@@ -322,6 +322,33 @@ class DeliveryGateway:
         return outcome.last_physical_stream_event_id
 
     @staticmethod
+    def _interactive_response_for_visible_body(
+        visible_body: str,
+        *,
+        canonical_body_candidate: str | None,
+    ) -> interactive._InteractiveResponse:
+        """Return interactive metadata only when it belongs to the visible body."""
+        visible_response = interactive.parse_and_format_interactive(visible_body, extract_mapping=True)
+        if visible_response.option_map and visible_response.options_list:
+            return visible_response
+
+        if canonical_body_candidate is None or canonical_body_candidate == visible_body:
+            return visible_response
+
+        canonical_response = interactive.parse_and_format_interactive(
+            canonical_body_candidate,
+            extract_mapping=True,
+        )
+        if (
+            canonical_response.option_map
+            and canonical_response.options_list
+            and canonical_response.formatted_text == visible_body
+        ):
+            return canonical_response
+
+        return visible_response
+
+    @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
         """Normalize CancelledError values to the canonical cancellation reason strings."""
         cancel_source: CancelSource = "interrupted"
@@ -977,13 +1004,17 @@ class DeliveryGateway:
         target: MessageTarget,
         event_id: str | None,
         response_text: str,
+        canonical_body_candidate: str | None = None,
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
         failure_reason: str | None = None,
     ) -> FinalDeliveryOutcome | None:
         if event_id is None:
             return None
-        interactive_response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        interactive_response = self._interactive_response_for_visible_body(
+            response_text,
+            canonical_body_candidate=canonical_body_candidate,
+        )
         edited = await self.edit_text(
             EditTextRequest(
                 target=target,
@@ -1290,6 +1321,7 @@ class DeliveryGateway:
                             target=request.target,
                             event_id=streamed_event_id,
                             response_text=final_transform_draft.response_text,
+                            canonical_body_candidate=final_body_candidate,
                             tool_trace=request.tool_trace,
                             extra_content=request.extra_content,
                             failure_reason=stream_outcome.failure_reason,
@@ -1319,9 +1351,9 @@ class DeliveryGateway:
                 )
 
             assert streamed_event_id is not None
-            interactive_response = interactive.parse_and_format_interactive(
+            interactive_response = self._interactive_response_for_visible_body(
                 streamed_text,
-                extract_mapping=True,
+                canonical_body_candidate=final_body_candidate,
             )
             return FinalDeliveryOutcome(
                 terminal_status="completed",

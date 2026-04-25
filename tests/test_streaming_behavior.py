@@ -4239,8 +4239,8 @@ class TestStreamingBehavior:
         response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_streamed_success_noop_final_transform_uses_visible_interactive_metadata(self) -> None:
-        """No-op final transforms should derive interactive metadata only from visible text."""
+    async def test_streamed_success_noop_final_transform_uses_matching_visible_interactive_metadata(self) -> None:
+        """No-op final transforms should keep interactive metadata when the canonical block matches visible text."""
         response_envelope = MessageEnvelope(
             source_event_id="$event123",
             room_id="!test:localhost",
@@ -4313,8 +4313,10 @@ class TestStreamingBehavior:
 
         assert outcome.final_visible_event_id == "$streaming"
         assert outcome.final_visible_body == formatted_interactive.formatted_text
-        assert dict(outcome.option_map or {}) == {}
-        assert list(outcome.options_list or ()) == []
+        assert dict(outcome.option_map or {}) == {"✅": "approve", "1": "approve"}
+        assert list(outcome.options_list or ()) == [
+            {"emoji": "✅", "label": "Approve", "value": "approve"},
+        ]
         response_hooks.apply_final_response_transform.assert_awaited_once()
         response_hooks.emit_cancelled_response.assert_not_awaited()
 

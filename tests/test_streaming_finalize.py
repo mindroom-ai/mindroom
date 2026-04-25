@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import nio
 import pytest
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom import interactive
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -19,7 +21,12 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
-from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+from mindroom.post_response_effects import (
+    PostResponseEffectsDeps,
+    PostResponseEffectsSupport,
+    ResponseOutcome,
+    apply_post_response_effects,
+)
 from mindroom.response_lifecycle import ResponseLifecycle
 from mindroom.streaming import (
     StreamingResponse,
@@ -50,6 +57,13 @@ def _client() -> AsyncMock:
     client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
     client.room_get_event_relations = Mock(return_value=_empty_async_iter())
     return client
+
+
+def _room_send_response(event_id: str) -> MagicMock:
+    response = MagicMock()
+    response.__class__ = nio.RoomSendResponse
+    response.event_id = event_id
+    return response
 
 
 async def _empty_async_iter() -> AsyncIterator[None]:
@@ -427,6 +441,151 @@ async def test_run_completed_content_does_not_rewrite_visible_stream_text(tmp_pa
     assert "🔧 `run_shell_command` [1]" in outcome.rendered_body
     assert "Final answer" not in outcome.rendered_body
     assert captured_edits[-1]["body"] == outcome.rendered_body
+
+
+@pytest.mark.asyncio
+async def test_streamed_interactive_final_reply_registers_reactions_on_root_event(tmp_path: Path) -> None:
+    """A streamed final interactive block should register reactions on the displayed root event."""
+    config = _config(tmp_path)
+    target = MessageTarget.resolve("!room:localhost", "$thread-root", "$reply")
+    client = _client()
+    raw_interactive = (
+        "```interactive\n"
+        "{\n"
+        '  "question": "Interactive-question repro test: do the emoji reaction options show up on this message?",\n'
+        '  "options": [\n'
+        '    {"emoji": "✅", "label": "Yes", "value": "yes"},\n'
+        '    {"emoji": "❌", "label": "No", "value": "no"},\n'
+        '    {"emoji": "🧪", "label": "Test", "value": "test"}\n'
+        "  ]\n"
+        "}\n"
+        "```"
+    )
+    formatted_interactive = interactive.parse_and_format_interactive(raw_interactive, extract_mapping=True)
+    captured_stream_edits: list[dict[str, Any]] = []
+
+    async def interactive_stream() -> AsyncIterator[str]:
+        yield raw_interactive
+
+    async def record_stream_edit(*args: object) -> DeliveredMatrixEvent:
+        content = args[3]
+        assert isinstance(content, dict)
+        captured_stream_edits.append(dict(content))
+        return DeliveredMatrixEvent(event_id="$obsolete-edit", content_sent=dict(content))
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_stream_edit)):
+        stream_outcome = await send_streaming_response(
+            client=client,
+            room_id=target.room_id,
+            reply_to_event_id=target.reply_to_event_id,
+            thread_id=target.resolved_thread_id,
+            sender_domain="localhost",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            response_stream=interactive_stream(),
+            existing_event_id="$displayed-root",
+            adopt_existing_placeholder=True,
+            target=target,
+            room_mode=target.is_room_mode,
+        )
+
+    assert stream_outcome.last_physical_stream_event_id == "$displayed-root"
+    assert stream_outcome.rendered_body == formatted_interactive.formatted_text
+    assert stream_outcome.canonical_final_body_candidate == raw_interactive
+    assert captured_stream_edits[-1]["body"] == formatted_interactive.formatted_text
+
+    envelope = _envelope()
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(
+            return_value=SimpleNamespace(
+                response_text=raw_interactive,
+                response_kind="ai",
+                envelope=envelope,
+            ),
+        ),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=client, orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=Mock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    final_outcome = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=target,
+            stream_transport_outcome=stream_outcome,
+            initial_delivery_kind="sent",
+            response_kind="ai",
+            response_envelope=envelope,
+            correlation_id="corr-streamed-interactive",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert final_outcome.terminal_status == "completed"
+    assert final_outcome.final_visible_event_id == "$displayed-root"
+    assert final_outcome.final_visible_body == formatted_interactive.formatted_text
+    assert dict(final_outcome.option_map or {}) == {
+        "✅": "yes",
+        "1": "yes",
+        "❌": "no",
+        "2": "no",
+        "🧪": "test",
+        "3": "test",
+    }
+    assert final_outcome.options_list == (
+        {"emoji": "✅", "label": "Yes", "value": "yes"},
+        {"emoji": "❌", "label": "No", "value": "no"},
+        {"emoji": "🧪", "label": "Test", "value": "test"},
+    )
+
+    client.room_send.side_effect = [
+        _room_send_response("$reaction-yes"),
+        _room_send_response("$reaction-no"),
+        _room_send_response("$reaction-test"),
+    ]
+    interactive._cleanup()
+    try:
+        support = PostResponseEffectsSupport(
+            runtime=SimpleNamespace(client=client, config=config),
+            logger=get_logger("tests.post_response"),
+            runtime_paths=runtime_paths_for(config),
+            delivery_gateway=Mock(),
+            conversation_cache=Mock(),
+        )
+        await apply_post_response_effects(
+            final_outcome,
+            ResponseOutcome(interactive_target=target),
+            support.build_deps(
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
+                interactive_agent_name="code",
+            ),
+        )
+
+        registered = interactive._active_questions["$displayed-root"]
+        assert registered.thread_id == "$thread-root"
+        assert registered.options == final_outcome.option_map
+        reaction_targets = [
+            call.kwargs["content"]["m.relates_to"]["event_id"] for call in client.room_send.await_args_list
+        ]
+        reaction_keys = [call.kwargs["content"]["m.relates_to"]["key"] for call in client.room_send.await_args_list]
+        assert reaction_targets == ["$displayed-root", "$displayed-root", "$displayed-root"]
+        assert "$obsolete-edit" not in reaction_targets
+        assert reaction_keys == ["✅", "❌", "🧪"]
+    finally:
+        interactive._cleanup()
 
 
 @pytest.mark.asyncio
