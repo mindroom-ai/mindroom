@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import uuid
 import weakref
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -372,9 +374,13 @@ def save_published_indexing_state(metadata_path: Path, state: PublishedIndexingS
     if state.retained_collections:
         payload["retained_collections"] = list(state.retained_collections)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = metadata_path.with_suffix(f"{metadata_path.suffix}.tmp")
-    tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(metadata_path)
+    tmp_path = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(metadata_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _default_collection_name(key: KnowledgeSnapshotKey) -> str:

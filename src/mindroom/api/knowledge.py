@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -45,6 +46,7 @@ logger = get_logger(__name__)
 
 _MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GiB
 _UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB
+_DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,14 @@ class _StagedUpload:
     destination: Path
     temp_path: Path
     relative_path: str
+
+
+@dataclass(frozen=True)
+class _FileListInfo:
+    files: list[dict[str, Any]]
+    total_size: int
+    degraded: bool = False
+    error: str | None = None
 
 
 def _ensure_base_exists(config: Config, base_id: str) -> None:
@@ -80,27 +90,30 @@ def _resolve_within_root(root: Path, relative_path: str) -> Path:
     if candidate.is_absolute() or ".." in candidate.parts:
         raise HTTPException(status_code=400, detail="Invalid path")
 
-    resolved = (root / candidate).resolve()
+    resolved_root = root.resolve()
+    resolved = (resolved_root / candidate).resolve()
     try:
-        resolved.relative_to(root)
+        resolved.relative_to(resolved_root)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Path is outside the knowledge folder") from exc
     return resolved
 
 
-def _list_file_info(
+async def _list_file_info(
     config: Config,
     base_id: str,
     root: Path,
     file_paths: list[Path] | None = None,
-) -> tuple[list[dict[str, Any]], int]:
+) -> _FileListInfo:
     files: list[dict[str, Any]] = []
     total_size = 0
 
     if not root.is_dir():
-        return files, total_size
+        return _FileListInfo(files=files, total_size=total_size)
 
-    managed_paths = set(_list_managed_file_paths(config, base_id, root))
+    managed_paths, error = await _list_managed_file_paths(config, base_id, root)
+    if error is not None:
+        return _FileListInfo(files=[], total_size=0, degraded=True, error=error)
     paths = (
         sorted(managed_paths) if file_paths is None else sorted(path for path in file_paths if path in managed_paths)
     )
@@ -118,14 +131,26 @@ def _list_file_info(
             },
         )
 
-    return files, total_size
+    return _FileListInfo(files=files, total_size=total_size)
 
 
-def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> list[Path]:
+async def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> tuple[set[Path], str | None]:
     base_config = config.knowledge_bases[base_id]
     if base_config.git is None:
-        return list_managed_knowledge_files(config, base_id, root)
-    return list_git_tracked_managed_knowledge_files(config, base_id, root)
+        return set(list_managed_knowledge_files(config, base_id, root)), None
+    try:
+        paths = await asyncio.to_thread(
+            list_git_tracked_managed_knowledge_files,
+            config,
+            base_id,
+            root,
+            timeout_seconds=_DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        error = redact_credentials_in_text(str(exc)) or "Git file listing timed out"
+        logger.warning("Could not list Git-backed knowledge files", base_id=base_id, error=error)
+        return set(), error
+    return set(paths), None
 
 
 def _request_refresh_owner(request: Request) -> KnowledgeRefreshOwner | None:
@@ -261,16 +286,22 @@ def _git_status(
     }
 
 
-def _git_backed_bases_for_source(
+def _path_overlaps(left: Path, right: Path) -> bool:
+    return left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _git_backed_bases_for_target(
     config: Config,
-    root: Path,
+    target: Path,
     runtime_paths: constants.RuntimePaths,
 ) -> tuple[str, ...]:
-    resolved_root = root.resolve()
+    resolved_target = target.resolve()
     git_base_ids: list[str] = []
     for candidate_id, candidate_config in config.knowledge_bases.items():
+        if candidate_config.git is None:
+            continue
         candidate_root = constants.resolve_config_relative_path(candidate_config.path, runtime_paths).resolve()
-        if candidate_root == resolved_root and candidate_config.git is not None:
+        if _path_overlaps(resolved_target, candidate_root):
             git_base_ids.append(candidate_id)
     return tuple(git_base_ids)
 
@@ -279,9 +310,9 @@ def _reject_git_file_mutation(
     config: Config,
     base_id: str,
     runtime_paths: constants.RuntimePaths,
+    target: Path,
 ) -> None:
-    root = _knowledge_root(config, base_id, runtime_paths)
-    git_base_ids = _git_backed_bases_for_source(config, root, runtime_paths)
+    git_base_ids = _git_backed_bases_for_target(config, target, runtime_paths)
     if not git_base_ids:
         return
     if base_id in git_base_ids:
@@ -359,7 +390,7 @@ async def _stage_upload(upload: UploadFile, destination: Path, filename: str, ro
     return _StagedUpload(
         destination=destination,
         temp_path=temp_path,
-        relative_path=destination.relative_to(root).as_posix(),
+        relative_path=destination.relative_to(root.resolve()).as_posix(),
     )
 
 
@@ -397,7 +428,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
     for base_id in sorted(config.knowledge_bases):
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
-        file_count = len(_list_file_info(config, base_id, root)[0])
+        file_info = await _list_file_info(config, base_id, root)
         snapshot_available, indexed_count = _snapshot_status(config, base_id, runtime_paths)
         git_status = _git_status(config, base_id, runtime_paths, request=request)
         refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
@@ -406,11 +437,14 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
             "name": base_id,
             "path": str(root),
             "watch": base_config.watch,
-            "file_count": file_count,
+            "file_count": len(file_info.files),
             "indexed_count": indexed_count,
             "manager_available": snapshot_available,
             "refreshing": refreshing,
+            "file_listing_degraded": file_info.degraded,
         }
+        if file_info.error is not None:
+            base_entry["file_listing_error"] = file_info.error
         if git_status is not None:
             base_entry["git"] = git_status
         bases.append(base_entry)
@@ -427,14 +461,16 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
     snapshot_available, _indexed_count = _snapshot_status(config, base_id, runtime_paths)
-    files, total_size = _list_file_info(config, base_id, root)
+    file_info = await _list_file_info(config, base_id, root)
 
     return {
         "base_id": base_id,
-        "files": files,
-        "total_size": total_size,
-        "file_count": len(files),
+        "files": file_info.files,
+        "total_size": file_info.total_size,
+        "file_count": len(file_info.files),
         "manager_available": snapshot_available,
+        "file_listing_degraded": file_info.degraded,
+        "file_listing_error": file_info.error,
     }
 
 
@@ -447,12 +483,11 @@ async def upload_knowledge_files(
     """Upload one or more files into a knowledge base folder."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
-    _reject_git_file_mutation(config, base_id, runtime_paths)
     uploaded: list[str] = []
     staged_uploads: list[_StagedUpload] = []
 
     async with knowledge_binding_mutation_lock(base_id, config=config, runtime_paths=runtime_paths):
-        root = _knowledge_root(config, base_id, runtime_paths, create=True)
+        root = _knowledge_root(config, base_id, runtime_paths)
 
         try:
             for upload in files:
@@ -463,7 +498,8 @@ async def upload_knowledge_files(
 
                 try:
                     destination = _resolve_within_root(root, filename)
-                    relative_path = destination.relative_to(root).as_posix()
+                    _reject_git_file_mutation(config, base_id, runtime_paths, destination)
+                    relative_path = destination.relative_to(root.resolve()).as_posix()
                     _reject_non_file_upload_destination(destination, relative_path)
                     staged_uploads.append(await _stage_upload(upload, destination, filename, root))
                 finally:
@@ -495,16 +531,16 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
     """Delete one knowledge file from disk and from the vector index."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
-    _reject_git_file_mutation(config, base_id, runtime_paths)
     root = _knowledge_root(config, base_id, runtime_paths)
     decoded_path = unquote(path)
     target = _resolve_within_root(root, decoded_path)
+    _reject_git_file_mutation(config, base_id, runtime_paths, target)
 
     async with knowledge_binding_mutation_lock(base_id, config=config, runtime_paths=runtime_paths):
         if not target.exists() or not target.is_file():
             raise HTTPException(status_code=404, detail="Knowledge file not found")
 
-        relative_path = target.relative_to(root).as_posix()
+        relative_path = target.relative_to(root.resolve()).as_posix()
         target.unlink()
         affected_base_ids = mark_published_snapshot_stale(
             base_id,
@@ -528,7 +564,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     root = _knowledge_root(config, base_id, runtime_paths)
     snapshot_available, indexed_count = _snapshot_status(config, base_id, runtime_paths)
     state = _snapshot_state(config, base_id, runtime_paths)
-    file_count = len(_list_file_info(config, base_id, root)[0])
+    file_info = await _list_file_info(config, base_id, root)
     git_status = _git_status(config, base_id, runtime_paths, request=request)
     refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
@@ -536,11 +572,13 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "base_id": base_id,
         "folder_path": str(root),
         "watch": config.knowledge_bases[base_id].watch,
-        "file_count": file_count,
+        "file_count": len(file_info.files),
         "indexed_count": indexed_count,
         "manager_available": snapshot_available,
         "refreshing": refreshing,
         "last_error": state.last_error if state is not None else None,
+        "file_listing_degraded": file_info.degraded,
+        "file_listing_error": file_info.error,
     }
     if git_status is not None:
         payload["git"] = git_status

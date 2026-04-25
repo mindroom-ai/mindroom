@@ -56,6 +56,7 @@ _COLLECTION_PREFIX = "mindroom_knowledge"
 _SOURCE_PATH_KEY = "source_path"
 _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
+_SOURCE_DIGEST_KEY = "source_digest"
 _FAILED_SIGNATURE_RETRY_SECONDS = 300
 _FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
 _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 32
@@ -126,6 +127,8 @@ _TEXT_LIKE_EXTENSIONS = {
     ".svelte",
     ".proto",
 }
+_FileSignature = tuple[int, int, str]
+_FailedFileSignature = tuple[int, int, str, int]
 INDEXING_SETTINGS_BASE_ID_INDEX = 0
 INDEXING_SETTINGS_STORAGE_ROOT_INDEX = 1
 INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX = 2
@@ -491,10 +494,19 @@ def _semantic_file_paths_from_relative_paths(
     return files
 
 
-def _git_tracked_relative_paths_from_checkout(config: Config, base_id: str, knowledge_root: Path) -> set[str]:
+def _git_tracked_relative_paths_from_checkout(
+    config: Config,
+    base_id: str,
+    knowledge_root: Path,
+    *,
+    timeout_seconds: float | None = None,
+) -> set[str]:
     git_config = config.get_knowledge_base_config(base_id).git
     if git_config is None:
         return set()
+    effective_timeout_seconds = float(
+        git_config.sync_timeout_seconds if timeout_seconds is None else timeout_seconds,
+    )
     try:
         result = subprocess.run(
             ["git", "ls-files", "-z"],
@@ -502,10 +514,10 @@ def _git_tracked_relative_paths_from_checkout(config: Config, base_id: str, know
             check=False,
             capture_output=True,
             text=True,
-            timeout=float(git_config.sync_timeout_seconds),
+            timeout=effective_timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
-        msg = f"Git command timed out after {git_config.sync_timeout_seconds}s: git ls-files -z"
+        msg = f"Git command timed out after {effective_timeout_seconds:g}s: git ls-files -z"
         raise RuntimeError(msg) from exc
     except OSError as exc:
         msg = f"Git command failed: git ls-files -z\n{exc}"
@@ -525,7 +537,13 @@ def _git_tracked_relative_paths_from_checkout(config: Config, base_id: str, know
     }
 
 
-def list_git_tracked_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
+def list_git_tracked_knowledge_files(
+    config: Config,
+    base_id: str,
+    knowledge_root: Path,
+    *,
+    timeout_seconds: float | None = None,
+) -> list[Path]:
     """List Git-tracked semantic files using the same source set as indexing."""
     root = knowledge_root.resolve()
     if not (root / ".git").is_dir():
@@ -534,8 +552,16 @@ def list_git_tracked_knowledge_files(config: Config, base_id: str, knowledge_roo
         config,
         base_id,
         root,
-        _git_tracked_relative_paths_from_checkout(config, base_id, root),
+        _git_tracked_relative_paths_from_checkout(config, base_id, root, timeout_seconds=timeout_seconds),
     )
+
+
+def _file_content_digest(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def knowledge_source_signature(
@@ -545,7 +571,7 @@ def knowledge_source_signature(
     *,
     tracked_relative_paths: Iterable[str] | None = None,
 ) -> str:
-    """Return a cheap signature for the currently managed local file corpus."""
+    """Return a robust signature for the currently managed local file corpus."""
     root = knowledge_root.resolve()
     digest = hashlib.sha256()
     base_config = config.get_knowledge_base_config(base_id)
@@ -562,6 +588,7 @@ def knowledge_source_signature(
         try:
             stat = path.stat()
             relative_path = path.relative_to(root).as_posix()
+            source_digest = _file_content_digest(path)
         except OSError:
             continue
         digest.update(relative_path.encode("utf-8"))
@@ -570,18 +597,22 @@ def knowledge_source_signature(
         digest.update(b"\0")
         digest.update(str(stat.st_size).encode("ascii"))
         digest.update(b"\0")
+        digest.update(source_digest.encode("ascii"))
+        digest.update(b"\0")
     return digest.hexdigest()
 
 
-def _source_signature_from_file_signatures(file_signatures: Mapping[str, tuple[int, int]]) -> str:
+def _source_signature_from_file_signatures(file_signatures: Mapping[str, _FileSignature]) -> str:
     """Return the same corpus signature from already-indexed relative path signatures."""
     digest = hashlib.sha256()
-    for relative_path, (source_mtime_ns, source_size) in sorted(file_signatures.items()):
+    for relative_path, (source_mtime_ns, source_size, source_digest) in sorted(file_signatures.items()):
         digest.update(relative_path.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(source_mtime_ns).encode("ascii"))
         digest.update(b"\0")
         digest.update(str(source_size).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(source_digest.encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -604,7 +635,7 @@ class KnowledgeManager:
     _git_lfs_hydrated_head_path: Path = field(init=False)
     _knowledge: Knowledge = field(init=False)
     _indexed_files: set[str] = field(default_factory=set, init=False)
-    _indexed_signatures: dict[str, tuple[int, int] | None] = field(default_factory=dict, init=False)
+    _indexed_signatures: dict[str, _FileSignature | None] = field(default_factory=dict, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -803,9 +834,15 @@ class KnowledgeManager:
             payload["source_signature"] = source_signature
         if retained_collections:
             payload["retained_collections"] = list(retained_collections)
-        tmp_path = self._indexing_settings_path.with_suffix(f"{self._indexing_settings_path.suffix}.tmp")
-        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        tmp_path.replace(self._indexing_settings_path)
+        tmp_path = self._indexing_settings_path.with_name(
+            f".{self._indexing_settings_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp",
+        )
+        try:
+            tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            tmp_path.replace(self._indexing_settings_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
         self._cached_persisted_indexing_state = _PersistedIndexingState(
             settings=persisted_settings,
             status=status,
@@ -1192,11 +1229,11 @@ class KnowledgeManager:
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
 
-    def _file_signature(self, file_path: Path) -> tuple[int, int]:
+    def _file_signature(self, file_path: Path) -> _FileSignature:
         stat = file_path.stat()
-        return stat.st_mtime_ns, stat.st_size
+        return stat.st_mtime_ns, stat.st_size, _file_content_digest(file_path)
 
-    def _load_failed_signatures(self) -> dict[str, tuple[int, int, int]]:
+    def _load_failed_signatures(self) -> dict[str, _FailedFileSignature]:
         if not self._index_failures_path.exists():
             return {}
 
@@ -1208,32 +1245,45 @@ class KnowledgeManager:
         if not isinstance(payload, dict):
             return {}
 
-        failed_signatures: dict[str, tuple[int, int, int]] = {}
+        failed_signatures: dict[str, _FailedFileSignature] = {}
         for path, value in payload.items():
             if not isinstance(path, str):
                 continue
-            if not isinstance(value, list | tuple) or len(value) not in {2, 3}:
+            if not isinstance(value, list | tuple) or len(value) not in {2, 3, 4}:
                 continue
             mtime_ns = _coerce_int(value[0])
             size = _coerce_int(value[1])
             if mtime_ns is None or size is None:
                 continue
-            failed_at_ns = _coerce_int(value[2]) if len(value) == 3 else 0
-            failed_signatures[path] = (mtime_ns, size, max(failed_at_ns or 0, 0))
+            source_digest = ""
+            failed_at_index = 2
+            if len(value) == 4:
+                raw_digest = value[2]
+                if not isinstance(raw_digest, str) or not raw_digest:
+                    continue
+                source_digest = raw_digest
+                failed_at_index = 3
+            failed_at_ns = _coerce_int(value[failed_at_index]) if len(value) > failed_at_index else 0
+            failed_signatures[path] = (mtime_ns, size, source_digest, max(failed_at_ns or 0, 0))
         return failed_signatures
 
-    def _save_failed_signatures(self, failed_signatures: dict[str, tuple[int, int, int]]) -> None:
-        payload = {path: [signature[0], signature[1], signature[2]] for path, signature in failed_signatures.items()}
+    def _save_failed_signatures(self, failed_signatures: dict[str, _FailedFileSignature]) -> None:
+        payload = {
+            path: [signature[0], signature[1], signature[2], signature[3]]
+            for path, signature in failed_signatures.items()
+        }
         self._index_failures_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
     def _should_skip_failed_signature(
         self,
         *,
-        failed_signature: tuple[int, int, int],
-        current_signature: tuple[int, int],
+        failed_signature: _FailedFileSignature,
+        current_signature: _FileSignature,
     ) -> bool:
-        failed_mtime_ns, failed_size, failed_at_ns = failed_signature
-        if (failed_mtime_ns, failed_size) != current_signature:
+        failed_mtime_ns, failed_size, failed_digest, failed_at_ns = failed_signature
+        if failed_digest and (failed_mtime_ns, failed_size, failed_digest) != current_signature:
+            return False
+        if not failed_digest and (failed_mtime_ns, failed_size) != current_signature[:2]:
             return False
         if failed_at_ns <= 0:
             # Legacy entries without timestamps should be retried.
@@ -1405,7 +1455,7 @@ class KnowledgeManager:
             return
         self._reset_vector_db(vector_db)
 
-    def _load_indexed_files_from_vector_db(self) -> dict[str, tuple[int, int] | None]:
+    def _load_indexed_files_from_vector_db(self) -> dict[str, _FileSignature | None]:
         """Load indexed source paths and optional file signatures from the vector collection."""
         vector_db = self._knowledge.vector_db
         if not isinstance(vector_db, ChromaDb):
@@ -1414,7 +1464,7 @@ class KnowledgeManager:
             return {}
 
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        indexed_files: dict[str, tuple[int, int] | None] = {}
+        indexed_files: dict[str, _FileSignature | None] = {}
         offset = 0
         batch_size = 1_000
 
@@ -1435,8 +1485,16 @@ class KnowledgeManager:
 
                 source_mtime_ns = _coerce_int(metadata.get(_SOURCE_MTIME_NS_KEY))
                 source_size = _coerce_int(metadata.get(_SOURCE_SIZE_KEY))
+                source_digest = metadata.get(_SOURCE_DIGEST_KEY)
                 signature = (
-                    (source_mtime_ns, source_size) if source_mtime_ns is not None and source_size is not None else None
+                    (source_mtime_ns, source_size, source_digest)
+                    if (
+                        source_mtime_ns is not None
+                        and source_size is not None
+                        and isinstance(source_digest, str)
+                        and source_digest
+                    )
+                    else None
                 )
                 if source_path not in indexed_files or (indexed_files[source_path] is None and signature is not None):
                     indexed_files[source_path] = signature
@@ -1498,7 +1556,7 @@ class KnowledgeManager:
                 continue
 
             indexed_signature = indexed_signatures.get(path)
-            if indexed_signature is not None and indexed_signature != signature:
+            if indexed_signature is None or indexed_signature != signature:
                 changed_or_missing_paths.append(path)
         changed_or_missing_paths.sort()
 
@@ -1518,8 +1576,8 @@ class KnowledgeManager:
                 # Only suppress retries for genuinely new files.  Previously-
                 # indexed files lost their vectors during the upsert attempt
                 # and must be retried on the next startup.
-                source_mtime_ns, source_size = current_signatures[relative_path]
-                failed_signatures[relative_path] = (source_mtime_ns, source_size, time.time_ns())
+                source_mtime_ns, source_size, source_digest = current_signatures[relative_path]
+                failed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest, time.time_ns())
 
         await asyncio.to_thread(self._save_failed_signatures, failed_signatures)
 
@@ -1592,15 +1650,16 @@ class KnowledgeManager:
         upsert: bool,
         knowledge: Knowledge | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+        indexed_signatures: dict[str, _FileSignature | None] | None = None,
     ) -> bool:
         """Index one file while the caller owns the operation lock."""
         relative_path = self._relative_path(resolved_path)
-        source_mtime_ns, source_size = self._file_signature(resolved_path)
+        source_mtime_ns, source_size, source_digest = self._file_signature(resolved_path)
         metadata = {
             _SOURCE_PATH_KEY: relative_path,
             _SOURCE_MTIME_NS_KEY: source_mtime_ns,
             _SOURCE_SIZE_KEY: source_size,
+            _SOURCE_DIGEST_KEY: source_digest,
         }
         reader = self._build_reader(resolved_path)
         target_knowledge = knowledge or self._knowledge
@@ -1637,11 +1696,11 @@ class KnowledgeManager:
 
         if indexed_files is not None and indexed_signatures is not None:
             indexed_files.add(relative_path)
-            indexed_signatures[relative_path] = (source_mtime_ns, source_size)
+            indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
         else:
             async with self._state_lock:
                 self._indexed_files.add(relative_path)
-                self._indexed_signatures[relative_path] = (source_mtime_ns, source_size)
+                self._indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
         logger.info("Indexed knowledge file", base_id=self.base_id, path=relative_path)
         return True
 
@@ -1651,7 +1710,7 @@ class KnowledgeManager:
         *,
         knowledge: Knowledge | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+        indexed_signatures: dict[str, _FileSignature | None] | None = None,
     ) -> int:
         """Reindex resolved files with bounded concurrency while holding the operation lock."""
         if not files:
@@ -1706,7 +1765,7 @@ class KnowledgeManager:
 
             await asyncio.to_thread(self._reset_vector_db, candidate_vector_db)
             candidate_indexed_files: set[str] = set()
-            candidate_indexed_signatures: dict[str, tuple[int, int] | None] = {}
+            candidate_indexed_signatures: dict[str, _FileSignature | None] = {}
             last_published_at = persisted_state.last_published_at if persisted_state is not None else None
             published_revision = persisted_state.published_revision if persisted_state is not None else None
             persisted_indexed_count = persisted_state.indexed_count if persisted_state is not None else None

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import os
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, ClassVar
@@ -844,7 +845,7 @@ async def test_existing_published_snapshot_is_used_while_refresh_runs(
         upsert: bool,
         knowledge: object | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
     ) -> bool:
         if knowledge is not None and knowledge is not self.get_knowledge() and not started.is_set():
             started.set()
@@ -895,7 +896,7 @@ async def test_refresh_discards_candidate_when_sources_change_before_publish(
         *,
         knowledge: object | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
     ) -> int:
         indexed_count = await original_reindex_files_locked(
             self,
@@ -1195,7 +1196,7 @@ async def test_failed_refresh_preserves_last_good_snapshot(tmp_path: Path, monke
         upsert: bool,
         knowledge: object | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
     ) -> bool:
         if knowledge is not None and knowledge is not self.get_knowledge():
             msg = "candidate failed"
@@ -1294,7 +1295,7 @@ async def test_partial_refresh_after_cached_snapshot_updates_failed_availability
         upsert: bool,
         knowledge: object | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
     ) -> bool:
         if resolved_path.name == "bad.md":
             return False
@@ -1375,6 +1376,88 @@ async def test_config_mismatch_refresh_cooldown_is_settings_aware(tmp_path: Path
     assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_owner=owner) is not None
     assert get_agent_knowledge("helper", newer_config, runtime_paths, refresh_owner=owner) is not None
 
+    assert owner.schedule_refresh.call_count == 2
+    assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
+    assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
+
+
+@pytest.mark.asyncio
+async def test_initializing_refresh_cooldown_is_settings_aware(tmp_path: Path) -> None:
+    """A cold initial load under old settings must not suppress a newer config's initial load."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    changed_config = config.model_copy(deep=True)
+    changed_config.knowledge_bases["docs"].chunk_size = 1024
+    newer_config = config.model_copy(deep=True)
+    newer_config.knowledge_bases["docs"].chunk_size = 2048
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+
+    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_owner=owner) is None
+    assert get_agent_knowledge("helper", newer_config, runtime_paths, refresh_owner=owner) is None
+
+    assert owner.schedule_initial_load.call_count == 2
+    assert owner.schedule_initial_load.call_args_list[0].kwargs["config"] is changed_config
+    assert owner.schedule_initial_load.call_args_list[1].kwargs["config"] is newer_config
+    owner.schedule_refresh.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) -> None:
+    """A failed cold refresh under old settings must not suppress a newer config's retry."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_path = snapshot_metadata_path(key)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "settings": list(key.indexing_settings),
+                "status": "indexing",
+                "availability": KnowledgeAvailability.REFRESH_FAILED.value,
+                "last_error": "cold failure",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    changed_config = config.model_copy(deep=True)
+    changed_config.knowledge_bases["docs"].chunk_size = 1024
+    newer_config = config.model_copy(deep=True)
+    newer_config.knowledge_bases["docs"].chunk_size = 2048
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    unavailable: dict[str, KnowledgeAvailability] = {}
+
+    assert (
+        get_agent_knowledge(
+            "helper",
+            changed_config,
+            runtime_paths,
+            refresh_owner=owner,
+            on_unavailable_bases=unavailable.update,
+        )
+        is None
+    )
+    assert (
+        get_agent_knowledge(
+            "helper",
+            newer_config,
+            runtime_paths,
+            refresh_owner=owner,
+            on_unavailable_bases=unavailable.update,
+        )
+        is None
+    )
+
+    assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert owner.schedule_refresh.call_count == 2
     assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
     assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
@@ -1527,7 +1610,7 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
         upsert: bool,
         knowledge: object | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
     ) -> bool:
         _ = (self, resolved_path, upsert, knowledge, indexed_files, indexed_signatures)
         msg = "candidate failed"
@@ -1644,7 +1727,7 @@ async def test_first_time_partial_refresh_does_not_publish_ready_snapshot(
         upsert: bool,
         knowledge: object | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
     ) -> bool:
         if resolved_path.name == "bad.md":
             return False
@@ -1692,7 +1775,7 @@ async def test_embedder_changing_partial_refresh_does_not_publish_old_snapshot_u
         upsert: bool,
         knowledge: object | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int] | None] | None = None,
+        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
     ) -> bool:
         _ = (self, resolved_path, upsert, knowledge, indexed_files, indexed_signatures)
         return False
@@ -2410,6 +2493,112 @@ async def test_local_noop_refresh_reports_published_snapshot(tmp_path: Path, mon
     assert result.published is True
     assert result.indexed_count == 1
     assert reindex_count == 1
+
+
+@pytest.mark.asyncio
+async def test_local_refresh_reindexes_when_content_changes_with_same_mtime_and_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unchanged fast path must not publish stale vectors after content-only changes."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("old snapshot", encoding="utf-8")
+    initial_stat = doc.stat()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    reindex_count = 0
+    original_reindex = KnowledgeManager.reindex_all
+
+    async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
+        nonlocal reindex_count
+        reindex_count += 1
+        return await original_reindex(self, protected_collections=protected_collections)
+
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    doc.write_text("new snapshot", encoding="utf-8")
+    os.utime(doc, ns=(initial_stat.st_atime_ns, initial_stat.st_mtime_ns))
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.published is True
+    assert reindex_count == 2
+    assert lookup.snapshot is not None
+    assert [document.content for document in lookup.snapshot.knowledge.search("snapshot", max_results=5)] == [
+        "new snapshot",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_rebuilds_missing_metadata_with_source_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful refresh must not publish synthesized READY metadata without a source signature."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("metadata snapshot", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    original_reindex = KnowledgeManager.reindex_all
+
+    async def _delete_metadata_after_reindex(
+        self: KnowledgeManager,
+        *,
+        protected_collections: tuple[str, ...] = (),
+    ) -> int:
+        indexed_count = await original_reindex(self, protected_collections=protected_collections)
+        self._indexing_settings_path.unlink()
+        return indexed_count
+
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", _delete_metadata_after_reindex)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+
+    assert result.published is True
+    assert state is not None
+    assert state.availability == KnowledgeAvailability.READY.value
+    assert state.source_signature == knowledge_source_signature(config, "docs", docs_path)
+
+
+def test_published_metadata_write_uses_unique_temp_and_cleans_failed_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Published metadata writes should not share one deterministic temp file."""
+    metadata_path = tmp_path / "indexing_settings.json"
+    attempted_temp_paths: list[Path] = []
+    original_replace = Path.replace
+
+    def _fail_temp_replace(self: Path, target: Path) -> Path:
+        if self.parent == tmp_path and self.name.startswith(".indexing_settings.json.") and self.name.endswith(".tmp"):
+            attempted_temp_paths.append(self)
+            msg = "replace failed"
+            raise OSError(msg)
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _fail_temp_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        knowledge_registry.save_published_indexing_state(
+            metadata_path,
+            knowledge_registry.PublishedIndexingState(
+                settings=("settings",),
+                status="complete",
+                collection="collection",
+                availability="ready",
+                source_signature="signature",
+            ),
+        )
+
+    assert attempted_temp_paths
+    assert attempted_temp_paths[0].name != "indexing_settings.json.tmp"
+    assert not attempted_temp_paths[0].exists()
 
 
 @pytest.mark.asyncio

@@ -292,13 +292,22 @@ async def _refresh_result_from_persisted_state(
             last_error=state.last_error,
         )
     if state is None:
+        source_signature = await asyncio.to_thread(
+            knowledge_source_signature,
+            manager.config,
+            manager.base_id,
+            manager._knowledge_source_path(),
+            tracked_relative_paths=manager._git_tracked_relative_paths,
+        )
         state = PublishedIndexingState(
             settings=key.indexing_settings,
             status="complete",
             collection=manager._current_collection_name(),
             availability="ready",
             indexed_count=indexed_count,
+            source_signature=source_signature,
         )
+        await asyncio.to_thread(save_published_indexing_state, snapshot_metadata_path(key), state)
     availability = snapshot_availability_for_state(key=key, state=state)
     if not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings):
         return KnowledgeRefreshResult(

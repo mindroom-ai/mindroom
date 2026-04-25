@@ -262,7 +262,7 @@ def _schedule_refresh_for_availability(
         return
 
     if availability is KnowledgeAvailability.INITIALIZING:
-        if _refresh_schedule_due(refresh_key, availability):
+        if _refresh_schedule_due(refresh_key, availability, settings=lookup.key.indexing_settings):
             refresh_owner.schedule_initial_load(
                 base_id,
                 config=config,
@@ -274,7 +274,11 @@ def _schedule_refresh_for_availability(
     if _refresh_schedule_due(
         refresh_key,
         availability,
-        settings=lookup.key.indexing_settings if availability is KnowledgeAvailability.CONFIG_MISMATCH else None,
+        settings=(
+            lookup.key.indexing_settings
+            if availability in {KnowledgeAvailability.CONFIG_MISMATCH, KnowledgeAvailability.REFRESH_FAILED}
+            else None
+        ),
         cooldown_seconds=_refresh_cooldown_seconds(lookup, config, availability),
     ):
         refresh_owner.schedule_refresh(

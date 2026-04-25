@@ -20,6 +20,8 @@ from mindroom.knowledge.registry import resolve_snapshot_key, snapshot_metadata_
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
+
     from mindroom.constants import RuntimePaths
 
 
@@ -300,6 +302,34 @@ def test_git_backed_file_counts_use_tracked_semantic_files(tmp_path: Path) -> No
     assert list_response.json()["bases"][0]["file_count"] == 1
 
 
+def test_git_file_listing_timeout_degrades_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dashboard status should use a short Git listing timeout and degrade predictably."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(docs, git=True)
+    _publish_committed_runtime_config(client.app, config)
+
+    def _timed_out_git_listing(*_args: object, timeout_seconds: float, **_kwargs: object) -> list[Path]:
+        assert timeout_seconds == 0.01
+        msg = "Git command timed out after 0.01s: git ls-files -z"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("mindroom.api.knowledge._DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.api.knowledge.list_git_tracked_managed_knowledge_files", _timed_out_git_listing)
+
+    response = client.get("/api/knowledge/bases/research/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_count"] == 0
+    assert payload["file_listing_degraded"] is True
+    assert payload["file_listing_error"] == "Git command timed out after 0.01s: git ls-files -z"
+
+
 def test_git_status_reads_disk_and_snapshot_metadata(tmp_path: Path) -> None:
     """Git status should expose cheap disk/snapshot facts without constructing a manager."""
     client = _test_client(tmp_path)
@@ -461,6 +491,70 @@ def test_upload_to_local_base_sharing_git_source_is_rejected(tmp_path: Path) -> 
     assert owner.scheduled == []
 
 
+def test_upload_to_child_of_git_source_is_rejected(tmp_path: Path) -> None:
+    """A local child alias inside a Git-backed source must not accept dashboard uploads."""
+    client = _test_client(tmp_path)
+    repo = tmp_path / "repo"
+    child = repo / "docs"
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(child), watch=False),
+            "repo": KnowledgeBaseConfig(
+                path=str(repo),
+                watch=False,
+                git=KnowledgeGitConfig(repo_url="https://example.com/org/research.git"),
+            ),
+        },
+    )
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    response = client.post(
+        "/api/knowledge/bases/research/upload",
+        files=[("files", ("guide.md", b"hello", "text/markdown"))],
+    )
+
+    assert response.status_code == 409
+    assert "Git-backed" in response.json()["detail"]
+    assert not (child / "guide.md").exists()
+    assert owner.scheduled == []
+
+
+def test_upload_to_parent_alias_over_git_source_path_is_rejected(tmp_path: Path) -> None:
+    """A parent local alias must not replace the path reserved for a Git-backed source."""
+    client = _test_client(tmp_path)
+    root = tmp_path / "knowledge"
+    repo = root / "repo"
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(root), watch=False),
+            "repo": KnowledgeBaseConfig(
+                path=str(repo),
+                watch=False,
+                git=KnowledgeGitConfig(repo_url="https://example.com/org/research.git"),
+            ),
+        },
+    )
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    response = client.post(
+        "/api/knowledge/bases/research/upload",
+        files=[("files", ("repo", b"hello", "text/markdown"))],
+    )
+
+    assert response.status_code == 409
+    assert "Git-backed" in response.json()["detail"]
+    assert not repo.exists()
+    assert owner.scheduled == []
+
+
 def test_upload_over_existing_directory_is_rejected_before_mutation(tmp_path: Path) -> None:
     """Uploads must not replace an existing directory with a file."""
     client = _test_client(tmp_path)
@@ -579,6 +673,68 @@ def test_delete_from_local_base_sharing_git_source_is_rejected(tmp_path: Path) -
     assert response.status_code == 409
     assert "Git-backed" in response.json()["detail"]
     assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
+    assert owner.scheduled == []
+
+
+def test_delete_from_child_of_git_source_is_rejected(tmp_path: Path) -> None:
+    """Deletes through a child local alias must not mutate a parent Git-backed source."""
+    client = _test_client(tmp_path)
+    repo = tmp_path / "repo"
+    child = repo / "docs"
+    child.mkdir(parents=True)
+    (child / "guide.md").write_text("hello", encoding="utf-8")
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(child), watch=False),
+            "repo": KnowledgeBaseConfig(
+                path=str(repo),
+                watch=False,
+                git=KnowledgeGitConfig(repo_url="https://example.com/org/research.git"),
+            ),
+        },
+    )
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    response = client.delete("/api/knowledge/bases/research/files/guide.md")
+
+    assert response.status_code == 409
+    assert "Git-backed" in response.json()["detail"]
+    assert (child / "guide.md").read_text(encoding="utf-8") == "hello"
+    assert owner.scheduled == []
+
+
+def test_delete_from_parent_alias_inside_git_source_is_rejected(tmp_path: Path) -> None:
+    """Deletes through a parent local alias must not remove files inside a Git-backed child source."""
+    client = _test_client(tmp_path)
+    root = tmp_path / "knowledge"
+    repo = root / "repo"
+    repo.mkdir(parents=True)
+    (repo / "guide.md").write_text("hello", encoding="utf-8")
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(root), watch=False),
+            "repo": KnowledgeBaseConfig(
+                path=str(repo),
+                watch=False,
+                git=KnowledgeGitConfig(repo_url="https://example.com/org/research.git"),
+            ),
+        },
+    )
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    response = client.delete("/api/knowledge/bases/research/files/repo/guide.md")
+
+    assert response.status_code == 409
+    assert "Git-backed" in response.json()["detail"]
+    assert (repo / "guide.md").read_text(encoding="utf-8") == "hello"
     assert owner.scheduled == []
 
 
