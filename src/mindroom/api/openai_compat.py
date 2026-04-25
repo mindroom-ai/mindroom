@@ -169,8 +169,12 @@ async def _run_response_background_then_release_lock(
         if background is not None:
             await background()
     finally:
-        if completion_lock.locked():
-            completion_lock.release()
+        _release_openai_completion_lock(completion_lock)
+
+
+def _release_openai_completion_lock(completion_lock: asyncio.Lock) -> None:
+    if completion_lock.locked():
+        completion_lock.release()
 
 
 def _attach_openai_completion_lock_release(
@@ -455,7 +459,7 @@ def _error_response(
     body = _OpenAIErrorResponse(
         error=_OpenAIError(message=message, type=error_type, param=param, code=code),
     )
-    return JSONResponse(status_code=status_code, content=body.model_dump())
+    return _OpenAIJSONResponse(status_code=status_code, content=body.model_dump())
 
 
 def _authenticate_request(
@@ -958,8 +962,8 @@ async def chat_completions(  # noqa: C901, PLR0912
                         execution_identity=execution_identity,
                         refresh_owner=knowledge_refresh_owner,
                     )
-    except Exception:
-        completion_lock.release()
+    except BaseException:
+        _release_openai_completion_lock(completion_lock)
         raise
 
     return _attach_openai_completion_lock_release(response, completion_lock)

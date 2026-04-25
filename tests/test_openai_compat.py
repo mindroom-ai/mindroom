@@ -766,6 +766,30 @@ class TestChatCompletions:
         assert mock_compact.await_args.kwargs["check"] is check
         assert mock_compact.await_args.kwargs["compaction_lifecycle"] is None
 
+    def test_completion_lock_releases_when_request_is_cancelled(self, app_client: TestClient) -> None:
+        """Cancellation after lock acquisition must not leave the OpenAI session locked."""
+        from concurrent.futures import CancelledError as FutureCancelledError  # noqa: PLC0415
+
+        completion_lock = asyncio.Lock()
+
+        async def cancelled_response(**_kwargs: object) -> str:
+            raise asyncio.CancelledError
+
+        with (
+            patch("mindroom.api.openai_compat._openai_completion_lock", return_value=completion_lock),
+            patch("mindroom.api.openai_compat.ai_response", side_effect=cancelled_response),
+            pytest.raises((asyncio.CancelledError, FutureCancelledError)),
+        ):
+            app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert not completion_lock.locked()
+
     @pytest.mark.asyncio
     async def test_non_stream_completion_returns_before_post_response_compaction(
         self,
@@ -2003,6 +2027,34 @@ async def test_openai_stream_response_runs_background_when_client_closes_after_d
         )
 
     assert events == ["compact"]
+
+
+@pytest.mark.asyncio
+async def test_openai_error_response_releases_lock_when_send_fails() -> None:
+    """Locked error responses should use the same finalizer-safe JSON path."""
+    completion_lock = asyncio.Lock()
+    await completion_lock.acquire()
+    response = openai_compat._attach_openai_completion_lock_release(
+        openai_compat._error_response(500, "failed", error_type="server_error"),
+        completion_lock,
+    )
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.body":
+            error_message = "client closed"
+            raise OSError(error_message)
+
+    with pytest.raises(OSError, match="client closed"):
+        await response(
+            {"type": "http"},
+            receive,
+            send,
+        )
+
+    assert not completion_lock.locked()
 
 
 class TestSessionIdDerivation:
