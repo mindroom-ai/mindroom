@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import weakref
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast
@@ -107,8 +108,13 @@ class _SnapshotVectorDb(Protocol):
 
 
 _published_snapshots: dict[KnowledgeSnapshotKey, PublishedKnowledgeSnapshot] = {}
+_published_snapshot_handles: weakref.WeakValueDictionary[int, PublishedKnowledgeSnapshot] = (
+    weakref.WeakValueDictionary()
+)
+_stale_ready_snapshots: set[tuple[KnowledgeRefreshKey, str | None]] = set()
 _QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH = 7
 _CORPUS_COMPATIBLE_SETTINGS_INDEXES = (0, 1, 2, 9, 10, 11, 12, 13, 14, 15, 16)
+_REPO_IDENTITY_SETTINGS_INDEX = 9
 
 
 def resolve_snapshot_key(
@@ -305,6 +311,50 @@ def _default_collection_name(key: KnowledgeSnapshotKey) -> str:
     return manager_module._collection_name(key.base_id, Path(key.knowledge_path))
 
 
+def _remember_snapshot_handle(snapshot: PublishedKnowledgeSnapshot) -> None:
+    _published_snapshot_handles[id(snapshot)] = snapshot
+
+
+def _same_physical_binding(key: KnowledgeSnapshotKey, refresh_key: KnowledgeRefreshKey) -> bool:
+    return (
+        key.base_id == refresh_key.base_id
+        and key.storage_root == refresh_key.storage_root
+        and key.knowledge_path == refresh_key.knowledge_path
+    )
+
+
+def _evict_published_snapshots_for_refresh_key(refresh_key: KnowledgeRefreshKey) -> None:
+    for cached_key in tuple(_published_snapshots):
+        if _same_physical_binding(cached_key, refresh_key):
+            _published_snapshots.pop(cached_key, None)
+
+
+def active_snapshot_collection_names(refresh_key: KnowledgeRefreshKey) -> tuple[str, ...]:
+    """Return collection names held by live published snapshot read handles."""
+    names: list[str] = []
+    for snapshot in list(_published_snapshot_handles.values()):
+        if not _same_physical_binding(snapshot.key, refresh_key):
+            continue
+        names.append(snapshot.state.collection or _default_collection_name(snapshot.key))
+    return tuple(dict.fromkeys(names))
+
+
+def mark_ready_snapshot_stale(refresh_key: KnowledgeRefreshKey, source_signature: str | None) -> None:
+    """Record a cheap stale marker for one READY snapshot source signature."""
+    _stale_ready_snapshots.add((refresh_key, source_signature))
+
+
+def ready_snapshot_marked_stale(refresh_key: KnowledgeRefreshKey, source_signature: str | None) -> bool:
+    """Return whether a READY snapshot source signature has a pending stale marker."""
+    return (refresh_key, source_signature) in _stale_ready_snapshots
+
+
+def clear_stale_ready_snapshot_markers(refresh_key: KnowledgeRefreshKey) -> None:
+    """Clear stale READY markers after a successful publish for one binding."""
+    stale_keys = {stale_key for stale_key in _stale_ready_snapshots if stale_key[0] == refresh_key}
+    _stale_ready_snapshots.difference_update(stale_keys)
+
+
 def _build_snapshot_knowledge(
     key: KnowledgeSnapshotKey,
     state: PublishedIndexingState,
@@ -371,7 +421,34 @@ def indexing_settings_corpus_compatible(
         _CORPUS_COMPATIBLE_SETTINGS_INDEXES,
     ):
         return published_settings == current_settings
-    return all(published_settings[index] == current_settings[index] for index in _CORPUS_COMPATIBLE_SETTINGS_INDEXES)
+    return all(
+        _settings_values_compatible(published_settings[index], current_settings[index], index=index)
+        for index in _CORPUS_COMPATIBLE_SETTINGS_INDEXES
+    )
+
+
+def _settings_values_compatible(published_value: str, current_value: str, *, index: int) -> bool:
+    if index != _REPO_IDENTITY_SETTINGS_INDEX:
+        return published_value == current_value
+    return _normalized_repo_identity_setting(published_value) == _normalized_repo_identity_setting(current_value)
+
+
+def _normalized_repo_identity_setting(value: str) -> str:
+    if not value or value.startswith("repo-url-sha256:"):
+        return value
+    return manager_module.credential_free_url_identity(value)
+
+
+def _metadata_settings_equal(
+    published_settings: tuple[str, ...],
+    current_settings: tuple[str, ...],
+) -> bool:
+    if len(published_settings) != len(current_settings):
+        return False
+    return all(
+        _settings_values_compatible(published_value, current_value, index=index)
+        for index, (published_value, current_value) in enumerate(zip(published_settings, current_settings, strict=True))
+    )
 
 
 def indexing_settings_snapshot_compatible(
@@ -427,7 +504,7 @@ def _snapshot_availability(
         availability = KnowledgeAvailability.REFRESH_FAILED
     elif state.status != "complete":
         availability = KnowledgeAvailability.INITIALIZING
-    elif state.settings != key.indexing_settings:
+    elif not _metadata_settings_equal(state.settings, key.indexing_settings):
         availability = KnowledgeAvailability.CONFIG_MISMATCH
     elif state.availability in {None, "", KnowledgeAvailability.READY.value}:
         availability = KnowledgeAvailability.READY
@@ -458,44 +535,53 @@ def get_published_snapshot(
         execution_identity=execution_identity,
         create=False,
     )
-    snapshot = _published_snapshots.get(key)
-    if snapshot is not None:
-        if not _cached_snapshot_still_queryable(snapshot):
-            _published_snapshots.pop(key, None)
-            availability = _snapshot_availability(key=key, state=snapshot.state)
-            if availability is KnowledgeAvailability.READY:
-                availability = KnowledgeAvailability.REFRESH_FAILED
+    try:
+        snapshot = _published_snapshots.get(key)
+        if snapshot is not None:
+            if not _cached_snapshot_still_queryable(snapshot):
+                _published_snapshots.pop(key, None)
+                availability = _snapshot_availability(key=key, state=snapshot.state)
+                if availability is KnowledgeAvailability.READY:
+                    availability = KnowledgeAvailability.REFRESH_FAILED
+                return KnowledgeSnapshotLookup(
+                    key=key,
+                    snapshot=None,
+                    availability=availability,
+                )
             return KnowledgeSnapshotLookup(
                 key=key,
-                snapshot=None,
-                availability=availability,
+                snapshot=snapshot,
+                availability=_snapshot_availability(key=key, state=snapshot.state),
             )
+
+        metadata_path = snapshot_metadata_path(key)
+        state = load_published_indexing_state(metadata_path)
+        availability = _snapshot_availability(key=key, state=state)
+        if state is None or state.status != "complete":
+            return KnowledgeSnapshotLookup(key=key, snapshot=None, availability=availability)
+
+        knowledge = _load_queryable_snapshot_from_state(key, state, config=config, runtime_paths=runtime_paths)
+        if knowledge is None:
+            if availability is KnowledgeAvailability.READY:
+                availability = KnowledgeAvailability.REFRESH_FAILED
+            return KnowledgeSnapshotLookup(key=key, snapshot=None, availability=availability)
+
+        snapshot = PublishedKnowledgeSnapshot(
+            key=key,
+            knowledge=knowledge,
+            state=state,
+            metadata_path=metadata_path,
+        )
+        _published_snapshots[key] = snapshot
+        _remember_snapshot_handle(snapshot)
+        return KnowledgeSnapshotLookup(key=key, snapshot=snapshot, availability=availability)
+    except Exception:
+        _published_snapshots.pop(key, None)
         return KnowledgeSnapshotLookup(
             key=key,
-            snapshot=snapshot,
-            availability=_snapshot_availability(key=key, state=snapshot.state),
+            snapshot=None,
+            availability=KnowledgeAvailability.REFRESH_FAILED,
         )
-
-    metadata_path = snapshot_metadata_path(key)
-    state = load_published_indexing_state(metadata_path)
-    availability = _snapshot_availability(key=key, state=state)
-    if state is None or state.status != "complete":
-        return KnowledgeSnapshotLookup(key=key, snapshot=None, availability=availability)
-
-    knowledge = _load_queryable_snapshot_from_state(key, state, config=config, runtime_paths=runtime_paths)
-    if knowledge is None:
-        if availability is KnowledgeAvailability.READY:
-            availability = KnowledgeAvailability.REFRESH_FAILED
-        return KnowledgeSnapshotLookup(key=key, snapshot=None, availability=availability)
-
-    snapshot = PublishedKnowledgeSnapshot(
-        key=key,
-        knowledge=knowledge,
-        state=state,
-        metadata_path=metadata_path,
-    )
-    _published_snapshots[key] = snapshot
-    return KnowledgeSnapshotLookup(key=key, snapshot=snapshot, availability=availability)
 
 
 def publish_snapshot(
@@ -506,6 +592,7 @@ def publish_snapshot(
     metadata_path: Path | None = None,
 ) -> PublishedKnowledgeSnapshot:
     """Publish a completed read handle into the process-local registry."""
+    _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(key))
     snapshot = PublishedKnowledgeSnapshot(
         key=key,
         knowledge=knowledge,
@@ -513,6 +600,7 @@ def publish_snapshot(
         metadata_path=metadata_path or snapshot_metadata_path(key),
     )
     _published_snapshots[key] = snapshot
+    _remember_snapshot_handle(snapshot)
     return snapshot
 
 
@@ -521,9 +609,43 @@ def snapshot_indexed_count(snapshot: PublishedKnowledgeSnapshot) -> int:
     return snapshot.state.indexed_count or 0
 
 
-def _state_collection_names(state: PublishedIndexingState) -> tuple[str, ...]:
-    collections = [collection for collection in (state.collection, *state.retained_collections) if collection]
+def _state_collection_names(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> tuple[str, ...]:
+    collections = [
+        collection
+        for collection in (state.collection or _default_collection_name(key), *state.retained_collections)
+        if collection
+    ]
     return tuple(dict.fromkeys(collections))
+
+
+def mark_published_snapshot_stale(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> bool:
+    """Mark the current published metadata stale after a direct source mutation."""
+    key = resolve_snapshot_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=False,
+    )
+    metadata_path = snapshot_metadata_path(key)
+    state = load_published_indexing_state(metadata_path)
+    if state is None:
+        return False
+
+    updated_state = replace(
+        state,
+        availability=KnowledgeAvailability.STALE.value,
+        source_signature=None,
+    )
+    save_published_indexing_state(metadata_path, updated_state)
+    _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(key))
+    return True
 
 
 def remove_source_path_from_published_snapshots(
@@ -548,7 +670,7 @@ def remove_source_path_from_published_snapshots(
         return False
 
     removed = False
-    for collection_name in _state_collection_names(state):
+    for collection_name in _state_collection_names(key, state):
         vector_db = _build_snapshot_vector_db(
             key,
             replace(state, collection=collection_name),
@@ -562,21 +684,23 @@ def remove_source_path_from_published_snapshots(
             bool(knowledge.remove_vectors_by_metadata({manager_module._SOURCE_PATH_KEY: relative_path})) or removed
         )
 
-    if not removed:
-        return False
-
     updated_state = replace(
         state,
-        indexed_count=max((state.indexed_count or 1) - 1, 0) if state.indexed_count is not None else None,
-        source_signature=manager_module.knowledge_source_signature(config, base_id, Path(key.knowledge_path)),
+        availability=KnowledgeAvailability.STALE.value,
+        indexed_count=(
+            max((state.indexed_count or 1) - 1, 0)
+            if removed and state.indexed_count is not None
+            else state.indexed_count
+        ),
+        source_signature=None,
     )
     save_published_indexing_state(metadata_path, updated_state)
-    snapshot = _published_snapshots.get(key)
-    if snapshot is not None:
-        _published_snapshots[key] = replace(snapshot, state=updated_state)
-    return True
+    _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(key))
+    return removed
 
 
 def clear_published_snapshots() -> None:
     """Clear all process-local snapshot read handles."""
     _published_snapshots.clear()
+    _published_snapshot_handles.clear()
+    _stale_ready_snapshots.clear()

@@ -6,17 +6,17 @@ import asyncio
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from agno.knowledge.knowledge import Knowledge
 
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import knowledge_source_signature
 from mindroom.knowledge.registry import (
     KnowledgeRefreshKey,
     KnowledgeSnapshotLookup,
     get_published_snapshot,
+    mark_ready_snapshot_stale,
+    ready_snapshot_marked_stale,
     refresh_key_for_snapshot_key,
 )
 from mindroom.logging_config import get_logger
@@ -35,10 +35,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
-_SOURCE_FRESHNESS_CHECK_COOLDOWN_SECONDS = 300.0
-_refresh_scheduled_at: dict[tuple[KnowledgeRefreshKey, KnowledgeAvailability], float] = {}
-_source_freshness_checked_at: dict[KnowledgeRefreshKey, float] = {}
-_stale_ready_snapshots: set[tuple[KnowledgeRefreshKey, str | None]] = set()
+_refresh_scheduled_at: dict[tuple[KnowledgeRefreshKey, KnowledgeAvailability, tuple[str, ...] | None], float] = {}
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -97,23 +94,15 @@ def _refresh_schedule_due(
     key: KnowledgeRefreshKey,
     availability: KnowledgeAvailability,
     *,
+    settings: tuple[str, ...] | None = None,
     cooldown_seconds: float = _REFRESH_RETRY_COOLDOWN_SECONDS,
 ) -> bool:
     now = time.monotonic()
-    cache_key = (key, availability)
+    cache_key = (key, availability, settings)
     last_scheduled_at = _refresh_scheduled_at.get(cache_key)
     if last_scheduled_at is not None and now - last_scheduled_at < cooldown_seconds:
         return False
     _refresh_scheduled_at[cache_key] = now
-    return True
-
-
-def _source_freshness_check_due(key: KnowledgeRefreshKey) -> bool:
-    now = time.monotonic()
-    last_checked_at = _source_freshness_checked_at.get(key)
-    if last_checked_at is not None and now - last_checked_at < _SOURCE_FRESHNESS_CHECK_COOLDOWN_SECONDS:
-        return False
-    _source_freshness_checked_at[key] = now
     return True
 
 
@@ -146,18 +135,6 @@ def _git_poll_due(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
     return published_age_seconds is None or published_age_seconds >= poll_interval_seconds
 
 
-def _ready_snapshot_source_stale(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
-    snapshot = lookup.snapshot
-    if snapshot is None or snapshot.state.source_signature is None:
-        return False
-    try:
-        current_signature = knowledge_source_signature(config, lookup.key.base_id, Path(lookup.key.knowledge_path))
-    except Exception:
-        logger.exception("Knowledge source freshness check failed", base_id=lookup.key.base_id)
-        return False
-    return current_signature != snapshot.state.source_signature
-
-
 def _ready_snapshot_effective_availability(
     lookup: KnowledgeSnapshotLookup,
     config: Config,
@@ -167,14 +144,10 @@ def _ready_snapshot_effective_availability(
     if availability is KnowledgeAvailability.READY and lookup.snapshot is not None:
         refresh_key = refresh_key_for_snapshot_key(lookup.key)
         source_signature = lookup.snapshot.state.source_signature
-        stale_key = (refresh_key, source_signature)
         if source_signature is None:
-            _stale_ready_snapshots.add(stale_key)
+            mark_ready_snapshot_stale(refresh_key, source_signature)
             availability = KnowledgeAvailability.STALE
-        elif _git_poll_due(lookup, config) or stale_key in _stale_ready_snapshots:
-            availability = KnowledgeAvailability.STALE
-        elif _source_freshness_check_due(refresh_key) and _ready_snapshot_source_stale(lookup, config):
-            _stale_ready_snapshots.add(stale_key)
+        elif _git_poll_due(lookup, config) or ready_snapshot_marked_stale(refresh_key, source_signature):
             availability = KnowledgeAvailability.STALE
     return availability
 
@@ -219,6 +192,7 @@ def _schedule_refresh_for_availability(
     if _refresh_schedule_due(
         refresh_key,
         availability,
+        settings=lookup.key.indexing_settings if availability is KnowledgeAvailability.CONFIG_MISMATCH else None,
         cooldown_seconds=_refresh_cooldown_seconds(lookup, config, availability),
     ):
         refresh_owner.schedule_refresh(

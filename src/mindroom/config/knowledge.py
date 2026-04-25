@@ -15,7 +15,7 @@ class KnowledgeGitConfig(BaseModel):
     poll_interval_seconds: int = Field(
         default=300,
         ge=5,
-        description="Reserved legacy setting; Git sync now runs during scheduled or explicit knowledge refreshes",
+        description="Minimum age before READY Git snapshots schedule an advisory on-access refresh",
     )
     credentials_service: str | None = Field(
         default=None,
@@ -54,7 +54,7 @@ class KnowledgeBaseConfig(BaseModel):
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(
         default=True,
-        description="Reserved legacy setting; knowledge refresh is scheduled on access or through explicit API actions",
+        description="Advisory refresh flag retained for compatibility; refresh is scheduled on access or explicit API actions, not by filesystem watchers",
     )
     chunk_size: int = Field(
         default=5000,

@@ -1818,6 +1818,7 @@ expose = [
     "snapshot_indexed_count",
     "snapshot_metadata_path",
     "StandaloneKnowledgeRefreshOwner",
+    "mark_published_snapshot_stale",
 ]
 from = ["mindroom.knowledge"]
 

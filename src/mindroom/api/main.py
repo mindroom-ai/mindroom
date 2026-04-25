@@ -453,6 +453,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     knowledge_refresh_owner = StandaloneKnowledgeRefreshOwner()
     _app.state.knowledge_refresh_owner = knowledge_refresh_owner
+    logger.info(
+        "Knowledge snapshots are not warmed during API startup; refresh is scheduled on access or explicit API actions",
+    )
 
     stop_event = asyncio.Event()
     watch_task = asyncio.create_task(_watch_config(stop_event, _app))

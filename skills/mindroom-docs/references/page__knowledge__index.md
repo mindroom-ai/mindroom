@@ -56,18 +56,18 @@ Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/AP
 knowledge_bases:
   my_docs:
     path: ./knowledge_docs/my_docs   # Folder containing documents
-    watch: false                      # Legacy/advisory; refresh is scheduled on access or by API actions
+    watch: false                      # Advisory; refresh is scheduled on access or by API actions, not by filesystem watchers
     chunk_size: 5000                  # Max characters per chunk
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
 
-| Field           | Type   | Default            | Description                                                                                                                            |
-| --------------- | ------ | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)                                                                        |
-| `watch`         | bool   | `true`             | Legacy/advisory flag. Refresh is scheduled on access when knowledge is missing/stale/failed, or through explicit dashboard/API actions |
-| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                      |
-| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                    |
-| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                  |
+| Field           | Type   | Default            | Description                                                                                                                                                |
+| --------------- | ------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)                                                                                            |
+| `watch`         | bool   | `true`             | Advisory flag retained for compatibility. Refresh is scheduled on access when knowledge is missing/stale/failed, or through explicit dashboard/API actions |
+| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                                          |
+| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                                        |
+| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                                      |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits. If chunking is too large, indexing retries will fail with embedder 500 errors.
 
@@ -174,18 +174,18 @@ knowledge_bases:
 
 ### Git Configuration Fields
 
-| Field                   | Type   | Default    | Description                                                                                                      |
-| ----------------------- | ------ | ---------- | ---------------------------------------------------------------------------------------------------------------- |
-| `repo_url`              | string | *required* | HTTPS repository URL to clone/fetch                                                                              |
-| `branch`                | string | `main`     | Branch to track                                                                                                  |
-| `poll_interval_seconds` | int    | `300`      | Legacy/advisory setting. Git polling loops are not started; Git sync runs during scheduled or explicit refreshes |
-| `credentials_service`   | string | `null`     | Service name in CredentialsManager for private repos                                                             |
-| `lfs`                   | bool   | `false`    | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom     |
-| `startup_behavior`      | string | `blocking` | Legacy/advisory setting. Startup no longer blocks on or schedules Git knowledge sync                             |
-| `sync_timeout_seconds`  | int    | `3600`     | Abort one Git command if it exceeds this timeout                                                                 |
-| `skip_hidden`           | bool   | `true`     | Skip files/folders starting with `.`                                                                             |
-| `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                                                           |
-| `exclude_patterns`      | list   | `[]`       | Root-anchored glob patterns to exclude                                                                           |
+| Field                   | Type   | Default    | Description                                                                                                     |
+| ----------------------- | ------ | ---------- | --------------------------------------------------------------------------------------------------------------- |
+| `repo_url`              | string | *required* | HTTPS repository URL to clone/fetch                                                                             |
+| `branch`                | string | `main`     | Branch to track                                                                                                 |
+| `poll_interval_seconds` | int    | `300`      | Minimum age before a READY Git snapshot schedules advisory on-access refresh. Git polling loops are not started |
+| `credentials_service`   | string | `null`     | Service name in CredentialsManager for private repos                                                            |
+| `lfs`                   | bool   | `false`    | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom    |
+| `startup_behavior`      | string | `blocking` | Legacy/advisory setting. Startup no longer blocks on or schedules Git knowledge sync                            |
+| `sync_timeout_seconds`  | int    | `3600`     | Abort one Git command if it exceeds this timeout                                                                |
+| `skip_hidden`           | bool   | `true`     | Skip files/folders starting with `.`                                                                            |
+| `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                                                          |
+| `exclude_patterns`      | list   | `[]`       | Root-anchored glob patterns to exclude                                                                          |
 
 When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows. Bundled container images already include it.
 

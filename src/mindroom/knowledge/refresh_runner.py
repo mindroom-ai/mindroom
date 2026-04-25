@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from threading import Lock
 from typing import TYPE_CHECKING
 
@@ -15,12 +16,15 @@ from mindroom.knowledge.registry import (
     KnowledgeRefreshKey,
     KnowledgeSnapshotKey,
     PublishedIndexingState,
+    active_snapshot_collection_names,
+    clear_stale_ready_snapshot_markers,
     indexing_settings_snapshot_compatible,
     load_published_indexing_state,
     publish_snapshot,
     refresh_key_for_snapshot_key,
     resolve_refresh_key,
     resolve_snapshot_key,
+    save_published_indexing_state,
     snapshot_availability_for_state,
     snapshot_metadata_path,
 )
@@ -129,8 +133,12 @@ async def _refresh_knowledge_binding_locked(
     )
     try:
         if manager._git_config() is not None:
-            await manager.sync_git_repository(index_changes=False)
-        indexed_count = await manager.reindex_all()
+            git_sync_result = await manager.sync_git_repository(index_changes=False)
+            if not git_sync_result.get("updated", False):
+                unchanged_result = await _publish_unchanged_git_snapshot(manager, key)
+                if unchanged_result is not None:
+                    return unchanged_result
+        indexed_count = await _reindex_manager_snapshot(manager, key)
     except Exception as exc:
         await _mark_refresh_failed(manager, key, error=str(exc))
         raise
@@ -170,6 +178,7 @@ async def _refresh_knowledge_binding_locked(
             state=state,
             metadata_path=snapshot_metadata_path(key),
         )
+        _clear_stale_markers_after_publish(refresh_key_for_snapshot_key(key))
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
@@ -183,6 +192,7 @@ async def _refresh_knowledge_binding_locked(
         state=state,
         metadata_path=snapshot_metadata_path(key),
     )
+    _clear_stale_markers_after_publish(refresh_key_for_snapshot_key(key))
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=indexed_count,
@@ -190,6 +200,56 @@ async def _refresh_knowledge_binding_locked(
         availability=availability,
         last_error=state.last_error,
     )
+
+
+async def _publish_unchanged_git_snapshot(
+    manager: KnowledgeManager,
+    key: KnowledgeSnapshotKey,
+) -> KnowledgeRefreshResult | None:
+    state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
+    if (
+        state is None
+        or state.status != "complete"
+        or state.source_signature is None
+        or state.availability == KnowledgeAvailability.REFRESH_FAILED.value
+        or not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings)
+    ):
+        return None
+
+    updated_state = replace(
+        state,
+        availability="ready",
+        last_published_at=datetime.now(tz=UTC).isoformat(),
+        published_revision=manager._git_last_successful_commit or state.published_revision,
+        last_error=None,
+    )
+    await asyncio.to_thread(
+        save_published_indexing_state,
+        snapshot_metadata_path(key),
+        updated_state,
+    )
+    manager._mark_git_initial_sync_complete()
+    publish_snapshot(
+        key,
+        knowledge=manager.get_knowledge(),
+        state=updated_state,
+        metadata_path=snapshot_metadata_path(key),
+    )
+    _clear_stale_markers_after_publish(refresh_key_for_snapshot_key(key))
+    return KnowledgeRefreshResult(
+        key=key,
+        indexed_count=updated_state.indexed_count or 0,
+        published=True,
+        availability=snapshot_availability_for_state(key=key, state=updated_state),
+        last_error=updated_state.last_error,
+    )
+
+
+async def _reindex_manager_snapshot(manager: KnowledgeManager, key: KnowledgeSnapshotKey) -> int:
+    protected_collections = active_snapshot_collection_names(refresh_key_for_snapshot_key(key))
+    if protected_collections:
+        return await manager.reindex_all(protected_collections=protected_collections)
+    return await manager.reindex_all()
 
 
 async def _mark_refresh_failed(manager: KnowledgeManager, key: KnowledgeSnapshotKey, *, error: str) -> None:
@@ -245,3 +305,7 @@ async def _mark_refresh_failed(manager: KnowledgeManager, key: KnowledgeSnapshot
         state=refreshed_state,
         metadata_path=snapshot_metadata_path(key),
     )
+
+
+def _clear_stale_markers_after_publish(key: KnowledgeRefreshKey) -> None:
+    clear_stale_ready_snapshot_markers(key)

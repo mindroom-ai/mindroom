@@ -16,6 +16,7 @@ from mindroom.knowledge import (
     PublishedIndexingState,
     knowledge_binding_mutation_lock,
     load_published_indexing_state,
+    mark_published_snapshot_stale,
     redact_url_credentials,
     refresh_knowledge_binding,
     remove_source_path_from_published_snapshots,
@@ -337,6 +338,19 @@ async def upload_knowledge_files(
 
             uploaded_paths.append(destination)
             uploaded.append(destination.relative_to(root).as_posix())
+
+        for relative_path in uploaded:
+            remove_source_path_from_published_snapshots(
+                base_id,
+                relative_path,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+        mark_published_snapshot_stale(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
 
     _schedule_refresh(config, base_id, runtime_paths, request=request)
 

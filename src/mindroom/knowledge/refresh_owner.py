@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.knowledge.refresh_runner import refresh_knowledge_binding
@@ -18,6 +19,27 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+_active_refresh_counts: dict[KnowledgeRefreshKey, int] = {}
+_active_refresh_counts_guard = Lock()
+
+
+def _mark_refresh_active(key: KnowledgeRefreshKey) -> None:
+    with _active_refresh_counts_guard:
+        _active_refresh_counts[key] = _active_refresh_counts.get(key, 0) + 1
+
+
+def _mark_refresh_inactive(key: KnowledgeRefreshKey) -> None:
+    with _active_refresh_counts_guard:
+        count = _active_refresh_counts.get(key, 0)
+        if count <= 1:
+            _active_refresh_counts.pop(key, None)
+        else:
+            _active_refresh_counts[key] = count - 1
+
+
+def _is_refresh_active(key: KnowledgeRefreshKey) -> bool:
+    with _active_refresh_counts_guard:
+        return _active_refresh_counts.get(key, 0) > 0
 
 
 class KnowledgeRefreshOwner(Protocol):
@@ -126,8 +148,7 @@ class PerBindingKnowledgeRefreshOwner:
             )
         except Exception:
             return False
-        task = self._tasks.get(key)
-        return task is not None and not task.done()
+        return _is_refresh_active(key)
 
     async def shutdown(self) -> None:
         """Cancel any in-flight background refresh tasks."""
@@ -178,6 +199,7 @@ class PerBindingKnowledgeRefreshOwner:
         self._start_task(key, request)
 
     def _start_task(self, key: KnowledgeRefreshKey, request: _ScheduledRefresh) -> None:
+        _mark_refresh_active(key)
         task = asyncio.create_task(
             self._run_refresh(key, request=request),
             name=f"knowledge_refresh:{request.base_id}",
@@ -186,6 +208,7 @@ class PerBindingKnowledgeRefreshOwner:
         task.add_done_callback(lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed))
 
     def _handle_done(self, key: KnowledgeRefreshKey, task: asyncio.Task[None]) -> None:
+        _mark_refresh_inactive(key)
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
         try:

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.embedder.ollama import OllamaEmbedder
@@ -125,6 +125,22 @@ _TEXT_LIKE_EXTENSIONS = {
     ".svelte",
     ".proto",
 }
+
+
+@runtime_checkable
+class _CollectionListingClient(Protocol):
+    """Vector client surface needed for best-effort collection cleanup."""
+
+    def list_collections(self) -> list[object]:
+        """Return collection names or collection objects."""
+        ...
+
+
+@runtime_checkable
+class _NamedCollection(Protocol):
+    """Collection object shape returned by Chroma clients."""
+
+    name: str
 
 
 @dataclass(frozen=True)
@@ -1179,11 +1195,42 @@ class KnowledgeManager:
         *,
         previous_state: _PersistedIndexingState | None,
         retained_collections: tuple[str, ...],
+        protected_collections: tuple[str, ...],
     ) -> None:
-        _ = (previous_state, retained_collections)
-        # Returned Knowledge handles can outlive the process-local registry entry that
-        # originally exposed them. Runtime cleanup therefore cannot safely delete old
-        # collections; offline/startup cleanup can reclaim them later.
+        _ = previous_state
+        vector_db = self._knowledge.vector_db
+        if not isinstance(vector_db, ChromaDb):
+            return
+        client = vector_db.client
+        if client is None or not isinstance(client, _CollectionListingClient):
+            return
+
+        protected_collection_names = set(retained_collections)
+        protected_collection_names.update(protected_collections)
+        protected_collection_names.add(self._current_collection_name())
+        candidate_prefix = f"{self._default_collection_name()}_candidate_"
+
+        for collection_name in self._listed_collection_names(client):
+            if collection_name in protected_collection_names or not collection_name.startswith(candidate_prefix):
+                continue
+            try:
+                self._delete_vector_db(self._build_vector_db(collection_name))
+            except Exception:
+                logger.warning(
+                    "Failed to clean superseded knowledge collection",
+                    base_id=self.base_id,
+                    collection=collection_name,
+                    exc_info=True,
+                )
+
+    def _listed_collection_names(self, client: _CollectionListingClient) -> tuple[str, ...]:
+        names: list[str] = []
+        for collection in client.list_collections():
+            if isinstance(collection, str):
+                names.append(collection)
+            elif isinstance(collection, _NamedCollection):
+                names.append(collection.name)
+        return tuple(dict.fromkeys(names))
 
     def _reset_vector_db(self, vector_db: ChromaDb) -> None:
         vector_db.delete()
@@ -1480,7 +1527,7 @@ class KnowledgeManager:
         results = await asyncio.gather(*(_index_one(file_path) for file_path in files))
         return sum(int(indexed) for indexed in results)
 
-    async def reindex_all(self) -> int:
+    async def reindex_all(self, *, protected_collections: tuple[str, ...] = ()) -> int:
         """Clear and rebuild the knowledge index from disk."""
         async with self._lock:
             files = self.list_files()
@@ -1589,6 +1636,7 @@ class KnowledgeManager:
                 self._cleanup_superseded_collections,
                 previous_state=persisted_state,
                 retained_collections=retained_collections,
+                protected_collections=protected_collections,
             )
             return indexed_count
 

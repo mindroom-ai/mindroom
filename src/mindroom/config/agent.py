@@ -75,7 +75,7 @@ class AgentPrivateKnowledgeConfig(BaseModel):
     )
     watch: bool = Field(
         default=True,
-        description="Reserved legacy setting; private knowledge refresh is scheduled on access",
+        description="Advisory refresh flag retained for compatibility; private knowledge refresh is scheduled on access",
     )
     chunk_size: int = Field(
         default=5000,
