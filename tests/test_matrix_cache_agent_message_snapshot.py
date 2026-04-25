@@ -50,7 +50,6 @@ async def _read_snapshot(
     thread_id: str | None,
     sender: str,
     runtime_started_at: float | None,
-    now: float | None = None,
 ) -> AgentMessageSnapshot | None:
     cache = _EventCache(db_path)
     await cache.initialize()
@@ -60,7 +59,6 @@ async def _read_snapshot(
             thread_id,
             sender,
             runtime_started_at=runtime_started_at,
-            now=now,
         )
     finally:
         await cache.close()
@@ -442,10 +440,10 @@ async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_
 
 
 @pytest.mark.asyncio
-async def test_accessor_rejects_stale_thread_cache_validated_too_long_ago(
+async def test_accessor_accepts_old_thread_cache_inside_trusted_boundary(
     tmp_path: Path,
 ) -> None:
-    """Threaded reads should reject snapshots older than the shared cache max age."""
+    """Threaded reads should trust old snapshots after certified sync catch-up."""
     db_path = tmp_path / "event_cache.db"
     cache = _EventCache(db_path)
     await cache.initialize()
@@ -473,15 +471,22 @@ async def test_accessor_rejects_stale_thread_cache_validated_too_long_ago(
     finally:
         await cache.close()
 
-    with pytest.raises(AgentMessageSnapshotUnavailable, match="cache_too_old"):
-        await _read_snapshot(
-            db_path,
-            room_id="!room:localhost",
-            thread_id="$thread-root",
-            sender="@agent:localhost",
-            runtime_started_at=0.0,
-            now=1000.0,
-        )
+    snapshot = await _read_snapshot(
+        db_path,
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=100.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={
+            "body": "Working...",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+        },
+        origin_server_ts=2000,
+    )
 
 
 @pytest.mark.asyncio
@@ -523,7 +528,6 @@ async def test_accessor_rejects_thread_cache_from_prior_bot_run(
             thread_id="$thread-root",
             sender="@agent:localhost",
             runtime_started_at=1001.0,
-            now=1001.0,
         )
 
 
@@ -571,7 +575,6 @@ async def test_accessor_rejects_invalidated_thread_cache(
             thread_id="$thread-root",
             sender="@agent:localhost",
             runtime_started_at=0.0,
-            now=1000.0,
         )
 
 

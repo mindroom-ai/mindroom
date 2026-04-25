@@ -396,7 +396,6 @@ class ConversationEventCache(Protocol):
         sender: str,
         *,
         runtime_started_at: float | None,
-        now: float | None = None,
     ) -> AgentMessageSnapshot | None:
         """Return the latest visible cached message from one sender in the given scope."""
 
@@ -604,7 +603,6 @@ class _EventCache:
         sender: str,
         *,
         runtime_started_at: float | None,
-        now: float | None = None,
     ) -> AgentMessageSnapshot | None:
         """Return the latest visible cached message from one sender in the given scope."""
         return await self._read_operation(
@@ -617,7 +615,6 @@ class _EventCache:
                 thread_id=thread_id,
                 sender=sender,
                 runtime_started_at=runtime_started_at,
-                now=now,
             ),
         )
 

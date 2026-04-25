@@ -35,7 +35,6 @@ That is indeterminate, not proof that durable cache caught up.
 
 - Do not add durable checkpoint metadata or rewrite the sync-token file format in this bug-fix pass.
 - Do not reorder every non-first-sync token persistence behind cache writes.
-- Do not relax `THREAD_CACHE_MAX_AGE_SECONDS`.
 - Do not redesign thread cache invalidation, room-scoped checkpoints, or event-cache schema.
 - Do not modify SaaS, frontend, Matrix message rendering, or unrelated agent orchestration code.
 - Do not add broad retries or try-except wrappers that hide unsafe cache-write failures.

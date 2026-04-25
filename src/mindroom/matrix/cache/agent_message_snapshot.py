@@ -78,7 +78,6 @@ async def _thread_scope_has_no_snapshot(
     room_id: str,
     thread_id: str | None,
     runtime_started_at: float | None,
-    now: float | None,
 ) -> bool:
     if thread_id is None:
         return False
@@ -90,7 +89,6 @@ async def _thread_scope_has_no_snapshot(
             thread_id=thread_id,
         ),
         runtime_started_at=runtime_started_at,
-        now=now,
     )
     if rejection_reason in _THREAD_CACHE_REJECTION_NONE_REASONS:
         return True
@@ -214,7 +212,6 @@ async def load_agent_message_snapshot(
     thread_id: str | None,
     sender: str,
     runtime_started_at: float | None,
-    now: float | None = None,
 ) -> AgentMessageSnapshot | None:
     """Return the latest visible message from ``sender`` in the given scope."""
     try:
@@ -223,7 +220,6 @@ async def load_agent_message_snapshot(
             room_id=room_id,
             thread_id=thread_id,
             runtime_started_at=runtime_started_at,
-            now=now,
         ):
             return None
         return await _load_scope_snapshot(

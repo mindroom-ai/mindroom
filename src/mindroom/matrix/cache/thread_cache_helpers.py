@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -11,11 +10,8 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
-THREAD_CACHE_MAX_AGE_SECONDS = 300.0
-
-
 class ThreadCacheStateLike(Protocol):
-    """Structural contract for durable thread cache freshness state."""
+    """Structural contract for durable thread cache trust state."""
 
     validated_at: float | None
     invalidated_at: float | None
@@ -35,7 +31,6 @@ def thread_cache_rejection_reason(
     cache_state: ThreadCacheStateLike | None,
     *,
     runtime_started_at: float | None,
-    now: float | None = None,
 ) -> str | None:
     """Return why one durable thread snapshot must be rejected, if at all."""
     rejection_reason: str | None = None
@@ -49,10 +44,6 @@ def thread_cache_rejection_reason(
         rejection_reason = "thread_invalidated_after_validation"
     elif cache_state.room_invalidated_at is not None and cache_state.room_invalidated_at >= cache_state.validated_at:
         rejection_reason = "room_invalidated_after_validation"
-    else:
-        checked_at = time.time() if now is None else now
-        if checked_at - cache_state.validated_at > THREAD_CACHE_MAX_AGE_SECONDS:
-            rejection_reason = "cache_too_old"
     return rejection_reason
 
 
@@ -60,14 +51,12 @@ def thread_cache_state_is_usable(
     cache_state: ThreadCacheStateLike | None,
     *,
     runtime_started_at: float | None,
-    now: float | None = None,
 ) -> bool:
     """Return whether one durable thread snapshot is safe to reuse."""
     return (
         thread_cache_rejection_reason(
             cache_state,
             runtime_started_at=runtime_started_at,
-            now=now,
         )
         is None
     )
