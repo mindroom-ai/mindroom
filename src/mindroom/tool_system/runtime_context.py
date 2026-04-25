@@ -18,8 +18,8 @@ from mindroom.hooks import (
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
+    validate_event_name,
 )
-from mindroom.hooks.types import validate_event_name
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugin_identity import validate_plugin_name
@@ -37,8 +37,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.hooks.sender import HookMessageSender
-    from mindroom.hooks.types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.scheduling import SchedulingRuntime

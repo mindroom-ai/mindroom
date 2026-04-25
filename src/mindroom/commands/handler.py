@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.config.main import Config
-    from mindroom.hooks.types import HookMatrixAdmin
+    from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.message_target import MessageTarget

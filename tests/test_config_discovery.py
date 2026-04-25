@@ -54,6 +54,11 @@ _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/response_runner.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
+_AGENT_STORAGE_HELPERS = {
+    "create_session_storage",
+    "get_agent_session",
+    "get_team_session",
+}
 _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
     "_build_tool_instance": "worker_target",
     "build_agent_toolkit": "execution_identity",
@@ -72,7 +77,7 @@ _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
 }
 _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
     ("src/mindroom/agents.py", "build_agent_toolkit", "execution_identity"),
-    ("src/mindroom/agents.py", "create_session_storage", "execution_identity"),
+    ("src/mindroom/agent_storage.py", "create_session_storage", "execution_identity"),
     ("src/mindroom/agents.py", "create_agent", "execution_identity"),
     ("src/mindroom/credentials.py", "load_scoped_credentials", "worker_target"),
     ("src/mindroom/credentials.py", "_resolve_worker_credentials_manager", "worker_target"),
@@ -300,6 +305,24 @@ def _collect_execution_identity_env_violations() -> list[str]:
             if not isinstance(node.args[0], ast.Constant) or node.args[0].value not in {"CUSTOMER_ID", "ACCOUNT_ID"}:
                 continue
             violations.append(f"{relative_path}:{node.lineno} reads runtime_paths.env_value({node.args[0].value!r})")
+    return sorted(set(violations))
+
+
+def _collect_agent_storage_helper_facade_import_violations() -> list[str]:
+    violations: list[str] = []
+    for relative_path, tree, _constant_aliases in _runtime_source_contexts():
+        if relative_path == "src/mindroom/agents.py":
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module != "mindroom.agents":
+                continue
+            violations.extend(
+                f"{relative_path}:{node.lineno} imports {alias.name} from mindroom.agents"
+                for alias in node.names
+                if alias.name in _AGENT_STORAGE_HELPERS
+            )
     return sorted(set(violations))
 
 
@@ -1063,6 +1086,11 @@ class TestRuntimeGuardrails:
     def test_tenant_account_env_reads_stay_at_ingress(self) -> None:
         """Prevent tenant/account attachment from drifting back into business logic."""
         violations = _collect_execution_identity_env_violations()
+        assert not violations, "\n".join(violations)
+
+    def test_agent_storage_helpers_are_imported_from_agent_storage(self) -> None:
+        """Keep storage-only helpers off the heavy agents facade in production code."""
+        violations = _collect_agent_storage_helper_facade_import_violations()
         assert not violations, "\n".join(violations)
 
     def test_plain_config_remains_runtime_free(self) -> None:

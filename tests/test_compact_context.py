@@ -20,7 +20,7 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 
-from mindroom.agents import create_session_storage, get_agent_session
+from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config

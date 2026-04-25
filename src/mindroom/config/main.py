@@ -46,6 +46,8 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
     safe_replace,
 )
+
+# config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
@@ -54,19 +56,13 @@ from mindroom.matrix.identity import (
     managed_space_alias_localpart,
 )
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
-from mindroom.tool_system.catalog import (
-    ToolConfigOverrideError,
-    ToolMetadataValidationError,
-    ToolValidationInfo,
-    resolved_tool_validation_snapshot_for_runtime,
-    validate_authored_tool_entry_overrides,
-)
-from mindroom.tool_system.plugins import PluginValidationError
+from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
+    from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
@@ -919,6 +915,9 @@ class Config(BaseModel):
     ) -> Config:
         """Validate config data against one explicit runtime context."""
         config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
+
         try:
             if tolerate_plugin_load_errors:
                 config._validate_authored_tool_entries(
@@ -1258,6 +1257,12 @@ class Config(BaseModel):
         tool_validation_snapshot: dict[str, ToolValidationInfo],
     ) -> None:
         """Validate one authored tool entry against the resolved validation snapshot."""
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import (  # noqa: PLC0415
+            ToolConfigOverrideError,
+            validate_authored_tool_entry_overrides,
+        )
+
         if entry.name not in tool_validation_snapshot and not self.is_tool_preset(entry.name):
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
             raise ToolConfigOverrideError(msg)
@@ -1276,6 +1281,9 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool = False,
     ) -> None:
         """Validate authored tool references against one resolved validation snapshot."""
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import resolved_tool_validation_snapshot_for_runtime  # noqa: PLC0415
+
         tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
             runtime_paths,
             self,

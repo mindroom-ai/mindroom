@@ -11,6 +11,10 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom import constants, interactive
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
+    EVENT_MESSAGE_AFTER_RESPONSE,
+    EVENT_MESSAGE_BEFORE_RESPONSE,
+    EVENT_MESSAGE_CANCELLED,
+    EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
     AfterResponseContext,
     BeforeResponseContext,
     CancelledResponseContext,
@@ -23,12 +27,6 @@ from mindroom.hooks import (
     emit,
     emit_final_response_transform,
     emit_transform,
-)
-from mindroom.hooks.types import (
-    EVENT_MESSAGE_AFTER_RESPONSE,
-    EVENT_MESSAGE_BEFORE_RESPONSE,
-    EVENT_MESSAGE_CANCELLED,
-    EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
 )
 from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -52,7 +50,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.history.types import (
+    from mindroom.history import (
         CompactionLifecycleFailure,
         CompactionLifecycleStart,
         CompactionLifecycleSuccess,

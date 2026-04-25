@@ -28,7 +28,8 @@ from agno.team import Team
 from pydantic import BaseModel, Field
 
 from mindroom import ai_runtime, model_loading
-from mindroom.agents import create_agent, get_team_session
+from mindroom.agent_storage import get_team_session
+from mindroom.agents import create_agent
 from mindroom.ai import build_matrix_run_metadata
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.cancellation import build_cancelled_error
@@ -39,14 +40,14 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_team_messages_text,
 )
-from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
-from mindroom.history.runtime import (
+from mindroom.history import (
     ScopeSessionContext,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
+    update_scope_seen_event_ids,
 )
-from mindroom.history.storage import update_scope_seen_event_ids
+from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import (
     KnowledgeAvailability,

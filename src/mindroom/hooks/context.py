@@ -10,6 +10,7 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 
+from . import matrix_admin as hook_matrix_admin
 from .state import (
     build_hook_room_state_putter,
     build_hook_room_state_querier,
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history.types import HistoryScope
+    from mindroom.history import HistoryScope
     from mindroom.matrix.cache import AgentMessageSnapshot
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
@@ -194,9 +195,7 @@ class HookContextSupport:
             if admin is not None:
                 return admin
         if self.agent_name == ROUTER_AGENT_NAME and self.runtime.client is not None:
-            from .matrix_admin import build_hook_matrix_admin  # noqa: PLC0415
-
-            return build_hook_matrix_admin(self.runtime.client, self.runtime_paths)
+            return hook_matrix_admin.build_hook_matrix_admin(self.runtime.client, self.runtime_paths)
         return None
 
     def base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:

@@ -43,8 +43,8 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
-from mindroom.hooks import build_hook_matrix_admin
-from mindroom.hooks.ingress import (
+from mindroom.hooks import (
+    build_hook_matrix_admin,
     hook_ingress_policy,
     is_automation_source_kind,
     is_voice_event,

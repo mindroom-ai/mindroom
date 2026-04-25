@@ -23,15 +23,15 @@ from mindroom import model_loading
 from mindroom.authorization import get_available_agents_for_sender_authoritative
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.hooks import (
+    EVENT_SCHEDULE_FIRED,
     HookRegistry,
     ScheduleFiredContext,
     build_hook_matrix_admin,
+    build_hook_message_sender,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
 )
-from mindroom.hooks.sender import build_hook_message_sender
-from mindroom.hooks.types import EVENT_SCHEDULE_FIRED
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.identity import MatrixID
@@ -43,7 +43,7 @@ from mindroom.thread_utils import get_agents_in_thread
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.hooks.types import HookMatrixAdmin
+    from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
 
 logger = get_logger(__name__)

@@ -37,11 +37,7 @@ depends_on = [
     "mindroom.error_handling",
     "mindroom.execution_preparation",
     "mindroom.history",
-    "mindroom.history.compaction",
     "mindroom.history.interrupted_replay",
-    "mindroom.history.runtime",
-    "mindroom.history.turn_recorder",
-    "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
@@ -91,10 +87,16 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_storage"
-depends_on = []
+depends_on = ["mindroom.runtime_resolution"]
 visibility = [
     "mindroom.agents",
+    "mindroom.conversation_state_writer",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
+    "mindroom.memory.auto_flush",
+    "mindroom.response_runner",
+    "mindroom.teams",
+    "mindroom.turn_store",
 ]
 
 [[modules]]
@@ -175,6 +177,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.hooks",
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.tool_system.runtime_context",
@@ -261,7 +264,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.execution_preparation",
-    "mindroom.history.runtime",
+    "mindroom.history",
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
@@ -471,6 +474,7 @@ depends_on = [
 path = "mindroom.delivery_gateway"
 depends_on = [
     "mindroom.constants",
+    "mindroom.hooks",
     "mindroom.matrix.client_delivery",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
@@ -482,7 +486,7 @@ depends_on = [
     "mindroom.coalescing",
     "mindroom.conversation_resolver",
     "mindroom.handled_turns",
-    "mindroom.hooks.ingress",
+    "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
     "mindroom.runtime_protocols",
@@ -493,15 +497,58 @@ path = "mindroom.execution_preparation"
 depends_on = [
     "mindroom.ai_runtime",
     "mindroom.constants",
-    "mindroom.history.runtime",
+    "mindroom.history",
     "mindroom.matrix.client_visible_messages",
     "mindroom.streaming",
 ]
 
 [[modules]]
+path = "mindroom.history"
+depends_on = [
+    "mindroom.history.compaction",
+    "mindroom.history.policy",
+    "mindroom.history.runtime",
+    "mindroom.history.storage",
+    "mindroom.history.types",
+]
+
+[[modules]]
+path = "mindroom.history.compaction"
+depends_on = [
+    "mindroom.cancellation",
+    "mindroom.constants",
+    "mindroom.history.storage",
+    "mindroom.history.types",
+    "mindroom.hooks",
+    "mindroom.logging_config",
+    "mindroom.timing",
+    "mindroom.token_budget",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.history.policy"
+depends_on = [
+    "mindroom.history.compaction",
+    "mindroom.history.types",
+    "mindroom.token_budget",
+]
+
+[[modules]]
+path = "mindroom.history.storage"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.history.types",
+]
+
+[[modules]]
+path = "mindroom.history.types"
+depends_on = []
+
+[[modules]]
 path = "mindroom.history.interrupted_replay"
 depends_on = [
-    "mindroom.agents",
+    "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.tool_system.events",
 ]
@@ -524,7 +571,6 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
-    "mindroom.agents",
     "mindroom.agent_storage",
     "mindroom.history.compaction",
     "mindroom.history.policy",
@@ -537,8 +583,62 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.hooks"
+depends_on = [
+    "mindroom.hooks.context",
+    "mindroom.hooks.decorators",
+    "mindroom.hooks.enrichment",
+    "mindroom.hooks.execution",
+    "mindroom.hooks.ingress",
+    "mindroom.hooks.matrix_admin",
+    "mindroom.hooks.registry",
+    "mindroom.hooks.sender",
+    "mindroom.hooks.state",
+    "mindroom.hooks.types",
+]
+
+[[modules]]
+path = "mindroom.hooks.decorators"
+depends_on = ["mindroom.hooks.types"]
+
+[[modules]]
+path = "mindroom.hooks.enrichment"
+depends_on = []
+
+[[modules]]
+path = "mindroom.hooks.execution"
+depends_on = [
+    "mindroom.hooks.context",
+    "mindroom.hooks.types",
+    "mindroom.logging_config",
+]
+
+[[modules]]
+path = "mindroom.hooks.ingress"
+depends_on = ["mindroom.hooks.types"]
+
+[[modules]]
+path = "mindroom.hooks.registry"
+depends_on = [
+    "mindroom.hooks.decorators",
+    "mindroom.hooks.types",
+    "mindroom.logging_config",
+]
+
+[[modules]]
+path = "mindroom.hooks.state"
+depends_on = []
+
+[[modules]]
+path = "mindroom.hooks.types"
+depends_on = []
+
+[[modules]]
 path = "mindroom.hooks.matrix_admin"
-depends_on = ["mindroom.matrix.client_room_admin"]
+depends_on = [
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.identity",
+]
 
 [[modules]]
 path = "mindroom.matrix.provisioning"
@@ -580,6 +680,7 @@ depends_on = [
     "mindroom.bot",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.hooks",
     "mindroom.knowledge",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
@@ -598,14 +699,16 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_runtime",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.history",
     "mindroom.history.interrupted_replay",
-    "mindroom.history.runtime",
     "mindroom.history.turn_recorder",
+    "mindroom.hooks",
     "mindroom.knowledge",
     "mindroom.matrix.client_visible_messages",
     "mindroom.memory",
@@ -630,6 +733,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.teams"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_runtime",
@@ -637,10 +741,8 @@ depends_on = [
     "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.execution_preparation",
+    "mindroom.history",
     "mindroom.history.interrupted_replay",
-    "mindroom.history.runtime",
-    "mindroom.history.storage",
-    "mindroom.history.turn_recorder",
     "mindroom.hooks",
     "mindroom.knowledge",
     "mindroom.logging_config",
@@ -682,7 +784,7 @@ depends_on = [
     "mindroom.matrix.rooms",
     "mindroom.mcp.config",
     "mindroom.tool_system.catalog",
-    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]
@@ -713,7 +815,7 @@ visibility = [
 [[modules]]
 path = "mindroom.memory.auto_flush"
 depends_on = [
-    "mindroom.agents",
+    "mindroom.agent_storage",
     "mindroom.logging_config",
     "mindroom.memory.functions",
     "mindroom.model_loading",
@@ -1109,6 +1211,7 @@ depends_on = [
 path = "mindroom.conversation_resolver"
 depends_on = [
     "mindroom.constants",
+    "mindroom.hooks",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
@@ -1119,9 +1222,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.conversation_state_writer"
 depends_on = [
-    "mindroom.agents",
-    "mindroom.history.runtime",
-    "mindroom.history.types",
+    "mindroom.agent_storage",
+    "mindroom.history",
     "mindroom.runtime_protocols",
 ]
 
@@ -1137,7 +1239,7 @@ depends_on = [
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
-    "mindroom.hooks.sender",
+    "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
     "mindroom.memory",
@@ -1262,7 +1364,6 @@ depends_on = [
     "mindroom.hooks.state",
     "mindroom.hooks.types",
     "mindroom.logging_config",
-    "mindroom.matrix.cache",
     "mindroom.runtime_protocols",
     "mindroom.tool_system.plugin_identity",
 ]
@@ -1270,8 +1371,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.scheduling"
 depends_on = [
-    "mindroom.hooks.sender",
     "mindroom.constants",
+    "mindroom.hooks",
     "mindroom.matrix.client_delivery",
     "mindroom.model_loading",
 ]
@@ -1279,6 +1380,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.runtime_context"
 depends_on = [
+    "mindroom.hooks",
     "mindroom.scheduling",
     "mindroom.tool_system.plugin_identity",
     "mindroom.tool_system.worker_routing",
@@ -1351,6 +1453,7 @@ depends_on = ["mindroom.constants"]
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
+    "mindroom.hooks",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_failures",
     "mindroom.tool_system.worker_routing",
@@ -1382,6 +1485,7 @@ depends_on = [
 path = "mindroom.tool_system.plugins"
 depends_on = [
     "mindroom.constants",
+    "mindroom.hooks",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.skills",
@@ -1452,11 +1556,17 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.hooks.sender"
-depends_on = ["mindroom.matrix.client_delivery"]
+depends_on = [
+    "mindroom.hooks.types",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.identity",
+    "mindroom.matrix.mentions",
+]
 
 [[modules]]
 path = "mindroom.turn_store"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.constants",
     "mindroom.handled_turns",
@@ -1470,6 +1580,7 @@ depends_on = [
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
     "mindroom.matrix.event_info",
@@ -1503,7 +1614,6 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.hooks",
-    "mindroom.hooks.ingress",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.identity",
     "mindroom.runtime_protocols",
@@ -2126,6 +2236,123 @@ expose = [
     "worker_scope_allows_shared_only_integrations",
 ]
 from = ["mindroom.tool_system.worker_routing"]
+
+[[interfaces]]
+expose = [
+    "CompactionOutcome",
+    "HistoryPolicy",
+    "HistoryScope",
+    "HistoryScopeState",
+    "PreparedHistoryState",
+    "PreparedScopeHistory",
+    "ResolvedHistoryExecutionPlan",
+    "ResolvedHistorySettings",
+    "ResolvedReplayPlan",
+    "ScopeSessionContext",
+    "add_pending_force_compaction_scope",
+    "apply_replay_plan",
+    "close_agent_runtime_sqlite_dbs",
+    "close_team_runtime_sqlite_dbs",
+    "compute_prompt_token_breakdown",
+    "create_scope_session_storage",
+    "estimate_preparation_static_tokens",
+    "estimate_preparation_static_tokens_for_team",
+    "finalize_history_preparation",
+    "manual_compaction_unavailable_message",
+    "open_bound_scope_session_context",
+    "open_resolved_scope_session_context",
+    "open_scope_session_context",
+    "prepare_bound_scope_history",
+    "prepare_history_for_run",
+    "prepare_scope_history",
+    "read_scope_seen_event_ids",
+    "read_scope_state",
+    "resolve_bound_team_scope_context",
+    "resolve_history_execution_plan",
+    "run_post_response_compaction_check",
+    "update_scope_seen_event_ids",
+    "write_scope_state",
+]
+from = ["mindroom.history"]
+
+[[interfaces]]
+expose = [
+    "BUILTIN_EVENT_NAMES",
+    "EVENT_AGENT_STARTED",
+    "EVENT_AGENT_STOPPED",
+    "EVENT_BOT_READY",
+    "EVENT_COMPACTION_AFTER",
+    "EVENT_COMPACTION_BEFORE",
+    "EVENT_CONFIG_RELOADED",
+    "EVENT_MESSAGE_AFTER_RESPONSE",
+    "EVENT_MESSAGE_BEFORE_RESPONSE",
+    "EVENT_MESSAGE_CANCELLED",
+    "EVENT_MESSAGE_ENRICH",
+    "EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM",
+    "EVENT_MESSAGE_RECEIVED",
+    "EVENT_REACTION_RECEIVED",
+    "EVENT_SCHEDULE_FIRED",
+    "EVENT_SESSION_STARTED",
+    "EVENT_SYSTEM_ENRICH",
+    "EVENT_TOOL_AFTER_CALL",
+    "EVENT_TOOL_BEFORE_CALL",
+    "AfterResponseContext",
+    "AgentLifecycleContext",
+    "BeforeResponseContext",
+    "CancelledResponseContext",
+    "CancelledResponseInfo",
+    "CompactionHookContext",
+    "ConfigReloadedContext",
+    "CustomEventContext",
+    "EnrichmentItem",
+    "FinalResponseDraft",
+    "FinalResponseTransformContext",
+    "HookCallback",
+    "HookContext",
+    "HookContextSupport",
+    "HookIngressPolicy",
+    "HookMatrixAdmin",
+    "HookMessageSender",
+    "HookRegistry",
+    "HookRegistryPlugin",
+    "HookRegistryState",
+    "HookRoomStatePutter",
+    "HookRoomStateQuerier",
+    "MessageEnrichContext",
+    "MessageEnvelope",
+    "MessageReceivedContext",
+    "ReactionReceivedContext",
+    "RegisteredHook",
+    "ResponseDraft",
+    "ResponseResult",
+    "ScheduleFiredContext",
+    "SessionHookContext",
+    "SystemEnrichContext",
+    "ToolAfterCallContext",
+    "ToolBeforeCallContext",
+    "build_hook_message_sender",
+    "build_hook_matrix_admin",
+    "build_hook_room_state_putter",
+    "build_hook_room_state_querier",
+    "default_timeout_ms_for_event",
+    "emit",
+    "emit_collect",
+    "emit_final_response_transform",
+    "emit_gate",
+    "emit_transform",
+    "get_hook_metadata",
+    "hook",
+    "hook_ingress_policy",
+    "is_automation_source_kind",
+    "is_voice_event",
+    "iter_module_hooks",
+    "render_enrichment_block",
+    "render_system_enrichment_block",
+    "send_hook_message",
+    "should_handle_interactive_text_response",
+    "validate_event_name",
+]
+from = ["mindroom.hooks"]
 
 [[interfaces]]
 expose = [

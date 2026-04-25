@@ -14,7 +14,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Literal, NotRequired, TypedDict
 
-from mindroom.history.types import HistoryScope
+from mindroom.history import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 

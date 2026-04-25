@@ -16,8 +16,6 @@ from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
 import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, agent_storage, constants, model_loading
@@ -68,7 +66,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
-    from mindroom.hooks.registry import HookRegistryPlugin
+    from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.tool_system.worker_routing import (
         ToolExecutionIdentity,
@@ -693,50 +691,9 @@ def _build_dynamic_tooling_instruction_block(
     )
 
 
-def create_session_storage(
-    agent_name: str,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> SqliteDb:
-    """Create persistent session storage for an agent."""
-    return _create_agent_state_db(
-        agent_name,
-        config,
-        runtime_paths,
-        subdir="sessions",
-        session_table=f"{agent_name}_sessions",
-        execution_identity=execution_identity,
-    )
-
-
 def _enable_all_history_replay(entity: Agent | Team) -> None:
     """Undo Agno's default three-run history fallback."""
     entity.num_history_runs = None
-
-
-def _create_agent_state_db(
-    agent_name: str,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-    *,
-    subdir: str,
-    session_table: str,
-) -> SqliteDb:
-    """Create a persistent SQLite database for one agent state category."""
-    state_storage_path = resolve_agent_runtime(
-        agent_name,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    ).state_root
-    return agent_storage.create_state_storage_db(
-        storage_name=agent_name,
-        state_root=state_storage_path,
-        subdir=subdir,
-        session_table=session_table,
-    )
 
 
 def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
@@ -744,30 +701,6 @@ def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
     culture_dir = storage_path / "culture"
     culture_dir.mkdir(parents=True, exist_ok=True)
     return SqliteDb(db_file=str(culture_dir / f"{culture_name}.db"))
-
-
-def get_agent_session(storage: SqliteDb, session_id: str) -> AgentSession | None:
-    """Retrieve and deserialize an AgentSession from storage."""
-    raw = storage.get_session(session_id, SessionType.AGENT)
-    if raw is None:
-        return None
-    if isinstance(raw, AgentSession):
-        return raw
-    if isinstance(raw, dict):
-        return AgentSession.from_dict(cast("dict[str, Any]", raw))
-    return None
-
-
-def get_team_session(storage: SqliteDb, session_id: str) -> TeamSession | None:
-    """Retrieve and deserialize a TeamSession from storage."""
-    raw = storage.get_session(session_id, SessionType.TEAM)
-    if raw is None:
-        return None
-    if isinstance(raw, TeamSession):
-        return raw
-    if isinstance(raw, dict):
-        return TeamSession.from_dict(cast("dict[str, Any]", raw))
-    return None
 
 
 def remove_run_by_event_id(
@@ -782,9 +715,9 @@ def remove_run_by_event_id(
     Returns True if a run was removed.
     """
     session = (
-        get_team_session(storage, session_id)
+        agent_storage.get_team_session(storage, session_id)
         if session_type is SessionType.TEAM
-        else get_agent_session(
+        else agent_storage.get_agent_session(
             storage,
             session_id,
         )
@@ -1321,14 +1254,11 @@ def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
 __all__ = [
     "build_agent_toolkit",
     "create_agent",
-    "create_session_storage",
     "describe_agent",
     "ensure_default_agent_workspaces",
     "get_agent_ids_for_room",
-    "get_agent_session",
     "get_agent_toolkit_names",
     "get_rooms_for_entity",
-    "get_team_session",
     "remove_run_by_event_id",
     "show_tool_calls_for_agent",
 ]

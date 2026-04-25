@@ -20,7 +20,8 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom import interactive
-from mindroom.agents import get_agent_session, remove_run_by_event_id
+from mindroom.agent_storage import get_agent_session
+from mindroom.agents import remove_run_by_event_id
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config

@@ -43,7 +43,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_team_messages_text,
 )
-from mindroom.history.runtime import (
+from mindroom.history import (
     ScopeSessionContext,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
@@ -96,7 +96,7 @@ if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
 
     from mindroom.config.main import Config
-    from mindroom.history.types import PostResponseCompactionCheck
+    from mindroom.history import PostResponseCompactionCheck
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
 logger = get_logger(__name__)
 

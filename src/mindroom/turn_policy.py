@@ -17,15 +17,16 @@ from mindroom.hooks import (
     EVENT_SYSTEM_ENRICH,
     EnrichmentItem,
     HookContextSupport,
+    HookIngressPolicy,
     MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
     SystemEnrichContext,
     emit,
     emit_collect,
+    is_automation_source_kind,
     render_enrichment_block,
 )
-from mindroom.hooks.ingress import HookIngressPolicy, is_automation_source_kind
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.identity import MatrixID, is_agent_id
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001

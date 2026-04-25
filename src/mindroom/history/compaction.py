@@ -31,8 +31,7 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.constants import MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS
 from mindroom.history.storage import clear_force_compaction_state, update_scope_seen_event_ids, write_scope_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
-from mindroom.hooks import CompactionHookContext, emit
-from mindroom.hooks.types import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE
+from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize

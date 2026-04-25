@@ -12,7 +12,8 @@ from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
 
-from mindroom.agents import get_agent_session, get_team_session, show_tool_calls_for_agent
+from mindroom.agent_storage import get_agent_session, get_team_session
+from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import (
     ai_response,
     build_matrix_run_metadata,
@@ -28,17 +29,17 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history import run_post_response_compaction_check
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
-from mindroom.history.runtime import run_post_response_compaction_check
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import (
+    EVENT_SESSION_STARTED,
     EnrichmentItem,
     MessageEnvelope,
     SessionHookContext,
     emit,
+    is_automation_source_kind,
 )
-from mindroom.hooks.ingress import is_automation_source_kind
-from mindroom.hooks.types import EVENT_SESSION_STARTED
 from mindroom.knowledge import (
     KnowledgeAccessSupport,
     KnowledgeAvailability,
@@ -94,9 +95,6 @@ from .media_inputs import MediaInputs
 from .response_lifecycle import ResponseLifecycle
 
 if TYPE_CHECKING:
-    from mindroom.history.types import HistoryScope
-
-if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
     from pathlib import Path
 
@@ -109,10 +107,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
-    from mindroom.history.types import (
-        CompactionOutcome,
-        PostResponseCompactionCheck,
-    )
+    from mindroom.history import CompactionOutcome, HistoryScope, PostResponseCompactionCheck
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
