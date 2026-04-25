@@ -364,6 +364,10 @@ EventCacheRuntime = _EventCacheRuntime
 class ConversationEventCache(Protocol):
     """Storage-agnostic cache API for Matrix event and thread lookups."""
 
+    @property
+    def durable_writes_available(self) -> bool:
+        """Return whether cache writes can durably persist data."""
+
     async def initialize(self) -> None:
         """Initialize any backing storage."""
 
@@ -449,9 +453,9 @@ class ConversationEventCache(Protocol):
         room_id: str,
         thread_id: str,
         *,
-        runtime_started_at: float,
+        runtime_started_at: float | None,
     ) -> bool:
-        """Refresh thread validation after a safe incremental update in the current runtime."""
+        """Refresh thread validation after a safe incremental update."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Return the cached thread ID for one event."""
@@ -482,6 +486,11 @@ class _EventCache:
     def is_initialized(self) -> bool:
         """Return whether the SQLite connection is currently open."""
         return self._runtime.is_initialized
+
+    @property
+    def durable_writes_available(self) -> bool:
+        """Return whether cache writes can durably persist data."""
+        return self._runtime.is_initialized and not self._runtime.is_disabled
 
     async def initialize(self) -> None:
         """Open the SQLite database and create the cache schema."""
@@ -700,19 +709,24 @@ class _EventCache:
         validated_at: float | None = None,
     ) -> bool:
         """Replace one cached thread snapshot only when nothing newer touched it after fetch start."""
+        replacement_validated_at = fetch_started_at if validated_at is None else min(validated_at, fetch_started_at)
+
+        async def replace_if_still_safe(db: aiosqlite.Connection) -> bool:
+            return await event_cache_threads.replace_thread_locked_if_not_newer(
+                db,
+                room_id=room_id,
+                thread_id=thread_id,
+                events=events,
+                fetch_started_at=fetch_started_at,
+                validated_at=replacement_validated_at,
+            )
+
         return bool(
             await self._write_operation(
                 room_id,
                 operation="replace_thread_if_not_newer",
                 disabled_result=False,
-                writer=lambda db: event_cache_threads.replace_thread_locked_if_not_newer(
-                    db,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    events=events,
-                    fetch_started_at=fetch_started_at,
-                    validated_at=time.time() if validated_at is None else validated_at,
-                ),
+                writer=replace_if_still_safe,
             ),
         )
 
@@ -790,7 +804,7 @@ class _EventCache:
         room_id: str,
         thread_id: str,
         *,
-        runtime_started_at: float,
+        runtime_started_at: float | None,
     ) -> bool:
         """Refresh one thread's validated timestamp after a safe incremental update."""
         return bool(

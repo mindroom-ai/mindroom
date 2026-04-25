@@ -46,6 +46,9 @@ class BotRuntimeView(Protocol):
     @property
     def runtime_started_at(self) -> float: ...  # noqa: D102
 
+    @property
+    def thread_cache_read_boundary(self) -> float: ...  # noqa: D102
+
 
 @dataclass
 class BotRuntimeState:
@@ -60,7 +63,14 @@ class BotRuntimeState:
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry | None = None
     runtime_started_at: float = field(default_factory=time.time)
+    thread_cache_read_boundary: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Default the thread-cache read boundary to this runtime start."""
+        if self.thread_cache_read_boundary == 0.0:
+            self.thread_cache_read_boundary = self.runtime_started_at
 
     def mark_runtime_started(self) -> None:
-        """Advance the runtime freshness boundary for one bot start or restart."""
+        """Advance runtime and thread-cache freshness boundaries for one bot start."""
         self.runtime_started_at = time.time()
+        self.thread_cache_read_boundary = self.runtime_started_at

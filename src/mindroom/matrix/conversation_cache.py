@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.matrix.sync_certification import SyncCacheWriteResult
 
 
 type ThreadReadResult = ThreadHistoryResult
@@ -408,6 +409,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
             self.runtime.runtime_paths,
         )
 
+    def _effective_thread_cache_runtime_started_at(self) -> float | None:
+        """Return the active restart freshness boundary for durable thread-cache reads."""
+        return self.runtime.thread_cache_read_boundary
+
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:
         """Memoize event lookups and thread reads for the lifetime of one inbound turn."""
@@ -564,7 +569,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            runtime_started_at=self.runtime.runtime_started_at,
+            runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
@@ -580,7 +585,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            runtime_started_at=self.runtime.runtime_started_at,
+            runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
@@ -596,7 +601,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            runtime_started_at=self.runtime.runtime_started_at,
+            runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
@@ -612,7 +617,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            runtime_started_at=self.runtime.runtime_started_at,
+            runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
@@ -629,7 +634,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            runtime_started_at=self.runtime.runtime_started_at,
+            runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
@@ -895,6 +900,21 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Apply one redaction to the advisory cache when the affected thread is known."""
         await self._live.apply_redaction(room_id, event)
 
-    def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
+    def cache_sync_timeline(
+        self,
+        response: nio.SyncResponse,
+        *,
+        raise_on_cache_write_failure: bool = False,
+    ) -> list[asyncio.Task[object]]:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
-        self._sync.cache_sync_timeline(response)
+        return self._sync.cache_sync_timeline(
+            response,
+            raise_on_cache_write_failure=raise_on_cache_write_failure,
+        )
+
+    async def cache_sync_timeline_for_certification(
+        self,
+        response: nio.SyncResponse,
+    ) -> SyncCacheWriteResult:
+        """Durably persist sync timeline events and report cache-certification status."""
+        return await self._sync.cache_sync_timeline_for_certification(response)

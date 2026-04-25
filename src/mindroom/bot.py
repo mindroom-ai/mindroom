@@ -40,7 +40,16 @@ from mindroom.matrix.identity import (
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
-from mindroom.matrix.sync_tokens import load_sync_token, save_sync_token
+from mindroom.matrix.sync_certification import (
+    SyncCacheWriteResult,
+    SyncCertificationDecision,
+    SyncCheckpoint,
+    SyncTrustState,
+    certify_sync_response,
+    handle_unknown_pos,
+    start_from_loaded_token,
+)
+from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import (
     AgentMatrixUser,
     create_agent_user,
@@ -335,6 +344,8 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._sync_shutting_down = False
+        self._sync_trust_state = SyncTrustState.COLD
+        self._sync_checkpoint: SyncCheckpoint | None = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._runtime_view = BotRuntimeState(
             client=None,
@@ -936,33 +947,96 @@ class AgentBot:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
 
-    def _restore_saved_sync_token(self) -> None:
-        """Restore the saved Matrix sync token onto the current client."""
-        assert self.client is not None
+    def _loaded_sync_token_for_certification(self) -> SyncCheckpoint | str | None:
+        """Load a saved token record without deciding trust in bot code."""
         try:
-            token = load_sync_token(self.storage_path, self.agent_name)
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
-            self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
-            return
-
-        if token is None:
-            return
-
-        self.client.next_batch = token
-        self.logger.info("matrix_sync_token_restored")
-
-    def _persist_sync_token(self) -> None:
-        """Persist the current Matrix sync token."""
-        if self.client is None:
-            return
-        token = self.client.next_batch
-        if not isinstance(token, str) or not token:
-            return
-
-        try:
-            save_sync_token(self.storage_path, self.agent_name, token)
+            token_record = load_sync_token_record(self.storage_path, self.agent_name)
         except OSError as exc:
+            self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+            return None
+        if token_record is None:
+            return None
+        self.logger.info(
+            "matrix_sync_token_restored",
+            certified=token_record.certified,
+            thread_cache_valid_after=token_record.thread_cache_valid_after,
+        )
+        return token_record.checkpoint if token_record.checkpoint is not None else token_record.token
+
+    def _restore_saved_sync_token(self) -> None:
+        """Restore Matrix sync continuity and initialize cache certification state."""
+        assert self.client is not None
+        startup = start_from_loaded_token(
+            self._loaded_sync_token_for_certification(),
+            runtime_started_at=self._runtime_view.runtime_started_at,
+        )
+        self._sync_trust_state = startup.state
+        self._sync_checkpoint = startup.checkpoint
+        self._runtime_view.thread_cache_read_boundary = startup.thread_cache_read_boundary
+        self.client.next_batch = startup.sync_token
+        if startup.legacy_token:
+            self.logger.warning("matrix_sync_token_uncertified_legacy")
+
+    def _save_sync_checkpoint(self, checkpoint: SyncCheckpoint | None) -> None:
+        """Persist one certified sync checkpoint if present."""
+        if checkpoint is None:
+            return
+        try:
+            save_sync_token(
+                self.storage_path,
+                self.agent_name,
+                checkpoint.token,
+                thread_cache_valid_after=checkpoint.thread_cache_valid_after,
+            )
+        except (OSError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
+
+    def _clear_saved_sync_token(self) -> None:
+        """Clear the saved sync token file."""
+        try:
+            clear_sync_token(self.storage_path, self.agent_name)
+        except OSError as exc:
+            self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
+
+    def _apply_sync_certification_decision(self, decision: SyncCertificationDecision) -> None:
+        """Apply a certifier decision to runtime state and token storage."""
+        self._sync_trust_state = decision.state
+        self._runtime_view.thread_cache_read_boundary = decision.thread_cache_read_boundary
+        self._sync_checkpoint = decision.checkpoint_to_save
+        if decision.reset_client_token and self.client is not None:
+            self.client.next_batch = None
+        if decision.clear_saved_token:
+            self._clear_saved_sync_token()
+        if decision.checkpoint_to_save is not None:
+            self._save_sync_checkpoint(decision.checkpoint_to_save)
+        if decision.reason is not None:
+            self.logger.warning(
+                "matrix_sync_certification_uncertain",
+                reason=decision.reason,
+            )
+
+    async def _sync_cache_result_for_certification(self, response: nio.SyncResponse) -> SyncCacheWriteResult:
+        """Return the durable cache write result for one sync response."""
+        return await self._conversation_cache.cache_sync_timeline_for_certification(response)
+
+    def _sync_certification_decision(
+        self,
+        response: nio.SyncResponse,
+        *,
+        cache_result: SyncCacheWriteResult,
+        first_sync_response: bool,
+        now: float,
+    ) -> SyncCertificationDecision:
+        """Return the certifier decision for one sync response."""
+        return certify_sync_response(
+            self._sync_trust_state,
+            previous_checkpoint=self._sync_checkpoint,
+            next_batch=response.next_batch,
+            cache_result=cache_result,
+            first_sync=first_sync_response,
+            now=now,
+            current_read_boundary=self._runtime_view.thread_cache_read_boundary,
+        )
 
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
@@ -980,15 +1054,24 @@ class AgentBot:
             return
 
         if isinstance(_response, nio.SyncResponse):
-            # Cache before persisting so a crash prefers replaying one batch over
-            # skipping events whose timeline metadata never reached local state.
-            self._conversation_cache.cache_sync_timeline(_response)
-
-        # Event callbacks run fire-and-forget in background tasks. A crash after
-        # persisting `next_batch` but before all callback tasks finish can still
-        # lose events. That window is small, and tracking every background task
-        # here would add more complexity than this restart optimization warrants.
-        self._persist_sync_token()
+            try:
+                cache_result = await self._sync_cache_result_for_certification(_response)
+            except asyncio.CancelledError as exc:
+                decision = self._sync_certification_decision(
+                    _response,
+                    cache_result=SyncCacheWriteResult(complete=False, errors=(exc,)),
+                    first_sync_response=first_sync_response,
+                    now=time.time(),
+                )
+                self._apply_sync_certification_decision(decision)
+                raise
+            decision = self._sync_certification_decision(
+                _response,
+                cache_result=cache_result,
+                first_sync_response=first_sync_response,
+                now=time.time(),
+            )
+            self._apply_sync_certification_decision(decision)
         self._first_sync_done = True
 
         if first_sync_response:
@@ -1002,6 +1085,14 @@ class AgentBot:
         """Update the watchdog clock on sync errors without marking cache state fresh."""
         logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
+        if _response.status_code == "M_UNKNOWN_POS":
+            self._apply_sync_certification_decision(handle_unknown_pos(now=time.time()))
+            self.logger.warning(
+                "matrix_sync_token_rejected",
+                status_code=_response.status_code,
+                error=str(_response),
+                first_sync=not self._first_sync_done,
+            )
 
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
@@ -1042,8 +1133,8 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
         )
         try:
-            self._restore_saved_sync_token()
             self._runtime_view.mark_runtime_started()
+            self._restore_saved_sync_token()
             await self._set_avatar_if_available()
             await self._set_presence_with_model_info()
             interactive.init_persistence(self.runtime_paths.storage_root)
@@ -1254,7 +1345,8 @@ class AgentBot:
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
         await self._coalescing_gate.drain_all()
-        self._persist_sync_token()
+        if self._sync_trust_state is SyncTrustState.CERTIFIED:
+            self._save_sync_checkpoint(self._sync_checkpoint)
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 

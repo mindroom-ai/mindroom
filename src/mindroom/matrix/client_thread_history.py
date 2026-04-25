@@ -539,6 +539,7 @@ async def refresh_thread_history_from_source(
     trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
+    fetch_started_at = time.time() if cache_write_guard_started_at is None else cache_write_guard_started_at
     try:
         fetch_result = await _fetch_thread_history_with_events(
             client,
@@ -569,7 +570,7 @@ async def refresh_thread_history_from_source(
             room_id=room_id,
             thread_id=thread_id,
             event_sources=fetch_result.event_sources,
-            fetch_started_at=cache_write_guard_started_at,
+            fetch_started_at=fetch_started_at,
         )
     diagnostics: dict[str, str | int | float | bool] = {
         "cache_read_ms": 0.0,
@@ -600,18 +601,12 @@ async def _store_thread_history_cache(
 ) -> bool:
     """Best-effort replacement of one cached thread snapshot."""
     try:
-        if fetch_started_at is None:
-            await event_cache.replace_thread(
-                room_id,
-                thread_id,
-                list(event_sources),
-            )
-            return True
+        write_guard_started_at = time.time() if fetch_started_at is None else fetch_started_at
         return await event_cache.replace_thread_if_not_newer(
             room_id,
             thread_id,
             list(event_sources),
-            fetch_started_at=fetch_started_at,
+            fetch_started_at=write_guard_started_at,
         )
     except Exception as exc:
         logger.warning(

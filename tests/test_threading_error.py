@@ -23,6 +23,7 @@ import pytest_asyncio
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache as matrix_cache
+import mindroom.matrix.cache.event_cache_threads as event_cache_threads_module
 import mindroom.timing as timing_module
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -35,6 +36,7 @@ from mindroom.matrix import thread_bookkeeping
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
 from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
 from mindroom.matrix.cache.thread_history_result import (
+    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
@@ -58,6 +60,8 @@ from mindroom.matrix.client import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
+from mindroom.matrix.sync_certification import SyncCacheWriteResult
+from mindroom.matrix.sync_tokens import load_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
@@ -512,6 +516,21 @@ async def _bind_owned_runtime_support(
 async def _close_bound_runtime_support(bot: AgentBot, support: OwnedRuntimeSupport) -> None:
     """Close one test-owned runtime-support bundle."""
     await close_owned_runtime_support(support, logger=bot.logger)
+
+
+def _save_certified_sync_token(
+    bot: AgentBot,
+    token: str,
+    *,
+    thread_cache_valid_after: float = 1.0,
+) -> None:
+    """Persist one cache-bound certified sync token for bot lifecycle tests."""
+    save_sync_token(
+        bot.storage_path,
+        bot.agent_name,
+        token,
+        thread_cache_valid_after=thread_cache_valid_after,
+    )
 
 
 def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
@@ -1648,6 +1667,28 @@ class TestThreadingBehavior:
 
         # No cleanup needed since we're using mocks
 
+    @staticmethod
+    def _sync_response(joined_rooms: object) -> MagicMock:
+        sync_response = MagicMock()
+        sync_response.__class__ = nio.SyncResponse
+        sync_response.rooms = MagicMock()
+        sync_response.rooms.join = joined_rooms
+        return sync_response
+
+    async def _run_sync_response_without_startup_side_effects(
+        self,
+        bot: AgentBot,
+        sync_response: nio.SyncResponse,
+    ) -> None:
+        if bot.client is not None and not isinstance(sync_response.next_batch, str):
+            sync_response.next_batch = bot.client.next_batch
+        with (
+            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+            patch.object(bot, "_maybe_start_startup_thread_prewarm"),
+            patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+        ):
+            await bot._on_sync_response(sync_response)
+
     @pytest.mark.asyncio
     async def test_start_and_stop_manage_persistent_event_cache(self, bot: AgentBot) -> None:
         """Startup and stop should leave injected runtime support owned by its external lifecycle."""
@@ -1861,7 +1902,7 @@ class TestThreadingBehavior:
             sync_response.__class__ = nio.SyncResponse
             sync_response.rooms = MagicMock()
             sync_response.rooms.join = {
-                "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event], limited=False)),
             }
             bot._first_sync_done = True
 
@@ -1874,6 +1915,132 @@ class TestThreadingBehavior:
         assert cached_event is not None
         assert cached_event["event_id"] == "$thread_msg:localhost"
         assert cached_event["content"]["body"] == "Thread reply"
+
+    @pytest.mark.asyncio
+    async def test_non_first_sync_waits_for_cache_write_before_token_persist(self, bot: AgentBot) -> None:
+        """Incremental sync tokens must not save until their cache writes are durable."""
+        cache_started = asyncio.Event()
+        allow_cache_finish = asyncio.Event()
+
+        async def delayed_cache_result(_response: nio.SyncResponse) -> SyncCacheWriteResult:
+            cache_started.set()
+            await allow_cache_finish.wait()
+            return SyncCacheWriteResult(complete=True)
+
+        bot._first_sync_done = True
+        bot.client.next_batch = "s_after_delayed_cache"
+        bot._coalescing_gate.drain_all = AsyncMock()
+        sync_response = self._sync_response({})
+
+        with patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(side_effect=delayed_cache_result),
+        ):
+            response_task = asyncio.create_task(
+                self._run_sync_response_without_startup_side_effects(bot, sync_response),
+            )
+            try:
+                await asyncio.wait_for(cache_started.wait(), timeout=1.0)
+
+                assert load_sync_token(bot.storage_path, bot.agent_name) is None
+                await bot.prepare_for_sync_shutdown()
+                assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+                allow_cache_finish.set()
+                await asyncio.wait_for(response_task, timeout=1.0)
+            finally:
+                allow_cache_finish.set()
+                await asyncio.gather(response_task, return_exceptions=True)
+
+        assert load_sync_token(bot.storage_path, bot.agent_name) == "s_after_delayed_cache"
+
+    @pytest.mark.asyncio
+    async def test_restored_first_sync_success_uses_checkpoint_boundary(self, bot: AgentBot) -> None:
+        """Successful restored-token catch-up should carry forward the loaded cache boundary."""
+        _save_certified_sync_token(bot, "s_before_complete", thread_cache_valid_after=1.0)
+        bot._runtime_view.mark_runtime_started()
+        runtime_started_at = bot._runtime_view.runtime_started_at
+        bot._restore_saved_sync_token()
+        bot.client.next_batch = "s_after_complete"
+
+        await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
+
+        token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
+        assert token_record is not None
+        assert token_record.token == "s_after_complete"  # noqa: S105
+        assert token_record.thread_cache_valid_after == 1.0
+        assert bot._runtime_view.thread_cache_read_boundary == 1.0
+        assert bot._runtime_view.thread_cache_read_boundary < runtime_started_at
+
+    @pytest.mark.asyncio
+    async def test_limited_restored_first_sync_clears_token_and_advances_boundary(self, bot: AgentBot) -> None:
+        """Limited restored-token catch-up must fail closed and force a cold retry token."""
+        _save_certified_sync_token(bot, "s_before_limited", thread_cache_valid_after=1.0)
+        bot._runtime_view.mark_runtime_started()
+        runtime_started_at = bot._runtime_view.runtime_started_at
+        bot._restore_saved_sync_token()
+        bot.client.next_batch = "s_after_limited"
+        sync_response = self._sync_response(
+            {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert bot.client.next_batch is None
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+        assert bot._runtime_view.thread_cache_read_boundary >= runtime_started_at
+
+    @pytest.mark.asyncio
+    async def test_cache_failure_clears_token_then_later_success_saves_advanced_boundary(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """After cache uncertainty, later checkpoints are allowed only with the new boundary."""
+        _save_certified_sync_token(bot, "s_before_failure", thread_cache_valid_after=1.0)
+        bot._runtime_view.mark_runtime_started()
+        bot._restore_saved_sync_token()
+        bot._first_sync_done = True
+        bot.client.next_batch = "s_after_failure"
+        failed_result = SyncCacheWriteResult(complete=True, errors=(RuntimeError("cache failed"),))
+
+        with patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(return_value=failed_result),
+        ):
+            await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
+
+        failed_boundary = bot._runtime_view.thread_cache_read_boundary
+        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+
+        bot.client.next_batch = "s_after_recovery"
+        with patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+        ):
+            await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
+
+        token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
+        assert token_record is not None
+        assert token_record.token == "s_after_recovery"  # noqa: S105
+        assert token_record.thread_cache_valid_after == failed_boundary
+
+    @pytest.mark.asyncio
+    async def test_empty_joined_rooms_first_sync_certifies_checkpoint(self, bot: AgentBot) -> None:
+        """A non-limited empty sync response can certify that there were no room deltas."""
+        _save_certified_sync_token(bot, "s_before_empty", thread_cache_valid_after=1.0)
+        bot._runtime_view.mark_runtime_started()
+        bot._restore_saved_sync_token()
+        bot.client.next_batch = "s_after_empty"
+
+        await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
+
+        token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
+        assert token_record is not None
+        assert token_record.token == "s_after_empty"  # noqa: S105
+        assert token_record.thread_cache_valid_after == 1.0
 
     @pytest.mark.asyncio
     async def test_sync_error_keeps_watchdog_clock_on_latest_activity(self, bot: AgentBot) -> None:
@@ -5152,6 +5319,249 @@ class TestThreadingBehavior:
         assert replaced is False
         assert cached_history is not None
         assert [event["event_id"] for event in cached_history] == [thread_id, "$reply_new:localhost"]
+
+    @pytest.mark.asyncio
+    async def test_prewarm_started_before_trust_revocation_does_not_seed_fresh_cache(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A prewarm fetch that began before trust revocation must not look fresh afterward."""
+        support = await _bind_owned_runtime_support(bot)
+        room_id = "!test:localhost"
+        thread_id = "$thread_root:localhost"
+        old_root_event = _text_event(
+            event_id=thread_id,
+            body="Old root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        old_reply_event = _text_event(
+            event_id="$reply_old:localhost",
+            body="Old reply",
+            sender="@agent:localhost",
+            server_timestamp=2000,
+            thread_id=thread_id,
+        )
+        fresh_root_event = _text_event(
+            event_id=thread_id,
+            body="Fresh root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        fresh_reply_event = _text_event(
+            event_id="$reply_fresh:localhost",
+            body="Fresh reply",
+            sender="@agent:localhost",
+            server_timestamp=3000,
+            thread_id=thread_id,
+        )
+        prewarm_fetch_started = asyncio.Event()
+        allow_prewarm_fetch_finish = asyncio.Event()
+        room_scan_count = 0
+
+        async def room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+            nonlocal room_scan_count
+            room_scan_count += 1
+            if room_scan_count == 1:
+                prewarm_fetch_started.set()
+                await allow_prewarm_fetch_finish.wait()
+                return nio.RoomMessagesResponse(
+                    room_id=room_id,
+                    chunk=[old_reply_event, old_root_event],
+                    start="",
+                    end=None,
+                )
+            return nio.RoomMessagesResponse(
+                room_id=room_id,
+                chunk=[fresh_reply_event, fresh_root_event],
+                start="",
+                end=None,
+            )
+
+        try:
+            bot.client.room_messages = AsyncMock(side_effect=room_messages)
+            prewarm_task = asyncio.create_task(
+                bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+                    room_id,
+                    thread_id,
+                ),
+            )
+            await asyncio.wait_for(prewarm_fetch_started.wait(), timeout=1.0)
+
+            bot._runtime_view.thread_cache_read_boundary = time.time()
+            allow_prewarm_fetch_finish.set()
+            prewarm_history = await asyncio.wait_for(prewarm_task, timeout=1.0)
+
+            history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
+        finally:
+            allow_prewarm_fetch_finish.set()
+            await _close_bound_runtime_support(bot, support)
+
+        assert [message.body for message in prewarm_history] == ["Old root", "Old reply"]
+        assert [message.body for message in history] == ["Fresh root", "Fresh reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "validated_before_runtime_start"
+        assert bot.client.room_messages.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_dispatch_refill_started_before_trust_revocation_does_not_seed_fresh_cache(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A normal dispatch refill that began before revocation must not seed a fresh row."""
+        support = await _bind_owned_runtime_support(bot)
+        room_id = "!test:localhost"
+        thread_id = "$thread_root:localhost"
+        old_root_event = _text_event(
+            event_id=thread_id,
+            body="Old root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        old_reply_event = _text_event(
+            event_id="$reply_old:localhost",
+            body="Old reply",
+            sender="@agent:localhost",
+            server_timestamp=2000,
+            thread_id=thread_id,
+        )
+        fresh_root_event = _text_event(
+            event_id=thread_id,
+            body="Fresh root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        fresh_reply_event = _text_event(
+            event_id="$reply_fresh:localhost",
+            body="Fresh reply",
+            sender="@agent:localhost",
+            server_timestamp=3000,
+            thread_id=thread_id,
+        )
+        dispatch_fetch_started = asyncio.Event()
+        allow_dispatch_fetch_finish = asyncio.Event()
+        room_scan_count = 0
+
+        async def room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+            nonlocal room_scan_count
+            room_scan_count += 1
+            if room_scan_count == 1:
+                dispatch_fetch_started.set()
+                await allow_dispatch_fetch_finish.wait()
+                return nio.RoomMessagesResponse(
+                    room_id=room_id,
+                    chunk=[old_reply_event, old_root_event],
+                    start="",
+                    end=None,
+                )
+            return nio.RoomMessagesResponse(
+                room_id=room_id,
+                chunk=[fresh_reply_event, fresh_root_event],
+                start="",
+                end=None,
+            )
+
+        try:
+            bot.client.room_messages = AsyncMock(side_effect=room_messages)
+            dispatch_task = asyncio.create_task(
+                bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id),
+            )
+            await asyncio.wait_for(dispatch_fetch_started.wait(), timeout=1.0)
+
+            bot._runtime_view.thread_cache_read_boundary = time.time()
+            allow_dispatch_fetch_finish.set()
+            dispatch_history = await asyncio.wait_for(dispatch_task, timeout=1.0)
+
+            history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
+        finally:
+            allow_dispatch_fetch_finish.set()
+            await _close_bound_runtime_support(bot, support)
+
+        assert [message.body for message in dispatch_history] == ["Old root", "Old reply"]
+        assert [message.body for message in history] == ["Fresh root", "Fresh reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "validated_before_runtime_start"
+        assert bot.client.room_messages.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_guarded_refill_commit_after_trust_revocation_does_not_look_fresh(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A guarded replacement that commits after revocation must still be rejected by strict reads."""
+        support = await _bind_owned_runtime_support(bot)
+        room_id = "!test:localhost"
+        thread_id = "$thread_root:localhost"
+        old_root_event = _text_event(
+            event_id=thread_id,
+            body="Old root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        old_reply_event = _text_event(
+            event_id="$reply_old:localhost",
+            body="Old reply",
+            sender="@agent:localhost",
+            server_timestamp=2000,
+            thread_id=thread_id,
+        )
+        fresh_root_event = _text_event(
+            event_id=thread_id,
+            body="Fresh root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+        )
+        fresh_reply_event = _text_event(
+            event_id="$reply_fresh:localhost",
+            body="Fresh reply",
+            sender="@agent:localhost",
+            server_timestamp=3000,
+            thread_id=thread_id,
+        )
+        write_entered = asyncio.Event()
+        allow_write_commit = asyncio.Event()
+        original_replace = event_cache_threads_module.replace_thread_locked_if_not_newer
+
+        async def blocked_replace(*args: object, **kwargs: object) -> bool:
+            write_entered.set()
+            await allow_write_commit.wait()
+            return await original_replace(*args, **kwargs)
+
+        try:
+            fetch_started_at = time.time()
+            with patch(
+                "mindroom.matrix.cache.event_cache_threads.replace_thread_locked_if_not_newer",
+                new=blocked_replace,
+            ):
+                write_task = asyncio.create_task(
+                    bot.event_cache.replace_thread_if_not_newer(
+                        room_id,
+                        thread_id,
+                        [old_root_event.source, old_reply_event.source],
+                        fetch_started_at=fetch_started_at,
+                    ),
+                )
+                await asyncio.wait_for(write_entered.wait(), timeout=1.0)
+
+                bot._runtime_view.thread_cache_read_boundary = time.time()
+                allow_write_commit.set()
+                replaced = await asyncio.wait_for(write_task, timeout=1.0)
+
+            page = MagicMock(spec=nio.RoomMessagesResponse)
+            page.chunk = [fresh_reply_event, fresh_root_event]
+            page.end = None
+            bot.client.room_messages = AsyncMock(return_value=page)
+
+            history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
+        finally:
+            allow_write_commit.set()
+            await _close_bound_runtime_support(bot, support)
+
+        assert replaced is True
+        assert [message.body for message in history] == ["Fresh root", "Fresh reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "validated_before_runtime_start"
+        bot.client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_lookup_miss_sync_plain_edit_invalidates_room_cache_state(
