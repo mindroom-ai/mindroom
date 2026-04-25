@@ -663,6 +663,7 @@ def _model_template_block(provider_preset: _ProviderPreset) -> str:
     if provider_preset == "codex":
         lines.extend(
             [
+                "context_window: 258000",
                 "# Prompt caching is enabled automatically per active agent session.",
                 "extra_kwargs:",
                 "  reasoning_effort: medium",
