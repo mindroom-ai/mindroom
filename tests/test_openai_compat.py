@@ -376,7 +376,7 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
         patch("mindroom.api.openai_compat._load_config", side_effect=_capture_load_config),
         patch(
             "mindroom.api.openai_compat._non_stream_completion",
-            new=AsyncMock(return_value=JSONResponse({"ok": True})),
+            new=AsyncMock(return_value=openai_compat._OpenAIJSONResponse({"ok": True})),
         ),
         TestClient(app) as client,
     ):
@@ -1978,14 +1978,24 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
         assert completion_lock.locked()
         events.append("compact")
 
-    response = JSONResponse(
+    response = openai_compat._OpenAIJSONResponse(
         content={"ok": True},
         background=BackgroundTask(existing_background),
     )
 
     wrapped = openai_compat._attach_openai_completion_lock_release(response, completion_lock)
-    assert wrapped.background is not None
-    await wrapped.background()
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.request"}
+
+    async def send(_message: dict[str, object]) -> None:
+        return None
+
+    await wrapped(
+        {"type": "http"},
+        receive,
+        send,
+    )
 
     assert events == ["compact"]
     assert not completion_lock.locked()
@@ -1998,9 +2008,12 @@ async def test_openai_stream_response_runs_background_when_client_closes_after_d
     from starlette.requests import ClientDisconnect  # noqa: PLC0415
 
     events: list[str] = []
+    done_sent = False
 
     async def body() -> AsyncIterator[str]:
+        nonlocal done_sent
         yield "data: [DONE]\n\n"
+        done_sent = True
 
     async def background() -> None:
         events.append("compact")
@@ -2010,6 +2023,7 @@ async def test_openai_stream_response_runs_background_when_client_closes_after_d
         media_type="text/event-stream",
         background=BackgroundTask(background),
     )
+    response.completion_predicate = lambda: done_sent
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2027,6 +2041,92 @@ async def test_openai_stream_response_runs_background_when_client_closes_after_d
         )
 
     assert events == ["compact"]
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_response_skips_background_when_client_closes_before_done() -> None:
+    """Incomplete streams must release the lock without running destructive compaction."""
+    from starlette.background import BackgroundTask  # noqa: PLC0415
+    from starlette.requests import ClientDisconnect  # noqa: PLC0415
+
+    events: list[str] = []
+    done_sent = False
+    completion_lock = asyncio.Lock()
+    await completion_lock.acquire()
+
+    async def body() -> AsyncIterator[str]:
+        nonlocal done_sent
+        yield "data: partial\n\n"
+        yield "data: [DONE]\n\n"
+        done_sent = True
+
+    async def background() -> None:
+        events.append("compact")
+
+    streaming_response = openai_compat._OpenAIStreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        background=BackgroundTask(background),
+    )
+    streaming_response.completion_predicate = lambda: done_sent
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock)
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.body" and message.get("body") == b"data: partial\n\n":
+            error_message = "client closed"
+            raise OSError(error_message)
+
+    with pytest.raises(ClientDisconnect):
+        await response(
+            {"type": "http", "asgi": {"spec_version": "2.4"}},
+            receive,
+            send,
+        )
+
+    assert events == []
+    assert not completion_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_openai_json_response_skips_background_when_send_fails() -> None:
+    """JSON send failures should release the lock without compacting an undelivered response."""
+    from starlette.background import BackgroundTask  # noqa: PLC0415
+
+    events: list[str] = []
+    completion_lock = asyncio.Lock()
+    await completion_lock.acquire()
+
+    async def background() -> None:
+        events.append("compact")
+
+    response = openai_compat._attach_openai_completion_lock_release(
+        openai_compat._OpenAIJSONResponse(
+            content={"ok": True},
+            background=BackgroundTask(background),
+        ),
+        completion_lock,
+    )
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.body":
+            error_message = "client closed"
+            raise OSError(error_message)
+
+    with pytest.raises(OSError, match="client closed"):
+        await response(
+            {"type": "http"},
+            receive,
+            send,
+        )
+
+    assert events == []
+    assert not completion_lock.locked()
 
 
 @pytest.mark.asyncio

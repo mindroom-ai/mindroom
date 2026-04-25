@@ -114,30 +114,84 @@ class _ToolStreamState:
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
+async def _run_openai_response_backgrounds(
+    *,
+    completed: bool,
+    response_error: BaseException | None,
+    completion_background: BackgroundTask | None,
+    always_background: BackgroundTask | None,
+) -> None:
+    """Run completion-scoped and always-run OpenAI response backgrounds."""
+    background_error: BaseException | None = None
+    if completed and completion_background is not None:
+        try:
+            await completion_background()
+        except BaseException as error:
+            background_error = error
+
+    finalizer_error: BaseException | None = None
+    if always_background is not None:
+        try:
+            await always_background()
+        except BaseException as error:
+            finalizer_error = error
+
+    if response_error is not None:
+        raise response_error
+    if background_error is not None:
+        raise background_error
+    if finalizer_error is not None:
+        raise finalizer_error
+
+
 class _OpenAIJSONResponse(JSONResponse):
-    """JSON response that always runs its finalizer after a send attempt."""
+    """JSON response with separate completion-scoped and always-run finalizers."""
+
+    always_background: BackgroundTask | None = None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        background = self.background
+        completion_background = self.background
         self.background = None
+        completed = False
+        response_error: BaseException | None = None
         try:
             await super().__call__(scope, receive, send)
-        finally:
-            if background is not None:
-                await background()
+        except BaseException as error:
+            response_error = error
+        else:
+            completed = True
+        await _run_openai_response_backgrounds(
+            completed=completed,
+            response_error=response_error,
+            completion_background=completion_background,
+            always_background=self.always_background,
+        )
 
 
 class _OpenAIStreamingResponse(StreamingResponse):
-    """Streaming response that always runs its finalizer after a send attempt."""
+    """Streaming response with completion-aware compaction and always-run finalizers."""
+
+    always_background: BackgroundTask | None = None
+    completion_predicate: Callable[[], bool] | None = None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        background = self.background
+        completion_background = self.background
         self.background = None
+        completed = False
+        response_error: BaseException | None = None
         try:
             await super().__call__(scope, receive, send)
-        finally:
-            if background is not None:
-                await background()
+        except BaseException as error:
+            response_error = error
+            completed = self.completion_predicate() if self.completion_predicate is not None else False
+        else:
+            completed = True
+        await _run_openai_response_backgrounds(
+            completed=completed,
+            response_error=response_error,
+            completion_background=completion_background,
+            always_background=self.always_background,
+        )
 
 
 def _openai_completion_lock(
@@ -161,17 +215,6 @@ def _openai_completion_lock(
     return lock
 
 
-async def _run_response_background_then_release_lock(
-    background: BackgroundTask | None,
-    completion_lock: asyncio.Lock,
-) -> None:
-    try:
-        if background is not None:
-            await background()
-    finally:
-        _release_openai_completion_lock(completion_lock)
-
-
 def _release_openai_completion_lock(completion_lock: asyncio.Lock) -> None:
     if completion_lock.locked():
         completion_lock.release()
@@ -181,11 +224,11 @@ def _attach_openai_completion_lock_release(
     response: JSONResponse | StreamingResponse,
     completion_lock: asyncio.Lock,
 ) -> JSONResponse | StreamingResponse:
-    response.background = BackgroundTask(
-        _run_response_background_then_release_lock,
-        response.background,
-        completion_lock,
-    )
+    if not isinstance(response, (_OpenAIJSONResponse, _OpenAIStreamingResponse)):
+        _release_openai_completion_lock(completion_lock)
+        msg = f"OpenAI completion response must use a finalizer-safe response class, got {type(response).__name__}"
+        raise TypeError(msg)
+    response.always_background = BackgroundTask(_release_openai_completion_lock, completion_lock)
     return response
 
 
@@ -1223,8 +1266,10 @@ async def _stream_completion(  # noqa: C901
 
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
+    stream_completed = False
 
     async def event_generator() -> AsyncIterator[str]:
+        nonlocal stream_completed
         tool_state = _ToolStreamState()
         saw_text_delta = False
         completed_body: str | None = None
@@ -1264,10 +1309,11 @@ async def _stream_completion(  # noqa: C901
 
             # 5. Stream terminator
             yield "data: [DONE]\n\n"
+            stream_completed = True
         finally:
             await stream.aclose()
 
-    return _OpenAIStreamingResponse(
+    response = _OpenAIStreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         background=_openai_post_response_compaction_task(
@@ -1277,6 +1323,8 @@ async def _stream_completion(  # noqa: C901
             execution_identity=execution_identity,
         ),
     )
+    response.completion_predicate = lambda: stream_completed
+    return response
 
 
 async def _run_openai_post_response_compaction_checks(
@@ -1669,8 +1717,10 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
 
         completion_id = f"chatcmpl-{uuid4().hex[:12]}"
         created = int(time.time())
+        stream_completed = False
 
         async def _event_generator() -> AsyncGenerator[str, None]:
+            nonlocal stream_completed
             try:
                 async for chunk in _team_stream_event_generator(
                     stream=stream,
@@ -1681,10 +1731,12 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                     team_name=team_name,
                 ):
                     yield chunk
+                    if chunk == "data: [DONE]\n\n":
+                        stream_completed = True
             finally:
                 await _cleanup()
 
-        return _OpenAIStreamingResponse(
+        response = _OpenAIStreamingResponse(
             _event_generator(),
             media_type="text/event-stream",
             background=_openai_post_response_compaction_task(
@@ -1694,6 +1746,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 execution_identity=execution_identity,
             ),
         )
+        response.completion_predicate = lambda: stream_completed
     except Exception:
         stack.close()
         close_team_runtime_sqlite_dbs(
@@ -1702,6 +1755,8 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
         raise
+    else:
+        return response
 
 
 def _extract_team_stream_failure(event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput) -> str | None:
