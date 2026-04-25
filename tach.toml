@@ -705,8 +705,8 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.history",
     "mindroom.history.interrupted_replay",
-    "mindroom.history.runtime",
     "mindroom.history.turn_recorder",
     "mindroom.hooks",
     "mindroom.knowledge",
@@ -2269,6 +2269,7 @@ expose = [
     "read_scope_state",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
+    "run_post_response_compaction_check",
     "update_scope_seen_event_ids",
     "write_scope_state",
 ]

@@ -29,8 +29,8 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history import run_post_response_compaction_check
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
-from mindroom.history.runtime import run_post_response_compaction_check
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import (
     EVENT_SESSION_STARTED,

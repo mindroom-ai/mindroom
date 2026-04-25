@@ -96,7 +96,7 @@ if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
 
     from mindroom.config.main import Config
-    from mindroom.history.types import PostResponseCompactionCheck
+    from mindroom.history import PostResponseCompactionCheck
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
 logger = get_logger(__name__)
 

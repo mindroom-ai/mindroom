@@ -19,6 +19,7 @@ from mindroom.history.runtime import (
     prepare_history_for_run,
     prepare_scope_history,
     resolve_bound_team_scope_context,
+    run_post_response_compaction_check,
 )
 from mindroom.history.storage import (
     add_pending_force_compaction_scope,
@@ -81,6 +82,7 @@ __all__ = [
     "read_scope_state",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
+    "run_post_response_compaction_check",
     "update_scope_seen_event_ids",
     "write_scope_state",
 ]

@@ -81,8 +81,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
+    from mindroom.history import CompactionLifecycle, PostResponseCompactionCheck
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.history.types import CompactionLifecycle, PostResponseCompactionCheck
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.events import ToolTraceEntry
