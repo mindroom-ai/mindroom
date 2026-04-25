@@ -13,7 +13,7 @@ import {
   getCoreRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { API_ENDPOINTS } from "@/lib/api";
+import { apiErrorMessageFromPayload, API_ENDPOINTS } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useConfigStore } from "@/store/configStore";
 import type { KnowledgeBaseConfig, KnowledgeGitConfig } from "@/types/config";
@@ -222,9 +222,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
     let detail = response.statusText;
     try {
       const payload = await response.json();
-      if (typeof payload?.detail === "string") {
-        detail = payload.detail;
-      }
+      detail = apiErrorMessageFromPayload(payload, detail);
     } catch {
       // Keep fallback detail
     }
@@ -271,6 +269,10 @@ export function Knowledge() {
     () => config?.knowledge_bases ?? {},
     [config?.knowledge_bases],
   );
+  const selectedBaseConfig = selectedBase
+    ? knowledgeBases[selectedBase]
+    : undefined;
+  const selectedBaseIsGitBacked = Boolean(selectedBaseConfig?.git);
   const baseNames = useMemo(
     () => Object.keys(knowledgeBases).sort(),
     [knowledgeBases],
@@ -613,6 +615,12 @@ export function Knowledge() {
       if (selectedFiles.length === 0 || !selectedBase) {
         return;
       }
+      if (selectedBaseIsGitBacked) {
+        setError(
+          "Git-backed knowledge bases sync from the repository. Update the repository and reindex instead.",
+        );
+        return;
+      }
 
       const formData = new FormData();
       selectedFiles.forEach((file) => {
@@ -650,12 +658,18 @@ export function Knowledge() {
         setUploading(false);
       }
     },
-    [loadData, selectedBase, toast],
+    [loadData, selectedBase, selectedBaseIsGitBacked, toast],
   );
 
   const handleDeleteFile = useCallback(
     async (path: string) => {
       if (!selectedBase) {
+        return;
+      }
+      if (selectedBaseIsGitBacked) {
+        setError(
+          "Git-backed knowledge bases sync from the repository. Update the repository and reindex instead.",
+        );
         return;
       }
 
@@ -691,7 +705,7 @@ export function Knowledge() {
         setDeletingPath(null);
       }
     },
-    [loadData, selectedBase, toast],
+    [loadData, selectedBase, selectedBaseIsGitBacked, toast],
   );
 
   const handleReindex = useCallback(async () => {
@@ -730,8 +744,8 @@ export function Knowledge() {
     }
   }, [loadData, selectedBase, toast]);
 
-  const columns: ColumnDef<KnowledgeFile>[] = useMemo(
-    () => [
+  const columns: ColumnDef<KnowledgeFile>[] = useMemo(() => {
+    const baseColumns: ColumnDef<KnowledgeFile>[] = [
       {
         accessorKey: "name",
         header: () => <span className="font-medium">Name</span>,
@@ -759,6 +773,14 @@ export function Knowledge() {
         header: () => <span className="font-medium">Modified</span>,
         cell: ({ row }) => formatModifiedDate(row.original.modified),
       },
+    ];
+
+    if (selectedBaseIsGitBacked) {
+      return baseColumns;
+    }
+
+    return [
+      ...baseColumns,
       {
         id: "actions",
         header: () => <span className="font-medium">Actions</span>,
@@ -770,15 +792,15 @@ export function Knowledge() {
               onClick={() => handleDeleteFile(row.original.path)}
               disabled={deletingPath === row.original.path || isDirty}
               title="Delete file"
+              aria-label={`Delete ${row.original.path}`}
             >
               <Trash2 className="h-4 w-4 text-destructive" />
             </Button>
           </div>
         ),
       },
-    ],
-    [deletingPath, handleDeleteFile, isDirty],
-  );
+    ];
+  }, [deletingPath, handleDeleteFile, isDirty, selectedBaseIsGitBacked]);
 
   const table = useReactTable({
     data: files,
@@ -1428,8 +1450,9 @@ export function Knowledge() {
                     </div>
 
                     <p className="text-xs text-muted-foreground">
-                      Uploaded files remain supported and are combined with
-                      Git-synced content.
+                      File upload and delete actions are disabled for Git
+                      sources. Update the repository and reindex to refresh
+                      content.
                     </p>
                   </div>
                 ) : null}
@@ -1542,47 +1565,17 @@ export function Knowledge() {
 
         {selectedBase && (
           <>
-            <Card
-              className={cn(
-                "border-dashed transition-colors",
-                dragActive ? "border-primary bg-primary/5" : "border-border",
-              )}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragActive(true);
-              }}
-              onDragLeave={(event) => {
-                event.preventDefault();
-                setDragActive(false);
-              }}
-              onDrop={onDrop}
-            >
-              <CardContent className="py-6">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <div>
-                    <p className="font-medium">
-                      Drop files here or upload manually
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      Supported formats are auto-detected by agno readers.
-                    </p>
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      className="hidden"
-                      multiple
-                      onChange={onFileInputChange}
-                    />
-                    <Button
-                      variant="outline"
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={uploading || isDirty}
-                    >
-                      <Upload className="h-4 w-4 mr-2" />
-                      {uploading ? "Uploading..." : "Upload"}
-                    </Button>
+            {selectedBaseIsGitBacked ? (
+              <Card>
+                <CardContent className="py-6">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="font-medium">Repository-managed files</p>
+                      <p className="text-sm text-muted-foreground">
+                        Update the configured repository, then reindex to sync
+                        and rebuild this base.
+                      </p>
+                    </div>
                     <Button
                       variant="outline"
                       onClick={handleReindex}
@@ -1597,9 +1590,68 @@ export function Knowledge() {
                       {reindexing ? "Reindexing..." : "Reindex"}
                     </Button>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            ) : (
+              <Card
+                className={cn(
+                  "border-dashed transition-colors",
+                  dragActive ? "border-primary bg-primary/5" : "border-border",
+                )}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setDragActive(true);
+                }}
+                onDragLeave={(event) => {
+                  event.preventDefault();
+                  setDragActive(false);
+                }}
+                onDrop={onDrop}
+              >
+                <CardContent className="py-6">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div>
+                      <p className="font-medium">
+                        Drop files here or upload manually
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Supported formats are auto-detected by agno readers.
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        className="hidden"
+                        multiple
+                        onChange={onFileInputChange}
+                      />
+                      <Button
+                        variant="outline"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploading || isDirty}
+                      >
+                        <Upload className="h-4 w-4 mr-2" />
+                        {uploading ? "Uploading..." : "Upload"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={handleReindex}
+                        disabled={reindexing || isDirty}
+                      >
+                        <RefreshCw
+                          className={cn(
+                            "h-4 w-4 mr-2",
+                            reindexing && "animate-spin",
+                          )}
+                        />
+                        {reindexing ? "Reindexing..." : "Reindex"}
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             <Card>
               <CardHeader className="pb-3">
@@ -1637,7 +1689,9 @@ export function Knowledge() {
                             colSpan={columns.length}
                             className="px-4 py-8 text-center text-muted-foreground"
                           >
-                            No files uploaded yet.
+                            {selectedBaseIsGitBacked
+                              ? "No repository files available yet."
+                              : "No files uploaded yet."}
                           </td>
                         </tr>
                       ) : (

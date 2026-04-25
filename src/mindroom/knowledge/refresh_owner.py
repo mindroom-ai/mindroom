@@ -175,7 +175,7 @@ class PerBindingKnowledgeRefreshOwner:
             execution_identity=execution_identity,
         )
         task = self._tasks.get(key)
-        if task is not None and not task.done():
+        if task is not None:
             self._pending[key] = request
             return
 

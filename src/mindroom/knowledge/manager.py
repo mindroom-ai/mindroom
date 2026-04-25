@@ -1222,7 +1222,6 @@ class KnowledgeManager:
         retained_collections: tuple[str, ...],
         protected_collections: tuple[str, ...],
     ) -> None:
-        _ = previous_state
         vector_db = self._knowledge.vector_db
         if not isinstance(vector_db, ChromaDb):
             return
@@ -1233,6 +1232,10 @@ class KnowledgeManager:
         protected_collection_names = set(retained_collections)
         protected_collection_names.update(protected_collections)
         protected_collection_names.add(self._current_collection_name())
+        default_collection = self._default_collection_name()
+        legacy_collections = {default_collection}
+        if previous_state is not None and previous_state.collection:
+            legacy_collections.add(previous_state.collection)
         candidate_prefix = f"{self._default_collection_name()}_candidate_"
 
         try:
@@ -1246,7 +1249,8 @@ class KnowledgeManager:
             return
 
         for collection_name in collection_names:
-            if collection_name in protected_collection_names or not collection_name.startswith(candidate_prefix):
+            same_base_collection = collection_name in legacy_collections or collection_name.startswith(candidate_prefix)
+            if collection_name in protected_collection_names or not same_base_collection:
                 continue
             try:
                 self._delete_vector_db(self._build_vector_db(collection_name))

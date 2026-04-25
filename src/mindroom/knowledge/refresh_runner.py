@@ -53,21 +53,30 @@ class KnowledgeRefreshResult:
     last_error: str | None = None
 
 
-_refresh_locks: dict[KnowledgeRefreshKey, asyncio.Lock] = {}
-_refresh_lock_accessed_at: dict[KnowledgeRefreshKey, float] = {}
+_RefreshLockKey = tuple[KnowledgeRefreshKey, int]
+_refresh_locks: dict[_RefreshLockKey, asyncio.Lock] = {}
+_refresh_lock_accessed_at: dict[_RefreshLockKey, float] = {}
 _refresh_locks_guard = Lock()
 _active_refresh_counts: dict[KnowledgeRefreshKey, int] = {}
 _active_refresh_counts_guard = Lock()
 _MAX_REFRESH_LOCKS = 512
 
 
+def _running_loop_key() -> int:
+    try:
+        return id(asyncio.get_running_loop())
+    except RuntimeError:
+        return 0
+
+
 def _refresh_lock_for_key(key: KnowledgeRefreshKey) -> asyncio.Lock:
+    lock_key = (key, _running_loop_key())
     with _refresh_locks_guard:
-        _refresh_lock_accessed_at[key] = time.monotonic()
-        lock = _refresh_locks.get(key)
+        _refresh_lock_accessed_at[lock_key] = time.monotonic()
+        lock = _refresh_locks.get(lock_key)
         if lock is None:
             lock = asyncio.Lock()
-            _refresh_locks[key] = lock
+            _refresh_locks[lock_key] = lock
             _prune_refresh_locks_locked()
         return lock
 
@@ -374,7 +383,7 @@ async def _publish_unchanged_local_snapshot(
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=updated_state.indexed_count or 0,
-        published=False,
+        published=True,
         availability=snapshot_availability_for_state(key=key, state=updated_state),
         last_error=updated_state.last_error,
     )

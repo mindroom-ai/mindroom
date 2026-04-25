@@ -93,7 +93,7 @@ agents:
 knowledge_bases:
   openclaw_memory:
     path: ${MINDROOM_STORAGE_PATH}/agents/openclaw/workspace/memory
-    watch: true
+    watch: false
 
 memory:
   file:
@@ -105,7 +105,9 @@ memory:
 When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`.
 If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded.
 The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` is auto-implied by `matrix_message`), so listing those tools individually is not necessary.
-Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `openclaw_memory` all read the same live workspace.
+Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `openclaw_memory` read the same canonical workspace.
+The `watch` flag is legacy/advisory, so knowledge refresh is scheduled on access or by explicit dashboard/API reindex rather than by a live filesystem watcher.
+If `openclaw_memory` is Git-backed, update the repository and reindex instead of using dashboard upload or delete actions.
 
 ## Recommended workspace layout
 

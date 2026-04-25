@@ -460,6 +460,37 @@ def test_mark_stale_uses_default_collection_for_legacy_metadata_without_collecti
     assert state.availability == KnowledgeAvailability.STALE.value
 
 
+@pytest.mark.asyncio
+async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path) -> None:
+    """Mutating one base should stale every published snapshot that reads the same source folder."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "guide.md"
+    doc.write_text("shared source old", encoding="utf-8")
+    config = _config(tmp_path, bases={"alpha": docs_path, "beta": docs_path}, agent_bases=["alpha", "beta"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
+    beta_lookup = get_published_snapshot("beta", config=config, runtime_paths=runtime_paths)
+    assert beta_lookup.snapshot is not None
+    assert beta_lookup.availability is KnowledgeAvailability.READY
+    doc.write_text("shared source new", encoding="utf-8")
+
+    marked = knowledge_registry.mark_published_snapshot_stale(
+        "alpha",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    beta_key = resolve_snapshot_key("beta", config=config, runtime_paths=runtime_paths)
+    beta_state = load_published_indexing_state(snapshot_metadata_path(beta_key))
+    refreshed_beta_lookup = get_published_snapshot("beta", config=config, runtime_paths=runtime_paths)
+
+    assert marked is True
+    assert beta_state is not None
+    assert beta_state.availability == KnowledgeAvailability.STALE.value
+    assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
+
+
 def test_legacy_git_raw_url_metadata_is_compatible_with_redacted_identity(tmp_path: Path) -> None:
     """Old metadata that stored raw Git URLs should remain compatible with credential-free identities."""
     docs_path = tmp_path / "docs"
@@ -828,6 +859,36 @@ async def test_successful_refreshes_keep_bounded_retention_metadata(tmp_path: Pa
     assert lookup.snapshot is not None
     assert [document.content for document in lookup.snapshot.knowledge.search("generation", max_results=5)] == [
         "generation 5",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publish_cleans_legacy_default_collection_after_migration(tmp_path: Path) -> None:
+    """A migrated metadata record without collection should not leave the old default collection forever."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("legacy default old", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    default_collection = manager._default_collection_name()
+    _VectorDb.collections[default_collection] = [
+        {"content": "legacy default old", "metadata": {"source_path": "doc.md"}},
+    ]
+    metadata_path = snapshot_metadata_path(key)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(json.dumps(list(key.indexing_settings)), encoding="utf-8")
+    doc.write_text("legacy default new", encoding="utf-8")
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert default_collection not in _VectorDb.collections
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.snapshot is not None
+    assert [document.content for document in lookup.snapshot.knowledge.search("legacy", max_results=5)] == [
+        "legacy default new",
     ]
 
 
@@ -1668,6 +1729,48 @@ async def test_refresh_owner_runs_one_pending_refresh_after_active_task(
 
 
 @pytest.mark.asyncio
+async def test_refresh_owner_done_task_keeps_newest_pending_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed task still owned by its callback must not let an older pending request run."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    old_config = config.model_copy(deep=True)
+    old_config.knowledge_bases["docs"].chunk_size = 2048
+    newest_config = config.model_copy(deep=True)
+    newest_config.knowledge_bases["docs"].chunk_size = 4096
+    runtime_paths = runtime_paths_for(config)
+    owner = PerBindingKnowledgeRefreshOwner()
+    key = knowledge_registry.resolve_refresh_key("docs", config=config, runtime_paths=runtime_paths)
+    seen_chunk_sizes: list[int] = []
+
+    async def _completed_refresh() -> None:
+        return None
+
+    async def _fake_refresh(base_id: str, **kwargs: object) -> object:
+        _ = base_id
+        refresh_config = kwargs["config"]
+        assert isinstance(refresh_config, Config)
+        seen_chunk_sizes.append(refresh_config.knowledge_bases["docs"].chunk_size)
+        return object()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+    done_task = asyncio.create_task(_completed_refresh())
+    await asyncio.sleep(0)
+    assert done_task.done()
+    owner._tasks[key] = done_task
+
+    owner.schedule_refresh("docs", config=old_config, runtime_paths=runtime_paths)
+    owner.schedule_refresh("docs", config=newest_config, runtime_paths=runtime_paths)
+    owner._handle_done(key, done_task)
+    await asyncio.sleep(0)
+    await owner.shutdown()
+
+    assert seen_chunk_sizes == [4096]
+
+
+@pytest.mark.asyncio
 async def test_refresh_owner_shutdown_suppresses_completed_refresh_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2004,6 +2107,35 @@ async def test_snapshot_indexed_count_uses_persisted_metadata_without_collection
     monkeypatch.setattr(_Client, "get_collection", _raise_scan)
 
     assert snapshot_indexed_count(lookup.snapshot) == 1
+
+
+@pytest.mark.asyncio
+async def test_local_noop_refresh_reports_published_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unchanged local refresh republishes a usable snapshot and reports it as published."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("local snapshot", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    reindex_count = 0
+    original_reindex = KnowledgeManager.reindex_all
+
+    async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
+        nonlocal reindex_count
+        reindex_count += 1
+        if reindex_count > 1:
+            msg = "unchanged local refresh should not reindex"
+            raise AssertionError(msg)
+        return await original_reindex(self, protected_collections=protected_collections)
+
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.published is True
+    assert result.indexed_count == 1
+    assert reindex_count == 1
 
 
 @pytest.mark.asyncio

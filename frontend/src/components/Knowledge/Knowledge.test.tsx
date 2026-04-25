@@ -66,6 +66,9 @@ function jsonResponse(payload: unknown, status = 200): Response {
 
 function setKnowledgeApiMock(
   payloadByBase: Record<string, KnowledgeApiPayloads>,
+  options: {
+    reindexResponses?: Record<string, Response>;
+  } = {},
 ) {
   const fetchMock = vi.mocked(global.fetch);
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -90,6 +93,17 @@ function setKnowledgeApiMock(
         payload
           ? jsonResponse(payload)
           : jsonResponse({ detail: "Not found" }, 404),
+      );
+    }
+
+    const reindexMatch = url.match(
+      /\/api\/knowledge\/bases\/([^/]+)\/reindex$/,
+    );
+    if (reindexMatch) {
+      const baseId = decodeURIComponent(reindexMatch[1] ?? "");
+      return Promise.resolve(
+        options.reindexResponses?.[baseId] ??
+          jsonResponse({ success: true, indexed_count: 1 }),
       );
     }
 
@@ -386,6 +400,149 @@ describe("Knowledge", () => {
     expect(screen.getByText("Git Error")).toBeInTheDocument();
     expect(screen.getByText(/Last Commit:/)).toHaveTextContent("abc123");
     expect(screen.getByText(/Git Error:/)).toHaveTextContent("fetch failed");
+  });
+
+  it("hides upload, drop, and file delete controls for git knowledge bases", async () => {
+    mockStore({
+      git_docs: {
+        path: "./knowledge_docs/git_docs",
+        watch: true,
+        git: {
+          repo_url: "https://github.com/org/git-docs",
+          branch: "release",
+        },
+      },
+    });
+    setKnowledgeApiMock({
+      git_docs: {
+        status: {
+          base_id: "git_docs",
+          folder_path: "./knowledge_docs/git_docs",
+          watch: true,
+          file_count: 1,
+          indexed_count: 1,
+          git: {
+            repo_url: "https://github.com/org/git-docs",
+            branch: "release",
+            lfs: false,
+            startup_behavior: "blocking",
+            syncing: false,
+            repo_present: true,
+            initial_sync_complete: true,
+            last_successful_sync_at: null,
+            last_successful_commit: "abc123",
+            last_error: null,
+            pending_startup_mode: null,
+          },
+        },
+        files: {
+          base_id: "git_docs",
+          files: [
+            {
+              name: "guide.md",
+              path: "guide.md",
+              size: 42,
+              modified: "2026-02-09T00:00:00.000Z",
+              type: "md",
+            },
+          ],
+          total_size: 42,
+          file_count: 1,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: git_docs");
+
+    expect(screen.getByText("Repository-managed files")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Drop files here or upload manually"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Upload" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Delete guide.md" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reindex" })).toBeInTheDocument();
+  });
+
+  it("surfaces structured reindex failure details", async () => {
+    mockStore({
+      git_docs: {
+        path: "./knowledge_docs/git_docs",
+        watch: true,
+        git: {
+          repo_url: "https://github.com/org/git-docs",
+          branch: "release",
+        },
+      },
+    });
+    setKnowledgeApiMock(
+      {
+        git_docs: {
+          status: {
+            base_id: "git_docs",
+            folder_path: "./knowledge_docs/git_docs",
+            watch: true,
+            file_count: 1,
+            indexed_count: 0,
+            git: {
+              repo_url: "https://github.com/org/git-docs",
+              branch: "release",
+              lfs: false,
+              startup_behavior: "blocking",
+              syncing: false,
+              repo_present: true,
+              initial_sync_complete: false,
+              last_successful_sync_at: null,
+              last_successful_commit: null,
+              last_error: null,
+              pending_startup_mode: null,
+            },
+          },
+          files: {
+            base_id: "git_docs",
+            files: [],
+            total_size: 0,
+            file_count: 0,
+          },
+        },
+      },
+      {
+        reindexResponses: {
+          git_docs: jsonResponse(
+            {
+              detail: {
+                success: false,
+                base_id: "git_docs",
+                indexed_count: 0,
+                availability: "refresh_failed",
+                last_error: "Indexed 0 of 1 managed knowledge files",
+              },
+            },
+            409,
+          ),
+        },
+      },
+    );
+
+    render(<Knowledge />);
+    await screen.findByText("Active: git_docs");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reindex" }));
+
+    expect(
+      await screen.findByText("Indexed 0 of 1 managed knowledge files"),
+    ).toBeInTheDocument();
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Reindex failed",
+        description: "Indexed 0 of 1 managed knowledge files",
+        variant: "destructive",
+      }),
+    );
   });
 
   it("switches source type in settings and toggles git fields", async () => {

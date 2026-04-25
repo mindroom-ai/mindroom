@@ -395,6 +395,10 @@ def _same_physical_binding(key: KnowledgeSnapshotKey, refresh_key: KnowledgeRefr
     )
 
 
+def _same_physical_source(left: KnowledgeSnapshotKey, right: KnowledgeSnapshotKey) -> bool:
+    return left.storage_root == right.storage_root and left.knowledge_path == right.knowledge_path
+
+
 def _snapshot_key_is_private(key: KnowledgeSnapshotKey) -> bool:
     return key.base_id.startswith(_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
 
@@ -802,19 +806,45 @@ def mark_published_snapshot_stale(
         execution_identity=execution_identity,
         create=False,
     )
-    metadata_path = snapshot_metadata_path(key)
-    state = load_published_indexing_state(metadata_path)
-    if state is None:
-        return False
+    matching_keys = [key]
+    for candidate_base_id in config.knowledge_bases:
+        if candidate_base_id == base_id:
+            continue
+        try:
+            candidate_key = resolve_snapshot_key(
+                candidate_base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                create=False,
+            )
+        except Exception:
+            logger.warning(
+                "Could not resolve related knowledge snapshot while marking stale",
+                base_id=base_id,
+                related_base_id=candidate_base_id,
+                exc_info=True,
+            )
+            continue
+        if _same_physical_source(candidate_key, key):
+            matching_keys.append(candidate_key)
 
-    updated_state = replace(
-        state,
-        availability=KnowledgeAvailability.STALE.value,
-        source_signature=None,
-    )
-    save_published_indexing_state(metadata_path, updated_state)
-    _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(key))
-    return True
+    marked = False
+    for matching_key in matching_keys:
+        metadata_path = snapshot_metadata_path(matching_key)
+        state = load_published_indexing_state(metadata_path)
+        if state is None:
+            continue
+
+        updated_state = replace(
+            state,
+            availability=KnowledgeAvailability.STALE.value,
+            source_signature=None,
+        )
+        save_published_indexing_state(metadata_path, updated_state)
+        _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
+        marked = True
+    return marked
 
 
 def clear_published_snapshots() -> None:
