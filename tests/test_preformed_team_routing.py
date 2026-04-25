@@ -20,7 +20,6 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY
-from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -38,6 +37,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
+
+    from mindroom.final_delivery import FinalDeliveryOutcome
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
