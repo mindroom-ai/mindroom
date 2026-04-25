@@ -2,8 +2,12 @@
 
 # ruff: noqa: RUF022
 
-from mindroom.knowledge.manager import KnowledgeManager, list_knowledge_files
-from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
+from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature, list_knowledge_files
+from mindroom.knowledge.redaction import (
+    credential_free_url_identity,
+    redact_credentials_in_text,
+    redact_url_credentials,
+)
 from mindroom.knowledge.refresh_owner import (
     KnowledgeRefreshOwner,
     OrchestratorKnowledgeRefreshOwner,
@@ -21,6 +25,7 @@ from mindroom.knowledge.registry import (
     get_published_snapshot,
     load_published_indexing_state,
     publish_snapshot,
+    remove_source_path_from_published_snapshots,
     resolve_refresh_key,
     resolve_snapshot_key,
     snapshot_indexed_count,
@@ -56,8 +61,11 @@ __all__ = [
     "snapshot_metadata_path",
     "snapshot_indexed_count",
     "clear_published_snapshots",
+    "remove_source_path_from_published_snapshots",
     "refresh_knowledge_binding",
     "list_knowledge_files",
+    "knowledge_source_signature",
+    "credential_free_url_identity",
     "redact_credentials_in_text",
     "redact_url_credentials",
 ]

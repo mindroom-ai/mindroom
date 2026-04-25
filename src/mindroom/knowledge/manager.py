@@ -33,7 +33,11 @@ from mindroom.embeddings import (
     effective_knowledge_embedder_signature,
 )
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
-from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
+from mindroom.knowledge.redaction import (
+    credential_free_url_identity,
+    redact_credentials_in_text,
+    redact_url_credentials,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -52,6 +56,7 @@ _SOURCE_SIZE_KEY = "source_size"
 _FAILED_SIGNATURE_RETRY_SECONDS = 300
 _FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
 _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 32
+_RETAINED_COLLECTION_COUNT = 3
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
 _INDEXING_STATUS_RESETTING = "resetting"
 _INDEXING_STATUS_INDEXING = "indexing"
@@ -129,6 +134,9 @@ class _PersistedIndexingState:
     last_published_at: str | None = None
     published_revision: str | None = None
     last_error: str | None = None
+    indexed_count: int | None = None
+    source_signature: str | None = None
+    retained_collections: tuple[str, ...] = ()
 
 
 def _resolve_knowledge_path(
@@ -176,7 +184,7 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         ),
         str(base_config.chunk_size),
         str(base_config.chunk_overlap),
-        git_config.repo_url if git_config is not None else "",
+        credential_free_url_identity(git_config.repo_url) if git_config is not None else "",
         git_config.branch if git_config is not None else "",
         str(git_config.lfs) if git_config is not None else "",
         str(git_config.skip_hidden) if git_config is not None else "",
@@ -391,6 +399,25 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
     return sorted(path for path in root.rglob("*") if include_knowledge_file(config, base_id, root, path))
 
 
+def knowledge_source_signature(config: Config, base_id: str, knowledge_root: Path) -> str:
+    """Return a cheap signature for the currently managed local file corpus."""
+    root = knowledge_root.resolve()
+    digest = hashlib.sha256()
+    for path in list_knowledge_files(config, base_id, root):
+        try:
+            stat = path.stat()
+            relative_path = path.relative_to(root).as_posix()
+        except OSError:
+            continue
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(stat.st_mtime_ns).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 @dataclass
 class KnowledgeManager:
     """Manage indexing for one knowledge base folder."""
@@ -506,6 +533,9 @@ class KnowledgeManager:
         last_published_at: str | None = None
         published_revision: str | None = None
         last_error: str | None = None
+        indexed_count: int | None = None
+        source_signature: str | None = None
+        retained_collections: tuple[str, ...] = ()
         if isinstance(payload, list):
             if all(isinstance(item, str) for item in payload):
                 settings = tuple(payload)
@@ -536,6 +566,19 @@ class KnowledgeManager:
                 )
                 raw_last_error = payload.get("last_error")
                 last_error = raw_last_error if isinstance(raw_last_error, str) and raw_last_error else None
+                raw_indexed_count = payload.get("indexed_count")
+                indexed_count = _coerce_int(raw_indexed_count)
+                if indexed_count is not None and indexed_count < 0:
+                    indexed_count = None
+                raw_source_signature = payload.get("source_signature")
+                source_signature = (
+                    raw_source_signature if isinstance(raw_source_signature, str) and raw_source_signature else None
+                )
+                raw_retained_collections = payload.get("retained_collections")
+                if isinstance(raw_retained_collections, list) and all(
+                    isinstance(item, str) and item for item in raw_retained_collections
+                ):
+                    retained_collections = tuple(dict.fromkeys(raw_retained_collections))
 
         if settings is None or status is None:
             return None
@@ -547,6 +590,9 @@ class KnowledgeManager:
             last_published_at=last_published_at,
             published_revision=published_revision,
             last_error=last_error,
+            indexed_count=indexed_count,
+            source_signature=source_signature,
+            retained_collections=retained_collections,
         )
 
     def _load_persisted_indexing_settings(self) -> tuple[str, ...] | None:
@@ -563,6 +609,9 @@ class KnowledgeManager:
         last_published_at: str | None = None,
         published_revision: str | None = None,
         last_error: str | None = None,
+        indexed_count: int | None = None,
+        source_signature: str | None = None,
+        retained_collections: tuple[str, ...] = (),
     ) -> None:
         persisted_settings = settings or self._indexing_settings
         payload: dict[str, object] = {
@@ -579,6 +628,12 @@ class KnowledgeManager:
             payload["published_revision"] = published_revision
         if last_error is not None:
             payload["last_error"] = last_error
+        if indexed_count is not None:
+            payload["indexed_count"] = indexed_count
+        if source_signature is not None:
+            payload["source_signature"] = source_signature
+        if retained_collections:
+            payload["retained_collections"] = list(retained_collections)
         tmp_path = self._indexing_settings_path.with_suffix(f"{self._indexing_settings_path.suffix}.tmp")
         tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         tmp_path.replace(self._indexing_settings_path)
@@ -590,15 +645,27 @@ class KnowledgeManager:
             last_published_at=last_published_at,
             published_revision=published_revision,
             last_error=last_error,
+            indexed_count=indexed_count,
+            source_signature=source_signature,
+            retained_collections=retained_collections,
         )
 
-    def _save_persisted_indexing_settings(self) -> None:
+    def _save_persisted_indexing_settings(
+        self,
+        *,
+        indexed_count: int,
+        source_signature: str,
+        retained_collections: tuple[str, ...],
+    ) -> None:
         self._save_persisted_indexing_state(
             _INDEXING_STATUS_COMPLETE,
             collection=self._current_collection_name(),
             availability=_INDEXING_AVAILABILITY_READY,
             last_published_at=datetime.now(tz=UTC).isoformat(),
             published_revision=self._git_last_successful_commit,
+            indexed_count=indexed_count,
+            source_signature=source_signature,
+            retained_collections=retained_collections,
         )
 
     def _load_git_lfs_hydrated_head(self) -> str | None:
@@ -1079,6 +1146,42 @@ class KnowledgeManager:
     def _build_knowledge(self, collection_name: str) -> Knowledge:
         return Knowledge(vector_db=self._build_vector_db(collection_name))
 
+    def _retained_collections_after_publish(
+        self,
+        *,
+        published_collection: str,
+        previous_state: _PersistedIndexingState | None,
+    ) -> tuple[str, ...]:
+        retained: list[str] = [published_collection]
+        if previous_state is not None:
+            if previous_state.collection:
+                retained.append(previous_state.collection)
+            retained.extend(previous_state.retained_collections)
+        return tuple(dict.fromkeys(retained))[:_RETAINED_COLLECTION_COUNT]
+
+    def _cleanup_superseded_collections(
+        self,
+        *,
+        previous_state: _PersistedIndexingState | None,
+        retained_collections: tuple[str, ...],
+    ) -> None:
+        if previous_state is None:
+            return
+        candidates = [
+            collection for collection in (previous_state.collection, *previous_state.retained_collections) if collection
+        ]
+        for collection_name in tuple(dict.fromkeys(candidates)):
+            if collection_name in retained_collections:
+                continue
+            try:
+                self._delete_vector_db(self._build_vector_db(collection_name))
+            except Exception:
+                logger.exception(
+                    "Failed to delete superseded knowledge collection",
+                    base_id=self.base_id,
+                    collection=collection_name,
+                )
+
     def _reset_vector_db(self, vector_db: ChromaDb) -> None:
         vector_db.delete()
         vector_db.create()
@@ -1397,6 +1500,9 @@ class KnowledgeManager:
             candidate_indexed_signatures: dict[str, tuple[int, int] | None] = {}
             last_published_at = persisted_state.last_published_at if persisted_state is not None else None
             published_revision = persisted_state.published_revision if persisted_state is not None else None
+            persisted_indexed_count = persisted_state.indexed_count if persisted_state is not None else None
+            persisted_source_signature = persisted_state.source_signature if persisted_state is not None else None
+            persisted_retained_collections = persisted_state.retained_collections if persisted_state is not None else ()
 
             async def _save_refresh_failed_state(error: str) -> None:
                 if has_published_snapshot and persisted_state is not None:
@@ -1404,11 +1510,14 @@ class KnowledgeManager:
                         self._save_persisted_indexing_state,
                         _INDEXING_STATUS_COMPLETE,
                         settings=persisted_state.settings,
-                        collection=live_collection_name,
+                        collection=persisted_state.collection or live_collection_name,
                         availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
                         last_published_at=last_published_at,
                         published_revision=published_revision,
                         last_error=error,
+                        indexed_count=persisted_indexed_count,
+                        source_signature=persisted_source_signature,
+                        retained_collections=persisted_retained_collections,
                     )
                     return
                 await asyncio.to_thread(
@@ -1417,6 +1526,13 @@ class KnowledgeManager:
                     collection=candidate_vector_db.collection_name,
                     availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
                     last_error=error,
+                    indexed_count=0,
+                    source_signature=knowledge_source_signature(
+                        self.config,
+                        self.base_id,
+                        self._knowledge_source_path(),
+                    ),
+                    retained_collections=(),
                 )
 
             try:
@@ -1442,7 +1558,22 @@ class KnowledgeManager:
             async with self._state_lock:
                 self._indexed_files = candidate_indexed_files
                 self._indexed_signatures = candidate_indexed_signatures
-            await asyncio.to_thread(self._save_persisted_indexing_settings)
+            source_signature = knowledge_source_signature(self.config, self.base_id, self._knowledge_source_path())
+            retained_collections = self._retained_collections_after_publish(
+                published_collection=candidate_vector_db.collection_name,
+                previous_state=persisted_state,
+            )
+            await asyncio.to_thread(
+                self._save_persisted_indexing_settings,
+                indexed_count=len(candidate_indexed_files),
+                source_signature=source_signature,
+                retained_collections=retained_collections,
+            )
+            await asyncio.to_thread(
+                self._cleanup_superseded_collections,
+                previous_state=persisted_state,
+                retained_collections=retained_collections,
+            )
             return indexed_count
 
     async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:

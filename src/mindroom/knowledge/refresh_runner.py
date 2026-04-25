@@ -7,17 +7,19 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
 
+from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
     KnowledgeRefreshKey,
     KnowledgeSnapshotKey,
     PublishedIndexingState,
-    indexing_settings_query_compatible,
+    indexing_settings_snapshot_compatible,
     load_published_indexing_state,
     publish_snapshot,
     refresh_key_for_snapshot_key,
     resolve_snapshot_key,
+    snapshot_availability_for_state,
     snapshot_metadata_path,
 )
 from mindroom.runtime_resolution import resolve_knowledge_binding
@@ -34,6 +36,9 @@ class KnowledgeRefreshResult:
 
     key: KnowledgeSnapshotKey
     indexed_count: int
+    published: bool
+    availability: KnowledgeAvailability
+    last_error: str | None = None
 
 
 _refresh_locks: dict[KnowledgeRefreshKey, asyncio.Lock] = {}
@@ -109,23 +114,46 @@ async def _refresh_knowledge_binding_locked(
 
     state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
     if state is not None and state.status != "complete":
-        return KnowledgeRefreshResult(key=key, indexed_count=indexed_count)
+        return KnowledgeRefreshResult(
+            key=key,
+            indexed_count=indexed_count,
+            published=False,
+            availability=snapshot_availability_for_state(key=key, state=state),
+            last_error=state.last_error,
+        )
     if state is None:
         state = PublishedIndexingState(
             settings=key.indexing_settings,
             status="complete",
             collection=manager._current_collection_name(),
             availability="ready",
+            indexed_count=indexed_count,
         )
-    if not indexing_settings_query_compatible(state.settings, key.indexing_settings):
-        return KnowledgeRefreshResult(key=key, indexed_count=indexed_count)
+    availability = snapshot_availability_for_state(key=key, state=state)
+    if (
+        not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings)
+        or availability is KnowledgeAvailability.REFRESH_FAILED
+    ):
+        return KnowledgeRefreshResult(
+            key=key,
+            indexed_count=indexed_count,
+            published=False,
+            availability=availability,
+            last_error=state.last_error,
+        )
     publish_snapshot(
         key,
         knowledge=manager.get_knowledge(),
         state=state,
         metadata_path=snapshot_metadata_path(key),
     )
-    return KnowledgeRefreshResult(key=key, indexed_count=indexed_count)
+    return KnowledgeRefreshResult(
+        key=key,
+        indexed_count=indexed_count,
+        published=True,
+        availability=availability,
+        last_error=state.last_error,
+    )
 
 
 async def _mark_refresh_failed(manager: KnowledgeManager, key: KnowledgeSnapshotKey, *, error: str) -> None:
@@ -150,6 +178,9 @@ async def _mark_refresh_failed(manager: KnowledgeManager, key: KnowledgeSnapshot
             last_published_at=state.last_published_at,
             published_revision=state.published_revision,
             last_error=redacted_error,
+            indexed_count=state.indexed_count,
+            source_signature=state.source_signature,
+            retained_collections=state.retained_collections,
         )
         return
     await asyncio.to_thread(
@@ -161,11 +192,16 @@ async def _mark_refresh_failed(manager: KnowledgeManager, key: KnowledgeSnapshot
         last_published_at=state.last_published_at,
         published_revision=state.published_revision,
         last_error=redacted_error,
+        indexed_count=state.indexed_count,
+        source_signature=state.source_signature,
+        retained_collections=state.retained_collections,
     )
     refreshed_state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
     if refreshed_state is None:
         return
-    if not indexing_settings_query_compatible(refreshed_state.settings, key.indexing_settings):
+    if not indexing_settings_snapshot_compatible(refreshed_state.settings, key.indexing_settings):
+        return
+    if snapshot_availability_for_state(key=key, state=refreshed_state) is KnowledgeAvailability.CONFIG_MISMATCH:
         return
     publish_snapshot(
         key,

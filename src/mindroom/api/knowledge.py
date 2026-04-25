@@ -18,6 +18,7 @@ from mindroom.knowledge import (
     load_published_indexing_state,
     redact_url_credentials,
     refresh_knowledge_binding,
+    remove_source_path_from_published_snapshots,
     resolve_snapshot_key,
     snapshot_indexed_count,
     snapshot_metadata_path,
@@ -351,6 +352,12 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
 
     relative_path = target.relative_to(root).as_posix()
     target.unlink()
+    remove_source_path_from_published_snapshots(
+        base_id,
+        relative_path,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
 
     _schedule_refresh(config, base_id, runtime_paths, request=request)
 
@@ -392,6 +399,17 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     _ensure_base_exists(config, base_id)
 
     result = await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths)
+    if not result.published:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "base_id": base_id,
+                "indexed_count": result.indexed_count,
+                "availability": result.availability.value,
+                "last_error": result.last_error,
+            },
+        )
     return {
         "success": True,
         "base_id": base_id,

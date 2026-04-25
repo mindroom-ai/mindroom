@@ -40,7 +40,7 @@ Add a knowledge base and assign it to an agent:
 knowledge_bases:
   docs:
     path: ./knowledge_docs
-    watch: true
+    watch: false
     chunk_size: 5000
     chunk_overlap: 0
 
@@ -65,7 +65,7 @@ Use a non-empty single path component such as `docs` or `company_docs`, not `""`
 knowledge_bases:
   my_docs:
     path: ./knowledge_docs/my_docs   # Folder containing documents
-    watch: true                       # Legacy/advisory; refresh is scheduled on access or by API actions
+    watch: false                      # Legacy/advisory; refresh is scheduled on access or by API actions
     chunk_size: 5000                  # Max characters per chunk
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
@@ -89,7 +89,7 @@ Use `agents.<name>.private.knowledge` when one shared agent definition should in
 knowledge_bases:
   company_docs:
     path: ./company_docs
-    watch: true
+    watch: false
 
 agents:
   mind:
@@ -102,7 +102,7 @@ agents:
       template_dir: ./mind_template
       knowledge:
         path: memory
-        watch: true
+        watch: false
     knowledge_bases: [company_docs]
 ```
 
@@ -140,12 +140,12 @@ You can define multiple knowledge bases and assign them to different agents:
 knowledge_bases:
   engineering:
     path: ./knowledge_docs/engineering
-    watch: true
+    watch: false
     chunk_size: 5000
     chunk_overlap: 0
   product:
     path: ./knowledge_docs/product
-    watch: true
+    watch: false
     chunk_size: 5000
     chunk_overlap: 0
   legal:
@@ -189,7 +189,7 @@ knowledge_bases:
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
       poll_interval_seconds: 300
-      startup_behavior: background
+      startup_behavior: blocking
       lfs: false
       skip_hidden: true
       include_patterns:

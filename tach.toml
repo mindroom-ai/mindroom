@@ -1673,6 +1673,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.refresh_runner"
 depends_on = [
+    "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",
@@ -1683,6 +1684,7 @@ depends_on = [
 path = "mindroom.knowledge.utils"
 depends_on = [
     "mindroom.knowledge.availability",
+    "mindroom.knowledge.manager",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
@@ -1798,6 +1800,8 @@ expose = [
     "get_agent_knowledge",
     "get_published_snapshot",
     "KnowledgeAvailability",
+    "credential_free_url_identity",
+    "knowledge_source_signature",
     "list_knowledge_files",
     "load_published_indexing_state",
     "OrchestratorKnowledgeRefreshOwner",
@@ -1805,6 +1809,7 @@ expose = [
     "publish_snapshot",
     "redact_credentials_in_text",
     "redact_url_credentials",
+    "remove_source_path_from_published_snapshots",
     "refresh_knowledge_binding",
     "resolve_refresh_key",
     "resolve_snapshot_key",

@@ -13,6 +13,7 @@ from mindroom import constants
 from mindroom.api import main
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.knowledge import KnowledgeAvailability
 from mindroom.knowledge.registry import resolve_snapshot_key, snapshot_metadata_path
 
 if TYPE_CHECKING:
@@ -58,6 +59,7 @@ def _write_snapshot_metadata(
     revision: str | None = None,
     published_at: str | None = None,
     last_error: str | None = None,
+    indexed_count: int | None = None,
 ) -> None:
     key = resolve_snapshot_key(base_id, config=config, runtime_paths=runtime_paths)
     metadata_path = snapshot_metadata_path(key)
@@ -75,6 +77,8 @@ def _write_snapshot_metadata(
     if last_error is not None:
         payload["availability"] = "refresh_failed"
         payload["last_error"] = last_error
+    if indexed_count is not None:
+        payload["indexed_count"] = indexed_count
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
 
@@ -136,6 +140,31 @@ def test_knowledge_bases_list_does_not_initialize_unused_configured_bases(tmp_pa
     assert payload["count"] == 2
     assert {base["name"] for base in payload["bases"]} == {"research", "unused"}
     assert all(base["manager_available"] is False for base in payload["bases"])
+    refresh.assert_not_awaited()
+
+
+def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: Path) -> None:
+    """Routine status endpoints use snapshot metadata counts without refresh work."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    snapshot = SimpleNamespace(state=SimpleNamespace(indexed_count=9))
+    lookup = SimpleNamespace(snapshot=snapshot, availability=KnowledgeAvailability.READY)
+
+    with (
+        patch("mindroom.api.knowledge.get_published_snapshot", return_value=lookup),
+        patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
+    ):
+        status_response = client.get("/api/knowledge/bases/research/status")
+        list_response = client.get("/api/knowledge/bases")
+
+    assert status_response.status_code == 200
+    assert list_response.status_code == 200
+    assert status_response.json()["indexed_count"] == 9
+    assert list_response.json()["bases"][0]["indexed_count"] == 9
     refresh.assert_not_awaited()
 
 
@@ -328,7 +357,14 @@ def test_explicit_reindex_uses_refresh_runner(tmp_path: Path) -> None:
 
     with patch(
         "mindroom.api.knowledge.refresh_knowledge_binding",
-        new=AsyncMock(return_value=SimpleNamespace(indexed_count=7)),
+        new=AsyncMock(
+            return_value=SimpleNamespace(
+                indexed_count=7,
+                published=True,
+                availability=KnowledgeAvailability.READY,
+                last_error=None,
+            ),
+        ),
     ) as refresh:
         response = client.post("/api/knowledge/bases/research/reindex")
 
@@ -339,3 +375,30 @@ def test_explicit_reindex_uses_refresh_runner(tmp_path: Path) -> None:
         config=config,
         runtime_paths=main._app_context(client.app).runtime_paths,
     )
+
+
+def test_explicit_reindex_returns_conflict_when_no_snapshot_is_published(tmp_path: Path) -> None:
+    """Admin reindex must not report success when refresh leaves no usable snapshot."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+
+    with patch(
+        "mindroom.api.knowledge.refresh_knowledge_binding",
+        new=AsyncMock(
+            return_value=SimpleNamespace(
+                indexed_count=0,
+                published=False,
+                availability=KnowledgeAvailability.REFRESH_FAILED,
+                last_error="Indexed 0 of 1 managed knowledge files",
+            ),
+        ),
+    ):
+        response = client.post("/api/knowledge/bases/research/reindex")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["success"] is False
+    assert detail["availability"] == "refresh_failed"
+    assert detail["last_error"] == "Indexed 0 of 1 managed knowledge files"

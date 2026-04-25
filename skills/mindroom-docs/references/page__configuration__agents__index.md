@@ -326,7 +326,7 @@ Use `private` when one shared agent definition should behave like a template tha
 knowledge_bases:
   company_docs:
     path: ./company_docs
-    watch: true
+    watch: false
 
 agents:
   mind:
@@ -350,7 +350,7 @@ agents:
         - MEMORY.md
       knowledge:
         path: memory
-        watch: true
+        watch: false
     knowledge_bases: [company_docs]
 ```
 
@@ -381,7 +381,7 @@ In the example above, each requester gets their own effective `mind_data/` root 
 | `private.knowledge`               | object                 | `null`              | Optional requester-local knowledge indexed from inside the private root. Sub-fields below. See [Knowledge Bases](https://docs.mindroom.chat/knowledge/#private-agent-knowledge)                                                                        |
 | `private.knowledge.enabled`       | bool                   | `true`              | Whether to index requester-local knowledge for this private agent instance. Set to `false` to disable indexing                                                                                                                                         |
 | `private.knowledge.path`          | string                 | `null`              | Path to a private knowledge directory relative to the private root                                                                                                                                                                                     |
-| `private.knowledge.watch`         | bool                   | `true`              | Watch the private knowledge directory for changes and auto-reindex                                                                                                                                                                                     |
+| `private.knowledge.watch`         | bool                   | `true`              | Legacy/advisory flag. Private knowledge refresh is scheduled on access or through explicit API actions                                                                                                                                                 |
 | `private.knowledge.chunk_size`    | int                    | `5000`              | Maximum characters per indexed chunk (min: 128)                                                                                                                                                                                                        |
 | `private.knowledge.chunk_overlap` | int                    | `0`                 | Overlapping characters between adjacent chunks (min: 0)                                                                                                                                                                                                |
 | `private.knowledge.git`           | object                 | `null`              | Optional Git sync configuration for requester-local private knowledge (same schema as top-level `knowledge_bases.<id>.git`)                                                                                                                            |

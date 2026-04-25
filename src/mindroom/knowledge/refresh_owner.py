@@ -149,6 +149,9 @@ class PerBindingKnowledgeRefreshOwner:
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None,
     ) -> None:
+        if self._shutting_down:
+            logger.debug("Skipping knowledge refresh schedule after shutdown", base_id=base_id)
+            return
         try:
             key = resolve_refresh_key(
                 base_id,

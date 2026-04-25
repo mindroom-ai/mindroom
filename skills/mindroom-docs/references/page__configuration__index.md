@@ -337,14 +337,14 @@ memory:
 knowledge_bases:
   docs:
     path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
-    watch: true                    # Reindex automatically when files change
+    watch: false                   # Legacy/advisory; refresh is scheduled on access or by API actions
     chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
     chunk_overlap: 0               # Default: 0 (overlapping characters between chunks)
     git:                           # Optional: Sync this folder from a Git repository
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
       poll_interval_seconds: 300
-      startup_behavior: background # Optional: defer resume/incremental syncs to the background loop
+      startup_behavior: blocking   # Legacy/advisory; startup does not schedule Git sync
       lfs: false                   # Optional: enable Git LFS support (requires git-lfs on the runtime host)
       sync_timeout_seconds: 3600   # Optional: abort a hung git command after this many seconds
       skip_hidden: true

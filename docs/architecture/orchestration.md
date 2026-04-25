@@ -149,7 +149,7 @@ On `orchestrator.stop()`:
 2. Stop memory auto-flush worker
 3. Cancel knowledge refresh task
 4. Cancel pending bot start tasks
-5. Shut down knowledge managers (`shutdown_shared_knowledge_managers()`)
+5. Shut down the per-binding knowledge refresh owner
 6. Cancel all sync tasks
 7. Signal all bots to stop (`bot.running = False`)
 8. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)

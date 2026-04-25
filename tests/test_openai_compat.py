@@ -51,6 +51,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
 )
+from mindroom.knowledge import KnowledgeAvailability
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
@@ -103,6 +104,22 @@ def _make_post_response_compaction_check() -> PostResponseCompactionCheck:
         ),
         active_context_window=64_000,
     )
+
+
+def _knowledge_lookup(
+    knowledge: object | None,
+    *,
+    base_id: str = "docs",
+    availability: KnowledgeAvailability = KnowledgeAvailability.READY,
+) -> SimpleNamespace:
+    snapshot = SimpleNamespace(knowledge=knowledge) if knowledge is not None else None
+    key = SimpleNamespace(
+        base_id=base_id,
+        storage_root="memory",
+        knowledge_path=f"memory/{base_id}",
+        indexing_settings=(),
+    )
+    return SimpleNamespace(key=key, snapshot=snapshot, availability=availability)
 
 
 def _prepared_team_execution_context(
@@ -4581,7 +4598,10 @@ class TestKnowledgeIntegration:
 
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", return_value=mock_knowledge),
+            patch(
+                "mindroom.knowledge.utils._lookup_knowledge_for_base",
+                return_value=_knowledge_lookup(mock_knowledge),
+            ),
         ):
             mock_ai.return_value = "Response with knowledge"
 
@@ -4610,23 +4630,23 @@ class TestKnowledgeIntegration:
         mock_knowledge = MagicMock()
         observed_calls: list[tuple[str, Config | None, RuntimePaths | None]] = []
 
-        def fake_get_knowledge_for_base(
+        def fake_lookup_knowledge_for_base(
             base_id: str,
             *,
             config: Config | None = None,
             runtime_paths: RuntimePaths | None = None,
             execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
-        ) -> MagicMock | None:
+        ) -> SimpleNamespace | None:
             observed_calls.append((base_id, config, runtime_paths))
             if config is None or runtime_paths is None or base_id != "docs":
                 return None
-            return mock_knowledge
+            return _knowledge_lookup(mock_knowledge, base_id=base_id)
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             TestClient(app) as client,
         ):
             mock_ai.return_value = "Response with keyed knowledge"
@@ -4682,8 +4702,6 @@ class TestKnowledgeIntegration:
 
     def test_unready_kb_emits_system_hint(self, knowledge_app_client: TestClient) -> None:
         """Missing published knowledge should inject a system-style degraded hint."""
-        from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
-
         scheduled_base_ids: list[str] = []
 
         class _FakeRefreshOwner:
@@ -4697,22 +4715,22 @@ class TestKnowledgeIntegration:
                 _ = base_id
                 return False
 
-        def fake_get_knowledge_for_base(
+        def fake_lookup_knowledge_for_base(
             base_id: str,
             *,
             config: Config | None = None,  # noqa: ARG001
             runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
             execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[KnowledgeAvailability], None] | None = None,
-        ) -> None:
-            _ = base_id
+        ) -> SimpleNamespace:
             if on_availability is not None:
                 on_availability(KnowledgeAvailability.INITIALIZING)
+            return _knowledge_lookup(None, base_id=base_id, availability=KnowledgeAvailability.INITIALIZING)
 
         knowledge_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
         ):
             mock_ai.return_value = "Response without knowledge"
 
@@ -4741,7 +4759,10 @@ class TestKnowledgeIntegration:
 
         with (
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", return_value=mock_knowledge),
+            patch(
+                "mindroom.knowledge.utils._lookup_knowledge_for_base",
+                return_value=_knowledge_lookup(mock_knowledge),
+            ),
         ):
             response = knowledge_app_client.post(
                 "/v1/chat/completions",
@@ -4779,20 +4800,21 @@ class TestKnowledgeIntegration:
         mock_knowledge_wiki.vector_db = MagicMock()
         mock_knowledge_wiki.max_results = 10
 
-        def fake_get_knowledge_for_base(
+        def fake_lookup_knowledge_for_base(
             base_id: str,
             *,
             config: Config | None = None,  # noqa: ARG001
             runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
             execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
-        ) -> MagicMock | None:
-            return {"docs": mock_knowledge_docs, "wiki": mock_knowledge_wiki}.get(base_id)
+        ) -> SimpleNamespace | None:
+            knowledge = {"docs": mock_knowledge_docs, "wiki": mock_knowledge_wiki}.get(base_id)
+            return _knowledge_lookup(knowledge, base_id=base_id) if knowledge is not None else None
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             TestClient(app) as client,
         ):
             mock_ai.return_value = "Merged knowledge response"

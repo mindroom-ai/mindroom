@@ -5,12 +5,19 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from agno.knowledge.knowledge import Knowledge
 
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.registry import KnowledgeRefreshKey, get_published_snapshot, resolve_refresh_key
+from mindroom.knowledge.manager import knowledge_source_signature
+from mindroom.knowledge.registry import (
+    KnowledgeRefreshKey,
+    KnowledgeSnapshotLookup,
+    get_published_snapshot,
+    refresh_key_for_snapshot_key,
+)
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
@@ -26,8 +33,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
-_READY_REFRESH_COOLDOWN_SECONDS = 300.0
-_ready_refresh_scheduled_at: dict[KnowledgeRefreshKey, float] = {}
+_REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
+_refresh_scheduled_at: dict[tuple[KnowledgeRefreshKey, KnowledgeAvailability], float] = {}
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -55,14 +62,14 @@ class _AsyncKnowledgeVectorDb(_KnowledgeVectorDb, Protocol):
     ) -> list[Document]: ...
 
 
-def _get_knowledge_for_base(
+def _lookup_knowledge_for_base(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     on_availability: Callable[[KnowledgeAvailability], None] | None = None,
-) -> Knowledge | None:
+) -> KnowledgeSnapshotLookup | None:
     """Resolve one configured base ID to its current Knowledge instance."""
     try:
         lookup = get_published_snapshot(
@@ -79,35 +86,32 @@ def _get_knowledge_for_base(
 
     if on_availability is not None:
         on_availability(lookup.availability)
-    if lookup.snapshot is None:
-        return None
-    return lookup.snapshot.knowledge
+    return lookup
 
 
-def _ready_refresh_due(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
+def _refresh_schedule_due(
+    key: KnowledgeRefreshKey,
+    availability: KnowledgeAvailability,
 ) -> bool:
-    try:
-        key = resolve_refresh_key(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            create=False,
-        )
-    except Exception:
-        logger.exception("Knowledge refresh key lookup failed", base_id=base_id)
-        return False
     now = time.monotonic()
-    last_scheduled_at = _ready_refresh_scheduled_at.get(key)
-    if last_scheduled_at is not None and now - last_scheduled_at < _READY_REFRESH_COOLDOWN_SECONDS:
+    cache_key = (key, availability)
+    last_scheduled_at = _refresh_scheduled_at.get(cache_key)
+    if last_scheduled_at is not None and now - last_scheduled_at < _REFRESH_RETRY_COOLDOWN_SECONDS:
         return False
-    _ready_refresh_scheduled_at[key] = now
+    _refresh_scheduled_at[cache_key] = now
     return True
+
+
+def _ready_snapshot_source_stale(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
+    snapshot = lookup.snapshot
+    if snapshot is None or snapshot.state.source_signature is None:
+        return False
+    try:
+        current_signature = knowledge_source_signature(config, lookup.key.base_id, Path(lookup.key.knowledge_path))
+    except Exception:
+        logger.exception("Knowledge source freshness check failed", base_id=lookup.key.base_id)
+        return False
+    return current_signature != snapshot.state.source_signature
 
 
 def get_agent_knowledge(
@@ -132,27 +136,30 @@ def get_agent_knowledge(
             nonlocal availability
             availability = value
 
-        knowledge = _get_knowledge_for_base(
+        lookup = _lookup_knowledge_for_base(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
             on_availability=_set_availability,
         )
+        knowledge = lookup.snapshot.knowledge if lookup is not None and lookup.snapshot is not None else None
         if refresh_owner is not None:
+            refresh_key = refresh_key_for_snapshot_key(lookup.key) if lookup is not None else None
             if availability is KnowledgeAvailability.INITIALIZING:
-                refresh_owner.schedule_initial_load(
-                    base_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                )
+                if refresh_key is not None and _refresh_schedule_due(refresh_key, availability):
+                    refresh_owner.schedule_initial_load(
+                        base_id,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        execution_identity=execution_identity,
+                    )
             elif availability is KnowledgeAvailability.READY:
-                if _ready_refresh_due(
-                    base_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
+                if (
+                    lookup is not None
+                    and refresh_key is not None
+                    and _ready_snapshot_source_stale(lookup, config)
+                    and _refresh_schedule_due(refresh_key, availability)
                 ):
                     refresh_owner.schedule_refresh(
                         base_id,
@@ -160,7 +167,7 @@ def get_agent_knowledge(
                         runtime_paths=runtime_paths,
                         execution_identity=execution_identity,
                     )
-            else:
+            elif refresh_key is not None and _refresh_schedule_due(refresh_key, availability):
                 refresh_owner.schedule_refresh(
                     base_id,
                     config=config,
@@ -270,7 +277,7 @@ class MultiKnowledgeVectorDb:
         return True
 
     def create(self) -> None:
-        """No-op because underlying knowledge managers own DB lifecycle."""
+        """No-op because underlying snapshots are already published."""
         return
 
     def search(

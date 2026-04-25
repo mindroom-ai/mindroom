@@ -11,9 +11,12 @@ from unittest.mock import MagicMock
 
 import pytest
 from agno.knowledge.document.base import Document
+from fastapi.testclient import TestClient
 
+import mindroom.knowledge.utils as knowledge_utils
+from mindroom.api import main
 from mindroom.config.agent import AgentConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge import (
     KnowledgeAvailability,
@@ -23,8 +26,9 @@ from mindroom.knowledge import (
     get_published_snapshot,
     redact_url_credentials,
     refresh_knowledge_binding,
+    snapshot_indexed_count,
 )
-from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.registry import load_published_indexing_state, resolve_snapshot_key, snapshot_metadata_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -133,23 +137,43 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
     monkeypatch.setattr("mindroom.knowledge.manager._create_embedder", lambda *_args, **_kwargs: object())
     clear_published_snapshots()
+    knowledge_utils._refresh_scheduled_at.clear()
     yield
     clear_published_snapshots()
+    knowledge_utils._refresh_scheduled_at.clear()
     _VectorDb.collections = {}
 
 
-def _config(tmp_path: Path, *, bases: dict[str, Path], agent_bases: list[str]) -> Config:
+def _config(
+    tmp_path: Path,
+    *,
+    bases: dict[str, Path],
+    agent_bases: list[str],
+    git_configs: dict[str, KnowledgeGitConfig] | None = None,
+) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=agent_bases)},
             models={},
             knowledge_bases={
-                base_id: KnowledgeBaseConfig(path=str(path), watch=False) for base_id, path in bases.items()
+                base_id: KnowledgeBaseConfig(
+                    path=str(path),
+                    watch=False,
+                    git=(git_configs or {}).get(base_id),
+                )
+                for base_id, path in bases.items()
             },
         ),
         runtime_paths,
     )
+
+
+def _publish_api_config(api_app: object, config: Config) -> None:
+    context = main._app_context(api_app)
+    context.config_data = config.authored_model_dump()
+    context.runtime_config = config
+    context.config_load_result = main.ConfigLoadResult(success=True)
 
 
 def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: Path) -> None:
@@ -178,8 +202,8 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_ready_snapshot_access_schedules_debounced_refresh(tmp_path: Path) -> None:
-    """A ready snapshot is returned immediately and refresh scheduling is cooldown-gated."""
+async def test_ready_snapshot_access_does_not_refresh_unchanged_sources(tmp_path: Path) -> None:
+    """A ready snapshot is returned immediately without churn when sources are unchanged."""
     docs_path = tmp_path / "docs"
     unused_path = tmp_path / "unused"
     docs_path.mkdir()
@@ -187,6 +211,32 @@ async def test_ready_snapshot_access_schedules_debounced_refresh(tmp_path: Path)
     config = _config(tmp_path, bases={"docs": docs_path, "unused": unused_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+
+    knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
+    second_knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
+
+    assert knowledge is not None
+    assert second_knowledge is not None
+    assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["ready snapshot"]
+    owner.schedule_initial_load.assert_not_called()
+    owner.schedule_refresh.assert_not_called()
+    assert len(_VectorDb.collections) == 1
+
+
+@pytest.mark.asyncio
+async def test_ready_snapshot_access_schedules_refresh_when_sources_change(tmp_path: Path) -> None:
+    """Ready access schedules only when a cheap source signature detects local changes."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("ready snapshot", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    doc.write_text("ready snapshot changed", encoding="utf-8")
     owner = MagicMock()
     owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
@@ -343,6 +393,28 @@ async def test_published_snapshot_handle_survives_later_refresh_generations(tmp_
 
 
 @pytest.mark.asyncio
+async def test_successful_refreshes_keep_bounded_collection_generations(tmp_path: Path) -> None:
+    """Repeated publishes retain only the latest bounded generation set."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("generation 0", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    for generation in range(6):
+        doc.write_text(f"generation {generation}", encoding="utf-8")
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert len(_VectorDb.collections) <= 3
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.snapshot is not None
+    assert [document.content for document in lookup.snapshot.knowledge.search("generation", max_results=5)] == [
+        "generation 5",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_failed_refresh_preserves_last_good_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed candidate build marks stale availability but keeps serving the old collection."""
     docs_path = tmp_path / "docs"
@@ -424,6 +496,69 @@ async def test_embedder_config_mismatch_returns_no_incompatible_snapshot(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda config: setattr(config.knowledge_bases["docs"].git, "repo_url", "https://example.com/other/repo.git"),
+        lambda config: setattr(config.knowledge_bases["docs"].git, "branch", "release"),
+        lambda config: setattr(config.knowledge_bases["docs"].git, "include_patterns", ["other/**"]),
+        lambda config: setattr(config.knowledge_bases["docs"].git, "exclude_patterns", ["doc.md"]),
+        lambda config: setattr(config.knowledge_bases["docs"].git, "skip_hidden", False),
+        lambda config: setattr(config.knowledge_bases["docs"], "include_extensions", [".txt"]),
+        lambda config: setattr(config.knowledge_bases["docs"], "exclude_extensions", [".md"]),
+    ],
+)
+async def test_corpus_changing_config_mismatch_returns_no_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutate: object,
+) -> None:
+    """Source identity and membership filter changes must not serve old content."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("old corpus snapshot", encoding="utf-8")
+    git_config = KnowledgeGitConfig(
+        repo_url="https://example.com/org/repo.git",
+        include_patterns=["**/*.md"],
+        skip_hidden=True,
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+
+    async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        assert index_changes is False
+        self._git_last_successful_commit = "rev-a"
+        return {"updated": True, "changed_count": 1, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    changed_config = config.model_copy(deep=True)
+    mutate(changed_config)
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    unavailable: dict[str, KnowledgeAvailability] = {}
+
+    knowledge = get_agent_knowledge(
+        "helper",
+        changed_config,
+        runtime_paths,
+        on_unavailable_bases=unavailable.update,
+        refresh_owner=owner,
+    )
+
+    assert knowledge is None
+    assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
+    owner.schedule_initial_load.assert_not_called()
+    owner.schedule_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_failed_refresh_after_config_change_preserves_published_settings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -468,7 +603,7 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
 
     lookup = get_published_snapshot("docs", config=changed_config, runtime_paths=runtime_paths)
     assert lookup.snapshot is not None
-    assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
+    assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
 
 
 def test_stale_metadata_without_collection_returns_unavailable_snapshot(tmp_path: Path) -> None:
@@ -538,8 +673,9 @@ async def test_first_time_partial_refresh_does_not_publish_ready_snapshot(
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert result.indexed_count == 1
+    assert result.published is False
     assert lookup.snapshot is None
-    assert lookup.availability is KnowledgeAvailability.INITIALIZING
+    assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
 
 
 @pytest.mark.asyncio
@@ -577,8 +713,89 @@ async def test_embedder_changing_partial_refresh_does_not_publish_old_snapshot_u
     lookup = get_published_snapshot("docs", config=changed_config, runtime_paths=runtime_paths)
 
     assert result.indexed_count == 0
+    assert result.published is False
     assert lookup.snapshot is None
     assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cold refresh failures remain visible and do not reschedule on every access."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("broken", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    async def _raise_reindex(self: KnowledgeManager) -> int:
+        _ = self
+        msg = "cold refresh failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", _raise_reindex)
+    with pytest.raises(RuntimeError, match="cold refresh failed"):
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.snapshot is None
+    assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
+
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    unavailable: dict[str, KnowledgeAvailability] = {}
+    first = get_agent_knowledge(
+        "helper",
+        config,
+        runtime_paths,
+        on_unavailable_bases=unavailable.update,
+        refresh_owner=owner,
+    )
+    second = get_agent_knowledge(
+        "helper",
+        config,
+        runtime_paths,
+        on_unavailable_bases=unavailable.update,
+        refresh_owner=owner,
+    )
+
+    assert first is None
+    assert second is None
+    assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
+    owner.schedule_initial_load.assert_not_called()
+    owner.schedule_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_api_delete_removes_published_vectors_before_background_refresh(tmp_path: Path) -> None:
+    """DELETE success means the deleted source is no longer queryable immediately."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("delete me now", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    before_delete = get_agent_knowledge("helper", config, runtime_paths)
+    assert before_delete is not None
+    assert [document.content for document in before_delete.search("delete", max_results=5)] == ["delete me now"]
+
+    owner = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    main.app.state.knowledge_refresh_owner = owner
+    client = TestClient(main.app)
+
+    response = client.delete("/api/knowledge/bases/docs/files/guide.md")
+
+    assert response.status_code == 200
+    after_delete = get_agent_knowledge("helper", config, runtime_paths)
+    assert after_delete is not None
+    assert after_delete.search("delete", max_results=5) == []
+    owner.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -685,6 +902,34 @@ async def test_refresh_owner_shutdown_suppresses_completed_refresh_failures(
     await owner.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_refresh_owner_does_not_schedule_after_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Late schedule calls after shutdown do not create orphaned refresh tasks."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    owner = PerBindingKnowledgeRefreshOwner()
+    calls = 0
+
+    async def _fake_refresh(base_id: str, **_kwargs: object) -> object:
+        _ = base_id
+        nonlocal calls
+        calls += 1
+        return object()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+
+    await owner.shutdown()
+    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await asyncio.sleep(0)
+
+    assert calls == 0
+    assert owner._tasks == {}
+
+
 def test_snapshot_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
     """The same base id resolves to separate refresh keys when storage binding differs."""
     path = tmp_path / "docs"
@@ -696,6 +941,178 @@ def test_snapshot_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
 
     assert key_a.base_id == key_b.base_id == "docs"
     assert key_a != key_b
+
+
+@pytest.mark.asyncio
+async def test_snapshot_indexed_count_uses_persisted_metadata_without_collection_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Routine status counts come from metadata rather than scanning vector rows."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("snapshot", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.snapshot is not None
+
+    def _raise_scan(self: _Client, name: str) -> _Collection:
+        _ = (self, name)
+        msg = "collection scan should not be used"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(_Client, "get_collection", _raise_scan)
+
+    assert snapshot_indexed_count(lookup.snapshot) == 1
+
+
+@pytest.mark.asyncio
+async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_secret_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git-backed refresh syncs first, publishes the revision, and persists no URL userinfo."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("git snapshot", encoding="utf-8")
+    git_config = KnowledgeGitConfig(
+        repo_url="https://ghp_secret:x-oauth-basic@example.com/org/repo.git",
+        branch="main",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    order: list[str] = []
+    original_reindex = KnowledgeManager.reindex_all
+
+    async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        assert index_changes is False
+        order.append("sync")
+        self._git_last_successful_commit = "rev-git"
+        return {"updated": True, "changed_count": 1, "removed_count": 0}
+
+    async def _track_reindex(self: KnowledgeManager) -> int:
+        order.append("reindex")
+        return await original_reindex(self)
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    metadata_text = snapshot_metadata_path(key).read_text(encoding="utf-8")
+
+    assert result.published is True
+    assert order == ["sync", "reindex"]
+    assert state is not None
+    assert state.published_revision == "rev-git"
+    assert state.source_signature == knowledge_source_signature(config, "docs", docs_path)
+    assert "ghp_secret" not in metadata_text
+    assert "x-oauth-basic" not in metadata_text
+
+
+@pytest.mark.asyncio
+async def test_git_sync_failure_preserves_last_good_snapshot_and_redacts_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Git sync failure keeps the last-good snapshot available under stale metadata."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("stable git snapshot", encoding="utf-8")
+    git_config = KnowledgeGitConfig(
+        repo_url="https://ghp_secret:x-oauth-basic@example.com/org/repo.git",
+        branch="main",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+
+    async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        assert index_changes is False
+        self._git_last_successful_commit = "rev-ok"
+        return {"updated": True, "changed_count": 1, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    async def _sync_failure(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        _ = (self, index_changes)
+        msg = "fetch failed https://ghp_secret:x-oauth-basic@example.com/org/repo.git"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_failure)
+    with pytest.raises(RuntimeError, match="fetch failed"):
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+
+    assert state is not None
+    assert state.availability == KnowledgeAvailability.REFRESH_FAILED.value
+    assert state.last_error is not None
+    assert "ghp_secret" not in state.last_error
+    assert "x-oauth-basic" not in state.last_error
+    assert lookup.snapshot is not None
+    assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
+    assert [document.content for document in lookup.snapshot.knowledge.search("snapshot", max_results=5)] == [
+        "stable git snapshot",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cold_git_sync_failure_records_failed_availability_and_redacted_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first Git failure is observable as refresh_failed instead of initializing."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    git_config = KnowledgeGitConfig(
+        repo_url="https://ghp_secret:x-oauth-basic@example.com/org/repo.git",
+        branch="main",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+
+    async def _sync_failure(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        _ = (self, index_changes)
+        msg = "clone failed https://ghp_secret:x-oauth-basic@example.com/org/repo.git"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_failure)
+
+    with pytest.raises(RuntimeError, match="clone failed"):
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+
+    assert state is not None
+    assert state.availability == KnowledgeAvailability.REFRESH_FAILED.value
+    assert state.last_error is not None
+    assert "ghp_secret" not in state.last_error
+    assert "x-oauth-basic" not in state.last_error
+    assert lookup.snapshot is None
+    assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
 
 
 def test_redact_url_credentials_hides_entire_http_userinfo() -> None:

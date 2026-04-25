@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
@@ -49,6 +49,9 @@ class PublishedIndexingState:
     last_published_at: str | None = None
     published_revision: str | None = None
     last_error: str | None = None
+    indexed_count: int | None = None
+    source_signature: str | None = None
+    retained_collections: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,7 @@ class _SnapshotVectorDb(Protocol):
 
 _published_snapshots: dict[KnowledgeSnapshotKey, PublishedKnowledgeSnapshot] = {}
 _QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH = 7
+_CORPUS_COMPATIBLE_SETTINGS_INDEXES = (0, 1, 2, 9, 10, 11, 12, 13, 14, 15, 16)
 
 
 def resolve_snapshot_key(
@@ -181,6 +185,20 @@ def snapshot_metadata_path(key: KnowledgeSnapshotKey) -> Path:
     return snapshot_base_storage_path(key) / "indexing_settings.json"
 
 
+def _coerce_nonnegative_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, float) and value.is_integer() and value >= 0:
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
 def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState | None:
     """Load published snapshot metadata without constructing a manager."""
     if not metadata_path.exists():
@@ -197,6 +215,9 @@ def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState
     last_published_at: str | None = None
     published_revision: str | None = None
     last_error: str | None = None
+    indexed_count: int | None = None
+    source_signature: str | None = None
+    retained_collections: tuple[str, ...] = ()
     if isinstance(payload, list):
         if all(isinstance(item, str) for item in payload):
             settings = tuple(payload)
@@ -225,6 +246,16 @@ def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState
             )
             raw_last_error = payload.get("last_error")
             last_error = raw_last_error if isinstance(raw_last_error, str) and raw_last_error else None
+            indexed_count = _coerce_nonnegative_int(payload.get("indexed_count"))
+            raw_source_signature = payload.get("source_signature")
+            source_signature = (
+                raw_source_signature if isinstance(raw_source_signature, str) and raw_source_signature else None
+            )
+            raw_retained_collections = payload.get("retained_collections")
+            if isinstance(raw_retained_collections, list) and all(
+                isinstance(item, str) and item for item in raw_retained_collections
+            ):
+                retained_collections = tuple(dict.fromkeys(raw_retained_collections))
 
     if settings is None or status is None:
         return None
@@ -236,7 +267,38 @@ def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState
         last_published_at=last_published_at,
         published_revision=published_revision,
         last_error=last_error,
+        indexed_count=indexed_count,
+        source_signature=source_signature,
+        retained_collections=retained_collections,
     )
+
+
+def save_published_indexing_state(metadata_path: Path, state: PublishedIndexingState) -> None:
+    """Persist published snapshot metadata without constructing a manager."""
+    payload: dict[str, object] = {
+        "settings": list(state.settings),
+        "status": state.status,
+    }
+    if state.collection is not None:
+        payload["collection"] = state.collection
+    if state.availability is not None:
+        payload["availability"] = state.availability
+    if state.last_published_at is not None:
+        payload["last_published_at"] = state.last_published_at
+    if state.published_revision is not None:
+        payload["published_revision"] = state.published_revision
+    if state.last_error is not None:
+        payload["last_error"] = state.last_error
+    if state.indexed_count is not None:
+        payload["indexed_count"] = state.indexed_count
+    if state.source_signature is not None:
+        payload["source_signature"] = state.source_signature
+    if state.retained_collections:
+        payload["retained_collections"] = list(state.retained_collections)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = metadata_path.with_suffix(f"{metadata_path.suffix}.tmp")
+    tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(metadata_path)
 
 
 def _default_collection_name(key: KnowledgeSnapshotKey) -> str:
@@ -300,8 +362,31 @@ def indexing_settings_query_compatible(
     )
 
 
+def indexing_settings_corpus_compatible(
+    published_settings: tuple[str, ...],
+    current_settings: tuple[str, ...],
+) -> bool:
+    """Return whether published content is safe for the current corpus config."""
+    if len(published_settings) <= max(_CORPUS_COMPATIBLE_SETTINGS_INDEXES) or len(current_settings) <= max(
+        _CORPUS_COMPATIBLE_SETTINGS_INDEXES,
+    ):
+        return published_settings == current_settings
+    return all(published_settings[index] == current_settings[index] for index in _CORPUS_COMPATIBLE_SETTINGS_INDEXES)
+
+
+def indexing_settings_snapshot_compatible(
+    published_settings: tuple[str, ...],
+    current_settings: tuple[str, ...],
+) -> bool:
+    """Return whether a snapshot can be queried under the current config."""
+    return indexing_settings_query_compatible(
+        published_settings,
+        current_settings,
+    ) and indexing_settings_corpus_compatible(published_settings, current_settings)
+
+
 def _snapshot_state_queryable(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> bool:
-    return state.status == "complete" and indexing_settings_query_compatible(state.settings, key.indexing_settings)
+    return state.status == "complete" and indexing_settings_snapshot_compatible(state.settings, key.indexing_settings)
 
 
 def _load_queryable_snapshot_from_state(
@@ -330,15 +415,30 @@ def _snapshot_availability(
     key: KnowledgeSnapshotKey,
     state: PublishedIndexingState | None,
 ) -> KnowledgeAvailability:
-    if state is None or state.status != "complete":
+    if state is None:
         return KnowledgeAvailability.INITIALIZING
-    if state.settings != key.indexing_settings:
-        return KnowledgeAvailability.CONFIG_MISMATCH
-    if state.availability == KnowledgeAvailability.REFRESH_FAILED.value:
-        return KnowledgeAvailability.REFRESH_FAILED
-    if state.availability in {None, "", KnowledgeAvailability.READY.value}:
-        return KnowledgeAvailability.READY
-    return KnowledgeAvailability.INITIALIZING
+
+    availability = KnowledgeAvailability.INITIALIZING
+    if state.status == "complete" and not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings):
+        availability = KnowledgeAvailability.CONFIG_MISMATCH
+    elif state.availability == KnowledgeAvailability.REFRESH_FAILED.value:
+        availability = KnowledgeAvailability.REFRESH_FAILED
+    elif state.status != "complete":
+        availability = KnowledgeAvailability.INITIALIZING
+    elif state.settings != key.indexing_settings:
+        availability = KnowledgeAvailability.CONFIG_MISMATCH
+    elif state.availability in {None, "", KnowledgeAvailability.READY.value}:
+        availability = KnowledgeAvailability.READY
+    return availability
+
+
+def snapshot_availability_for_state(
+    *,
+    key: KnowledgeSnapshotKey,
+    state: PublishedIndexingState | None,
+) -> KnowledgeAvailability:
+    """Return the public availability value for persisted snapshot state."""
+    return _snapshot_availability(key=key, state=state)
 
 
 def get_published_snapshot(
@@ -415,34 +515,64 @@ def publish_snapshot(
 
 
 def snapshot_indexed_count(snapshot: PublishedKnowledgeSnapshot) -> int:
-    """Return the number of distinct indexed source files in a snapshot."""
-    vector_db = cast("_SnapshotVectorDb | None", snapshot.knowledge.vector_db)
-    if vector_db is None or not vector_db.exists():
-        return 0
-    if vector_db.client is None:
-        return 0
-    collection = vector_db.client.get_collection(name=vector_db.collection_name)
-    indexed_files: set[str] = set()
-    offset = 0
-    batch_size = 1_000
-    while True:
-        result = collection.get(limit=batch_size, offset=offset, include=["metadatas"])
-        raw_metadatas = result.get("metadatas")
-        metadatas = raw_metadatas if isinstance(raw_metadatas, list) else []
-        for metadata in metadatas:
-            if not isinstance(metadata, dict):
-                continue
-            metadata_values = cast("dict[str, object]", metadata)
-            source_path = metadata_values.get(manager_module._SOURCE_PATH_KEY)
-            if isinstance(source_path, str) and source_path:
-                indexed_files.add(source_path)
-        raw_ids = result.get("ids")
-        ids = raw_ids if isinstance(raw_ids, list) else []
-        fetched_count = len(ids)
-        if fetched_count == 0:
-            break
-        offset += fetched_count
-    return len(indexed_files)
+    """Return the persisted number of distinct indexed source files."""
+    return snapshot.state.indexed_count or 0
+
+
+def _state_collection_names(state: PublishedIndexingState) -> tuple[str, ...]:
+    collections = [collection for collection in (state.collection, *state.retained_collections) if collection]
+    return tuple(dict.fromkeys(collections))
+
+
+def remove_source_path_from_published_snapshots(
+    base_id: str,
+    relative_path: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> bool:
+    """Remove one source path from all retained published collections for a binding."""
+    key = resolve_snapshot_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=False,
+    )
+    metadata_path = snapshot_metadata_path(key)
+    state = load_published_indexing_state(metadata_path)
+    if state is None:
+        return False
+
+    removed = False
+    for collection_name in _state_collection_names(state):
+        vector_db = _build_snapshot_vector_db(
+            key,
+            replace(state, collection=collection_name),
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        if not vector_db.exists():
+            continue
+        knowledge = manager_module.Knowledge(vector_db=vector_db)
+        removed = (
+            bool(knowledge.remove_vectors_by_metadata({manager_module._SOURCE_PATH_KEY: relative_path})) or removed
+        )
+
+    if not removed:
+        return False
+
+    updated_state = replace(
+        state,
+        indexed_count=max((state.indexed_count or 1) - 1, 0) if state.indexed_count is not None else None,
+        source_signature=manager_module.knowledge_source_signature(config, base_id, Path(key.knowledge_path)),
+    )
+    save_published_indexing_state(metadata_path, updated_state)
+    snapshot = _published_snapshots.get(key)
+    if snapshot is not None:
+        _published_snapshots[key] = replace(snapshot, state=updated_state)
+    return True
 
 
 def clear_published_snapshots() -> None:

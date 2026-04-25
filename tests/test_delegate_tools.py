@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -307,15 +308,24 @@ class TestDelegateKnowledge:
                 _ = base_id
                 return False
 
-        def fake_get_knowledge_for_base(
+        def fake_lookup_knowledge_for_base(
             base_id: str,
             *,
             on_availability: object | None = None,
             **_kwargs: object,
-        ) -> None:
-            _ = base_id
+        ) -> SimpleNamespace:
             if on_availability is not None:
                 on_availability(KnowledgeAvailability.INITIALIZING)
+            return SimpleNamespace(
+                key=SimpleNamespace(
+                    base_id=base_id,
+                    storage_root=str(tmp_path),
+                    knowledge_path=str(tmp_path / base_id),
+                    indexing_settings=(),
+                ),
+                snapshot=None,
+                availability=KnowledgeAvailability.INITIALIZING,
+            )
 
         config = Config(
             agents={
@@ -345,7 +355,7 @@ class TestDelegateKnowledge:
         delegate_tool = next(tool for tool in agent.tools if tool.name == "delegate")
 
         with (
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             patch(
                 "mindroom.custom_tools.delegate.ai_response",
                 new_callable=AsyncMock,
