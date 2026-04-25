@@ -28,6 +28,7 @@ type KnowledgeApiPayloads = {
     watch: boolean;
     file_count: number;
     indexed_count: number;
+    refreshing?: boolean;
     git?: {
       repo_url: string;
       branch: string;
@@ -376,11 +377,11 @@ describe("Knowledge", () => {
     render(<Knowledge />);
     await screen.findByText("Active: git_docs");
 
-    expect(screen.getByText("Git: background")).toBeInTheDocument();
-    expect(screen.getByText("Syncing")).toBeInTheDocument();
+    expect(screen.getByText("Git policy: background")).toBeInTheDocument();
+    expect(screen.getByText("Refreshing")).toBeInTheDocument();
     expect(screen.getByText("Repo Present")).toBeInTheDocument();
-    expect(screen.getByText("Initial Sync Pending")).toBeInTheDocument();
-    expect(screen.getByText("Pending: Resume")).toBeInTheDocument();
+    expect(screen.getByText("Snapshot Pending")).toBeInTheDocument();
+    expect(screen.getByText("Pending refresh: Resume")).toBeInTheDocument();
     expect(screen.getByText("LFS")).toBeInTheDocument();
     expect(screen.getByText("Git Error")).toBeInTheDocument();
     expect(screen.getByText(/Last Commit:/)).toHaveTextContent("abc123");
@@ -574,7 +575,9 @@ describe("Knowledge", () => {
     render(<Knowledge />);
     await screen.findByText("Active: docs");
 
-    fireEvent.click(screen.getByRole("combobox", { name: "Startup Behavior" }));
+    fireEvent.click(
+      screen.getByRole("combobox", { name: "Legacy Startup Behavior" }),
+    );
     fireEvent.click(screen.getByRole("option", { name: "Blocking" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Enable Git LFS" }));
     fireEvent.change(screen.getByLabelText("Sync Timeout (seconds)"), {

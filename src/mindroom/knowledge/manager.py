@@ -125,6 +125,27 @@ _TEXT_LIKE_EXTENSIONS = {
     ".svelte",
     ".proto",
 }
+INDEXING_SETTINGS_BASE_ID_INDEX = 0
+INDEXING_SETTINGS_STORAGE_ROOT_INDEX = 1
+INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX = 2
+INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH = 7
+INDEXING_SETTINGS_CHUNK_SIZE_INDEX = 7
+INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX = 8
+INDEXING_SETTINGS_REPO_IDENTITY_INDEX = 9
+INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES = (
+    INDEXING_SETTINGS_BASE_ID_INDEX,
+    INDEXING_SETTINGS_STORAGE_ROOT_INDEX,
+    INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX,
+    INDEXING_SETTINGS_REPO_IDENTITY_INDEX,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+)
+INDEXING_SETTINGS_LAYOUT_LENGTH = 17
 
 
 @runtime_checkable
@@ -190,7 +211,7 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
     embedder_config = config.memory.embedder.config
     base_config = config.get_knowledge_base_config(base_id)
     git_config = base_config.git
-    return (
+    settings = (
         base_id,
         str(storage_path.resolve()),
         str(knowledge_path.resolve()),
@@ -211,6 +232,10 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         str(tuple(base_config.include_extensions)) if base_config.include_extensions is not None else "",
         str(tuple(base_config.exclude_extensions)),
     )
+    if len(settings) != INDEXING_SETTINGS_LAYOUT_LENGTH:
+        msg = "Knowledge indexing settings layout constants must match _indexing_settings_key"
+        raise AssertionError(msg)
+    return settings
 
 
 def _settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> tuple[str, ...]:
@@ -1210,7 +1235,17 @@ class KnowledgeManager:
         protected_collection_names.add(self._current_collection_name())
         candidate_prefix = f"{self._default_collection_name()}_candidate_"
 
-        for collection_name in self._listed_collection_names(client):
+        try:
+            collection_names = self._listed_collection_names(client)
+        except Exception:
+            logger.warning(
+                "Failed to list superseded knowledge collections for cleanup",
+                base_id=self.base_id,
+                exc_info=True,
+            )
+            return
+
+        for collection_name in collection_names:
             if collection_name in protected_collection_names or not collection_name.startswith(candidate_prefix):
                 continue
             try:
@@ -1618,20 +1653,25 @@ class KnowledgeManager:
                 await _save_refresh_failed_state("Knowledge source changed during refresh; refresh skipped")
                 return indexed_count
 
-            self._knowledge.vector_db = candidate_vector_db
-            async with self._state_lock:
-                self._indexed_files = candidate_indexed_files
-                self._indexed_signatures = candidate_indexed_signatures
             retained_collections = self._retained_collections_after_publish(
                 published_collection=candidate_vector_db.collection_name,
                 previous_state=persisted_state,
             )
             await asyncio.to_thread(
-                self._save_persisted_indexing_settings,
+                self._save_persisted_indexing_state,
+                _INDEXING_STATUS_COMPLETE,
+                collection=candidate_vector_db.collection_name,
+                availability=_INDEXING_AVAILABILITY_READY,
+                last_published_at=datetime.now(tz=UTC).isoformat(),
+                published_revision=self._git_last_successful_commit,
                 indexed_count=len(candidate_indexed_files),
                 source_signature=candidate_source_signature,
                 retained_collections=retained_collections,
             )
+            self._knowledge.vector_db = candidate_vector_db
+            async with self._state_lock:
+                self._indexed_files = candidate_indexed_files
+                self._indexed_signatures = candidate_indexed_signatures
             await asyncio.to_thread(
                 self._cleanup_superseded_collections,
                 previous_state=persisted_state,

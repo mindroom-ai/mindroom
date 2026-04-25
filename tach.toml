@@ -1819,6 +1819,7 @@ expose = [
     "snapshot_metadata_path",
     "StandaloneKnowledgeRefreshOwner",
     "mark_published_snapshot_stale",
+    "is_refresh_active_for_binding",
 ]
 from = ["mindroom.knowledge"]
 

@@ -62,6 +62,7 @@ interface KnowledgeStatus {
   watch: boolean;
   file_count: number;
   indexed_count: number;
+  refreshing?: boolean;
   git?: {
     repo_url: string;
     branch: string;
@@ -892,7 +893,7 @@ export function Knowledge() {
                               </p>
                               <p className="mt-1 text-xs text-muted-foreground">
                                 {baseConfig?.watch
-                                  ? "Watching for changes"
+                                  ? "Refresh on access"
                                   : "Manual reindex only"}
                               </p>
                             </>
@@ -1101,9 +1102,10 @@ export function Knowledge() {
 
                 <div className="flex items-center justify-between rounded-md border p-3">
                   <div className="space-y-1">
-                    <p className="text-sm font-medium">Watch Folder</p>
+                    <p className="text-sm font-medium">Refresh on Access</p>
                     <p className="text-xs text-muted-foreground">
-                      Automatically index file additions and updates.
+                      Schedule a background refresh when assigned agents access
+                      this base.
                     </p>
                   </div>
                   <Checkbox
@@ -1256,7 +1258,7 @@ export function Knowledge() {
                         className="text-sm font-medium"
                         htmlFor="knowledge-git-startup-behavior"
                       >
-                        Startup Behavior
+                        Legacy Startup Behavior
                       </label>
                       <Select
                         value={settings.git.startup_behavior ?? "blocking"}
@@ -1278,8 +1280,8 @@ export function Knowledge() {
                         </SelectContent>
                       </Select>
                       <p className="text-xs text-muted-foreground">
-                        Blocking waits for the initial sync. Background serves
-                        the current index and syncs later.
+                        Retained for compatibility. Git refreshes are scheduled
+                        on access or by explicit reindex.
                       </p>
                     </div>
 
@@ -1459,12 +1461,12 @@ export function Knowledge() {
                   {status?.git ? (
                     <>
                       <Badge variant="outline">
-                        Git: {status.git.startup_behavior}
+                        Git policy: {status.git.startup_behavior}
                       </Badge>
                       <Badge
                         variant={status.git.syncing ? "default" : "outline"}
                       >
-                        {status.git.syncing ? "Syncing" : "Idle"}
+                        {status.git.syncing ? "Refreshing" : "Idle"}
                       </Badge>
                       <Badge variant="outline">
                         {status.git.repo_present
@@ -1473,12 +1475,12 @@ export function Knowledge() {
                       </Badge>
                       <Badge variant="outline">
                         {status.git.initial_sync_complete
-                          ? "Initial Sync Complete"
-                          : "Initial Sync Pending"}
+                          ? "Snapshot Ready"
+                          : "Snapshot Pending"}
                       </Badge>
                       {status.git.pending_startup_mode ? (
                         <Badge variant="secondary">
-                          Pending:{" "}
+                          Pending refresh:{" "}
                           {formatStartupMode(status.git.pending_startup_mode)}
                         </Badge>
                       ) : null}

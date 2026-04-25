@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
+_MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
 _refresh_scheduled_at: dict[tuple[KnowledgeRefreshKey, KnowledgeAvailability, tuple[str, ...] | None], float] = {}
 
 
@@ -103,7 +104,17 @@ def _refresh_schedule_due(
     if last_scheduled_at is not None and now - last_scheduled_at < cooldown_seconds:
         return False
     _refresh_scheduled_at[cache_key] = now
+    _prune_refresh_schedule_bookkeeping()
     return True
+
+
+def _prune_refresh_schedule_bookkeeping() -> None:
+    """Bound advisory refresh cooldown bookkeeping for request-scoped bindings."""
+    if len(_refresh_scheduled_at) <= _MAX_REFRESH_SCHEDULED_COOLDOWNS:
+        return
+    excess = len(_refresh_scheduled_at) - _MAX_REFRESH_SCHEDULED_COOLDOWNS
+    for cache_key, _scheduled_at in sorted(_refresh_scheduled_at.items(), key=lambda item: item[1])[:excess]:
+        _refresh_scheduled_at.pop(cache_key, None)
 
 
 def _published_snapshot_age_seconds(value: str | None) -> float | None:

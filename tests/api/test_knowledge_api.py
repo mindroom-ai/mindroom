@@ -451,3 +451,44 @@ def test_explicit_reindex_returns_conflict_when_no_snapshot_is_published(tmp_pat
     assert detail["success"] is False
     assert detail["availability"] == "refresh_failed"
     assert detail["last_error"] == "Indexed 0 of 1 managed knowledge files"
+
+
+def test_explicit_reindex_returns_structured_failure_when_refresh_raises(tmp_path: Path) -> None:
+    """Operational refresh exceptions should not become unstructured 500 responses."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+
+    with patch(
+        "mindroom.api.knowledge.refresh_knowledge_binding",
+        new=AsyncMock(side_effect=RuntimeError("Git failed https://token:secret@example.com/repo.git")),
+    ):
+        response = client.post("/api/knowledge/bases/research/reindex")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["success"] is False
+    assert detail["base_id"] == "research"
+    assert detail["availability"] == "refresh_failed"
+    assert detail["indexed_count"] == 0
+    assert detail["last_error"] == "Git failed https://***@example.com/repo.git"
+
+
+def test_status_degrades_gracefully_when_snapshot_key_resolution_fails(tmp_path: Path) -> None:
+    """Status should still return file facts when snapshot metadata cannot be resolved."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+
+    with patch("mindroom.api.knowledge.resolve_snapshot_key", side_effect=ValueError("bad binding")):
+        response = client.get("/api/knowledge/bases/research/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_count"] == 1
+    assert payload["indexed_count"] == 0
+    assert payload["manager_available"] is False

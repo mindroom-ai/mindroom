@@ -965,8 +965,8 @@ export function AgentEditor() {
                 </FieldGroup>
 
                 <FieldGroup
-                  label="Watch Private Knowledge"
-                  helperText="Watch the private knowledge path for changes."
+                  label="Refresh Private Knowledge"
+                  helperText="Schedule refresh on access for requester-local knowledge."
                   htmlFor="private_knowledge_watch"
                 >
                   <div className="flex items-center gap-2">
@@ -981,7 +981,7 @@ export function AgentEditor() {
                       htmlFor="private_knowledge_watch"
                       className="text-sm font-medium cursor-pointer select-none"
                     >
-                      Watch for changes
+                      Refresh on access
                     </label>
                   </div>
                 </FieldGroup>

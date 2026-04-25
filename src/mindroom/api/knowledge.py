@@ -16,9 +16,11 @@ from mindroom.api import config_lifecycle
 from mindroom.knowledge import (
     KnowledgeAvailability,
     PublishedIndexingState,
+    is_refresh_active_for_binding,
     knowledge_binding_mutation_lock,
     load_published_indexing_state,
     mark_published_snapshot_stale,
+    redact_credentials_in_text,
     redact_url_credentials,
     refresh_knowledge_binding,
     resolve_snapshot_key,
@@ -29,12 +31,14 @@ from mindroom.knowledge import (
 from mindroom.knowledge import (
     list_knowledge_files as list_managed_knowledge_files,
 )
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
+logger = get_logger(__name__)
 
 _MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GiB
 _UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB
@@ -144,13 +148,17 @@ def _snapshot_status(
     base_id: str,
     runtime_paths: constants.RuntimePaths,
 ) -> tuple[bool, int]:
-    key = resolve_snapshot_key(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        create=False,
-    )
-    state = load_published_indexing_state(snapshot_metadata_path(key))
+    try:
+        key = resolve_snapshot_key(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            create=False,
+        )
+        state = load_published_indexing_state(snapshot_metadata_path(key))
+    except Exception:
+        logger.warning("Could not resolve knowledge snapshot status", base_id=base_id, exc_info=True)
+        return False, 0
     if state is None:
         return False, 0
     availability = snapshot_availability_for_state(key=key, state=state)
@@ -169,13 +177,38 @@ def _snapshot_state(
     base_id: str,
     runtime_paths: constants.RuntimePaths,
 ) -> PublishedIndexingState | None:
-    key = resolve_snapshot_key(
+    try:
+        key = resolve_snapshot_key(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            create=False,
+        )
+        return load_published_indexing_state(snapshot_metadata_path(key))
+    except Exception:
+        logger.warning("Could not resolve knowledge snapshot state", base_id=base_id, exc_info=True)
+        return None
+
+
+def _is_refreshing(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    request: Request,
+) -> bool:
+    owner = _request_refresh_owner(request)
+    if owner is not None:
+        return owner.is_refreshing(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    return is_refresh_active_for_binding(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
-        create=False,
     )
-    return load_published_indexing_state(snapshot_metadata_path(key))
 
 
 def _git_status(
@@ -190,21 +223,12 @@ def _git_status(
         return None
     root = _knowledge_root(config, base_id, runtime_paths)
     state = _snapshot_state(config, base_id, runtime_paths)
-    owner = _request_refresh_owner(request)
     return {
         "repo_url": redact_url_credentials(git_config.repo_url),
         "branch": git_config.branch,
         "lfs": git_config.lfs,
         "startup_behavior": git_config.startup_behavior,
-        "syncing": bool(
-            owner.is_refreshing(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-            if owner is not None
-            else False,
-        ),
+        "syncing": _is_refreshing(config, base_id, runtime_paths, request=request),
         "repo_present": (root / ".git").is_dir(),
         "initial_sync_complete": (
             state is not None and state.status == "complete" and state.published_revision is not None
@@ -319,6 +343,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         file_count = len(_list_file_info(config, base_id, root)[0])
         snapshot_available, indexed_count = _snapshot_status(config, base_id, runtime_paths)
         git_status = _git_status(config, base_id, runtime_paths, request=request)
+        refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
         base_entry = {
             "name": base_id,
@@ -327,6 +352,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
             "file_count": file_count,
             "indexed_count": indexed_count,
             "manager_available": snapshot_available,
+            "refreshing": refreshing,
         }
         if git_status is not None:
             base_entry["git"] = git_status
@@ -445,6 +471,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     state = _snapshot_state(config, base_id, runtime_paths)
     file_count = len(_list_file_info(config, base_id, root)[0])
     git_status = _git_status(config, base_id, runtime_paths, request=request)
+    refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
     payload = {
         "base_id": base_id,
@@ -453,6 +480,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "file_count": file_count,
         "indexed_count": indexed_count,
         "manager_available": snapshot_available,
+        "refreshing": refreshing,
         "last_error": state.last_error if state is not None else None,
     }
     if git_status is not None:
@@ -466,7 +494,32 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
 
-    result = await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, force_reindex=True)
+    try:
+        result = await refresh_knowledge_binding(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            force_reindex=True,
+        )
+    except Exception as exc:
+        state = _snapshot_state(config, base_id, runtime_paths)
+        availability = KnowledgeAvailability.REFRESH_FAILED
+        if state is not None:
+            try:
+                key = resolve_snapshot_key(base_id, config=config, runtime_paths=runtime_paths, create=False)
+                availability = snapshot_availability_for_state(key=key, state=state)
+            except Exception:
+                logger.warning("Could not resolve failed reindex snapshot availability", base_id=base_id, exc_info=True)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "base_id": base_id,
+                "indexed_count": state.indexed_count or 0 if state is not None else 0,
+                "availability": availability.value,
+                "last_error": state.last_error if state is not None else redact_credentials_in_text(str(exc)),
+            },
+        ) from exc
     if not result.published:
         raise HTTPException(
             status_code=409,

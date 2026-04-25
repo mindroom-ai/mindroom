@@ -14,7 +14,11 @@ from mindroom.knowledge.refresh_owner import (
     PerBindingKnowledgeRefreshOwner,
     StandaloneKnowledgeRefreshOwner,
 )
-from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
+from mindroom.knowledge.refresh_runner import (
+    is_refresh_active_for_binding,
+    knowledge_binding_mutation_lock,
+    refresh_knowledge_binding,
+)
 from mindroom.knowledge.registry import (
     KnowledgeRefreshKey,
     KnowledgeSnapshotKey,
@@ -67,6 +71,7 @@ __all__ = [
     "snapshot_indexed_count",
     "clear_published_snapshots",
     "refresh_knowledge_binding",
+    "is_refresh_active_for_binding",
     "knowledge_binding_mutation_lock",
     "list_knowledge_files",
     "knowledge_source_signature",

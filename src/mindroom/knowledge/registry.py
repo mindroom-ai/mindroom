@@ -128,9 +128,9 @@ _published_snapshot_handles: weakref.WeakValueDictionary[int, PublishedKnowledge
 _published_knowledge_leases: dict[int, _PublishedKnowledgeLease] = {}
 _published_knowledge_finalizers: dict[int, weakref.finalize] = {}
 _stale_ready_snapshots: set[tuple[KnowledgeRefreshKey, str | None]] = set()
-_QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH = 7
-_CORPUS_COMPATIBLE_SETTINGS_INDEXES = (0, 1, 2, 9, 10, 11, 12, 13, 14, 15, 16)
-_REPO_IDENTITY_SETTINGS_INDEX = 9
+_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
+_MAX_PRIVATE_PUBLISHED_SNAPSHOTS = 128
+_MAX_STALE_READY_SNAPSHOT_MARKERS = 512
 
 
 def _snapshot_key_from_binding(
@@ -374,6 +374,7 @@ def _remember_snapshot_handle(snapshot: PublishedKnowledgeSnapshot) -> None:
             knowledge_id,
         )
     except TypeError:
+        _published_knowledge_leases.pop(knowledge_id, None)
         logger.warning(
             "Knowledge object cannot be weak-referenced for snapshot collection protection",
             base_id=snapshot.key.base_id,
@@ -392,6 +393,27 @@ def _same_physical_binding(key: KnowledgeSnapshotKey, refresh_key: KnowledgeRefr
         and key.storage_root == refresh_key.storage_root
         and key.knowledge_path == refresh_key.knowledge_path
     )
+
+
+def _snapshot_key_is_private(key: KnowledgeSnapshotKey) -> bool:
+    return key.base_id.startswith(_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+
+
+def _refresh_key_is_private(key: KnowledgeRefreshKey) -> bool:
+    return key.base_id.startswith(_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+
+
+def prune_private_snapshot_bookkeeping() -> None:
+    """Bound request-scoped snapshot bookkeeping without invalidating live handles."""
+    private_snapshot_keys = [key for key in _published_snapshots if _snapshot_key_is_private(key)]
+    for key in private_snapshot_keys[:-_MAX_PRIVATE_PUBLISHED_SNAPSHOTS]:
+        _published_snapshots.pop(key, None)
+
+    if len(_stale_ready_snapshots) > _MAX_STALE_READY_SNAPSHOT_MARKERS:
+        private_stale_keys = [key for key in _stale_ready_snapshots if _refresh_key_is_private(key[0])]
+        stale_excess = len(_stale_ready_snapshots) - _MAX_STALE_READY_SNAPSHOT_MARKERS
+        for stale_key in private_stale_keys[:stale_excess]:
+            _stale_ready_snapshots.discard(stale_key)
 
 
 def _evict_published_snapshots_for_refresh_key(refresh_key: KnowledgeRefreshKey) -> None:
@@ -417,6 +439,7 @@ def active_snapshot_collection_names(refresh_key: KnowledgeRefreshKey) -> tuple[
 def mark_ready_snapshot_stale(refresh_key: KnowledgeRefreshKey, source_signature: str | None) -> None:
     """Record a cheap stale marker for one READY snapshot source signature."""
     _stale_ready_snapshots.add((refresh_key, source_signature))
+    prune_private_snapshot_bookkeeping()
 
 
 def ready_snapshot_marked_stale(refresh_key: KnowledgeRefreshKey, source_signature: str | None) -> bool:
@@ -503,13 +526,13 @@ def indexing_settings_query_compatible(
 ) -> bool:
     """Return whether current queries can use a collection from published settings."""
     if (
-        len(published_settings) < _QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH
-        or len(current_settings) < _QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH
+        len(published_settings) < manager_module.INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH
+        or len(current_settings) < manager_module.INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH
     ):
         return published_settings == current_settings
     return (
-        published_settings[:_QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH]
-        == current_settings[:_QUERY_COMPATIBLE_SETTINGS_PREFIX_LENGTH]
+        published_settings[: manager_module.INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH]
+        == current_settings[: manager_module.INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH]
     )
 
 
@@ -518,18 +541,17 @@ def indexing_settings_corpus_compatible(
     current_settings: tuple[str, ...],
 ) -> bool:
     """Return whether published content is safe for the current corpus config."""
-    if len(published_settings) <= max(_CORPUS_COMPATIBLE_SETTINGS_INDEXES) or len(current_settings) <= max(
-        _CORPUS_COMPATIBLE_SETTINGS_INDEXES,
-    ):
+    corpus_indexes = manager_module.INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES
+    if len(published_settings) <= max(corpus_indexes) or len(current_settings) <= max(corpus_indexes):
         return published_settings == current_settings
     return all(
         _settings_values_compatible(published_settings[index], current_settings[index], index=index)
-        for index in _CORPUS_COMPATIBLE_SETTINGS_INDEXES
+        for index in corpus_indexes
     )
 
 
 def _settings_values_compatible(published_value: str, current_value: str, *, index: int) -> bool:
-    if index != _REPO_IDENTITY_SETTINGS_INDEX:
+    if index != manager_module.INDEXING_SETTINGS_REPO_IDENTITY_INDEX:
         return published_value == current_value
     return _normalized_repo_identity_setting(published_value) == _normalized_repo_identity_setting(current_value)
 
@@ -598,7 +620,10 @@ def _snapshot_availability(
         return KnowledgeAvailability.INITIALIZING
 
     availability = KnowledgeAvailability.INITIALIZING
-    if state.status == "complete" and not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings):
+    if state.status == "complete" and (
+        not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings)
+        or not indexing_settings_metadata_equal(state.settings, key.indexing_settings)
+    ):
         availability = KnowledgeAvailability.CONFIG_MISMATCH
     elif state.availability == KnowledgeAvailability.STALE.value:
         availability = KnowledgeAvailability.STALE
@@ -606,8 +631,6 @@ def _snapshot_availability(
         availability = KnowledgeAvailability.REFRESH_FAILED
     elif state.status != "complete":
         availability = KnowledgeAvailability.INITIALIZING
-    elif not indexing_settings_metadata_equal(state.settings, key.indexing_settings):
-        availability = KnowledgeAvailability.CONFIG_MISMATCH
     elif state.availability in {None, "", KnowledgeAvailability.READY.value}:
         availability = KnowledgeAvailability.READY
     return availability
@@ -722,7 +745,28 @@ def publish_snapshot(
     )
     _published_snapshots[key] = snapshot
     _remember_snapshot_handle(snapshot)
+    prune_private_snapshot_bookkeeping()
     return snapshot
+
+
+def publish_snapshot_from_state(
+    key: KnowledgeSnapshotKey,
+    *,
+    state: PublishedIndexingState,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    metadata_path: Path | None = None,
+) -> PublishedKnowledgeSnapshot | None:
+    """Publish a read handle rebuilt from persisted metadata."""
+    knowledge = _load_queryable_snapshot_from_state(key, state, config=config, runtime_paths=runtime_paths)
+    if knowledge is None:
+        return None
+    return publish_snapshot(
+        key,
+        knowledge=knowledge,
+        state=state,
+        metadata_path=metadata_path,
+    )
 
 
 def snapshot_indexed_count(snapshot: PublishedKnowledgeSnapshot) -> int:
@@ -746,7 +790,11 @@ def mark_published_snapshot_stale(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> bool:
-    """Mark the current published metadata stale after a direct source mutation."""
+    """Mark metadata stale after a direct source mutation.
+
+    Callers that mutate files must hold ``knowledge_binding_mutation_lock`` so
+    stale writes stay serialized with refresh publishes for the same binding.
+    """
     key = resolve_snapshot_key(
         base_id,
         config=config,
