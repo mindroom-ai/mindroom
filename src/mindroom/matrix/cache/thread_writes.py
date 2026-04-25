@@ -14,6 +14,7 @@ from mindroom.matrix.cache.event_cache_events import (
     normalize_nio_event_for_cache,
 )
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
     MutationThreadImpact,
@@ -104,6 +105,7 @@ async def _apply_thread_message_mutation(
     room_level_skip_message: str,
     invalidate_on_append_failure: bool,
     allow_room_invalidation: bool = True,
+    raise_on_cache_write_failure: bool = False,
 ) -> bool:
     if impact.state is MutationThreadImpactState.ROOM_LEVEL:
         cache_ops.logger.debug(
@@ -119,6 +121,7 @@ async def _apply_thread_message_mutation(
         await cache_ops.invalidate_room_threads(
             room_id,
             reason=_mutation_reason(context, "thread_lookup_unavailable"),
+            raise_on_failure=raise_on_cache_write_failure,
         )
         return True
     assert impact.thread_id is not None
@@ -127,18 +130,21 @@ async def _apply_thread_message_mutation(
         room_id,
         impact.thread_id,
         reason=_mutation_reason(context, "thread_mutation"),
+        raise_on_failure=raise_on_cache_write_failure,
     )
     appended = await cache_ops.append_event_to_cache(
         room_id,
         impact.thread_id,
         event_source,
         context=context,
+        raise_on_failure=raise_on_cache_write_failure,
     )
     if invalidate_on_append_failure and not appended:
         await cache_ops.invalidate_known_thread(
             room_id,
             impact.thread_id,
             reason=_mutation_reason(context, "append_failed"),
+            raise_on_failure=raise_on_cache_write_failure,
         )
     return False
 
@@ -175,6 +181,7 @@ async def _apply_thread_redaction_mutation(
     context: MutationWriteContext,
     allow_room_invalidation: bool = True,
     redact_room_level_event: bool = True,
+    raise_on_cache_write_failure: bool = False,
 ) -> bool:
     redact_failure_message = {
         "outbound": "Ignoring outbound Matrix redaction cache bookkeeping failure after successful redact",
@@ -193,6 +200,7 @@ async def _apply_thread_redaction_mutation(
         redacted_event_id,
         thread_id=impact.thread_id,
         failure_message=redact_failure_message,
+        raise_on_failure=raise_on_cache_write_failure,
     )
     if impact.state is MutationThreadImpactState.UNKNOWN and redacted and not allow_room_invalidation:
         return False
@@ -203,6 +211,7 @@ async def _apply_thread_redaction_mutation(
         success_reason=_mutation_reason(context, "redaction"),
         failure_reason=_mutation_reason(context, "redaction_failed"),
         lookup_unavailable_reason=_mutation_reason(context, "redaction_lookup_unavailable"),
+        raise_on_failure=raise_on_cache_write_failure,
     )
     return impact.state is MutationThreadImpactState.UNKNOWN and redacted
 
@@ -845,6 +854,7 @@ class ThreadSyncWritePolicy:
         threaded_events: typing.Sequence[dict[str, object]],
         *,
         resolution_context: MutationResolutionContext,
+        raise_on_cache_write_failure: bool,
     ) -> None:
         room_threads_invalidated = False
         for event_source in threaded_events:
@@ -869,6 +879,7 @@ class ThreadSyncWritePolicy:
                     room_level_skip_message="Skipping sync thread cache bookkeeping for known non-threaded message mutation",
                     invalidate_on_append_failure=True,
                     allow_room_invalidation=not room_threads_invalidated,
+                    raise_on_cache_write_failure=raise_on_cache_write_failure,
                 )
                 or room_threads_invalidated
             )
@@ -879,6 +890,7 @@ class ThreadSyncWritePolicy:
         redacted_event_ids: typing.Sequence[str],
         *,
         resolution_context: MutationResolutionContext,
+        raise_on_cache_write_failure: bool,
     ) -> None:
         room_threads_invalidated = False
         for redacted_event_id in redacted_event_ids:
@@ -897,6 +909,7 @@ class ThreadSyncWritePolicy:
                     impact=impact,
                     context="sync",
                     allow_room_invalidation=not room_threads_invalidated,
+                    raise_on_cache_write_failure=raise_on_cache_write_failure,
                 )
                 or room_threads_invalidated
             )
@@ -907,6 +920,8 @@ class ThreadSyncWritePolicy:
         plain_events: typing.Sequence[dict[str, object]],
         threaded_events: typing.Sequence[dict[str, object]],
         redacted_event_ids: typing.Sequence[str],
+        *,
+        raise_on_cache_write_failure: bool,
     ) -> None:
         plain_batch = [
             (event_id, room_id, event_source)
@@ -922,11 +937,13 @@ class ThreadSyncWritePolicy:
             room_id,
             plain_batch,
             failure_message="Failed to persist sync events to cache",
+            raise_on_failure=raise_on_cache_write_failure,
         )
         await self._cache_ops.store_events_batch(
             room_id,
             threaded_batch,
             failure_message="Failed to persist sync threaded events to cache",
+            raise_on_failure=raise_on_cache_write_failure,
         )
         resolution_context = await self._resolver.build_sync_mutation_resolution_context(
             room_id,
@@ -937,11 +954,13 @@ class ThreadSyncWritePolicy:
             room_id,
             threaded_events,
             resolution_context=resolution_context,
+            raise_on_cache_write_failure=raise_on_cache_write_failure,
         )
         await self._apply_sync_redactions(
             room_id,
             redacted_event_ids,
             resolution_context=resolution_context,
+            raise_on_cache_write_failure=raise_on_cache_write_failure,
         )
 
     def _group_sync_timeline_updates(
@@ -972,24 +991,115 @@ class ThreadSyncWritePolicy:
                 )
         return room_plain_events, room_threaded_events, room_redactions
 
-    def cache_sync_timeline(self, response: nio.SyncResponse) -> None:
+    def cache_sync_timeline(
+        self,
+        response: nio.SyncResponse,
+        *,
+        raise_on_cache_write_failure: bool = False,
+    ) -> list[asyncio.Task[object]]:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
         if not self._cache_ops.cache_runtime_available():
-            return
+            return []
         room_plain_events, room_threaded_events, room_redactions = self._group_sync_timeline_updates(response)
+        tasks: list[asyncio.Task[object]] = []
         for room_id in set(room_plain_events) | set(room_threaded_events) | set(room_redactions):
             plain_events = room_plain_events.get(room_id, ())
             threaded_events = room_threaded_events.get(room_id, ())
             redacted_event_ids = room_redactions.get(room_id, ())
-            self._cache_ops.queue_room_cache_update(
-                room_id,
-                lambda room_id=room_id, plain_events=plain_events, threaded_events=threaded_events, redacted_event_ids=redacted_event_ids: (
-                    self._persist_room_sync_timeline_updates(
-                        room_id,
-                        plain_events,
-                        threaded_events,
-                        redacted_event_ids,
-                    )
+            tasks.append(
+                self._cache_ops.queue_room_cache_update(
+                    room_id,
+                    lambda room_id=room_id, plain_events=plain_events, threaded_events=threaded_events, redacted_event_ids=redacted_event_ids: (
+                        self._persist_room_sync_timeline_updates(
+                            room_id,
+                            plain_events,
+                            threaded_events,
+                            redacted_event_ids,
+                            raise_on_cache_write_failure=raise_on_cache_write_failure,
+                        )
+                    ),
+                    name="matrix_cache_sync_timeline",
                 ),
-                name="matrix_cache_sync_timeline",
             )
+        return tasks
+
+    @staticmethod
+    def _limited_sync_timeline_room_ids(
+        response: nio.SyncResponse,
+    ) -> tuple[tuple[str, ...], tuple[BaseException, ...]]:
+        """Return limited joined-room IDs or validation errors for one sync response."""
+        try:
+            joined_rooms = response.rooms.join
+        except AttributeError as exc:
+            return (), (exc,)
+        if not isinstance(joined_rooms, dict):
+            return (), (TypeError("sync response joined rooms must be a dict"),)
+
+        limited_room_ids: list[str] = []
+        for room_id, room_info in joined_rooms.items():
+            if not isinstance(room_id, str) or room_info is None:
+                return (), (TypeError("sync response contains an invalid joined room"),)
+            try:
+                timeline = room_info.timeline
+                limited = False if timeline is None else timeline.limited
+                events = [] if timeline is None else timeline.events
+            except AttributeError as exc:
+                return (), (exc,)
+            if not isinstance(limited, bool) or not isinstance(events, list):
+                return (), (TypeError("sync response contains an invalid joined-room timeline"),)
+            if limited:
+                limited_room_ids.append(room_id)
+        return tuple(limited_room_ids), ()
+
+    @staticmethod
+    def _cache_task_errors(results: list[object | BaseException]) -> tuple[BaseException, ...]:
+        """Return task outcomes that prevent cache certification."""
+        errors: list[BaseException] = []
+        current_task = asyncio.current_task()
+        for result in results:
+            if isinstance(result, (KeyboardInterrupt, SystemExit)):
+                raise result
+            if isinstance(result, asyncio.CancelledError):
+                if current_task is not None and current_task.cancelling():
+                    raise result
+                errors.append(result)
+                continue
+            if isinstance(result, BaseException):
+                errors.append(result)
+        return tuple(errors)
+
+    async def cache_sync_timeline_for_certification(
+        self,
+        response: nio.SyncResponse,
+    ) -> SyncCacheWriteResult:
+        """Persist sync timeline data and report whether it certifies the sync token."""
+        if not self._cache_ops.cache_runtime_available():
+            return SyncCacheWriteResult(complete=False)
+
+        limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
+        if validation_errors:
+            return SyncCacheWriteResult(complete=False, errors=validation_errors)
+
+        try:
+            tasks = self.cache_sync_timeline(response, raise_on_cache_write_failure=True)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return SyncCacheWriteResult(
+                complete=False,
+                limited_room_ids=limited_room_ids,
+                errors=(exc,),
+            )
+
+        results: list[object | BaseException] = []
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        errors = self._cache_task_errors(results)
+        complete = self._cache_ops.cache_runtime_available() and not errors and not limited_room_ids
+        return SyncCacheWriteResult(
+            complete=complete,
+            limited_room_ids=limited_room_ids,
+            errors=errors,
+        )

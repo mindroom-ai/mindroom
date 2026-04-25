@@ -15,6 +15,7 @@ from nio.api import RelationshipType
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 import mindroom.matrix.client_thread_history as matrix_client_module
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_WARMUP_SUFFIX_KEY
@@ -29,6 +30,7 @@ from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
+from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.client import (
     ResolvedVisibleMessage,
     RoomThreadsPageError,
@@ -43,6 +45,7 @@ from mindroom.matrix.client_thread_history import (
     _resolve_scanned_thread_message_sources,
     _resolve_thread_history_from_event_sources_timed,
 )
+from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
 from tests.conftest import (
     bind_runtime_paths,
@@ -262,7 +265,7 @@ class TestThreadHistory:
             room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[{"event_id": "$thread_root"}],
-            fetch_started_at=None,
+            fetch_started_at=ANY,
         )
 
     @pytest.mark.asyncio
@@ -2164,6 +2167,36 @@ class TestThreadHistoryCache:
         await cache.replace_thread(room_id, thread_id, events)
 
     @staticmethod
+    def _conversation_cache_for_runtime(
+        *,
+        tmp_path: Path,
+        client: nio.AsyncClient,
+        event_cache: _EventCache,
+        runtime_started_at: float,
+        thread_cache_valid_after: float | None = None,
+    ) -> tuple[MatrixConversationCache, _EventCacheWriteCoordinator]:
+        runtime_paths = test_runtime_paths(tmp_path)
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            runtime_paths,
+        )
+        coordinator = _EventCacheWriteCoordinator(logger=MagicMock(), background_task_owner=object())
+        runtime = BotRuntimeState(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            enable_streaming=True,
+            orchestrator=None,
+            event_cache=event_cache,
+            event_cache_write_coordinator=coordinator,
+        )
+        runtime.runtime_started_at = runtime_started_at
+        runtime.thread_cache_read_boundary = (
+            runtime_started_at if thread_cache_valid_after is None else thread_cache_valid_after
+        )
+        return MatrixConversationCache(logger=MagicMock(), runtime=runtime), coordinator
+
+    @staticmethod
     def _make_redaction_event(
         *,
         event_id: str,
@@ -2545,6 +2578,123 @@ class TestThreadHistoryCache:
         assert history.diagnostics["homeserver_scan_pages"] == 1
 
     @pytest.mark.asyncio
+    async def test_restored_token_post_sync_reuses_pre_runtime_thread_cache(self, tmp_path: Path) -> None:
+        """Restored-token catch-up may reuse pre-runtime snapshots inside the token cache window."""
+        cache = _EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        runtime_started_at = time.time()
+        thread_cache_valid_after = runtime_started_at - 20.0
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Cached reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Cached reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread_root",
+            [self._cache_source(root_event), self._cache_source(reply_event)],
+            validated_at=runtime_started_at - 10.0,
+        )
+
+        client = MagicMock()
+        client.room_messages = AsyncMock(side_effect=AssertionError("should reuse cache after sync catch-up"))
+        conversation_cache, coordinator = self._conversation_cache_for_runtime(
+            tmp_path=tmp_path,
+            client=client,
+            event_cache=cache,
+            runtime_started_at=runtime_started_at,
+            thread_cache_valid_after=thread_cache_valid_after,
+        )
+
+        try:
+            history = await conversation_cache.get_dispatch_thread_history(
+                "!room:localhost",
+                "$thread_root",
+            )
+        finally:
+            await coordinator.close()
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics
+        client.room_messages.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_untrusted_restart_rejects_pre_runtime_thread_cache(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Cold starts and pre-catch-up restarts must reject pre-runtime thread snapshots."""
+        cache = _EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        runtime_started_at = time.time()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Reply in thread",
+            server_timestamp=2000,
+            source_content={
+                "body": "Reply in thread",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread_root",
+            [self._cache_source(root_event), self._cache_source(reply_event)],
+            validated_at=runtime_started_at - 10.0,
+        )
+
+        client = MagicMock()
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [reply_event, root_event]
+        page.end = None
+        client.room_messages = AsyncMock(return_value=page)
+        conversation_cache, coordinator = self._conversation_cache_for_runtime(
+            tmp_path=tmp_path,
+            client=client,
+            event_cache=cache,
+            runtime_started_at=runtime_started_at,
+        )
+
+        try:
+            history = await conversation_cache.get_dispatch_thread_history(
+                "!room:localhost",
+                "$thread_root",
+            )
+        finally:
+            await coordinator.close()
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == ("validated_before_runtime_start")
+        assert history.diagnostics["cache_runtime_started_at"] == runtime_started_at
+        client.room_messages.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_cache_miss_persists_reference_descendant_in_causal_order(
         self,
         tmp_path: Path,
@@ -2826,10 +2976,10 @@ class TestThreadHistoryCache:
             ),
         )
         broken_cache.get_thread_events = AsyncMock(side_effect=cached_events_side_effect, return_value=[])
-        broken_cache.replace_thread = AsyncMock(side_effect=RuntimeError("db broken"))
+        broken_cache.replace_thread_if_not_newer = AsyncMock(side_effect=RuntimeError("db broken"))
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
-        broken_cache.replace_thread.assert_awaited_once()
+        broken_cache.replace_thread_if_not_newer.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_incremental_thread_revalidation_does_not_bypass_runtime_or_room_staleness(
