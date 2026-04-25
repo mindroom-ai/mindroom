@@ -6,6 +6,7 @@ Exposes MindRoom agents as an OpenAI-compatible API so any chat frontend
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -33,6 +34,7 @@ from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from starlette.background import BackgroundTask
 
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
@@ -45,6 +47,7 @@ from mindroom.history.runtime import (
     ScopeSessionContext,
     close_team_runtime_sqlite_dbs,
     open_bound_scope_session_context,
+    run_post_response_compaction_check,
 )
 from mindroom.knowledge import (
     KnowledgeAvailability,
@@ -90,14 +93,17 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
+    from starlette.types import Receive, Scope, Send
 
     from mindroom.config.main import Config
+    from mindroom.history.types import PostResponseCompactionCheck
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
 _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES: frozenset[WorkerScope | None] = frozenset({None, "shared"})
+_OPENAI_COMPLETION_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
 
 
 @dataclass(slots=True)
@@ -106,6 +112,124 @@ class _ToolStreamState:
 
     next_tool_id: int = 1
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
+
+
+async def _run_openai_response_backgrounds(
+    *,
+    completed: bool,
+    response_error: BaseException | None,
+    completion_background: BackgroundTask | None,
+    always_background: BackgroundTask | None,
+) -> None:
+    """Run completion-scoped and always-run OpenAI response backgrounds."""
+    background_error: BaseException | None = None
+    if completed and completion_background is not None:
+        try:
+            await completion_background()
+        except BaseException as error:
+            background_error = error
+
+    finalizer_error: BaseException | None = None
+    if always_background is not None:
+        try:
+            await always_background()
+        except BaseException as error:
+            finalizer_error = error
+
+    if response_error is not None:
+        raise response_error
+    if background_error is not None:
+        raise background_error
+    if finalizer_error is not None:
+        raise finalizer_error
+
+
+class _OpenAIJSONResponse(JSONResponse):
+    """JSON response with separate completion-scoped and always-run finalizers."""
+
+    always_background: BackgroundTask | None = None
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        completion_background = self.background
+        self.background = None
+        completed = False
+        response_error: BaseException | None = None
+        try:
+            await super().__call__(scope, receive, send)
+        except BaseException as error:
+            response_error = error
+        else:
+            completed = True
+        await _run_openai_response_backgrounds(
+            completed=completed,
+            response_error=response_error,
+            completion_background=completion_background,
+            always_background=self.always_background,
+        )
+
+
+class _OpenAIStreamingResponse(StreamingResponse):
+    """Streaming response with completion-aware compaction and always-run finalizers."""
+
+    always_background: BackgroundTask | None = None
+    completion_predicate: Callable[[], bool] | None = None
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        completion_background = self.background
+        self.background = None
+        completed = False
+        response_error: BaseException | None = None
+        try:
+            await super().__call__(scope, receive, send)
+        except BaseException as error:
+            response_error = error
+            completed = self.completion_predicate() if self.completion_predicate is not None else False
+        else:
+            completed = self.completion_predicate() if self.completion_predicate is not None else True
+        await _run_openai_response_backgrounds(
+            completed=completed,
+            response_error=response_error,
+            completion_background=completion_background,
+            always_background=self.always_background,
+        )
+
+
+def _openai_completion_lock(
+    *,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    session_id: str,
+) -> asyncio.Lock:
+    key = (str(runtime_paths.storage_root), agent_name, session_id)
+    lock = _OPENAI_COMPLETION_LOCKS.get(key)
+    if lock is not None:
+        return lock
+    if len(_OPENAI_COMPLETION_LOCKS) >= 100:
+        for candidate_key, candidate_lock in list(_OPENAI_COMPLETION_LOCKS.items()):
+            if len(_OPENAI_COMPLETION_LOCKS) < 100:
+                break
+            if not candidate_lock.locked():
+                _OPENAI_COMPLETION_LOCKS.pop(candidate_key, None)
+    lock = asyncio.Lock()
+    _OPENAI_COMPLETION_LOCKS[key] = lock
+    return lock
+
+
+def _release_openai_completion_lock(completion_lock: asyncio.Lock) -> None:
+    if completion_lock.locked():
+        completion_lock.release()
+
+
+def _attach_openai_completion_lock_release(
+    response: JSONResponse | StreamingResponse,
+    completion_lock: asyncio.Lock,
+) -> JSONResponse | StreamingResponse:
+    if not isinstance(response, (_OpenAIJSONResponse, _OpenAIStreamingResponse)):
+        _release_openai_completion_lock(completion_lock)
+        msg = f"OpenAI completion response must use a finalizer-safe response class, got {type(response).__name__}"
+        raise TypeError(msg)
+    response.always_background = BackgroundTask(_release_openai_completion_lock, completion_lock)
+    return response
 
 
 def _load_config(
@@ -378,7 +502,7 @@ def _error_response(
     body = _OpenAIErrorResponse(
         error=_OpenAIError(message=message, type=error_type, param=param, code=code),
     )
-    return JSONResponse(status_code=status_code, content=body.model_dump())
+    return _OpenAIJSONResponse(status_code=status_code, content=body.model_dump())
 
 
 def _authenticate_request(
@@ -750,7 +874,7 @@ async def list_models(
 
 
 @router.post("/chat/completions", response_model=None)
-async def chat_completions(
+async def chat_completions(  # noqa: C901, PLR0912
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
@@ -798,26 +922,19 @@ async def chat_completions(
         resolved_thread_id=None,
     )
     knowledge_refresh_owner = _request_knowledge_refresh_owner(request)
+    completion_lock = _openai_completion_lock(
+        runtime_paths=runtime_paths,
+        agent_name=agent_name,
+        session_id=session_id,
+    )
+    await completion_lock.acquire()
 
-    # Team execution path
-    if agent_name.startswith(_TEAM_MODEL_PREFIX):
-        team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
-        if req.stream:
-            response: JSONResponse | StreamingResponse = await _stream_team_completion(
-                team_name,
-                agent_name,
-                prompt,
-                session_id,
-                config,
-                runtime_paths,
-                thread_history,
-                req.user,
-                execution_identity=execution_identity,
-                refresh_owner=knowledge_refresh_owner,
-            )
-        else:
-            with tool_execution_identity(execution_identity):
-                response = await _non_stream_team_completion(
+    try:
+        # Team execution path
+        if agent_name.startswith(_TEAM_MODEL_PREFIX):
+            team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
+            if req.stream:
+                response: JSONResponse | StreamingResponse = await _stream_team_completion(
                     team_name,
                     agent_name,
                     prompt,
@@ -829,40 +946,40 @@ async def chat_completions(
                     execution_identity=execution_identity,
                     refresh_owner=knowledge_refresh_owner,
                 )
-    else:
-        # Resolve knowledge base for this agent
-        unavailable_bases: dict[str, KnowledgeAvailability] = {}
-        try:
-            knowledge = get_agent_knowledge(
-                agent_name,
-                config,
-                runtime_paths,
-                on_missing_bases=_log_missing_knowledge_bases(agent_name),
-                on_unavailable_bases=unavailable_bases.update,
-                refresh_owner=knowledge_refresh_owner,
-            )
-        except Exception:
-            logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
-            knowledge = None
-        availability_hint = _knowledge_availability_system_message(unavailable_bases)
-        if availability_hint:
-            prompt = f"{availability_hint}\n\n{prompt}"
-        if req.stream:
-            response = await _stream_completion(
-                agent_name,
-                prompt,
-                session_id,
-                config,
-                runtime_paths,
-                thread_history,
-                req.user,
-                knowledge,
-                execution_identity=execution_identity,
-                refresh_owner=knowledge_refresh_owner,
-            )
+            else:
+                with tool_execution_identity(execution_identity):
+                    response = await _non_stream_team_completion(
+                        team_name,
+                        agent_name,
+                        prompt,
+                        session_id,
+                        config,
+                        runtime_paths,
+                        thread_history,
+                        req.user,
+                        execution_identity=execution_identity,
+                        refresh_owner=knowledge_refresh_owner,
+                    )
         else:
-            with tool_execution_identity(execution_identity):
-                response = await _non_stream_completion(
+            # Resolve knowledge base for this agent
+            unavailable_bases: dict[str, KnowledgeAvailability] = {}
+            try:
+                knowledge = get_agent_knowledge(
+                    agent_name,
+                    config,
+                    runtime_paths,
+                    on_missing_bases=_log_missing_knowledge_bases(agent_name),
+                    on_unavailable_bases=unavailable_bases.update,
+                    refresh_owner=knowledge_refresh_owner,
+                )
+            except Exception:
+                logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
+                knowledge = None
+            availability_hint = _knowledge_availability_system_message(unavailable_bases)
+            if availability_hint:
+                prompt = f"{availability_hint}\n\n{prompt}"
+            if req.stream:
+                response = await _stream_completion(
                     agent_name,
                     prompt,
                     session_id,
@@ -874,8 +991,25 @@ async def chat_completions(
                     execution_identity=execution_identity,
                     refresh_owner=knowledge_refresh_owner,
                 )
+            else:
+                with tool_execution_identity(execution_identity):
+                    response = await _non_stream_completion(
+                        agent_name,
+                        prompt,
+                        session_id,
+                        config,
+                        runtime_paths,
+                        thread_history,
+                        req.user,
+                        knowledge,
+                        execution_identity=execution_identity,
+                        refresh_owner=knowledge_refresh_owner,
+                    )
+    except BaseException:
+        _release_openai_completion_lock(completion_lock)
+        raise
 
-    return response
+    return _attach_openai_completion_lock_release(response, completion_lock)
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +1030,7 @@ async def _non_stream_completion(
     refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     response_text = await ai_response(
         agent_name=agent_name,
         prompt=prompt,
@@ -910,6 +1045,7 @@ async def _non_stream_completion(
         include_openai_compat_guidance=True,
         active_event_ids=set(),
         execution_identity=execution_identity,
+        post_response_compaction_checks_collector=post_response_compaction_checks,
         refresh_owner=refresh_owner,
     )
 
@@ -930,7 +1066,15 @@ async def _non_stream_completion(
             ),
         ],
     )
-    return JSONResponse(content=response.model_dump())
+    return _OpenAIJSONResponse(
+        content=response.model_dump(),
+        background=_openai_post_response_compaction_task(
+            post_response_compaction_checks,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1071,7 +1215,16 @@ def _extract_stream_text(event: AIStreamChunk, tool_state: _ToolStreamState) -> 
     return _format_stream_tool_event(event, tool_state)
 
 
-async def _stream_completion(  # noqa: C901
+def _extract_agent_stream_failure(event: AIStreamChunk) -> str | None:
+    """Return terminal agent-stream failure text when the chunk represents one."""
+    if isinstance(event, RunErrorEvent):
+        return str(event.content or "Agent execution failed.")
+    if isinstance(event, str) and _is_error_response(event):
+        return event
+    return None
+
+
+async def _stream_completion(  # noqa: C901, PLR0915
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -1084,6 +1237,7 @@ async def _stream_completion(  # noqa: C901
     refresh_owner: KnowledgeRefreshOwner | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     stream = cast(
         "AsyncGenerator[AIStreamChunk, None]",
         stream_with_tool_execution_identity(
@@ -1102,6 +1256,7 @@ async def _stream_completion(  # noqa: C901
                 include_openai_compat_guidance=True,
                 active_event_ids=set(),
                 execution_identity=execution_identity,
+                post_response_compaction_checks_collector=post_response_compaction_checks,
                 refresh_owner=refresh_owner,
             ),
         ),
@@ -1113,15 +1268,24 @@ async def _stream_completion(  # noqa: C901
         await stream.aclose()
         return _error_response(500, "Agent returned empty response", error_type="server_error")
 
-    if isinstance(first_event, str) and _is_error_response(first_event):
-        logger.warning("Stream returned error", model=agent_name, session_id=session_id, error=first_event)
+    first_error = _extract_agent_stream_failure(first_event)
+    if first_error is not None:
+        logger.warning(
+            "Stream returned error",
+            model=agent_name,
+            session_id=session_id,
+            error=first_error,
+        )
         await stream.aclose()
         return _error_response(500, "Agent execution failed", error_type="server_error")
 
     completion_id = f"chatcmpl-{uuid4().hex[:12]}"
     created = int(time.time())
+    stream_completed = False
+    stream_failed = False
 
     async def event_generator() -> AsyncIterator[str]:
+        nonlocal stream_completed, stream_failed
         tool_state = _ToolStreamState()
         saw_text_delta = False
         completed_body: str | None = None
@@ -1146,13 +1310,24 @@ async def _stream_completion(  # noqa: C901
                 if isinstance(event, RunCompletedEvent):
                     completed_body = str(event.content) if event.content is not None else completed_body
                     continue
+                failure_text = _extract_agent_stream_failure(event)
+                if failure_text is not None:
+                    stream_failed = True
+                    logger.warning(
+                        "Stream emitted terminal failure",
+                        model=agent_name,
+                        session_id=session_id,
+                        error=failure_text,
+                    )
+                    yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': failure_text})}\n\n"
+                    break
                 text = _extract_stream_text(event, tool_state)
                 if text:
                     if isinstance(event, (RunContentEvent, str)):
                         saw_text_delta = True
                     yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
-            if completed_body and not saw_text_delta:
+            if completed_body and not saw_text_delta and not stream_failed:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': completed_body})}\n\n"
 
             # 4. Final chunk with finish_reason
@@ -1161,10 +1336,66 @@ async def _stream_completion(  # noqa: C901
 
             # 5. Stream terminator
             yield "data: [DONE]\n\n"
+            stream_completed = not stream_failed
         finally:
             await stream.aclose()
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    response = _OpenAIStreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        background=_openai_post_response_compaction_task(
+            post_response_compaction_checks,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+        ),
+    )
+    response.completion_predicate = lambda: stream_completed
+    return response
+
+
+async def _run_openai_post_response_compaction_checks(
+    checks: Sequence[PostResponseCompactionCheck],
+    *,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> None:
+    """Run post-response compaction for OpenAI-compatible sessions without Matrix notices."""
+    for check in checks:
+        try:
+            await run_post_response_compaction_check(
+                check=check,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                compaction_lifecycle=None,
+            )
+        except Exception:
+            logger.exception(
+                "OpenAI-compatible post-response compaction failed",
+                session_id=check.session_id,
+                scope=check.scope.key,
+            )
+
+
+def _openai_post_response_compaction_task(
+    checks: Sequence[PostResponseCompactionCheck],
+    *,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> BackgroundTask | None:
+    """Return a response-finalizer task for post-response OpenAI compaction."""
+    if not checks:
+        return None
+    return BackgroundTask(
+        _run_openai_post_response_compaction_checks,
+        tuple(checks),
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1256,6 +1487,7 @@ async def _prepare_openai_team_run_input(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
+    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
 ) -> str:
     """Prepare the canonical prompt text for one OpenAI-compatible team run."""
     prepared_execution = await prepare_bound_team_run_context(
@@ -1275,6 +1507,8 @@ async def _prepare_openai_team_run_input(
         current_sender_id=None,
         compaction_outcomes_collector=None,
     )
+    if post_response_compaction_checks_collector is not None:
+        post_response_compaction_checks_collector.extend(prepared_execution.post_response_compaction_checks or [])
     return render_prepared_team_messages_text(prepared_execution.messages)
 
 
@@ -1295,6 +1529,7 @@ async def _non_stream_team_completion(
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     unavailable_bases: dict[str, KnowledgeAvailability] = {}
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     try:
         with open_bound_scope_session_context(
             agents=[],
@@ -1338,6 +1573,7 @@ async def _non_stream_team_completion(
                     config=config,
                     runtime_paths=runtime_paths,
                     thread_history=thread_history,
+                    post_response_compaction_checks_collector=post_response_compaction_checks,
                 )
             except Exception:
                 logger.exception("Team member preparation failed", team=team_name)
@@ -1374,7 +1610,15 @@ async def _non_stream_team_completion(
                     ),
                 ],
             )
-            return JSONResponse(content=result.model_dump())
+            return _OpenAIJSONResponse(
+                content=result.model_dump(),
+                background=_openai_post_response_compaction_task(
+                    post_response_compaction_checks,
+                    runtime_paths=runtime_paths,
+                    config=config,
+                    execution_identity=execution_identity,
+                ),
+            )
     finally:
         close_team_runtime_sqlite_dbs(
             agents=agents,
@@ -1383,7 +1627,7 @@ async def _non_stream_team_completion(
         )
 
 
-async def _stream_team_completion(  # noqa: C901
+async def _stream_team_completion(  # noqa: C901, PLR0915
     team_name: str,
     model_id: str,
     prompt: str,
@@ -1402,6 +1646,7 @@ async def _stream_team_completion(  # noqa: C901
     scope_context: ScopeSessionContext | None = None
     stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
     unavailable_bases: dict[str, KnowledgeAvailability] = {}
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = []
 
     async def _cleanup() -> None:
         if stream is not None:
@@ -1459,6 +1704,7 @@ async def _stream_team_completion(  # noqa: C901
                 config=config,
                 runtime_paths=runtime_paths,
                 thread_history=thread_history,
+                post_response_compaction_checks_collector=post_response_compaction_checks,
             )
         except Exception:
             logger.exception("Team member preparation failed", team=team_name)
@@ -1498,8 +1744,15 @@ async def _stream_team_completion(  # noqa: C901
 
         completion_id = f"chatcmpl-{uuid4().hex[:12]}"
         created = int(time.time())
+        stream_completed = False
+        stream_failed = False
+
+        def mark_stream_failed() -> None:
+            nonlocal stream_failed
+            stream_failed = True
 
         async def _event_generator() -> AsyncGenerator[str, None]:
+            nonlocal stream_completed
             try:
                 async for chunk in _team_stream_event_generator(
                     stream=stream,
@@ -1508,12 +1761,25 @@ async def _stream_team_completion(  # noqa: C901
                     created=created,
                     model_id=model_id,
                     team_name=team_name,
+                    mark_stream_failed=mark_stream_failed,
                 ):
                     yield chunk
+                    if chunk == "data: [DONE]\n\n" and not stream_failed:
+                        stream_completed = True
             finally:
                 await _cleanup()
 
-        return StreamingResponse(_event_generator(), media_type="text/event-stream")
+        response = _OpenAIStreamingResponse(
+            _event_generator(),
+            media_type="text/event-stream",
+            background=_openai_post_response_compaction_task(
+                post_response_compaction_checks,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+            ),
+        )
+        response.completion_predicate = lambda: stream_completed and not stream_failed
     except Exception:
         stack.close()
         close_team_runtime_sqlite_dbs(
@@ -1522,6 +1788,8 @@ async def _stream_team_completion(  # noqa: C901
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
         raise
+    else:
+        return response
 
 
 def _extract_team_stream_failure(event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput) -> str | None:
@@ -1585,6 +1853,7 @@ async def _team_stream_event_generator(
     created: int,
     model_id: str,
     team_name: str,
+    mark_stream_failed: Callable[[], None],
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses.
 
@@ -1614,6 +1883,7 @@ async def _team_stream_event_generator(
         async for event in stream:
             if _extract_team_stream_failure(event) is not None:
                 logger.warning("Team stream emitted terminal failure", team=team_name)
+                mark_stream_failed()
                 pending = _finalize_pending_tools(tool_state)
                 if pending:
                     yield _chunk(pending)
@@ -1625,6 +1895,7 @@ async def _team_stream_event_generator(
                 yield _chunk(text)
     except Exception:
         logger.exception("Team stream failed during iteration", team=team_name)
+        mark_stream_failed()
         pending = _finalize_pending_tools(tool_state)
         if pending:
             yield _chunk(pending)

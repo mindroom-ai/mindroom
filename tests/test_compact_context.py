@@ -27,11 +27,16 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
-from mindroom.delivery_gateway import CompactionNoticeRequest
 from mindroom.history import prepare_history_for_run
 from mindroom.history.runtime import ScopeSessionContext, open_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
-from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
+from mindroom.history.types import (
+    CompactionLifecycleStart,
+    CompactionLifecycleSuccess,
+    CompactionOutcome,
+    HistoryScope,
+    HistoryScopeState,
+)
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -440,8 +445,8 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
 
 
 @pytest.mark.asyncio
-async def test_send_compaction_notice_omits_zero_breakdown_fields_in_html_body(tmp_path: Path) -> None:
-    """Bot notices should reuse the zero-filtered notice text for both plain and HTML bodies."""
+async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_body(tmp_path: Path) -> None:
+    """Lifecycle completion edits should reuse the zero-filtered notice text."""
     config, runtime_paths = _make_config(tmp_path)
     bot = AgentBot(
         agent_user=AgentMatrixUser(
@@ -472,30 +477,51 @@ async def test_send_compaction_notice_omits_zero_breakdown_fields_in_html_body(t
         runs_after=8,
         compacted_run_count=12,
         compacted_at="2026-01-01T00:00:00Z",
-        notify=True,
         history_budget_tokens=100_000,
         role_instructions_tokens=0,
         tool_definition_tokens=0,
         current_prompt_tokens=62,
     )
 
-    with patch(
-        "mindroom.delivery_gateway.send_message_result",
-        new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
-    ) as mock_send:
-        event_id = await bot._delivery_gateway.send_compaction_notice(
-            CompactionNoticeRequest(
-                target=MessageTarget.resolve("!room:localhost", None, "$incoming"),
-                main_response_event_id="$reply",
+    target = MessageTarget.resolve("!room:localhost", None, "$reply")
+    with (
+        patch(
+            "mindroom.delivery_gateway.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
+        ),
+        patch(
+            "mindroom.delivery_gateway.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice-edit")),
+        ) as mock_edit,
+    ):
+        event_id = await bot._delivery_gateway.send_compaction_lifecycle_start(
+            target=target,
+            reply_to_event_id="$reply",
+            event=CompactionLifecycleStart(
+                mode="auto",
+                session_id="session-1",
+                scope="agent:test_agent",
+                summary_model="summary-model",
+                before_tokens=30_000,
+                history_budget_tokens=100_000,
+                runs_before=20,
+            ),
+        )
+        await bot._delivery_gateway.edit_compaction_lifecycle_success(
+            target=target,
+            event=CompactionLifecycleSuccess(
+                notice_event_id=event_id,
                 outcome=outcome,
+                duration_ms=123,
             ),
         )
 
     assert event_id == "$notice"
-    assert mock_send.await_args is not None
-    sent_content = mock_send.await_args.args[2]
+    assert mock_edit.await_args is not None
+    sent_content = mock_edit.await_args.args[3]
     assert sent_content["io.mindroom.compaction"]["version"] == 2
     assert sent_content["io.mindroom.compaction"]["history_budget_tokens"] == 100_000
+    assert sent_content["io.mindroom.compaction"]["duration_ms"] == 123
     assert sent_content["body"] == outcome.format_notice()
     assert sent_content["body"] == (
         "\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget\n   Overhead: 62 prompt"

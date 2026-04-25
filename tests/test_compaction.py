@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,19 +18,36 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.compaction import (
     compute_prompt_token_breakdown,
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
-from mindroom.history.types import CompactionOutcome, _to_k
+from mindroom.history.policy import classify_compaction_decision
+from mindroom.history.types import (
+    CompactionLifecycle,
+    CompactionLifecycleStart,
+    CompactionOutcome,
+    PostResponseCompactionCheck,
+    ResolvedHistoryExecutionPlan,
+    _to_k,
+)
 from mindroom.memory import MemoryPromptParts
+from mindroom.message_target import MessageTarget
+from mindroom.post_response_effects import (
+    PostResponseEffectsDeps,
+    PostResponseEffectsSupport,
+    ResponseOutcome,
+    apply_post_response_effects,
+)
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.delivery_gateway import DeliveryGateway
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -65,12 +83,39 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
         "runs_after": 8,
         "compacted_run_count": 12,
         "compacted_at": "2026-01-01T00:00:00Z",
-        "notify": True,
     }
     if "window_tokens" in overrides and "history_budget_tokens" not in overrides:
         defaults["history_budget_tokens"] = overrides["window_tokens"]
     defaults.update(overrides)
     return CompactionOutcome(**defaults)
+
+
+def _make_post_response_check(**overrides: object) -> PostResponseCompactionCheck:
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_config=True,
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        explicit_compaction_model=False,
+        compaction_model_name="summary-model",
+        compaction_context_window=64_000,
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=12_000,
+        reserve_tokens=4_096,
+        static_prompt_tokens=0,
+        replay_budget_tokens=10_000,
+        summary_input_budget_tokens=20_000,
+        hard_replay_budget_tokens=59_904,
+    )
+    defaults: dict[str, object] = {
+        "agent_name": "test_agent",
+        "session_id": "session-1",
+        "scope_kind": "agent",
+        "scope_id": "test_agent",
+        "execution_plan": execution_plan,
+        "active_context_window": 64_000,
+    }
+    defaults.update(overrides)
+    return PostResponseCompactionCheck(**defaults)
 
 
 def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
@@ -91,6 +136,108 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
         runtime_paths,
     )
     return config, runtime_paths
+
+
+@pytest.mark.asyncio
+async def test_post_response_compaction_uses_matrix_lifecycle_adapter(tmp_path: Path) -> None:
+    """Post-response compaction should send lifecycle notices through the Matrix adapter."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+    sent_starts: list[dict[str, object]] = []
+
+    class FakeDeliveryGateway:
+        async def send_compaction_lifecycle_start(
+            self,
+            *,
+            target: MessageTarget,
+            reply_to_event_id: str,
+            event: CompactionLifecycleStart,
+        ) -> str:
+            sent_starts.append(
+                {
+                    "target": target,
+                    "reply_to_event_id": reply_to_event_id,
+                    "event": event,
+                },
+            )
+            return "$notice"
+
+    support = PostResponseEffectsSupport(
+        runtime=SimpleNamespace(config=config, client=None),
+        logger=MagicMock(),
+        runtime_paths=runtime_paths,
+        delivery_gateway=cast("DeliveryGateway", FakeDeliveryGateway()),
+        conversation_cache=MagicMock(),
+    )
+    check = _make_post_response_check()
+    target = MessageTarget.resolve(
+        room_id="!room:test",
+        thread_id="$thread",
+        reply_to_event_id="$response",
+    )
+
+    async def fake_run_compaction(**kwargs: object) -> None:
+        lifecycle = cast("CompactionLifecycle", kwargs["compaction_lifecycle"])
+        notice_id = await lifecycle.start(
+            CompactionLifecycleStart(
+                mode="auto",
+                session_id=check.session_id,
+                scope=check.scope.key,
+                summary_model=check.execution_plan.compaction_model_name,
+                before_tokens=14_000,
+                history_budget_tokens=check.execution_plan.replay_budget_tokens,
+                runs_before=8,
+            ),
+        )
+        assert notice_id == "$notice"
+
+    await support.run_post_response_compactions(
+        [check],
+        execution_identity=None,
+        target=target,
+        reply_to_event_id="$response",
+        run_compaction=fake_run_compaction,
+    )
+
+    assert len(sent_starts) == 1
+    assert sent_starts[0]["target"] == target
+    assert sent_starts[0]["reply_to_event_id"] == "$response"
+    assert sent_starts[0]["event"] == CompactionLifecycleStart(
+        mode="auto",
+        session_id="session-1",
+        scope="agent:test_agent",
+        summary_model="summary-model",
+        before_tokens=14_000,
+        history_budget_tokens=10_000,
+        runs_before=8,
+    )
+
+
+def test_compaction_policy_classifies_trigger_and_required_modes() -> None:
+    """The policy surface should classify post-response and foreground compaction modes."""
+    plan = _make_post_response_check().execution_plan
+
+    opportunistic = classify_compaction_decision(
+        plan=plan,
+        force_compact_before_next_run=False,
+        current_history_tokens=12_001,
+    )
+    required = classify_compaction_decision(
+        plan=plan,
+        force_compact_before_next_run=False,
+        current_history_tokens=60_000,
+    )
+    forced = classify_compaction_decision(
+        plan=plan,
+        force_compact_before_next_run=True,
+        current_history_tokens=5_000,
+    )
+
+    assert opportunistic.mode == "opportunistic"
+    assert opportunistic.reason == "over_trigger_fits_hard_budget"
+    assert required.mode == "required"
+    assert required.reason == "history_exceeds_hard_budget"
+    assert forced.mode == "required"
+    assert forced.reason == "forced"
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +397,98 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     assert outcome.format_notice() == (
         "\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget\n   Overhead: 62 prompt"
     )
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_start_compaction_check_after_response_link_persistence() -> None:
+    """Post-response compaction should use the final persisted session and preserve response linkage first."""
+    check = _make_post_response_check()
+    events: list[str] = []
+    persist_response_event_id = MagicMock(side_effect=lambda *_args: events.append("persist_response_event_id"))
+
+    async def _start_compaction(*_args: object) -> None:
+        events.append("start_compaction")
+
+    start_compaction = AsyncMock(side_effect=_start_compaction)
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Reply",
+            delivery_kind="sent",
+        ),
+        ResponseOutcome(
+            response_run_id="run-1",
+            post_response_compaction_checks=(check,),
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            persist_response_event_id=persist_response_event_id,
+            run_post_response_compaction=start_compaction,
+        ),
+    )
+
+    persist_response_event_id.assert_called_once_with("run-1", "$response")
+    start_compaction.assert_awaited_once_with((check,), "$response")
+    assert events == ["persist_response_event_id", "start_compaction"]
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_skip_compaction_after_non_streaming_run_failure() -> None:
+    """A delivered Matrix error reply from a failed non-streaming run must not compact."""
+    check = _make_post_response_check()
+    start_compaction = AsyncMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Agent execution failed",
+            delivery_kind="sent",
+        ),
+        ResponseOutcome(
+            response_run_id="run-1",
+            run_succeeded=False,
+            post_response_compaction_checks=(check,),
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            run_post_response_compaction=start_compaction,
+        ),
+    )
+
+    start_compaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_skip_compaction_after_streaming_run_failure() -> None:
+    """A delivered Matrix error reply from a failed streaming run must not compact."""
+    check = _make_post_response_check()
+    start_compaction = AsyncMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="partial\n\nTeam execution failed.",
+            delivery_kind="edited",
+        ),
+        ResponseOutcome(
+            response_run_id="run-1",
+            run_succeeded=False,
+            post_response_compaction_checks=(check,),
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            run_post_response_compaction=start_compaction,
+        ),
+    )
+
+    start_compaction.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

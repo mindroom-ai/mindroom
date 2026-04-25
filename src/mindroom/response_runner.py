@@ -29,6 +29,7 @@ from mindroom.constants import (
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
+from mindroom.history.runtime import run_post_response_compaction_check
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import (
     EnrichmentItem,
@@ -85,6 +86,7 @@ from .delivery_gateway import (
     DeliveryGateway,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
+    MatrixCompactionLifecycle,
     SendTextRequest,
     StreamingDeliveryRequest,
 )
@@ -107,7 +109,10 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
-    from mindroom.history.types import CompactionOutcome
+    from mindroom.history.types import (
+        CompactionOutcome,
+        PostResponseCompactionCheck,
+    )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
@@ -903,6 +908,24 @@ class ResponseRunner:
             return replace(request, existing_event_id=message_id, existing_event_is_placeholder=True)
         return replace(request, existing_event_id=message_id)
 
+    def _build_compaction_lifecycle(
+        self,
+        *,
+        target: MessageTarget,
+        request: ResponseRequest,
+    ) -> MatrixCompactionLifecycle:
+        """Build the ordered foreground compaction notice adapter for one response."""
+        reply_to_event_id = (
+            request.existing_event_id
+            if request.existing_event_id is not None and request.existing_event_is_placeholder
+            else request.reply_to_event_id
+        )
+        return MatrixCompactionLifecycle(
+            delivery_gateway=self.deps.delivery_gateway,
+            target=target,
+            reply_to_event_id=reply_to_event_id,
+        )
+
     async def _refresh_thread_history_after_lock(
         self,
         request: ResponseRequest,
@@ -1068,7 +1091,6 @@ class ResponseRunner:
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
-                reply_to_event_id=request.reply_to_event_id,
                 thread_id=resolved_target.resolved_thread_id,
                 interactive_agent_name=self.deps.agent_name,
             ),
@@ -1253,6 +1275,7 @@ class ResponseRunner:
         response_run_id = str(uuid4())
         final_delivery_outcome: FinalDeliveryOutcome | None = None
         compaction_outcomes: list[CompactionOutcome] = []
+        post_response_compaction_checks: list[PostResponseCompactionCheck] = []
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
         delivery_failure_reason: str | None = None
@@ -1281,6 +1304,10 @@ class ResponseRunner:
             if message_id is not None:
                 tracked_event_id = message_id
                 team_turn_recorder.set_response_event_id(message_id)
+            compaction_lifecycle = self._build_compaction_lifecycle(
+                target=delivery_target,
+                request=delivery_request,
+            )
 
             def _note_attempt_run_id(current_run_id: str) -> None:
                 self.deps.stop_manager.update_run_id(message_id, current_run_id)
@@ -1316,6 +1343,8 @@ class ResponseRunner:
                             active_event_ids=active_event_ids,
                             response_sender_id=self.deps.matrix_full_id,
                             compaction_outcomes_collector=compaction_outcomes,
+                            post_response_compaction_checks_collector=post_response_compaction_checks,
+                            compaction_lifecycle=compaction_lifecycle,
                             configured_team_name=self.deps.agent_name
                             if self.deps.agent_name in self.deps.runtime.config.teams
                             else None,
@@ -1406,6 +1435,8 @@ class ResponseRunner:
                                     active_event_ids=active_event_ids,
                                     response_sender_id=self.deps.matrix_full_id,
                                     compaction_outcomes_collector=compaction_outcomes,
+                                    post_response_compaction_checks_collector=post_response_compaction_checks,
+                                    compaction_lifecycle=compaction_lifecycle,
                                     configured_team_name=self.deps.agent_name
                                     if self.deps.agent_name in self.deps.runtime.config.teams
                                     else None,
@@ -1616,19 +1647,20 @@ class ResponseRunner:
                 session_id=session_id,
                 session_type=SessionType.TEAM,
                 execution_identity=tool_dispatch.execution_identity,
-                compaction_outcomes=tuple(compaction_outcomes),
+                run_succeeded=team_turn_recorder.outcome == "completed",
+                post_response_compaction_checks=tuple(post_response_compaction_checks),
                 interactive_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
                 thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
-                dispatch_compaction_when_suppressed=True,
             ),
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
-                reply_to_event_id=request.reply_to_event_id,
                 thread_id=resolved_target.resolved_thread_id,
                 interactive_agent_name=self.deps.agent_name,
                 persist_response_event_id=persist_response_event_id,
+                execution_identity=tool_dispatch.execution_identity,
+                run_post_response_compaction=run_post_response_compaction_check,
             ),
         )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
@@ -1842,9 +1874,14 @@ class ResponseRunner:
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
+        post_response_compaction_checks: list[PostResponseCompactionCheck],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> str:
         """Run one non-streaming AI request."""
+        compaction_lifecycle = self._build_compaction_lifecycle(
+            target=runtime.resolved_target,
+            request=request,
+        )
 
         def note_attempt_run_id(current_run_id: str) -> None:
             self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
@@ -1884,6 +1921,8 @@ class ResponseRunner:
                 run_metadata_collector=run_metadata_content,
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 compaction_outcomes_collector=compaction_outcomes,
+                post_response_compaction_checks_collector=post_response_compaction_checks,
+                compaction_lifecycle=compaction_lifecycle,
                 refresh_owner=(
                     self.deps.runtime.orchestrator.knowledge_refresh_owner
                     if self.deps.runtime.orchestrator is not None
@@ -1925,9 +1964,14 @@ class ResponseRunner:
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
+        post_response_compaction_checks: list[PostResponseCompactionCheck],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> StreamTransportOutcome:
         """Run one streaming AI request and send the streamed Matrix response."""
+        compaction_lifecycle = self._build_compaction_lifecycle(
+            target=runtime.resolved_target,
+            request=request,
+        )
 
         def note_attempt_run_id(current_run_id: str) -> None:
             self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
@@ -1968,6 +2012,8 @@ class ResponseRunner:
             run_metadata_collector=run_metadata_content,
             execution_identity=runtime.tool_dispatch.execution_identity,
             compaction_outcomes_collector=compaction_outcomes,
+            post_response_compaction_checks_collector=post_response_compaction_checks,
+            compaction_lifecycle=compaction_lifecycle,
             refresh_owner=(
                 self.deps.runtime.orchestrator.knowledge_refresh_owner
                 if self.deps.runtime.orchestrator is not None
@@ -2019,13 +2065,15 @@ class ResponseRunner:
             )
             raise
 
-    async def process_and_respond(  # noqa: C901
+    async def process_and_respond(  # noqa: C901, PLR0915
         self,
         request: ResponseRequest,
         *,
         run_id: str | None = None,
         response_kind: str = "ai",
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+        post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+        run_success_collector: list[bool] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
     ) -> FinalDeliveryOutcome:
         """Process a message and send a response without streaming."""
@@ -2062,6 +2110,7 @@ class ResponseRunner:
         )
         tool_trace: list[Any] = []
         compaction_outcomes: list[CompactionOutcome] = []
+        post_response_compaction_checks: list[PostResponseCompactionCheck] = []
         run_metadata_content: dict[str, Any] = {}
         active_event_ids = self._active_response_event_ids(request.room_id)
         turn_recorder = self._build_turn_recorder(
@@ -2081,6 +2130,7 @@ class ResponseRunner:
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
                     compaction_outcomes=compaction_outcomes,
+                    post_response_compaction_checks=post_response_compaction_checks,
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
@@ -2150,8 +2200,12 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
+        if run_success_collector is not None:
+            run_success_collector.append(turn_recorder.outcome == "completed")
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.extend(compaction_outcomes)
+        if post_response_compaction_checks_collector is not None:
+            post_response_compaction_checks_collector.extend(post_response_compaction_checks)
         return delivery
 
     async def process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
@@ -2161,6 +2215,8 @@ class ResponseRunner:
         run_id: str | None = None,
         response_kind: str = "ai",
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+        post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+        run_success_collector: list[bool] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
         tool_trace_collector: list[Any] | None = None,
         run_metadata_content_collector: dict[str, Any] | None = None,
@@ -2198,6 +2254,7 @@ class ResponseRunner:
             create_storage=history_storage_factory,
         )
         compaction_outcomes: list[CompactionOutcome] = []
+        post_response_compaction_checks: list[PostResponseCompactionCheck] = []
         run_metadata_content = run_metadata_content_collector if run_metadata_content_collector is not None else {}
         active_event_ids = self._active_response_event_ids(request.room_id)
         tool_trace = tool_trace_collector if tool_trace_collector is not None else []
@@ -2219,6 +2276,7 @@ class ResponseRunner:
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
                     compaction_outcomes=compaction_outcomes,
+                    post_response_compaction_checks=post_response_compaction_checks,
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
@@ -2254,8 +2312,12 @@ class ResponseRunner:
                     is_team=False,
                     response_event_id=error.event_id,
                 )
+            if run_success_collector is not None:
+                run_success_collector.append(turn_recorder.outcome == "completed")
             if compaction_outcomes_collector is not None:
                 compaction_outcomes_collector.extend(compaction_outcomes)
+            if post_response_compaction_checks_collector is not None:
+                post_response_compaction_checks_collector.extend(post_response_compaction_checks)
             response_extra_content = _merge_response_extra_content(
                 run_metadata_content,
                 request.attachment_ids,
@@ -2334,8 +2396,12 @@ class ResponseRunner:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
 
+        if run_success_collector is not None:
+            run_success_collector.append(turn_recorder.outcome == "completed")
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.extend(compaction_outcomes)
+        if post_response_compaction_checks_collector is not None:
+            post_response_compaction_checks_collector.extend(post_response_compaction_checks)
         return delivery
 
     async def generate_response(self, request: ResponseRequest) -> str | None:
@@ -2409,6 +2475,8 @@ class ResponseRunner:
         self._note_pipeline_metadata(request, response_kind="agent", used_streaming=use_streaming)
         final_delivery_outcome: FinalDeliveryOutcome | None = None
         compaction_outcomes: list[CompactionOutcome] = []
+        post_response_compaction_checks: list[PostResponseCompactionCheck] = []
+        run_successes: list[bool] = []
         response_run_id = str(uuid4())
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
@@ -2481,6 +2549,8 @@ class ResponseRunner:
                     delivery_request,
                     run_id=response_run_id,
                     compaction_outcomes_collector=compaction_outcomes,
+                    post_response_compaction_checks_collector=post_response_compaction_checks,
+                    run_success_collector=run_successes,
                     on_delivery_started=note_delivery_started,
                     tool_trace_collector=tool_trace,
                     run_metadata_content_collector=run_metadata_content,
@@ -2490,6 +2560,8 @@ class ResponseRunner:
                     delivery_request,
                     run_id=response_run_id,
                     compaction_outcomes_collector=compaction_outcomes,
+                    post_response_compaction_checks_collector=post_response_compaction_checks,
+                    run_success_collector=run_successes,
                     on_delivery_started=note_delivery_started,
                 )
 
@@ -2633,7 +2705,8 @@ class ResponseRunner:
             session_id=session_id,
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
             execution_identity=execution_identity,
-            compaction_outcomes=tuple(compaction_outcomes),
+            run_succeeded=run_successes[-1] if run_successes else False,
+            post_response_compaction_checks=tuple(post_response_compaction_checks),
             interactive_target=resolved_target,
             thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
             thread_summary_thread_id=resolved_target.resolved_thread_id,
@@ -2643,11 +2716,12 @@ class ResponseRunner:
         )
         post_response_deps = self.deps.post_response_effects.build_deps(
             room_id=request.room_id,
-            reply_to_event_id=request.reply_to_event_id,
             thread_id=resolved_target.resolved_thread_id,
             interactive_agent_name=self.deps.agent_name,
             queue_memory_persistence=queue_memory_persistence,
             persist_response_event_id=persist_response_event_id,
+            execution_identity=execution_identity,
+            run_post_response_compaction=run_post_response_compaction_check,
         )
         try:
             final_outcome = await lifecycle.finalize(

@@ -973,6 +973,8 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
         unseen_event_ids=[],
         replays_persisted_history=False,
         compaction_outcomes=[],
+        compaction_decision=None,
+        post_response_compaction_checks=[],
     )
     run_output = MagicMock()
     run_output.content = "ok"

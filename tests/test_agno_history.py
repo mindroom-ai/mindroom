@@ -52,7 +52,7 @@ from mindroom.history.compaction import (
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
-from mindroom.history.policy import resolve_history_execution_plan, should_attempt_destructive_compaction
+from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
 from mindroom.history.runtime import (
     apply_replay_plan,
     estimate_preparation_static_tokens,
@@ -62,6 +62,7 @@ from mindroom.history.runtime import (
     open_scope_session_context,
     plan_replay_that_fits,
     prepare_bound_scope_history,
+    run_post_response_compaction_check,
 )
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
@@ -70,6 +71,9 @@ from mindroom.history.storage import (
     write_scope_state,
 )
 from mindroom.history.types import (
+    CompactionLifecycleFailure,
+    CompactionLifecycleStart,
+    CompactionLifecycleSuccess,
     CompactionOutcome,
     HistoryPolicy,
     HistoryScope,
@@ -163,6 +167,34 @@ class RecordingModel(Model):
         **_kwargs: object,
     ) -> ModelResponse:
         return response
+
+
+@dataclass
+class RecordingCompactionLifecycle:
+    """Lifecycle test double that records foreground compaction notice ordering."""
+
+    events: list[object] = field(default_factory=list)
+    start_event_id: str | None = "$compaction"
+
+    async def start(self, event: CompactionLifecycleStart) -> str | None:
+        self.events.append(event)
+        return self.start_event_id
+
+    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
+        self.events.append(event)
+
+    async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
+        self.events.append(event)
+
+
+@dataclass
+class FailingStartCompactionLifecycle(RecordingCompactionLifecycle):
+    """Lifecycle test double whose initial notice delivery fails."""
+
+    async def start(self, event: CompactionLifecycleStart) -> str | None:
+        self.events.append(event)
+        message = "matrix unavailable"
+        raise RuntimeError(message)
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -687,6 +719,394 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     assert prepared.replays_persisted_history is False
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].summary == "merged summary"
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_records_post_response_compaction_check_without_summary_request(
+    tmp_path: Path,
+) -> None:
+    """Auto compaction should be checked after the reply without compacting before this reply."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 120),
+                    Message(role="assistant", content="a" * 120),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    with (
+        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.history.compaction._generate_compaction_summary", new=AsyncMock()) as mock_summary,
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            static_prompt_tokens=0,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs or []] == ["run-1"]
+    assert prepared.compaction_outcomes == []
+    assert len(prepared.post_response_compaction_checks) == 1
+    assert prepared.post_response_compaction_checks[0].session_id == "session-1"
+    assert prepared.post_response_compaction_checks[0].scope.key == "agent:test_agent"
+    assert prepared.compaction_decision.mode == "opportunistic"
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.mode == "configured"
+    mock_get_model.assert_not_called()
+    mock_summary.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_records_post_response_compaction_check_for_missing_first_session(
+    tmp_path: Path,
+) -> None:
+    """The first successful reply should still be eligible for immediate post-response compaction."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=None,
+        static_prompt_tokens=0,
+    )
+
+    assert prepared.compaction_outcomes == []
+    assert len(prepared.post_response_compaction_checks) == 1
+    assert prepared.post_response_compaction_checks[0].session_id == "session-1"
+    assert prepared.post_response_compaction_checks[0].scope.key == "agent:test_agent"
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_uses_updated_persisted_session(
+    tmp_path: Path,
+) -> None:
+    """Post-response compaction should decide from the session after the assistant run was persisted."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1")
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+    session.runs = [
+        _completed_run(
+            "assistant-run",
+            messages=[
+                Message(role="user", content="u" * 120),
+                Message(role="assistant", content="a" * 120),
+            ],
+        ),
+    ]
+    storage.upsert_session(session)
+    lifecycle = RecordingCompactionLifecycle()
+
+    async def _summary_after_notice(*_args: object, **_kwargs: object) -> SessionSummary:
+        assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
+        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(side_effect=_summary_after_notice),
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=lifecycle,
+        )
+
+    assert outcome is not None
+    assert outcome.lifecycle_notice_event_id == "$compaction"
+    assert outcome.compacted_run_count == 1
+    assert len(lifecycle.events) == 2
+    assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
+    assert isinstance(lifecycle.events[1], CompactionLifecycleSuccess)
+    assert lifecycle.events[1].notice_event_id == "$compaction"
+    assert lifecycle.events[1].outcome is outcome
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_edits_failure_when_model_load_fails(
+    tmp_path: Path,
+) -> None:
+    """Post-response lifecycle notices should not remain running when model loading fails."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "assistant-run",
+                messages=[
+                    Message(role="user", content="u" * 120),
+                    Message(role="assistant", content="a" * 120),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+    lifecycle = RecordingCompactionLifecycle()
+
+    with patch("mindroom.model_loading.get_model_instance", side_effect=ValueError("bad summary model")):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=lifecycle,
+        )
+
+    assert outcome is None
+    assert len(lifecycle.events) == 2
+    assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
+    assert isinstance(lifecycle.events[1], CompactionLifecycleFailure)
+    assert lifecycle.events[1].notice_event_id == "$compaction"
+    assert lifecycle.events[1].failure_reason == "bad summary model"
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_continues_when_lifecycle_start_fails(
+    tmp_path: Path,
+) -> None:
+    """Matrix lifecycle delivery should be best-effort and not abort compaction."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "assistant-run",
+                messages=[
+                    Message(role="user", content="u" * 120),
+                    Message(role="assistant", content="a" * 120),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+    lifecycle = FailingStartCompactionLifecycle()
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=lifecycle,
+        )
+
+    assert outcome is not None
+    assert outcome.lifecycle_notice_event_id is None
+    assert outcome.compacted_run_count == 1
+    assert len(lifecycle.events) == 1
+    assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_required_compaction_starts_lifecycle_before_summary_request(
+    tmp_path: Path,
+) -> None:
+    """Foreground compaction should make the visible lifecycle notice before the summary call blocks."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    lifecycle = RecordingCompactionLifecycle()
+
+    async def _summary_after_notice(*_args: object, **_kwargs: object) -> SessionSummary:
+        assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
+        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(side_effect=_summary_after_notice),
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            compaction_lifecycle=lifecycle,
+        )
+
+    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_outcomes[0].lifecycle_notice_event_id == "$compaction"
+    assert prepared.compaction_decision.mode == "required"
+    assert len(prepared.post_response_compaction_checks) == 1
+    assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
+    assert isinstance(lifecycle.events[1], CompactionLifecycleSuccess)
+    assert lifecycle.events[1].notice_event_id == "$compaction"
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_required_compaction_edits_failure_when_model_load_fails(
+    tmp_path: Path,
+) -> None:
+    """Required compaction should surface model-load failure in the lifecycle and continue."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    lifecycle = RecordingCompactionLifecycle()
+
+    with patch("mindroom.model_loading.get_model_instance", side_effect=ValueError("bad summary model")):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            compaction_lifecycle=lifecycle,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_decision.mode == "required"
+    assert len(prepared.post_response_compaction_checks) == 1
+    assert len(lifecycle.events) == 2
+    assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
+    assert isinstance(lifecycle.events[1], CompactionLifecycleFailure)
+    assert lifecycle.events[1].notice_event_id == "$compaction"
+    assert lifecycle.events[1].failure_reason == "bad summary model"
 
 
 @pytest.mark.asyncio
@@ -2810,7 +3230,6 @@ def test_get_entity_compaction_config_merges_authored_overrides(tmp_path: Path) 
                     threshold_tokens=12_000,
                     reserve_tokens=2_048,
                     model="summary-model",
-                    notify=True,
                 ),
             ),
             models={
@@ -2836,7 +3255,6 @@ def test_get_entity_compaction_config_merges_authored_overrides(tmp_path: Path) 
     assert resolved.threshold_percent == 0.6
     assert resolved.reserve_tokens == 2_048
     assert resolved.model == "summary-model"
-    assert resolved.notify is True
 
 
 def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_path: Path) -> None:
@@ -3227,7 +3645,7 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
     assert execution_plan.replay_budget_tokens == 490
 
 
-def test_should_attempt_destructive_compaction_forced_compaction_takes_priority() -> None:
+def test_classify_compaction_decision_forced_compaction_takes_priority() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_config=True,
         authored_compaction_enabled=True,
@@ -3243,14 +3661,17 @@ def test_should_attempt_destructive_compaction_forced_compaction_takes_priority(
         summary_input_budget_tokens=5_000,
     )
 
-    assert should_attempt_destructive_compaction(
+    decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=True,
         current_history_tokens=None,
     )
 
+    assert decision.mode == "required"
+    assert decision.reason == "forced"
 
-def test_should_attempt_destructive_compaction_uses_authored_compaction_when_over_budget() -> None:
+
+def test_classify_compaction_decision_uses_post_response_when_over_trigger_but_fits() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_config=True,
         authored_compaction_enabled=True,
@@ -3264,13 +3685,17 @@ def test_should_attempt_destructive_compaction_uses_authored_compaction_when_ove
         static_prompt_tokens=2_000,
         replay_budget_tokens=10_000,
         summary_input_budget_tokens=5_000,
+        hard_replay_budget_tokens=20_000,
     )
 
-    assert should_attempt_destructive_compaction(
+    decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=False,
         current_history_tokens=10_001,
     )
+
+    assert decision.mode == "opportunistic"
+    assert decision.reason == "over_trigger_fits_hard_budget"
 
 
 def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: Path) -> None:
@@ -3572,7 +3997,6 @@ def _make_test_compaction_outcome() -> CompactionOutcome:
         runs_after=8,
         compacted_run_count=12,
         compacted_at="2026-01-01T00:00:00Z",
-        notify=True,
     )
 
 

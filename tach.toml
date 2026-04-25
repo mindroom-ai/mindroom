@@ -601,6 +601,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.runtime",
     "mindroom.history.turn_recorder",
     "mindroom.knowledge",
     "mindroom.matrix.client_visible_messages",

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, TypeGuard
+from typing import Literal, Protocol, TypeGuard
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
 _CompactionMode = Literal["auto", "manual"]
+_CompactionDecisionMode = Literal["none", "opportunistic", "required"]
+_CompactionLifecycleStatus = Literal["success", "failed", "timeout"]
 _CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summary_input_budget"]
 _ReplayPlanMode = Literal["configured", "limited", "disabled"]
 
@@ -70,6 +72,7 @@ class ResolvedHistoryExecutionPlan:
     replay_budget_tokens: int | None
     summary_input_budget_tokens: int | None
     unavailable_reason: _CompactionAvailabilityReason | None = None
+    hard_replay_budget_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,85 @@ class ResolvedReplayPlan:
     num_history_messages: int | None = None
     history_limit_mode: Literal["runs", "messages"] | None = None
     history_limit: int | None = None
+
+
+@dataclass(frozen=True)
+class CompactionDecision:
+    """Resolved compaction lifecycle decision for one history preparation."""
+
+    mode: _CompactionDecisionMode
+    reason: str
+    current_history_tokens: int | None = None
+    trigger_budget_tokens: int | None = None
+    hard_budget_tokens: int | None = None
+    fitted_replay_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class PostResponseCompactionCheck:
+    """Post-response check for whether the updated session should compact now."""
+
+    agent_name: str
+    session_id: str
+    scope_kind: _ScopeKind
+    scope_id: str
+    execution_plan: ResolvedHistoryExecutionPlan
+    active_context_window: int | None
+
+    @property
+    def scope(self) -> HistoryScope:
+        """Return the typed history scope for this request."""
+        return HistoryScope(kind=self.scope_kind, scope_id=self.scope_id)
+
+
+@dataclass(frozen=True)
+class CompactionLifecycleStart:
+    """Visible lifecycle notice payload emitted before foreground compaction."""
+
+    mode: _CompactionMode
+    session_id: str
+    scope: str
+    summary_model: str
+    before_tokens: int
+    history_budget_tokens: int | None
+    runs_before: int
+
+
+@dataclass(frozen=True)
+class CompactionLifecycleSuccess:
+    """Visible lifecycle notice payload emitted after successful foreground compaction."""
+
+    notice_event_id: str | None
+    outcome: CompactionOutcome
+    duration_ms: int
+
+
+@dataclass(frozen=True)
+class CompactionLifecycleFailure:
+    """Visible lifecycle notice payload emitted after failed foreground compaction."""
+
+    notice_event_id: str | None
+    mode: _CompactionMode
+    session_id: str
+    scope: str
+    summary_model: str
+    status: _CompactionLifecycleStatus
+    duration_ms: int
+    failure_reason: str
+    history_budget_tokens: int | None
+
+
+class CompactionLifecycle(Protocol):
+    """Interface for ordered foreground compaction Matrix notice delivery."""
+
+    async def start(self, event: CompactionLifecycleStart) -> str | None:
+        """Send the initial compaction notice and return its Matrix event id."""
+
+    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
+        """Edit the lifecycle notice after successful compaction."""
+
+    async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
+        """Edit the lifecycle notice after failed compaction."""
 
 
 def _to_k(tokens: int) -> str:
@@ -108,7 +190,7 @@ def _should_render_overhead_tokens(tokens: int | None) -> TypeGuard[int]:
 
 @dataclass(frozen=True)
 class CompactionOutcome:
-    """Completed pre-run compaction result used for notices and tests."""
+    """Completed compaction result used for lifecycle notices and tests."""
 
     mode: _CompactionMode
     session_id: str
@@ -124,17 +206,20 @@ class CompactionOutcome:
     runs_after: int
     compacted_run_count: int
     compacted_at: str
-    notify: bool
     history_budget_tokens: int | None = None
     role_instructions_tokens: int | None = None
     tool_definition_tokens: int | None = None
     current_prompt_tokens: int | None = None
+    lifecycle_notice_event_id: str | None = None
+    duration_ms: int | None = None
+    status: _CompactionLifecycleStatus = "success"
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized notice metadata for Matrix compaction messages."""
         version = 2 if self.history_budget_tokens is not None else 1
         meta: dict[str, object] = {
             "version": version,
+            "status": self.status,
             "mode": self.mode,
             "session_id": self.session_id,
             "scope": self.scope,
@@ -155,6 +240,10 @@ class CompactionOutcome:
             meta["tool_definition_tokens"] = self.tool_definition_tokens
         if self.current_prompt_tokens is not None:
             meta["current_prompt_tokens"] = self.current_prompt_tokens
+        if self.lifecycle_notice_event_id is not None:
+            meta["lifecycle_notice_event_id"] = self.lifecycle_notice_event_id
+        if self.duration_ms is not None:
+            meta["duration_ms"] = self.duration_ms
         return meta
 
     def format_notice(self) -> str:
@@ -184,3 +273,7 @@ class PreparedHistoryState:
     compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
     replay_plan: ResolvedReplayPlan | None = None
     replays_persisted_history: bool = False
+    compaction_decision: CompactionDecision = field(
+        default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
+    )
+    post_response_compaction_checks: list[PostResponseCompactionCheck] = field(default_factory=list)

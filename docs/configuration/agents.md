@@ -126,7 +126,6 @@ agents:
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
-      notify: false
 
 ```
 
@@ -156,7 +155,7 @@ agents:
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int | `null` | Max messages from history. Mutually exclusive with `num_history_runs` |
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `false`). On Anthropic and Vertex Claude models, setting this to `true` can mutate replayed tool messages and invalidate prompt-cache prefixes |
-| `compaction` | object | `null` | Per-agent auto-compaction overrides. When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed. Authoring `defaults.compaction` enables the optional destructive compaction phase for inheriting agents and teams. A non-empty per-agent block also enables that destructive phase for the agent, but a bare `compaction: {}` is only a no-op override that inherits authored defaults. Use `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`, and `notify` to change the destructive-compaction policy. Replay safety always uses the active runtime model window. If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass. Compaction is destructive inside the live session: it merges old history into `session.summary` and removes the compacted raw runs from `session.runs` |
+| `compaction` | object | `null` | Per-agent auto-compaction overrides. When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed. Authoring `defaults.compaction` enables the optional destructive compaction phase for inheriting agents and teams. A non-empty per-agent block also enables that destructive phase for the agent, but a bare `compaction: {}` is only a no-op override that inherits authored defaults. Use `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model` to change the destructive-compaction policy. Replay safety always uses the active runtime model window. If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass. Compaction is destructive inside the live session: it merges old history into `session.summary` and removes the compacted raw runs from `session.runs` |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Routed tools may still show generic worker warmup text such as `Preparing isolated worker...`, but that copy never includes tool identifiers or tool-trace metadata. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](../deployment/sandbox-proxy.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
@@ -177,9 +176,10 @@ Startup thread prewarm is a background, best-effort cache warmup for rooms alrea
 The router and teams still accept authorized invites based on their existing room-lifecycle rules.
 Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an agent to join and persist a room.
 
-MindRoom prepares persisted history in two phases.
-It may first compact older durable history into `session.summary`.
-It then always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
+MindRoom compacts in one visible lifecycle.
+If the current reply needs compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
+After a successful visible reply, MindRoom re-checks the updated persisted session and immediately compacts if the next reply would cross the compaction threshold.
+It always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
 That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.
 Compaction rewrites the persisted Agno session in SQLite.
 Older compacted runs are removed from `session.runs` and replaced by the merged `session.summary`, so raw pre-compaction runs are not retained for later audit or debugging.
@@ -582,7 +582,6 @@ defaults:
   #   enabled: true
   #   threshold_percent: 0.8
   #   reserve_tokens: 16384
-  #   notify: false
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true                 # Show tool-call markers and trace metadata; hidden mode still allows generic worker warmup copy
   worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)

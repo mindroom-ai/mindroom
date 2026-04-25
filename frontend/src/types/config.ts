@@ -111,7 +111,6 @@ export interface CompactionConfig {
   threshold_percent?: number | null;
   reserve_tokens?: number;
   model?: string | null;
-  notify?: boolean;
 }
 
 const DEFAULT_INHERITED_TOOLS = ["scheduler"] as const;
@@ -122,8 +121,7 @@ function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
     compaction.enabled === undefined &&
     compaction.threshold_tokens === undefined &&
     compaction.threshold_percent === undefined &&
-    compaction.reserve_tokens === undefined &&
-    compaction.notify === undefined
+    compaction.reserve_tokens === undefined
   );
 }
 
@@ -133,8 +131,7 @@ function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
     compaction.model === undefined &&
     compaction.threshold_tokens === undefined &&
     compaction.threshold_percent === undefined &&
-    compaction.reserve_tokens === undefined &&
-    compaction.notify === undefined
+    compaction.reserve_tokens === undefined
   );
 }
 

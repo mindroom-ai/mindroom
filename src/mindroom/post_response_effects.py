@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
-from mindroom.delivery_gateway import CompactionNoticeRequest
+from mindroom.delivery_gateway import MatrixCompactionLifecycle
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
@@ -18,18 +18,35 @@ from mindroom.timing import timed
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
+    from typing import Protocol
 
     import nio
     import structlog
     from agno.db.base import SessionType
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.history.types import CompactionOutcome
+    from mindroom.history.types import CompactionOutcome, PostResponseCompactionCheck
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+    class PostResponseCompactionRunner(Protocol):
+        """Callable shape for direct post-response compaction execution."""
+
+        def __call__(
+            self,
+            *,
+            check: PostResponseCompactionCheck,
+            runtime_paths: RuntimePaths,
+            config: Config,
+            execution_identity: ToolExecutionIdentity | None,
+            compaction_lifecycle: MatrixCompactionLifecycle,
+        ) -> Awaitable[CompactionOutcome | None]:
+            """Run one post-response compaction check."""
+            ...
 
 
 @dataclass(frozen=True)
@@ -40,14 +57,14 @@ class ResponseOutcome:
     session_id: str | None = None
     session_type: SessionType | None = None
     execution_identity: ToolExecutionIdentity | None = None
-    compaction_outcomes: tuple[CompactionOutcome, ...] = ()
+    run_succeeded: bool = True
+    post_response_compaction_checks: tuple[PostResponseCompactionCheck, ...] = ()
     interactive_target: MessageTarget | None = None
     thread_summary_room_id: str | None = None
     thread_summary_thread_id: str | None = None
     thread_summary_message_count_hint: int | None = None
     memory_prompt: str | None = None
     memory_thread_history: Sequence[ResolvedVisibleMessage] | None = None
-    dispatch_compaction_when_suppressed: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,14 +79,8 @@ class PostResponseEffectsDeps:
         ]
         | None
     ) = None
-    dispatch_compaction_notices: (
-        Callable[
-            [str, Sequence[CompactionOutcome]],
-            Awaitable[None],
-        ]
-        | None
-    ) = None
     queue_memory_persistence: Callable[[], None] | None = None
+    run_post_response_compaction: Callable[[Sequence[PostResponseCompactionCheck], str], Awaitable[None]] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
@@ -141,33 +152,6 @@ class PostResponseEffectsSupport:
             options_list,
         )
 
-    async def _dispatch_compaction_notices(
-        self,
-        *,
-        room_id: str,
-        reply_to_event_id: str,
-        main_response_event_id: str | None,
-        thread_id: str | None,
-        compaction_outcomes: Sequence[CompactionOutcome],
-    ) -> None:
-        """Send compaction notices for all outcomes that request one."""
-        if main_response_event_id is None:
-            return
-        for outcome in compaction_outcomes:
-            if not outcome.notify:
-                continue
-            await self.delivery_gateway.send_compaction_notice(
-                CompactionNoticeRequest(
-                    target=MessageTarget.resolve(
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        reply_to_event_id=reply_to_event_id,
-                    ),
-                    main_response_event_id=main_response_event_id,
-                    outcome=outcome,
-                ),
-            )
-
     def queue_thread_summary(
         self,
         room_id: str,
@@ -192,15 +176,40 @@ class PostResponseEffectsSupport:
             owner=self.runtime,
         )
 
+    async def run_post_response_compactions(
+        self,
+        checks: Sequence[PostResponseCompactionCheck],
+        *,
+        execution_identity: ToolExecutionIdentity | None,
+        target: MessageTarget,
+        reply_to_event_id: str,
+        run_compaction: PostResponseCompactionRunner,
+    ) -> None:
+        """Run immediate post-response compaction checks before the turn fully completes."""
+        for check in checks:
+            compaction_lifecycle = MatrixCompactionLifecycle(
+                delivery_gateway=self.delivery_gateway,
+                target=target,
+                reply_to_event_id=reply_to_event_id,
+            )
+            await run_compaction(
+                check=check,
+                runtime_paths=self.runtime_paths,
+                config=self.runtime.config,
+                execution_identity=execution_identity,
+                compaction_lifecycle=compaction_lifecycle,
+            )
+
     def build_deps(
         self,
         *,
         room_id: str,
-        reply_to_event_id: str,
         thread_id: str | None,
         interactive_agent_name: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
+        run_post_response_compaction: PostResponseCompactionRunner | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
 
@@ -219,23 +228,27 @@ class PostResponseEffectsSupport:
                 agent_name=interactive_agent_name,
             )
 
-        async def dispatch_compaction_notices(
-            main_response_event_id: str,
-            compaction_outcomes: Sequence[CompactionOutcome],
-        ) -> None:
-            await self._dispatch_compaction_notices(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                main_response_event_id=main_response_event_id,
-                thread_id=thread_id,
-                compaction_outcomes=compaction_outcomes,
-            )
-
         return PostResponseEffectsDeps(
             logger=self.logger,
             register_interactive=register_interactive,
-            dispatch_compaction_notices=dispatch_compaction_notices,
             queue_memory_persistence=queue_memory_persistence,
+            run_post_response_compaction=(
+                (
+                    lambda checks, response_event_id: self.run_post_response_compactions(
+                        checks,
+                        execution_identity=execution_identity,
+                        target=MessageTarget.resolve(
+                            room_id=room_id,
+                            thread_id=thread_id,
+                            reply_to_event_id=response_event_id,
+                        ),
+                        reply_to_event_id=response_event_id,
+                        run_compaction=run_post_response_compaction,
+                    )
+                )
+                if run_post_response_compaction is not None
+                else None
+            ),
             persist_response_event_id=persist_response_event_id,
             should_queue_thread_summary=self.should_queue_thread_summary,
             queue_thread_summary=self.queue_thread_summary,
@@ -266,17 +279,6 @@ async def apply_post_response_effects(
             [dict(item) for item in final_delivery_outcome.options_list],
         )
 
-    if (
-        response_event_id is not None
-        and deps.dispatch_compaction_notices is not None
-        and outcome.compaction_outcomes
-        and (not final_delivery_outcome.suppressed or outcome.dispatch_compaction_when_suppressed)
-    ):
-        await deps.dispatch_compaction_notices(
-            response_event_id,
-            outcome.compaction_outcomes,
-        )
-
     if deps.queue_memory_persistence is not None:
         try:
             deps.queue_memory_persistence()
@@ -303,6 +305,26 @@ async def apply_post_response_effects(
                 session_id=outcome.session_id,
                 run_id=outcome.response_run_id,
                 response_event_id=response_event_id,
+            )
+
+    if (
+        response_event_id is not None
+        and final_delivery_outcome.terminal_status == "completed"
+        and not final_delivery_outcome.suppressed
+        and outcome.run_succeeded
+        and outcome.post_response_compaction_checks
+        and deps.run_post_response_compaction is not None
+    ):
+        try:
+            await deps.run_post_response_compaction(outcome.post_response_compaction_checks, response_event_id)
+        except Exception:
+            deps.logger.exception(
+                "Failed to run post-response compaction",
+                session_id=outcome.session_id,
+                room_id=outcome.interactive_target.room_id if outcome.interactive_target is not None else None,
+                thread_id=(
+                    outcome.interactive_target.resolved_thread_id if outcome.interactive_target is not None else None
+                ),
             )
 
     if (

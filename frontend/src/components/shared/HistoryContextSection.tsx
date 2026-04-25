@@ -439,37 +439,6 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   }}
                 />
               </FieldGroup>
-
-              <FieldGroup
-                label="Notify Room"
-                helperText={`Post a room notice after compaction completes (default: ${
-                  defaultCompaction?.notify ? "on" : "off"
-                }).`}
-                htmlFor="compaction_notify"
-              >
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="compaction_notify"
-                    checked={
-                      compactionConfig?.notify ??
-                      defaultCompaction?.notify ??
-                      false
-                    }
-                    onCheckedChange={(checked) => {
-                      mutateCompaction((current) => ({
-                        ...(current ?? {}),
-                        notify: checked === true,
-                      }));
-                    }}
-                  />
-                  <label
-                    htmlFor="compaction_notify"
-                    className="text-sm font-medium cursor-pointer select-none"
-                  >
-                    Send compaction notices
-                  </label>
-                </div>
-              </FieldGroup>
             </div>
           </div>
         </FieldGroup>

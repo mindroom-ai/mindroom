@@ -82,7 +82,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history import CompactionOutcome
+    from mindroom.history import CompactionLifecycle, CompactionOutcome, PostResponseCompactionCheck
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -1454,6 +1454,8 @@ async def _prepare_materialized_team_execution(
     current_sender_id: str | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
     configured_team_name: str | None,
+    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
@@ -1483,8 +1485,11 @@ async def _prepare_materialized_team_execution(
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         compaction_outcomes_collector=compaction_outcomes_collector,
+        compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,
     )
+    if post_response_compaction_checks_collector is not None:
+        post_response_compaction_checks_collector.extend(prepared_execution.post_response_compaction_checks or [])
     run_metadata = build_matrix_run_metadata(
         reply_to_event_id,
         prepared_execution.unseen_event_ids,
@@ -1514,6 +1519,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
@@ -1595,6 +1602,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 response_sender_id=response_sender_id,
                 current_sender_id=user_id,
                 compaction_outcomes_collector=compaction_outcomes_collector,
+                post_response_compaction_checks_collector=post_response_compaction_checks_collector,
+                compaction_lifecycle=compaction_lifecycle,
                 configured_team_name=configured_team_name,
                 thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
                 matrix_run_metadata=matrix_run_metadata,
@@ -1866,6 +1875,8 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
@@ -1962,6 +1973,8 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 response_sender_id=response_sender_id,
                 current_sender_id=user_id,
                 compaction_outcomes_collector=compaction_outcomes_collector,
+                post_response_compaction_checks_collector=post_response_compaction_checks_collector,
+                compaction_lifecycle=compaction_lifecycle,
                 configured_team_name=configured_team_name,
                 thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
                 matrix_run_metadata=matrix_run_metadata,

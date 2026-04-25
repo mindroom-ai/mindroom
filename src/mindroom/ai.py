@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.history.types import CompactionLifecycle, PostResponseCompactionCheck
     from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.events import ToolTraceEntry
@@ -761,6 +762,8 @@ async def _prepare_agent_and_prompt(
     active_event_ids: Collection[str] = frozenset(),
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_owner: KnowledgeRefreshOwner | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
@@ -836,6 +839,7 @@ async def _prepare_agent_and_prompt(
         reply_to_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
         compaction_outcomes_collector=compaction_outcomes_collector,
+        compaction_lifecycle=compaction_lifecycle,
         current_sender_id=current_sender_id,
         timing_scope=timing_scope,
     )
@@ -843,6 +847,12 @@ async def _prepare_agent_and_prompt(
         compaction_outcomes=prepared_execution.compaction_outcomes,
         replay_plan=prepared_execution.replay_plan,
         replays_persisted_history=prepared_execution.replays_persisted_history,
+        compaction_decision=(
+            prepared_execution.compaction_decision
+            if prepared_execution.compaction_decision is not None
+            else PreparedHistoryState().compaction_decision
+        ),
+        post_response_compaction_checks=list(prepared_execution.post_response_compaction_checks or []),
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
@@ -860,10 +870,14 @@ async def _prepare_agent_and_prompt(
             compaction_outcomes=enriched_outcomes,
             replay_plan=prepared_history.replay_plan,
             replays_persisted_history=prepared_history.replays_persisted_history,
+            compaction_decision=prepared_history.compaction_decision,
+            post_response_compaction_checks=prepared_history.post_response_compaction_checks,
         )
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.clear()
             compaction_outcomes_collector.extend(enriched_outcomes)
+    if post_response_compaction_checks_collector is not None:
+        post_response_compaction_checks_collector.extend(prepared_history.post_response_compaction_checks)
 
     logger.info(
         "Preparing agent and prompt",
@@ -902,6 +916,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_owner: KnowledgeRefreshOwner | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
@@ -946,6 +962,10 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         compaction_outcomes_collector: Optional list that receives completed
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
+        post_response_compaction_checks_collector: Optional list that receives
+            post-response compaction checks from this run.
+        compaction_lifecycle: Optional lifecycle sink for ordered foreground
+            compaction notices.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
         refresh_owner: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
@@ -1009,6 +1029,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     active_event_ids=active_event_ids,
                     execution_identity=execution_identity,
                     compaction_outcomes_collector=compaction_outcomes_collector,
+                    post_response_compaction_checks_collector=post_response_compaction_checks_collector,
+                    compaction_lifecycle=compaction_lifecycle,
                     delegation_depth=delegation_depth,
                     refresh_owner=refresh_owner,
                     system_enrichment_items=system_enrichment_items,
@@ -1343,6 +1365,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_owner: KnowledgeRefreshOwner | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
@@ -1385,6 +1409,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         compaction_outcomes_collector: Optional list that receives completed
             compaction outcomes from auto-compaction and manual `compact_context`
             tool calls during this run.
+        post_response_compaction_checks_collector: Optional list that receives
+            post-response compaction checks from this run.
+        compaction_lifecycle: Optional lifecycle sink for ordered foreground
+            compaction notices.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
         refresh_owner: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
@@ -1451,6 +1479,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     active_event_ids=active_event_ids,
                     execution_identity=execution_identity,
                     compaction_outcomes_collector=compaction_outcomes_collector,
+                    post_response_compaction_checks_collector=post_response_compaction_checks_collector,
+                    compaction_lifecycle=compaction_lifecycle,
                     delegation_depth=delegation_depth,
                     refresh_owner=refresh_owner,
                     system_enrichment_items=system_enrichment_items,

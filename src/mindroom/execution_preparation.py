@@ -45,7 +45,13 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.history import CompactionOutcome
     from mindroom.history.runtime import PreparedScopeHistory
-    from mindroom.history.types import PreparedHistoryState, ResolvedReplayPlan
+    from mindroom.history.types import (
+        CompactionDecision,
+        CompactionLifecycle,
+        PostResponseCompactionCheck,
+        PreparedHistoryState,
+        ResolvedReplayPlan,
+    )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
@@ -89,6 +95,8 @@ class PreparedExecutionContext:
     unseen_event_ids: list[str]
     replays_persisted_history: bool
     compaction_outcomes: list[CompactionOutcome]
+    compaction_decision: CompactionDecision | None = None
+    post_response_compaction_checks: list[PostResponseCompactionCheck] | None = None
 
     @property
     def final_prompt(self) -> str:
@@ -599,6 +607,8 @@ async def _prepare_execution_context_common(
         unseen_event_ids=unseen_event_ids,
         replays_persisted_history=prepared_history.replays_persisted_history,
         compaction_outcomes=prepared_history.compaction_outcomes,
+        compaction_decision=prepared_history.compaction_decision,
+        post_response_compaction_checks=prepared_history.post_response_compaction_checks,
     )
 
 
@@ -616,6 +626,7 @@ async def prepare_agent_execution_context(
     reply_to_event_id: str | None,
     active_event_ids: Collection[str],
     compaction_outcomes_collector: list[CompactionOutcome] | None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     current_sender_id: str | None = None,
     timing_scope: str | None = None,
 ) -> PreparedExecutionContext:
@@ -648,6 +659,7 @@ async def prepare_agent_execution_context(
                 fallback_full_prompt=replay_fallback_prompt,
             ),
             timing_scope=timing_scope,
+            compaction_lifecycle=compaction_lifecycle,
         )
 
     return await _prepare_execution_context_common(
@@ -688,6 +700,7 @@ async def prepare_bound_team_execution_context(
     response_sender_id: str | None = None,
     current_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
@@ -708,6 +721,7 @@ async def prepare_bound_team_execution_context(
             team_name=team_name,
             active_model_name=active_model_name,
             active_context_window=active_context_window,
+            compaction_lifecycle=compaction_lifecycle,
         )
 
     return await _prepare_execution_context_common(
@@ -749,6 +763,7 @@ async def prepare_bound_team_run_context(
     response_sender_id: str | None = None,
     current_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
 ) -> PreparedExecutionContext:
     """Prepare a team run with queued-notice scrubbing and replay application."""
@@ -772,6 +787,7 @@ async def prepare_bound_team_run_context(
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         compaction_outcomes_collector=compaction_outcomes_collector,
+        compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,
     )
     if prepared_execution.replay_plan is not None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -52,7 +52,11 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.history.types import CompactionOutcome
+    from mindroom.history.types import (
+        CompactionLifecycleFailure,
+        CompactionLifecycleStart,
+        CompactionLifecycleSuccess,
+    )
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.streaming_delivery import StreamInputChunk
@@ -215,12 +219,34 @@ class CancelledVisibleNoteRequest:
 
 
 @dataclass(frozen=True)
-class CompactionNoticeRequest:
-    """Parameters for a compaction notice send."""
+class MatrixCompactionLifecycle:
+    """Matrix-backed compaction lifecycle notice adapter."""
 
+    delivery_gateway: DeliveryGateway
     target: MessageTarget
-    main_response_event_id: str
-    outcome: CompactionOutcome
+    reply_to_event_id: str
+
+    async def start(self, event: CompactionLifecycleStart) -> str | None:
+        """Send the initial visible lifecycle notice."""
+        return await self.delivery_gateway.send_compaction_lifecycle_start(
+            target=self.target,
+            reply_to_event_id=self.reply_to_event_id,
+            event=event,
+        )
+
+    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
+        """Edit the lifecycle notice after successful compaction."""
+        await self.delivery_gateway.edit_compaction_lifecycle_success(
+            target=self.target,
+            event=event,
+        )
+
+    async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
+        """Edit the lifecycle notice after failed compaction."""
+        await self.delivery_gateway.edit_compaction_lifecycle_failure(
+            target=self.target,
+            event=event,
+        )
 
 
 @dataclass(frozen=True)
@@ -781,40 +807,128 @@ class DeliveryGateway:
             extra_content=extra_content,
         )
 
-    async def send_compaction_notice(self, request: CompactionNoticeRequest) -> str | None:
-        """Send one compaction notice without mention parsing side effects."""
-        client = self._client()
-        summary_line = request.outcome.format_notice()
-        formatted_body = f"<em>{html_escape(summary_line).replace(chr(10), '<br/>')}</em>"
-        target = request.target
-        effective_thread_id = target.resolved_thread_id
+    async def send_compaction_lifecycle_start(
+        self,
+        *,
+        target: MessageTarget,
+        reply_to_event_id: str,
+        event: CompactionLifecycleStart,
+    ) -> str | None:
+        """Send the foreground compaction lifecycle notice."""
+        body = "Compacting history..."
         content = build_message_content(
-            summary_line,
-            formatted_body=formatted_body,
-            thread_event_id=effective_thread_id,
-            reply_to_event_id=request.main_response_event_id,
+            body,
+            formatted_body=f"<em>{html_escape(body)}</em>",
+            thread_event_id=target.resolved_thread_id,
+            reply_to_event_id=reply_to_event_id,
             extra_content={
                 "msgtype": "m.notice",
-                constants.COMPACTION_NOTICE_CONTENT_KEY: request.outcome.to_notice_metadata(),
+                constants.COMPACTION_NOTICE_CONTENT_KEY: {
+                    "version": 3,
+                    "status": "running",
+                    "mode": event.mode,
+                    "session_id": event.session_id,
+                    "scope": event.scope,
+                    "summary_model": event.summary_model,
+                    "before_tokens": event.before_tokens,
+                    "history_budget_tokens": event.history_budget_tokens,
+                    "runs_before": event.runs_before,
+                },
                 "com.mindroom.skip_mentions": True,
             },
         )
-        delivered = await send_message_result(client, target.room_id, content)
+        delivered = await send_message_result(self._client(), target.room_id, content)
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,
                 delivered.event_id,
                 delivered.content_sent,
             )
-            self.deps.logger.info(
-                "Sent compaction notice",
-                event_id=delivered.event_id,
-                **target.log_context,
-                summary_model=request.outcome.summary_model,
-            )
+            self.deps.logger.info("Sent compaction lifecycle notice", event_id=delivered.event_id, **target.log_context)
             return delivered.event_id
-        self.deps.logger.error("Failed to send compaction notice", **target.log_context)
+        self.deps.logger.error("Failed to send compaction lifecycle notice", **target.log_context)
         return None
+
+    async def edit_compaction_lifecycle_success(
+        self,
+        *,
+        target: MessageTarget,
+        event: CompactionLifecycleSuccess,
+    ) -> None:
+        """Edit the foreground compaction lifecycle notice after success."""
+        if event.notice_event_id is None:
+            return
+        outcome = replace(event.outcome, duration_ms=event.duration_ms)
+        await self._edit_compaction_lifecycle_notice(
+            target=target,
+            event_id=event.notice_event_id,
+            body=outcome.format_notice(),
+            metadata=outcome.to_notice_metadata(),
+        )
+
+    async def edit_compaction_lifecycle_failure(
+        self,
+        *,
+        target: MessageTarget,
+        event: CompactionLifecycleFailure,
+    ) -> None:
+        """Edit the foreground compaction lifecycle notice after failure."""
+        if event.notice_event_id is None:
+            return
+        body = f"Compaction failed; continuing with trimmed history. {event.failure_reason}"
+        await self._edit_compaction_lifecycle_notice(
+            target=target,
+            event_id=event.notice_event_id,
+            body=body,
+            metadata={
+                "version": 3,
+                "status": event.status,
+                "mode": event.mode,
+                "session_id": event.session_id,
+                "scope": event.scope,
+                "summary_model": event.summary_model,
+                "duration_ms": event.duration_ms,
+                "failure_reason": event.failure_reason,
+                "history_budget_tokens": event.history_budget_tokens,
+            },
+        )
+
+    async def _edit_compaction_lifecycle_notice(
+        self,
+        *,
+        target: MessageTarget,
+        event_id: str,
+        body: str,
+        metadata: dict[str, object],
+    ) -> None:
+        latest_thread_event_id = await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
+            target.room_id,
+            target.resolved_thread_id,
+            target.reply_to_event_id,
+            event_id,
+        )
+        content = build_message_content(
+            body,
+            formatted_body=f"<em>{html_escape(body).replace(chr(10), '<br/>')}</em>",
+            thread_event_id=target.resolved_thread_id,
+            reply_to_event_id=target.reply_to_event_id,
+            latest_thread_event_id=latest_thread_event_id,
+            extra_content={
+                "msgtype": "m.notice",
+                constants.COMPACTION_NOTICE_CONTENT_KEY: metadata,
+                "com.mindroom.skip_mentions": True,
+            },
+        )
+        delivered = await edit_message_result(self._client(), target.room_id, event_id, content, body)
+        if delivered is not None:
+            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
+                target.room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
+            self.deps.logger.info("Edited compaction lifecycle notice", event_id=event_id, **target.log_context)
+            return
+        self.deps.logger.error("Failed to edit compaction lifecycle notice", event_id=event_id, **target.log_context)
 
     async def deliver_stream(
         self,

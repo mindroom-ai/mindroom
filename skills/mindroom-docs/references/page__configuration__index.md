@@ -209,7 +209,6 @@ teams:
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
-      notify: false
     rooms: []                      # Optional: Rooms to auto-join
 
 # Culture configurations (optional)
@@ -248,7 +247,6 @@ defaults:
   #   enabled: true
   #   threshold_percent: 0.8
   #   reserve_tokens: 16384
-  #   notify: false
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
@@ -280,8 +278,11 @@ Those tools keep using normal shared credentials even when `worker_grantable_cre
 Sandbox-proxied execution is stricter than direct local execution: ordinary runtime `.env` values and provider env do not carry over unless they are explicitly passed through.
 
 # Auto-compaction is destructive inside the active session.
-# It rewrites the stored session summary and removes compacted raw runs from
-# the live session so Agno replays only the summary plus recent runs.
+# It uses one Matrix lifecycle notice that is edited in place.
+# It runs before a reply only when needed for that reply.
+# Otherwise it runs immediately after a successful reply when the updated session crosses the threshold.
+# It rewrites the stored session summary and removes compacted raw runs from the live session.
+# Agno then replays only the summary plus recent runs.
 # Use __MINDROOM_INHERIT__ inside a tool override to clear one inherited authored field
 # while keeping the rest of defaults.tools for that agent.
 # See agents.md for the full per-agent tool configuration syntax.

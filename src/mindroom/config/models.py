@@ -216,7 +216,10 @@ def _validate_compaction_threshold_choice(
 class CompactionOverrideConfig(BaseModel):
     """Optional per-agent overrides for automatic compaction."""
 
-    enabled: bool | None = Field(default=None, description="Whether to auto-compact before a run")
+    enabled: bool | None = Field(
+        default=None,
+        description="Whether to run destructive auto-compaction for this history scope",
+    )
     threshold_tokens: int | None = Field(
         default=None,
         ge=1,
@@ -237,10 +240,6 @@ class CompactionOverrideConfig(BaseModel):
         default=None,
         description="Optional model config name to use for summary generation",
     )
-    notify: bool | None = Field(
-        default=None,
-        description="Whether to emit a Matrix compaction notice after compaction",
-    )
 
     @model_validator(mode="after")
     def validate_threshold_choice(self) -> Self:
@@ -255,7 +254,7 @@ class CompactionOverrideConfig(BaseModel):
 class CompactionConfig(BaseModel):
     """Concrete automatic compaction configuration."""
 
-    enabled: bool = Field(default=True, description="Whether to auto-compact before a run")
+    enabled: bool = Field(default=True, description="Whether to run destructive auto-compaction for this history scope")
     threshold_tokens: int | None = Field(
         default=None,
         ge=1,
@@ -275,10 +274,6 @@ class CompactionConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
-    )
-    notify: bool = Field(
-        default=False,
-        description="Whether to emit a Matrix compaction notice after compaction",
     )
 
     @model_validator(mode="after")
