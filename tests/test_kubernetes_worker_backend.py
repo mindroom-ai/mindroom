@@ -235,6 +235,7 @@ class _FakeCoreApi:
         self.services: dict[str, object] = {}
         self.pods: dict[str, object] = {}
         self.created_bodies: list[dict[str, object]] = []
+        self.deleted_names: list[str] = []
 
     def read_namespaced_service(self, name: str, namespace: str) -> object:
         _ = namespace
@@ -258,6 +259,7 @@ class _FakeCoreApi:
 
     def delete_namespaced_service(self, name: str, namespace: str) -> None:
         _ = namespace
+        self.deleted_names.append(name)
         self.services.pop(name, None)
 
     def read_namespaced_pod(self, name: str, namespace: str) -> object:
@@ -592,15 +594,17 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
     assert committed_runtime.env_value("CUSTOMER_ID") == "tenant-123"
     assert committed_runtime.env_value("ACCOUNT_ID") == "account-456"
-    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
-    assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") is None
-    assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") is None
-    assert committed_runtime.env_value("OPENAI_BASE_URL") is None
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == str(
+        committed_runtime.storage_root / ".runtime" / credentials_path.name,
+    )
+    assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") == "demo-project"
+    assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") == "us-central1"
+    assert committed_runtime.env_value("OPENAI_BASE_URL") == "http://example.invalid/v1"
     assert committed_runtime.env_value("CUSTOM_API_TOKEN") is None
     assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
-    assert not local_credentials_path.exists()
+    assert local_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
 def test_kubernetes_backend_uses_provided_validation_snapshot(tmp_path: Path) -> None:
@@ -636,6 +640,49 @@ def test_kubernetes_backend_uses_provided_validation_snapshot(tmp_path: Path) ->
     )
 
 
+def test_kubernetes_backend_excludes_internal_file_secrets_from_worker_payload(tmp_path: Path) -> None:
+    """Dedicated Kubernetes workers must not copy control-plane or GitHub file secrets into worker startup env."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    secret_path = tmp_path / "control-secret.txt"
+    secret_path.write_text("supersecret\n", encoding="utf-8")
+    storage_mount_path = tmp_path / "worker-storage"
+    storage_mount_path.mkdir()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={
+            "GITHUB_TOKEN_FILE": str(secret_path),
+            "MINDROOM_API_KEY_FILE": str(secret_path),
+            "MINDROOM_LOCAL_CLIENT_SECRET_FILE": str(secret_path),
+        },
+    )
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path=str(storage_mount_path),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
+    worker_root = committed_runtime.storage_root
+    local_worker_root = runtime_paths.storage_root / "workers" / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+
+    assert committed_runtime.env_value("GITHUB_TOKEN_FILE") is None
+    assert committed_runtime.env_value("MINDROOM_API_KEY_FILE") is None
+    assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET_FILE") is None
+    assert not (local_worker_root / ".runtime" / "file-secrets" / "GITHUB_TOKEN_FILE").exists()
+    assert not (local_worker_root / ".runtime" / "file-secrets" / "MINDROOM_API_KEY_FILE").exists()
+    assert not (local_worker_root / ".runtime" / "file-secrets" / "MINDROOM_LOCAL_CLIENT_SECRET_FILE").exists()
+    assert str(worker_root).endswith(f"workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}")
+
+
 def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path: Path) -> None:
     """Dedicated worker payloads must not serialize unusable host-local ADC paths."""
     config_dir = tmp_path / "cfg"
@@ -663,6 +710,115 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
 
 
+def test_kubernetes_backend_drops_host_local_generic_file_secret_when_not_mounted(tmp_path: Path) -> None:
+    """Dedicated worker payloads must not retain unusable host-local generic *_FILE secrets."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={"OPENAI_API_KEY_FILE": "/host/path/openai.key"},
+    )
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path=str(tmp_path / "not-mounted-storage"),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
+
+    assert committed_runtime.env_value("OPENAI_API_KEY_FILE") is None
+    assert "OPENAI_API_KEY_FILE" not in committed_runtime.env_file_values
+
+
+def test_kubernetes_backend_commits_relative_file_backed_secrets_into_worker_payload(tmp_path: Path) -> None:
+    """Dedicated Kubernetes workers should preserve relative *_FILE secrets by copying them into worker state."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    secret_path = config_dir / "secrets" / "openai.key"
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    secret_path.write_text("sk-relative\n", encoding="utf-8")
+    storage_mount_path = tmp_path / "worker-storage"
+    storage_mount_path.mkdir()
+    (config_dir / ".env").write_text("OPENAI_API_KEY_FILE=secrets/openai.key\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path=str(storage_mount_path),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
+    expected_worker_root = committed_runtime.storage_root
+    local_secret_copy = (
+        runtime_paths.storage_root
+        / "workers"
+        / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+        / ".runtime"
+        / "file-secrets"
+        / "OPENAI_API_KEY_FILE"
+        / "openai.key"
+    )
+
+    assert committed_runtime.env_value("OPENAI_API_KEY_FILE") == str(
+        expected_worker_root / ".runtime" / "file-secrets" / "OPENAI_API_KEY_FILE" / "openai.key",
+    )
+    assert local_secret_copy.read_text(encoding="utf-8") == "sk-relative\n"
+
+
+def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_paths_differ(tmp_path: Path) -> None:
+    """Dedicated workers should copy ADC into the local shared storage root even when pod mount paths differ."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    credentials_path = tmp_path / "adc.json"
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    local_storage_root = tmp_path / "local-shared-storage"
+    local_storage_root.mkdir()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=local_storage_root,
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    )
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path="/app/worker",
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
+    state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+    local_adc_copy = local_storage_root / state_subpath / ".runtime" / credentials_path.name
+
+    assert (
+        committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS")
+        == f"/app/worker/{state_subpath}/.runtime/{credentials_path.name}"
+    )
+    assert local_adc_copy.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
+
+
 def test_kubernetes_backend_rejects_google_vertex_adc_worker_grant(tmp_path: Path) -> None:
     """Dedicated workers should reject google_vertex_adc instead of accepting a non-working grant."""
     config_dir = tmp_path / "cfg"
@@ -681,6 +837,7 @@ def test_kubernetes_backend_rejects_google_vertex_adc_worker_grant(tmp_path: Pat
         storage_path=local_storage_root,
         process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
     )
+
     with pytest.raises(WorkerBackendError, match="google_vertex_adc"):
         _backend(
             runtime_paths=runtime_paths,
@@ -689,8 +846,73 @@ def test_kubernetes_backend_rejects_google_vertex_adc_worker_grant(tmp_path: Pat
         )
 
 
-def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:
-    """Dedicated worker payloads should keep the primary runtime config path when no ConfigMap is mounted."""
+def test_kubernetes_backend_rejects_symlinked_google_application_credentials_path(tmp_path: Path) -> None:
+    """Explicit ADC handoff should reject symlinked host paths for consistency with other worker copies."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    real_credentials_path = tmp_path / "real-adc.json"
+    real_credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    symlinked_credentials_path = tmp_path / "adc-link.json"
+    symlinked_credentials_path.symlink_to(real_credentials_path)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "local-shared-storage",
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(symlinked_credentials_path)},
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    with pytest.raises(
+        WorkerBackendError,
+        match="Kubernetes worker GOOGLE_APPLICATION_CREDENTIALS must not contain symlinks",
+    ):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+
+def test_kubernetes_backend_rejects_symlinked_google_application_credentials_destination(
+    tmp_path: Path,
+) -> None:
+    """Explicit ADC handoff should reject worker-owned destination symlinks."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    credentials_path = tmp_path / "google-credentials.json"
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    local_storage_root = (tmp_path / "local-shared-storage").resolve()
+    local_storage_root.mkdir()
+    victim_path = tmp_path / "victim.txt"
+    victim_path.write_text("victim\n", encoding="utf-8")
+    destination_path = (
+        local_storage_root / "workers" / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A) / ".runtime" / credentials_path.name
+    )
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_path.symlink_to(victim_path)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=local_storage_root,
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    with pytest.raises(
+        WorkerBackendError,
+        match="Kubernetes worker GOOGLE_APPLICATION_CREDENTIALS destination must stay within the worker state root",
+    ):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert victim_path.read_text(encoding="utf-8") == "victim\n"
+
+
+def test_kubernetes_backend_uses_worker_visible_config_path_without_configmap(tmp_path: Path) -> None:
+    """Dedicated worker payloads should serialize the pod-visible config path when no ConfigMap is mounted."""
     config_path = tmp_path / "workspace-config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -705,7 +927,7 @@ def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_
         _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
     )
 
-    assert committed_runtime.config_path == config_path.resolve()
+    assert committed_runtime.config_path == Path("/app/config.yaml")
 
 
 def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:
@@ -899,9 +1121,20 @@ def test_kubernetes_backend_user_agent_mounts_private_root_from_worker_spec() ->
     assert f"/app/worker/private_instances/{worker_dir_name(worker_key)}" not in mount_paths
 
 
-def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibility_changes() -> None:
-    """Changing private visibility should recreate the Deployment instead of relying on patch semantics."""
-    backend, apps_api, _core_api = _backend()
+def test_kubernetes_backend_rejects_private_user_agent_deployment_without_target_visibility(
+    tmp_path: Path,
+) -> None:
+    """Private user-agent workers must fail closed until the targeted private agent is explicitly visible."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "agents:\n  mind:\n    private:\n      per: user_agent\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
     worker_key = resolve_worker_key(
         "user_agent",
         ToolExecutionIdentity(
@@ -917,14 +1150,15 @@ def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibil
         agent_name="mind",
     )
 
-    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    with pytest.raises(WorkerBackendError, match="missing from explicit private-agent visibility"):
+        backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    assert apps_api.created_bodies == []
+
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=20.0)
 
-    assert len(apps_api.created_bodies) == 2
-    recreated_worker_id = apps_api.created_bodies[-1]["metadata"]["name"]
-    assert apps_api.deleted_names == [recreated_worker_id]
-    recreated = apps_api.created_bodies[-1]
-    volume_mounts = recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    assert len(apps_api.created_bodies) == 1
+    created = apps_api.created_bodies[0]
+    volume_mounts = created["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
     expected_private_root = str(
         _private_instance_state_root_path(
@@ -957,9 +1191,10 @@ def test_kubernetes_backend_waits_for_deployment_deletion_before_recreate() -> N
         agent_name="mind",
     )
 
-    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=10.0)
     worker_id = apps_api.created_bodies[0]["metadata"]["name"]
     apps_api.delete_read_lag_by_name[worker_id] = 1
+    apps_api.deployments[worker_id].metadata.annotations["mindroom.ai/template-hash"] = "stale"
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=20.0)
 
@@ -1162,10 +1397,32 @@ def test_kubernetes_backend_preserving_evict_deletes_service_but_keeps_deploymen
     assert handle.worker_id not in core_api.services
 
 
+def test_kubernetes_backend_preserving_evict_clears_stale_failure_reason() -> None:
+    """Workers that leave the failed state should not keep stale failure annotations."""
+    backend, apps_api, core_api = _backend()
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+
+    backend.record_failure(_TEST_SCOPED_WORKER_KEY_A, "boom", now=1.0)
+    evicted = backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=True, now=5.0)
+
+    assert evicted is not None
+    assert evicted.status == "idle"
+    assert evicted.failure_reason is None
+    assert handle.worker_id in apps_api.deployments
+    assert handle.worker_id not in core_api.services
+    assert "mindroom.ai/failure-reason" not in apps_api.deployments[handle.worker_id].metadata.annotations
+
+    touched = backend.get_worker(_TEST_SCOPED_WORKER_KEY_A, now=6.0)
+    assert touched is not None
+    assert touched.status == "idle"
+    assert touched.failure_reason is None
+
+
 def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
     """Worker discovery should stay confined to this backend's label set within a shared namespace."""
     backend, apps_api, _core_api = _backend()
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    runtime_namespace = apps_api.created_bodies[0]["metadata"]["labels"]["mindroom.ai/runtime-namespace"]
 
     unrelated_body = deepcopy(apps_api.created_bodies[0])
     unrelated_name = "mindroom-worker-unrelated"
@@ -1190,8 +1447,51 @@ def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
         "app.kubernetes.io/managed-by=mindroom,"
         "app.kubernetes.io/name=mindroom-worker,"
         "mindroom.ai/component=worker,"
+        f"mindroom.ai/runtime-namespace={runtime_namespace},"
         "mindroom.ai/tenant=test"
     )
+
+
+def test_kubernetes_backend_shutdown_is_scoped_to_runtime_namespace() -> None:
+    """Manager shutdown should only delete Kubernetes workers owned by this runtime."""
+    backend, apps_api, core_api = _backend()
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+
+    unrelated_deployment = deepcopy(apps_api.created_bodies[0])
+    unrelated_service = deepcopy(core_api.created_bodies[0])
+    unrelated_name = "mindroom-worker-unrelated"
+    unrelated_runtime_namespace = "other-runtime"
+    unrelated_deployment["metadata"]["name"] = unrelated_name
+    unrelated_deployment["metadata"]["annotations"]["mindroom.ai/worker-key"] = _TEST_SCOPED_WORKER_KEY_B
+    unrelated_deployment["metadata"]["labels"]["mindroom.ai/runtime-namespace"] = unrelated_runtime_namespace
+    unrelated_deployment["metadata"]["labels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_deployment["spec"]["selector"]["matchLabels"]["mindroom.ai/runtime-namespace"] = (
+        unrelated_runtime_namespace
+    )
+    unrelated_deployment["spec"]["selector"]["matchLabels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_deployment["spec"]["template"]["metadata"]["labels"]["mindroom.ai/runtime-namespace"] = (
+        unrelated_runtime_namespace
+    )
+    unrelated_deployment["spec"]["template"]["metadata"]["labels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_deployment["spec"]["replicas"] = 1
+    unrelated = _to_namespace(unrelated_deployment)
+    unrelated.metadata.generation = 1
+    unrelated.status = SimpleNamespace(ready_replicas=1, observed_generation=1)
+    apps_api.deployments[unrelated_name] = unrelated
+
+    unrelated_service["metadata"]["name"] = unrelated_name
+    unrelated_service["metadata"]["labels"]["mindroom.ai/runtime-namespace"] = unrelated_runtime_namespace
+    unrelated_service["metadata"]["labels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_service["spec"]["selector"]["mindroom.ai/runtime-namespace"] = unrelated_runtime_namespace
+    unrelated_service["spec"]["selector"]["mindroom.ai/worker-id"] = unrelated_name
+    core_api.services[unrelated_name] = _to_namespace(unrelated_service)
+
+    backend.shutdown()
+
+    assert apps_api.deleted_names == [handle.worker_id]
+    assert core_api.deleted_names == [handle.worker_id]
+    assert unrelated_name in apps_api.deployments
+    assert unrelated_name in core_api.services
 
 
 def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:
@@ -1206,6 +1506,41 @@ def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:
     assert patch_name == handle.worker_id
     assert patch_body["metadata"]["annotations"]["mindroom.ai/last-used-at"] == "25.0"
     assert "template" not in patch_body.get("spec", {})
+
+
+def test_kubernetes_backend_reuses_ready_deployment_without_incrementing_startups() -> None:
+    """Ensuring an already-ready worker should keep its original startup metadata."""
+    backend, apps_api, _core_api = _backend()
+    first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    second = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    assert second.worker_id == first.worker_id
+    deployment = apps_api.deployments[first.worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "1"
+    assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "10.0"
+    assert deployment.metadata.annotations["mindroom.ai/last-used-at"] == "20.0"
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "ready"
+
+
+def test_kubernetes_backend_recreated_ready_deployment_records_a_new_start() -> None:
+    """Template-drift recreation should count as a real restart in lifecycle metadata."""
+    backend, apps_api, _core_api = _backend()
+    first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    backend.config.extra_env["EXTRA_FLAG"] = "1"
+    second = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    deployment = apps_api.deployments[first.worker_id]
+    assert apps_api.deleted_names == [first.worker_id]
+    assert len(apps_api.created_bodies) == 2
+    assert second.worker_id == first.worker_id
+    assert second.startup_count == 2
+    assert second.last_started_at == 20.0
+    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "2"
+    assert deployment.metadata.annotations["mindroom.ai/last-started-at"] == "20.0"
+    assert deployment.metadata.annotations["mindroom.ai/last-used-at"] == "20.0"
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "ready"
 
 
 def test_kubernetes_backend_pins_workers_to_control_plane_node(

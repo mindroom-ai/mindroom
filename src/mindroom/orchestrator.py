@@ -74,6 +74,7 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.workers.runtime import set_primary_worker_storage_path
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
@@ -1760,23 +1761,26 @@ async def main(
 ) -> None:
     """Main entry point for the multi-agent bot system."""
     storage_path = runtime_paths.storage_root
-
-    # Configure logging before any background tasks or account setup begin.
-    setup_logging(level=log_level, runtime_paths=runtime_paths)
-
-    logger.info("Syncing API keys from environment to CredentialsManager...")
-    sync_env_to_credentials(runtime_paths=runtime_paths)
-
-    # Ensure storage exists before any runtime components try to write into it.
-    storage_path.mkdir(parents=True, exist_ok=True)
-
-    logger.info("Starting orchestrator...")
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    set_runtime_starting()
+    orchestrator: MultiAgentOrchestrator | None = None
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()
 
     try:
+        # Scope dedicated worker state to the active runtime before startup work runs.
+        set_primary_worker_storage_path(storage_path)
+
+        # Configure logging before any background tasks or account setup begin.
+        setup_logging(level=log_level, runtime_paths=runtime_paths)
+
+        logger.info("Syncing API keys from environment to CredentialsManager...")
+        sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        # Ensure storage exists before any runtime components try to write into it.
+        storage_path.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Starting orchestrator...")
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        set_runtime_starting()
         auxiliary_specs = [
             (
                 "config watcher",
@@ -1827,6 +1831,8 @@ async def main(
         for task in auxiliary_tasks:
             with suppress(asyncio.CancelledError):
                 await task
-        await orchestrator.stop()
+        if orchestrator is not None:
+            await orchestrator.stop()
         reset_matrix_sync_health()
         reset_runtime_state()
+        set_primary_worker_storage_path(None)

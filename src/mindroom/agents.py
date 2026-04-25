@@ -85,6 +85,10 @@ _DEFAULT_MIND_CONTEXT_FILES = (
     "TOOLS.md",
     "HEARTBEAT.md",
 )
+_PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
+    "./.mindroom-worker-assets/",
+    ".mindroom-worker-assets/",
+)
 
 
 @dataclass
@@ -183,6 +187,8 @@ def _load_context_files(
     for raw_path in context_files:
         if isinstance(raw_path, Path):
             resolved_path = raw_path
+        elif raw_path.startswith(_PROJECTED_WORKER_ASSET_PATH_PREFIXES):
+            resolved_path = constants.resolve_config_relative_path(raw_path, runtime_paths)
         elif agent_name is not None and storage_path is not None:
             resolved_path = resolve_agent_owned_path(
                 raw_path,

@@ -18,6 +18,9 @@ class WorkerBackend(Protocol):
     backend_name: str
     idle_timeout_seconds: float
 
+    def shutdown(self) -> None:
+        """Release backend-owned runtime resources before discarding this manager."""
+
     def ensure_worker(
         self,
         spec: WorkerSpec,

@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom import constants
+from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import worker_dir_name
 
 if TYPE_CHECKING:
@@ -149,10 +150,25 @@ def request_execution_env(
 ) -> dict[str, str]:
     """Return the effective runtime-scoped execution env for one request."""
     if execution_env:
-        return dict(execution_env)
+        protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
+        return {key: value for key, value in execution_env.items() if key not in protected_env_names}
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
     return dict(constants.execution_runtime_env_values(runtime_paths))
+
+
+def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return execution env names that a dedicated worker must keep worker-local."""
+    if not runner_uses_dedicated_worker(runtime_paths):
+        return frozenset()
+
+    protected_names = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", SHARED_CREDENTIALS_PATH_ENV}
+    protected_names.update(
+        name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
+    )
+    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
+        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
+    return frozenset(protected_names)
 
 
 def runtime_paths_with_execution_env(
@@ -163,15 +179,19 @@ def runtime_paths_with_execution_env(
     if not execution_env:
         return runtime_paths
 
+    protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
+    overlay_env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
     process_env = dict(runtime_paths.process_env)
-    process_env.update(execution_env)
+    process_env.update(overlay_env)
+    env_file_values = dict(runtime_paths.env_file_values)
+    env_file_values.update(overlay_env)
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
         env_path=runtime_paths.env_path,
         storage_root=runtime_paths.storage_root,
         process_env=MappingProxyType(process_env),
-        env_file_values=runtime_paths.env_file_values,
+        env_file_values=MappingProxyType(env_file_values),
     )
 
 
@@ -204,10 +224,15 @@ def subprocess_passthrough_env() -> dict[str, str]:
 def generic_subprocess_env() -> dict[str, str]:
     """Build the baseline subprocess env for non-worker execution."""
     env = subprocess_passthrough_env()
-    for key in ("HOME", "PATH", "PYTHONPATH", "VIRTUAL_ENV"):
+    for key in ("HOME", "PATH", "VIRTUAL_ENV"):
         value = os.environ.get(key)
         if value:
             env[key] = value
+    python_path_parts = [str(project_src_path())]
+    existing_python_path = os.environ.get("PYTHONPATH", "")
+    if existing_python_path:
+        python_path_parts.append(existing_python_path)
+    env["PYTHONPATH"] = os.pathsep.join(python_path_parts)
     return env
 
 
