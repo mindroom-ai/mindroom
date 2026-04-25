@@ -292,6 +292,24 @@ class ThreadOutboundWritePolicy:
                 return
             if not is_thread_affecting_relation(event_info):
                 return
+            thread_id = event_info.thread_id or event_info.thread_id_from_edit
+            if thread_id is not None:
+                self._schedule_fail_open_thread_update(
+                    room_id,
+                    thread_id,
+                    lambda: self._apply_outbound_event_notification(
+                        room_id,
+                        event_id,
+                        normalized_event_source,
+                        event_info,
+                    ),
+                    name="matrix_cache_notify_outbound_event",
+                    cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
+                    failure_message="Ignoring outbound cache bookkeeping failure after successful send",
+                    log_context={"event_id": event_id},
+                )
+                return
+            # Lookup-dependent outbound mutations stay on the room barrier because earlier outbound writes can create the lookup rows needed to resolve thread impact. Safe parallelization would require reservation-based routing (see ISSUE-189).
             self._schedule_fail_open_room_update(
                 room_id,
                 lambda: self._apply_outbound_event_notification(
@@ -400,6 +418,7 @@ class ThreadOutboundWritePolicy:
             if not redacted_event_id:
                 return
 
+            # Lookup-dependent outbound mutations stay on the room barrier because earlier outbound writes can create the lookup rows needed to resolve thread impact. Safe parallelization would require reservation-based routing (see ISSUE-189).
             self._schedule_fail_open_room_update(
                 room_id,
                 lambda: self._apply_outbound_redaction_notification(room_id, redacted_event_id),
@@ -472,6 +491,61 @@ class ThreadOutboundWritePolicy:
                 **log_context,
             )
 
+    def _schedule_fail_open_thread_update(
+        self,
+        room_id: str,
+        thread_id: str,
+        update_coro_factory: typing.Callable[[], typing.Coroutine[Any, Any, object]],
+        *,
+        name: str,
+        cancelled_message: str,
+        failure_message: str,
+        log_context: dict[str, object],
+    ) -> None:
+        async def safe_update() -> None:
+            try:
+                await update_coro_factory()
+            except asyncio.CancelledError as exc:
+                self._cache_ops.logger.warning(
+                    cancelled_message,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    error=str(exc),
+                    **log_context,
+                )
+            except Exception as exc:
+                self._cache_ops.logger.warning(
+                    failure_message,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    error=str(exc),
+                    **log_context,
+                )
+
+        try:
+            self._cache_ops.queue_thread_cache_update(
+                room_id,
+                thread_id,
+                safe_update,
+                name=name,
+            )
+        except asyncio.CancelledError as exc:
+            self._cache_ops.logger.warning(
+                cancelled_message,
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+                **log_context,
+            )
+        except Exception as exc:
+            self._cache_ops.logger.warning(
+                failure_message,
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+                **log_context,
+            )
+
 
 class ThreadLiveWritePolicy:
     """Own live-event and live-redaction thread cache mutations."""
@@ -512,7 +586,7 @@ class ThreadLiveWritePolicy:
             event_info=event_info,
         )
         room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"
-        if impact.state is not MutationThreadImpactState.THREADED:
+        if impact.state is MutationThreadImpactState.ROOM_LEVEL:
             await _apply_thread_message_mutation(
                 cache_ops=self._cache_ops,
                 room_id=room_id,
@@ -525,7 +599,20 @@ class ThreadLiveWritePolicy:
                 invalidate_on_append_failure=True,
             )
             return
+        if impact.state is MutationThreadImpactState.UNKNOWN:
+            # UNKNOWN-impact mutations must use the eager invalidate_room_threads
+            # path: the per-thread coordinator's concurrent writers cannot safely
+            # uphold the `room_invalidated_at >= validated_at` invariant that
+            # revalidate_thread_after_incremental_update_locked relies on at read
+            # time. See ISSUE-189 for the architectural follow-up.
+            await self._cache_ops.invalidate_room_threads(
+                room_id,
+                reason="live_thread_lookup_unavailable",
+            )
+            return
 
+        thread_id = impact.thread_id
+        assert thread_id is not None
         event_source = normalize_nio_event_for_cache(event)
 
         async def append_and_invalidate() -> bool:
@@ -541,8 +628,9 @@ class ThreadLiveWritePolicy:
                 invalidate_on_append_failure=True,
             )
 
-        await self._cache_ops.queue_room_cache_update(
+        await self._cache_ops.queue_thread_cache_update(
             room_id,
+            thread_id,
             append_and_invalidate,
             name="matrix_cache_append_live_event",
         )
@@ -594,8 +682,9 @@ class ThreadLiveWritePolicy:
 
         outcome = "ok"
         try:
-            appended = await self._cache_ops.queue_room_cache_update(
+            appended = await self._cache_ops.queue_thread_cache_update(
                 room_id,
+                thread_id,
                 append_and_invalidate,
                 name="matrix_cache_append_live_event",
             )
@@ -636,9 +725,10 @@ class ThreadLiveWritePolicy:
             event_info=event_info,
         )
         impact_resolution_ms = round((time.perf_counter() - impact_started) * 1000, 1)
+        room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"
         if impact.state is MutationThreadImpactState.ROOM_LEVEL:
             self._cache_ops.logger.debug(
-                "Skipping live thread cache bookkeeping for known non-threaded message mutation",
+                room_level_skip_message,
                 room_id=room_id,
                 event_id=event.event_id,
                 original_event_id=event_info.original_event_id,
@@ -655,6 +745,11 @@ class ThreadLiveWritePolicy:
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
             invalidate_started = time.perf_counter()
+            # UNKNOWN-impact mutations must use the eager invalidate_room_threads
+            # path: the per-thread coordinator's concurrent writers cannot safely
+            # uphold the `room_invalidated_at >= validated_at` invariant that
+            # revalidate_thread_after_incremental_update_locked relies on at read
+            # time. See ISSUE-189 for the architectural follow-up.
             await self._cache_ops.invalidate_room_threads(
                 room_id,
                 reason="live_thread_lookup_unavailable",
@@ -715,6 +810,7 @@ class ThreadLiveWritePolicy:
             event_id=event.event_id,
             context="live",
         )
+        thread_id = impact.thread_id
 
         async def redact_and_invalidate() -> bool:
             return await _apply_thread_redaction_mutation(
@@ -725,6 +821,14 @@ class ThreadLiveWritePolicy:
                 context="live",
             )
 
+        if thread_id is not None:
+            await self._cache_ops.queue_thread_cache_update(
+                room_id,
+                thread_id,
+                redact_and_invalidate,
+                name="matrix_cache_apply_redaction",
+            )
+            return
         await self._cache_ops.queue_room_cache_update(
             room_id,
             redact_and_invalidate,

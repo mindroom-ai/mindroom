@@ -344,6 +344,58 @@ class TestConfigInit:
         assert "Google" in output
         assert "auth" in output
 
+    def test_init_profile_public_codex_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
+        """Hosted Codex profile should use Codex defaults and hosted Matrix settings."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--profile", "public-codex"],
+        )
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert "mindroom_user" not in config
+        assert config["models"]["default"]["provider"] == "codex"
+        assert config["models"]["default"]["id"] == "gpt-5.5"
+        assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
+        assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
+        assert "Prompt caching is enabled automatically per active agent session." in target.read_text()
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert "Run `codex login` before starting MindRoom." in env_content
+        assert "# CODEX_HOME=~/.codex" in env_content
+        assert "\nANTHROPIC_API_KEY=" not in env_content
+        assert "\nOPENAI_API_KEY=" not in env_content
+        assert "\nOPENROUTER_API_KEY=" not in env_content
+
+        output = normalize_console_output(result.output)
+        assert "mindroom connect --pair-code" in output
+        assert "codex login" in output
+
+    def test_init_profile_codex_alias_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
+        """The concise codex profile alias should use hosted Codex defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--profile", "codex"],
+        )
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert "mindroom_user" not in config
+        assert config["models"]["default"]["provider"] == "codex"
+        assert config["models"]["default"]["id"] == "gpt-5.5"
+        assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
+
+    @pytest.mark.parametrize("profile", ["openai-codex", "public-openai-codex"])
+    def test_init_rejects_openai_codex_profile_aliases(self, tmp_path: Path, profile: str) -> None:
+        """Config init should avoid redundant OpenAI-Codex profile aliases."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--profile", profile])
+        assert result.exit_code == 2
+        assert "Invalid profile" in normalize_console_output(result.output)
+
     def test_init_full_profile_omits_pairing_step(self, tmp_path: Path) -> None:
         """Full profile next steps should NOT mention pairing."""
         target = tmp_path / "config.yaml"
@@ -523,6 +575,31 @@ class TestConfigInit:
         content = target.read_text()
         assert "provider: openrouter" in content
         assert "anthropic/claude-sonnet-4.6" in content
+
+    def test_init_codex_preset_uses_codex_models(self, tmp_path: Path) -> None:
+        """Config init --provider codex uses Codex subscription defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "codex"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "codex"
+        assert config["models"]["default"]["id"] == "gpt-5.5"
+        assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
+        assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "Run `codex login` before starting MindRoom." in env_content
+        assert "# CODEX_HOME=~/.codex" in env_content
+        assert "OPENAI_API_KEY=your-openai-key-here" not in env_content
+
+    @pytest.mark.parametrize("provider", ["openai-codex", "openai_codex", "c"])
+    def test_init_rejects_openai_codex_provider_aliases(self, tmp_path: Path, provider: str) -> None:
+        """Config init should accept codex as the provider preset without extra aliases."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", provider])
+        assert result.exit_code == 1
+        assert "Invalid --provider value" in normalize_console_output(result.output)
 
     def test_init_anthropic_preset_uses_anthropic_models_and_local_embedder(self, tmp_path: Path) -> None:
         """Config init --provider anthropic should only require the Anthropic API key."""

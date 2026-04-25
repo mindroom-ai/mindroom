@@ -19,7 +19,7 @@ This guide covers the simplest production-like setup:
 - Python 3.12+
 - `uv` installed
 - A Matrix account that can sign in to `chat.mindroom.chat`
-- At least one AI provider API key
+- At least one AI provider API key, or a local Codex CLI ChatGPT subscription login
 
 ## 1. Initialize Local Config
 
@@ -27,7 +27,7 @@ This guide covers the simplest production-like setup:
 uvx mindroom config init --profile public
 ```
 
-This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults.
+This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults. Use `uvx mindroom config init --profile public-codex` if you want the starter config to use `provider: codex`.
 
 ## 2. Add AI Provider Key
 
@@ -37,6 +37,8 @@ Edit `~/.mindroom/.env` and set at least one provider key:
 OPENAI_API_KEY=...
 # or OPENROUTER_API_KEY=...
 ```
+
+For Codex CLI subscription auth, run `codex login` instead of adding an API key. MindRoom reads `~/.codex/auth.json` by default.
 
 ## 3. Pair This Install
 

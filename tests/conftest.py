@@ -18,8 +18,9 @@ import mindroom.bot  # noqa: F401
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
+from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.matrix.cache.event_cache import _EventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
@@ -99,6 +100,36 @@ def _make_room_get_event_response(event_id: str) -> nio.RoomGetEventResponse:
     response = nio.RoomGetEventResponse()
     response.event = event
     return response
+
+
+def _outcome(
+    terminal_status: str,
+    event_id: str | None = None,
+    is_visible_response: bool = False,
+    final_visible_body: str | None = None,
+    delivery_kind: str | None = None,
+    failure_reason: str | None = None,
+    suppressed: bool = False,
+    tool_trace: tuple[object, ...] = (),
+    extra_content: Mapping[str, object] | None = None,
+    option_map: dict[str, str] | None = None,
+    options_list: tuple[dict[str, str], ...] | None = None,
+) -> FinalDeliveryOutcome:
+    """Build one compact terminal outcome for tests."""
+    resolved_suppressed = suppressed or (failure_reason == "suppressed_by_hook" and not is_visible_response)
+    return FinalDeliveryOutcome(
+        terminal_status=terminal_status,
+        event_id=event_id,
+        is_visible_response=is_visible_response,
+        final_visible_body=final_visible_body,
+        delivery_kind=delivery_kind,
+        failure_reason=failure_reason,
+        suppressed=resolved_suppressed,
+        tool_trace=tool_trace,
+        extra_content=dict(extra_content or {}),
+        option_map=option_map,
+        options_list=options_list,
+    )
 
 
 class _AutoRoomCache(MutableMapping[str, nio.MatrixRoom]):
@@ -680,6 +711,45 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         )
 
     bot._delivery_gateway.send_text = AsyncMock(side_effect=_send_text)
+
+    async def _deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
+        event_id = await send_response(
+            request.target.room_id,
+            request.target.reply_to_event_id,
+            request.response_text,
+            request.target.resolved_thread_id,
+            reply_to_event=None,
+            skip_mentions=request.skip_mentions,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+            thread_mode_override=None,
+            target=request.target,
+        )
+        delivery_kind = "edited" if request.existing_event_id is not None else "sent"
+        if event_id is None:
+            if request.existing_event_id is not None:
+                return _outcome(
+                    terminal_status="error",
+                    event_id=request.existing_event_id,
+                    is_visible_response=True,
+                    final_visible_body=request.response_text,
+                    failure_reason="test_mock_no_visible_response",
+                    extra_content=request.extra_content,
+                )
+            return _outcome(
+                terminal_status="error",
+                failure_reason="test_mock_no_visible_response",
+            )
+        return _outcome(
+            terminal_status="completed",
+            event_id=event_id,
+            is_visible_response=True,
+            final_visible_body=request.response_text,
+            delivery_kind=delivery_kind,
+            extra_content=request.extra_content,
+        )
+
+    bot._delivery_gateway.deliver_final = AsyncMock(side_effect=_deliver_final)
     replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
 
@@ -688,6 +758,13 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
     """Route response execution through one legacy-style generate-response mock."""
     wrap_extracted_collaborators(bot, "_response_runner")
 
+    def _resolved_event_id_from_test_result(
+        result: FinalDeliveryOutcome | str | None,
+    ) -> str | None:
+        if isinstance(result, FinalDeliveryOutcome):
+            return result.final_visible_event_id
+        return result
+
     async def _generate(request: ResponseRequest) -> str | None:
         if request.prepare_after_lock is not None:
             try:
@@ -695,7 +772,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             except Exception as exc:
                 raise PostLockRequestPreparationError from exc
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
-        return await generate_response(
+        result = await generate_response(
             room_id=request.room_id,
             prompt=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
@@ -713,6 +790,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             target=request.target,
             matrix_run_metadata=request.matrix_run_metadata,
         )
+        return _resolved_event_id_from_test_result(result)
 
     bot._response_runner.generate_response = AsyncMock(side_effect=_generate)
     replace_turn_controller_deps(bot, response_runner=bot._response_runner)

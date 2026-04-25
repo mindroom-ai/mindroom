@@ -169,7 +169,7 @@ Use this path if you want to run MindRoom locally while using hosted chat + Matr
 # Create ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
 uvx mindroom config init --profile public
 
-# Add at least one model API key
+# Add model auth, or use `--profile public-codex` and run `codex login`
 $EDITOR ~/.mindroom/.env
 
 # Generate pair code in https://chat.mindroom.chat:

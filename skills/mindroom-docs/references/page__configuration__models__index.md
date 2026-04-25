@@ -102,14 +102,19 @@ models:
 
 ## Codex Subscription Models
 
-Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API. Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens. MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint. The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-plugin-style form `openai-codex/gpt-5.5`. If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`.
+Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API. Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens. MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint. The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-plugin-style form `openai-codex/gpt-5.5`. If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`. For starter config generation, use `mindroom config init --profile public-codex` or `mindroom config init --provider codex`.
 
 ```
 models:
   default:
     provider: codex
     id: gpt-5.5
+    # Prompt caching is enabled automatically per active agent session.
+    extra_kwargs:
+      reasoning_effort: medium
 ```
+
+Set Codex reasoning effort through `extra_kwargs.reasoning_effort`. Agno maps this to the Responses API `reasoning.effort` field. Supported effort values are `minimal`, `low`, `medium`, and `high`. The starter Codex profile uses `medium`. MindRoom sends a Codex prompt-cache key plus the Codex CLI session headers for each active agent session. By default, that key is derived from the current execution identity, so separate Matrix threads can run concurrently without sharing one global cache key. You can set `extra_kwargs.prompt_cache_key` to override that derived key for a model, but avoid a single low-cardinality value for many busy threads unless you intentionally want those requests routed together. Live testing against the Codex subscription endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key. Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected. Treat Codex prompt caching as best-effort rather than guaranteed.
 
 ## Context Window
 

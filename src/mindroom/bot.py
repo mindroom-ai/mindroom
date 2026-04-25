@@ -149,6 +149,8 @@ if TYPE_CHECKING:
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
     from mindroom.tool_system.events import ToolTraceEntry
 
+type MatrixEventId = str
+
 logger = get_logger(__name__)
 
 __all__ = ["AgentBot"]
@@ -1571,7 +1573,7 @@ class AgentBot:
                 lifecycle lock is acquired and before response generation starts.
 
         Returns:
-            Event ID of the response message, or None if failed
+            Event ID of the visible response, or None if no visible response landed.
 
         """
         return await self._response_runner.generate_response(
@@ -1608,7 +1610,7 @@ class AgentBot:
         extra_content: dict[str, Any] | None = None,
         thread_mode_override: Literal["thread", "room"] | None = None,
         target: MessageTarget | None = None,
-    ) -> str | None:
+    ) -> MatrixEventId | None:
         """Send a response message to a room."""
         resolved_target = target or self._conversation_resolver.build_message_target(
             room_id=room_id,
@@ -1636,7 +1638,7 @@ class AgentBot:
         extra_content: dict[str, Any] | None = None,
         *,
         trigger_dispatch: bool = False,
-    ) -> str | None:
+    ) -> MatrixEventId | None:
         """Send a hook-originated Matrix message with stable metadata tags."""
         if self.client is None:
             self.logger.warning("Hook send requested before Matrix client is ready", room_id=room_id)
@@ -1796,8 +1798,28 @@ class TeamBot(AgentBot):
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
-            return None
-
+            return await self._response_runner.generate_response_for_empty_prompt(
+                ResponseRequest(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    thread_id=thread_id,
+                    thread_history=thread_history,
+                    prompt=prompt,
+                    model_prompt=model_prompt,
+                    existing_event_id=existing_event_id,
+                    existing_event_is_placeholder=existing_event_is_placeholder,
+                    user_id=user_id,
+                    media=media,
+                    attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
+                    response_envelope=response_envelope,
+                    correlation_id=correlation_id,
+                    target=target,
+                    matrix_run_metadata=matrix_run_metadata,
+                    system_enrichment_items=system_enrichment_items,
+                    on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                ),
+                response_kind="team",
+            )
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
@@ -1821,15 +1843,23 @@ class TeamBot(AgentBot):
         )
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None
+            response_event_id: str | None
             if existing_event_id:
-                await self._edit_message(room_id, existing_event_id, team_resolution.reason, thread_id)
-                return existing_event_id
-            return await self._send_response(
-                room_id,
-                reply_to_event_id,
-                team_resolution.reason,
-                thread_id,
-            )
+                edited = await self._edit_message(
+                    room_id=room_id,
+                    event_id=existing_event_id,
+                    new_text=team_resolution.reason,
+                    thread_id=thread_id,
+                )
+                response_event_id = existing_event_id if edited else None
+            else:
+                response_event_id = await self._send_response(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    response_text=team_resolution.reason,
+                    thread_id=thread_id,
+                )
+            return response_event_id
         assert team_resolution.mode is not None
 
         resolved_target = target or self._conversation_resolver.build_message_target(

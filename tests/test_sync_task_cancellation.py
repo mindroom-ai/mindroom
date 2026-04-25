@@ -12,12 +12,15 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.cancellation import (
+    SYNC_RESTART_CANCEL_MSG,
+    USER_STOP_CANCEL_MSG,
+    cancel_failure_reason,
+)
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.runtime import (
-    SYNC_RESTART_CANCEL_MSG,
-    USER_STOP_CANCEL_MSG,
     MatrixSyncStalledError,
     _SyncIteration,
     cancel_sync_task,
@@ -257,6 +260,14 @@ async def test_classify_cancel_source_sync_restart() -> None:
 async def test_classify_cancel_source_unknown_returns_interrupted() -> None:
     """Untagged cancellations should surface as generic interruptions."""
     assert classify_cancel_source(asyncio.CancelledError()) == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_cancel_failure_reason_matches_cancel_source() -> None:
+    """Failure reasons should stay aligned with the shared cancel provenance mapping."""
+    assert cancel_failure_reason("user_stop") == "cancelled_by_user"
+    assert cancel_failure_reason("sync_restart") == "sync_restart_cancelled"
+    assert cancel_failure_reason("interrupted") == "interrupted"
 
 
 @pytest.mark.asyncio

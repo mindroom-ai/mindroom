@@ -8,6 +8,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -17,7 +18,9 @@ from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 from pydantic import ValidationError
 
+from mindroom import interactive
 from mindroom.bot import AgentBot
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
@@ -29,7 +32,12 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
 )
-from mindroom.delivery_gateway import DeliveryResult
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    DeliveryGatewayDeps,
+    FinalizeStreamedResponseRequest,
+)
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
@@ -42,7 +50,8 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
+from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+from mindroom.response_lifecycle import ResponseLifecycle
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
@@ -1870,7 +1879,7 @@ class TestStreamingBehavior:
             return
 
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
-            event_id, accumulated = await send_streaming_response(
+            outcome = await send_streaming_response(
                 client=mock_client,
                 room_id="!test:localhost",
                 reply_to_event_id="$original_123",
@@ -1884,8 +1893,10 @@ class TestStreamingBehavior:
                 room_mode=True,
             )
 
+        event_id = outcome.last_physical_stream_event_id
+        accumulated = outcome.rendered_body
         assert event_id == "$thinking_123"
-        assert accumulated == ""
+        assert accumulated is not None
         assert len(edited_contents) == 1
         final_content, final_text = edited_contents[0]
         assert final_text == PROGRESS_PLACEHOLDER
@@ -1930,7 +1941,7 @@ class TestStreamingBehavior:
             patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
         ):
-            event_id, accumulated = await send_streaming_response(
+            outcome = await send_streaming_response(
                 client=mock_client,
                 room_id="!test:localhost",
                 reply_to_event_id="$original_123",
@@ -1943,7 +1954,10 @@ class TestStreamingBehavior:
                 latest_thread_event_id="$original_123",
             )
 
+        event_id = outcome.last_physical_stream_event_id
+        accumulated = outcome.rendered_body
         assert event_id == "$stream-send"
+        assert accumulated is not None
         assert accumulated == "Hello from stream"
         assert conversation_cache.notify_outbound_message.call_count == 2
         first_call = conversation_cache.notify_outbound_message.call_args_list[0].args
@@ -2138,10 +2152,16 @@ class TestStreamingBehavior:
             )
             yield "stream chunk"
 
-        async def fake_send_streaming_response(*args: object, **_kwargs: object) -> tuple[str, str]:
+        async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
             response_stream = args[7]
             chunks = [str(chunk) async for chunk in response_stream]
-            return "$response", "".join(chunks)
+            body = "".join(chunks)
+            return StreamTransportOutcome(
+                last_physical_stream_event_id="$response",
+                terminal_status="completed",
+                rendered_body=body,
+                visible_body_state="visible_body",
+            )
 
         try:
             with (
@@ -2201,9 +2221,11 @@ class TestStreamingBehavior:
             patch(
                 "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
                         event_id="$response",
-                        response_text="handled",
+                        final_visible_body="handled",
+                        is_visible_response=True,
                         delivery_kind="sent",
                     ),
                 ),
@@ -2317,7 +2339,7 @@ class TestStreamingBehavior:
 
         with (
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(StreamingDeliveryError) as exc_info,
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -2335,6 +2357,8 @@ class TestStreamingBehavior:
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER not in edited_texts[0]
         assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
+        assert exc_info.value.transport_outcome.terminal_status == "cancelled"
+        assert exc_info.value.transport_outcome.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_interrupted_stream_preserves_partial_text_with_suffix(self) -> None:
@@ -2358,7 +2382,7 @@ class TestStreamingBehavior:
 
         with (
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(StreamingDeliveryError),
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -2391,7 +2415,7 @@ class TestStreamingBehavior:
                 "mindroom.streaming.edit_message_result",
                 new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit", content_sent={})),
             ),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(StreamingDeliveryError),
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -2428,7 +2452,7 @@ class TestStreamingBehavior:
                 "mindroom.streaming.edit_message_result",
                 new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit", content_sent={})),
             ),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(StreamingDeliveryError),
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -2467,7 +2491,7 @@ class TestStreamingBehavior:
 
         with (
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(StreamingDeliveryError) as exc_info,
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -2486,6 +2510,8 @@ class TestStreamingBehavior:
         final_content, final_text = edited_messages[-1]
         assert final_text == build_restart_interrupted_body("Partial answer")
         assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+        assert exc_info.value.transport_outcome.terminal_status == "cancelled"
+        assert exc_info.value.transport_outcome.failure_reason == "sync_restart_cancelled"
 
     @pytest.mark.asyncio
     async def test_cancel_sources_reuse_compatible_terminal_stream_statuses(self) -> None:
@@ -2525,7 +2551,7 @@ class TestStreamingBehavior:
 
             with (
                 patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-                pytest.raises(asyncio.CancelledError),
+                pytest.raises(StreamingDeliveryError),
             ):
                 await send_streaming_response(
                     client=mock_client,
@@ -2851,9 +2877,13 @@ class TestStreamingBehavior:
 
         with (
             patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
+            patch(
+                "mindroom.streaming.edit_message_result",
+                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit123", content_sent={})),
+            ),
             patch("mindroom.streaming._drain_worker_progress_events", new=lingering_drain),
         ):
-            event_id, accumulated = await send_streaming_response(
+            outcome = await send_streaming_response(
                 client=mock_client,
                 room_id="!test:localhost",
                 reply_to_event_id="$original_123",
@@ -2864,8 +2894,9 @@ class TestStreamingBehavior:
                 response_stream=stream(),
             )
 
-        assert event_id == "$event123"
-        assert accumulated == "hello"
+        assert outcome.last_physical_stream_event_id == "$event123"
+        assert outcome.terminal_status == "completed"
+        assert outcome.rendered_body == "hello"
 
     @pytest.mark.asyncio
     async def test_worker_progress_delivery_failure_does_not_leak_undelivered_buffered_text(self) -> None:
@@ -3251,9 +3282,15 @@ class TestStreamingBehavior:
                 restart_interrupted: bool = False,
                 cancel_source: CancelSource | None = None,
                 error: Exception | None = None,
-            ) -> None:
+            ) -> StreamTransportOutcome:
                 del client, cancelled, restart_interrupted, cancel_source
                 finalize_calls.append(error)
+                return StreamTransportOutcome(
+                    last_physical_stream_event_id=self.event_id,
+                    terminal_status="completed",
+                    rendered_body=None,
+                    visible_body_state="none",
+                )
 
         async def fail_stream_supervision(
             response_stream: AsyncIterator[object],
@@ -3477,7 +3514,7 @@ class TestStreamingBehavior:
             await asyncio.sleep(0.4)
             yield "x" * 300
 
-        event_id, accumulated = await send_streaming_response(
+        outcome = await send_streaming_response(
             client=mock_client,
             room_id="!test:localhost",
             reply_to_event_id="$original_123",
@@ -3488,9 +3525,9 @@ class TestStreamingBehavior:
             response_stream=stream(),
         )
 
-        assert event_id == "$warmup_stream_123"
-        assert accumulated == "x" * 300
-        assert "Preparing isolated worker" not in accumulated
+        assert outcome.last_physical_stream_event_id == "$warmup_stream_123"
+        assert outcome.rendered_body == "x" * 300
+        assert "Preparing isolated worker" not in outcome.rendered_body
 
     @pytest.mark.asyncio
     async def test_hidden_tool_mode_worker_warmup_uses_generic_copy(self) -> None:
@@ -3688,7 +3725,7 @@ class TestStreamingBehavior:
 
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             if terminal_kind == "cancel":
-                with pytest.raises(asyncio.CancelledError):
+                with pytest.raises(StreamingDeliveryError):
                     await send_streaming_response(
                         client=mock_client,
                         room_id="!test:localhost",
@@ -3990,6 +4027,298 @@ class TestStreamingBehavior:
         )
 
     @pytest.mark.asyncio
+    async def test_streamed_success_allows_one_final_response_transform(self) -> None:
+        """A clean streamed success may replace the final visible text exactly once."""
+        response_envelope = MessageEnvelope(
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="helper",
+            source_kind="message",
+        )
+        response_hooks = SimpleNamespace(
+            apply_before_response=AsyncMock(
+                return_value=SimpleNamespace(
+                    response_text="chunk",
+                    response_kind="ai",
+                    tool_trace=None,
+                    extra_content=None,
+                    envelope=response_envelope,
+                    suppress=False,
+                ),
+            ),
+            apply_final_response_transform=AsyncMock(
+                return_value=SimpleNamespace(
+                    response_text="updated text",
+                    response_kind="ai",
+                    envelope=response_envelope,
+                ),
+            ),
+            emit_after_response=AsyncMock(),
+            emit_cancelled_response=AsyncMock(),
+        )
+        gateway = DeliveryGateway(
+            DeliveryGatewayDeps(
+                runtime=SimpleNamespace(
+                    client=_make_matrix_client_mock(),
+                    orchestrator=None,
+                    config=self.config,
+                    runtime_started_at=0.0,
+                ),
+                runtime_paths=runtime_paths_for(self.config),
+                agent_name="helper",
+                logger=MagicMock(),
+                redact_message_event=AsyncMock(return_value=True),
+                sender_domain="localhost",
+                resolver=MagicMock(),
+                response_hooks=response_hooks,
+            ),
+        )
+        object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
+
+        outcome = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+                stream_transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$streaming",
+                    terminal_status="completed",
+                    rendered_body="chunk",
+                    visible_body_state="visible_body",
+                ),
+                initial_delivery_kind="sent",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-final-transform-success",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.final_visible_event_id == "$streaming"
+        assert outcome.final_visible_body == "updated text"
+        assert outcome.delivery_kind == "edited"
+        response_hooks.apply_before_response.assert_not_awaited()
+        response_hooks.apply_final_response_transform.assert_awaited_once()
+        gateway.edit_text.assert_awaited_once()
+        edited_request = gateway.edit_text.await_args.args[0]
+        assert edited_request.event_id == "$streaming"
+        assert edited_request.new_text == "updated text"
+        runner = SimpleNamespace(
+            deps=SimpleNamespace(
+                delivery_gateway=SimpleNamespace(
+                    deps=SimpleNamespace(response_hooks=response_hooks),
+                ),
+            ),
+            _log_post_response_effects_failure=MagicMock(),
+            _emit_pipeline_timing_summary=MagicMock(),
+            _response_outcome=MagicMock(return_value=None),
+        )
+        lifecycle = ResponseLifecycle(
+            runner=runner,
+            response_kind="ai",
+            request=MagicMock(),
+            response_envelope=response_envelope,
+            correlation_id="corr-final-transform-success",
+        )
+        finalized = await lifecycle.finalize(
+            outcome,
+            build_post_response_outcome=lambda _delivered: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=MagicMock()),
+        )
+
+        assert finalized.delivery_kind == "edited"
+        assert finalized.response_text == "updated text"
+        response_hooks.emit_after_response.assert_awaited_once()
+        after_kwargs = response_hooks.emit_after_response.await_args.kwargs
+        assert after_kwargs["response_text"] == "updated text"
+        assert after_kwargs["delivery_kind"] == "edited"
+        response_hooks.emit_cancelled_response.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_streamed_success_noop_final_transform_keeps_visible_stream_text(self) -> None:
+        """Canonical final content must not rewrite the visible stream unless the hook changes it."""
+        response_envelope = MessageEnvelope(
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="helper",
+            source_kind="message",
+        )
+        response_hooks = SimpleNamespace(
+            apply_before_response=AsyncMock(),
+            apply_final_response_transform=AsyncMock(
+                return_value=SimpleNamespace(
+                    response_text="canonical final",
+                    response_kind="ai",
+                    envelope=response_envelope,
+                ),
+            ),
+            emit_after_response=AsyncMock(),
+            emit_cancelled_response=AsyncMock(),
+        )
+        gateway = DeliveryGateway(
+            DeliveryGatewayDeps(
+                runtime=SimpleNamespace(
+                    client=_make_matrix_client_mock(),
+                    orchestrator=None,
+                    config=self.config,
+                    runtime_started_at=0.0,
+                ),
+                runtime_paths=runtime_paths_for(self.config),
+                agent_name="helper",
+                logger=MagicMock(),
+                redact_message_event=AsyncMock(return_value=True),
+                sender_domain="localhost",
+                resolver=MagicMock(),
+                response_hooks=response_hooks,
+            ),
+        )
+        outcome = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+                stream_transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$streaming",
+                    terminal_status="completed",
+                    rendered_body="chunk",
+                    visible_body_state="visible_body",
+                    canonical_final_body_candidate="canonical final",
+                ),
+                initial_delivery_kind="sent",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-final-transform-noop",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome.final_visible_event_id == "$streaming"
+        assert outcome.final_visible_body == "chunk"
+        response_hooks.apply_before_response.assert_not_awaited()
+        response_hooks.apply_final_response_transform.assert_awaited_once()
+        runner = SimpleNamespace(
+            deps=SimpleNamespace(
+                delivery_gateway=SimpleNamespace(
+                    deps=SimpleNamespace(response_hooks=response_hooks),
+                ),
+            ),
+            _log_post_response_effects_failure=MagicMock(),
+            _emit_pipeline_timing_summary=MagicMock(),
+            _response_outcome=MagicMock(return_value=None),
+        )
+        lifecycle = ResponseLifecycle(
+            runner=runner,
+            response_kind="ai",
+            request=MagicMock(),
+            response_envelope=response_envelope,
+            correlation_id="corr-final-transform-noop",
+        )
+        finalized = await lifecycle.finalize(
+            outcome,
+            build_post_response_outcome=lambda _delivered: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=MagicMock()),
+        )
+
+        assert finalized.delivery_kind == "sent"
+        assert finalized.response_text == "chunk"
+        response_hooks.emit_after_response.assert_awaited_once()
+        after_kwargs = response_hooks.emit_after_response.await_args.kwargs
+        assert after_kwargs["response_text"] == "chunk"
+        assert after_kwargs["delivery_kind"] == "sent"
+        response_hooks.emit_cancelled_response.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_streamed_success_noop_final_transform_uses_visible_interactive_metadata(self) -> None:
+        """No-op final transforms should derive interactive metadata only from visible text."""
+        response_envelope = MessageEnvelope(
+            source_event_id="$event123",
+            room_id="!test:localhost",
+            target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="helper",
+            source_kind="message",
+        )
+        raw_interactive = (
+            "```interactive\n"
+            '{"question":"Approve?","options":[{"emoji":"✅","label":"Approve","value":"approve"}]}\n'
+            "```"
+        )
+        formatted_interactive = interactive.parse_and_format_interactive(
+            raw_interactive,
+            extract_mapping=True,
+        )
+        response_hooks = SimpleNamespace(
+            apply_before_response=AsyncMock(),
+            apply_final_response_transform=AsyncMock(
+                return_value=SimpleNamespace(
+                    response_text=raw_interactive,
+                    response_kind="ai",
+                    envelope=response_envelope,
+                ),
+            ),
+            emit_after_response=AsyncMock(),
+            emit_cancelled_response=AsyncMock(),
+        )
+        gateway = DeliveryGateway(
+            DeliveryGatewayDeps(
+                runtime=SimpleNamespace(
+                    client=_make_matrix_client_mock(),
+                    orchestrator=None,
+                    config=self.config,
+                    runtime_started_at=0.0,
+                ),
+                runtime_paths=runtime_paths_for(self.config),
+                agent_name="helper",
+                logger=MagicMock(),
+                redact_message_event=AsyncMock(return_value=True),
+                sender_domain="localhost",
+                resolver=MagicMock(),
+                response_hooks=response_hooks,
+            ),
+        )
+
+        outcome = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=MessageTarget.resolve("!test:localhost", None, "$event123"),
+                stream_transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$streaming",
+                    terminal_status="completed",
+                    rendered_body=formatted_interactive.formatted_text,
+                    visible_body_state="visible_body",
+                    canonical_final_body_candidate=raw_interactive,
+                ),
+                initial_delivery_kind="sent",
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-final-transform-interactive",
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+        assert outcome.final_visible_event_id == "$streaming"
+        assert outcome.final_visible_body == formatted_interactive.formatted_text
+        assert dict(outcome.option_map or {}) == {}
+        assert list(outcome.options_list or ()) == []
+        response_hooks.apply_final_response_transform.assert_awaited_once()
+        response_hooks.emit_cancelled_response.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_worker_warmup_failure_notice_clears_before_visible_tool_start(self) -> None:
         """A visible tool-start marker should clear stale worker failure suffixes before sending."""
         mock_client = _make_matrix_client_mock()
@@ -4202,7 +4531,7 @@ class TestStreamingConfig:
                 super().__init__(**kwargs)
                 captured.append(self)
 
-        event_id, text = await send_streaming_response(
+        outcome = await send_streaming_response(
             client=mock_client,
             room_id="!r:localhost",
             reply_to_event_id="$orig",
@@ -4215,7 +4544,10 @@ class TestStreamingConfig:
             room_mode=True,
         )
 
+        event_id = outcome.last_physical_stream_event_id
+        text = outcome.rendered_body
         assert event_id == "$cfg_test"
+        assert text is not None
         assert text == "hello"
         assert len(captured) == 1
         sr = captured[0]

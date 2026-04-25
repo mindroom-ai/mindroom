@@ -18,9 +18,9 @@ from mindroom.matrix.large_messages import _NORMAL_MESSAGE_LIMIT, prepare_large_
 from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingResponse,
-    _StreamInputChunk,
     send_streaming_response,
 )
+from mindroom.streaming_delivery import StreamInputChunk
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 
 
@@ -626,11 +626,11 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
     client = MockClient()
     config = MockConfig()
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file", args_preview="file_name=a.py")]
         yield StructuredStreamChunk(content="🔧 `save_file` [1] ⏳", tool_trace=trace)
 
-    event_id, _ = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -642,6 +642,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
         streaming_cls=ReplacementStreamingResponse,
     )
 
+    event_id = outcome.last_physical_stream_event_id
     assert event_id is not None
     assert len(client.messages_sent) >= 1
     last_content = client.messages_sent[-1][2]
@@ -657,11 +658,11 @@ async def test_streaming_with_extra_content_metadata() -> None:
     config = MockConfig()
     extra_content: dict[str, object] = {}
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield "hello"
         extra_content[AI_RUN_METADATA_KEY] = {"version": 1, "usage": {"total_tokens": 10}}
 
-    event_id, _ = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -674,6 +675,7 @@ async def test_streaming_with_extra_content_metadata() -> None:
         extra_content=extra_content,
     )
 
+    event_id = outcome.last_physical_stream_event_id
     assert event_id is not None
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
     assert target_content[AI_RUN_METADATA_KEY]["usage"]["total_tokens"] == 10
@@ -691,11 +693,11 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
     ]
     trace_stale = [ToolTraceEntry(type="tool_call_started", tool_name="save_file")]
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield StructuredStreamChunk(content="🔧 `save_file` [1]", tool_trace=trace_full)
         yield StructuredStreamChunk(content="🔧 `save_file` [1]", tool_trace=trace_stale)
 
-    event_id, _ = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -707,6 +709,7 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
         streaming_cls=ReplacementStreamingResponse,
     )
 
+    event_id = outcome.last_physical_stream_event_id
     assert event_id is not None
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
     assert _TOOL_TRACE_KEY in target_content
@@ -721,11 +724,11 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
 
     tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
         yield ToolCallCompletedEvent(tool=tool, content="ok")
 
-    event_id, accumulated = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -737,8 +740,11 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
         streaming_cls=ReplacementStreamingResponse,
     )
 
+    event_id = outcome.last_physical_stream_event_id
+    accumulated = outcome.rendered_body
     assert event_id is not None
     # The accumulated text must still contain the tool marker, not be empty
+    assert accumulated is not None
     assert "save_file" in accumulated
     assert accumulated.strip() != ""
 
@@ -749,11 +755,11 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
     client = MockClient()
     config = MockConfig()
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield "hello"
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
 
-    event_id, accumulated = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -764,8 +770,9 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
     )
+    accumulated = outcome.canonical_final_body_candidate or outcome.rendered_body or ""
 
-    assert event_id is not None
+    assert outcome.last_physical_stream_event_id is not None
     assert accumulated.startswith("hello")
     assert "save_file" in accumulated
 
@@ -782,13 +789,13 @@ async def test_replacement_streaming_preserves_visible_tool_marker_across_snapsh
 
     tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield "hello"
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
         yield "hello world"
         yield ToolCallCompletedEvent(tool=tool, content="ok")
 
-    event_id, accumulated = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -799,8 +806,9 @@ async def test_replacement_streaming_preserves_visible_tool_marker_across_snapsh
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
     )
+    accumulated = outcome.canonical_final_body_candidate or outcome.rendered_body or ""
 
-    assert event_id is not None
+    assert outcome.last_physical_stream_event_id is not None
     assert accumulated.startswith("hello world")
     assert "save_file" in accumulated
     assert "⏳" not in accumulated
@@ -817,14 +825,14 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
     client = MockClient()
     config = MockConfig()
 
-    async def stream() -> AsyncIterator[_StreamInputChunk]:
+    async def stream() -> AsyncIterator[StreamInputChunk]:
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="first_tool", tool_args={}))
         await asyncio.sleep(0)
         yield ToolCallStartedEvent(tool=ToolExecution(tool_name="second_tool", tool_args={}))
         await asyncio.sleep(0)
         yield "Done"
 
-    event_id, accumulated = await send_streaming_response(
+    outcome = await send_streaming_response(
         client=client,
         room_id="!test:room",
         reply_to_event_id=None,
@@ -836,7 +844,10 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
         show_tool_calls=False,
     )
 
+    event_id = outcome.last_physical_stream_event_id
+    accumulated = outcome.rendered_body
     assert event_id is not None
+    assert accumulated is not None
     assert accumulated == "\n\nDone"
     bodies = [content.get("m.new_content", content)["body"] for _, _, content in client.messages_sent]
     assert bodies == ["Thinking...", "\n\nDone"]

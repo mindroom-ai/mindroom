@@ -34,7 +34,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
-from mindroom.delivery_gateway import DeliveryResult
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -259,14 +259,12 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
     queue_thread_summary = MagicMock()
 
     await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id=None,
+            suppressed=True,
+        ),
         ResponseOutcome(
-            resolved_event_id="$response",
-            delivery_result=DeliveryResult(
-                event_id="$response",
-                response_text="hidden",
-                delivery_kind="sent",
-                suppressed=True,
-            ),
             interactive_target=MessageTarget.resolve(
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -283,6 +281,74 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
     )
 
     queue_thread_summary.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_register_interactive_follow_up_for_preserved_stream_failure() -> None:
+    """Preserved visible streamed replies should still register interactive follow-up."""
+    register_interactive = AsyncMock()
+    target = MessageTarget.resolve(
+        room_id="!room:localhost",
+        thread_id="$thread",
+        reply_to_event_id="$event",
+    )
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$stream",
+            is_visible_response=True,
+            final_visible_body="Choose",
+            delivery_kind="sent",
+            option_map={"1": "yes"},
+            options_list=({"emoji": "1", "label": "Yes", "value": "yes"},),
+        ),
+        ResponseOutcome(
+            interactive_target=target,
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            register_interactive=register_interactive,
+        ),
+    )
+
+    register_interactive.assert_awaited_once_with(
+        "$stream",
+        target,
+        {"1": "yes"},
+        [{"emoji": "1", "label": "Yes", "value": "yes"}],
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_skip_interactive_follow_up_for_preserved_stream_error() -> None:
+    """Failed preserved stream outcomes must not register interactive follow-up on a failed reply."""
+    register_interactive = AsyncMock()
+    target = MessageTarget.resolve(
+        room_id="!room:localhost",
+        thread_id="$thread",
+        reply_to_event_id="$event",
+    )
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$stream",
+            is_visible_response=True,
+            final_visible_body="Choose",
+            option_map={"1": "yes"},
+            options_list=({"emoji": "1", "label": "Yes", "value": "yes"},),
+        ),
+        ResponseOutcome(
+            interactive_target=target,
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            register_interactive=register_interactive,
+        ),
+    )
+
+    register_interactive.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -344,14 +410,14 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         patch("mindroom.thread_summary._recover_last_summary_count", new=AsyncMock(return_value=0)),
     ):
         await apply_post_response_effects(
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="response",
+                delivery_kind="sent",
+            ),
             ResponseOutcome(
-                resolved_event_id="$response",
-                delivery_result=DeliveryResult(
-                    event_id="$response",
-                    response_text="visible",
-                    delivery_kind="sent",
-                    suppressed=False,
-                ),
                 thread_summary_room_id="!room:localhost",
                 thread_summary_thread_id="$thread",
                 thread_summary_message_count_hint=4,
@@ -536,9 +602,11 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=DeliveryResult(
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
                         event_id="$response",
-                        response_text="ok",
+                        is_visible_response=True,
+                        final_visible_body="ok",
                         delivery_kind="sent",
                     ),
                 ),
@@ -568,7 +636,8 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
 
             lifecycle_lock.release()
             await asyncio.wait_for(lifecycle_started.wait(), timeout=0.2)
-            assert await task == "$response"
+            resolution = await task
+            assert resolution == "$response"
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()

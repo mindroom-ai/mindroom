@@ -454,7 +454,7 @@ async def test_delivery_gateway_edit_text_preserves_plain_reply_relation_in_room
 
 @pytest.mark.asyncio
 async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tmp_path: Path) -> None:
-    """Final delivery should route fresh sends through the gateway's native send helper."""
+    """Final delivery should route fresh sends through the gateway helper only."""
     gateway, before_hooks, after_hooks = _gateway_with_mocks(tmp_path)
     before_hooks.return_value = ResponseDraft(
         response_text="raw response",
@@ -487,14 +487,14 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
         )
 
     mock_send_text.assert_awaited_once()
-    after_hooks.assert_awaited_once()
+    after_hooks.assert_not_awaited()
     assert result.event_id == "$response"
     assert result.delivery_kind == "sent"
 
 
 @pytest.mark.asyncio
 async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messages(tmp_path: Path) -> None:
-    """Final delivery should route edits through the gateway's native edit helper."""
+    """Final delivery should route edits through the gateway helper only."""
     gateway, before_hooks, after_hooks = _gateway_with_mocks(tmp_path)
     before_hooks.return_value = ResponseDraft(
         response_text="raw response",
@@ -527,6 +527,6 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
         )
 
     mock_edit_text.assert_awaited_once()
-    after_hooks.assert_awaited_once()
+    after_hooks.assert_not_awaited()
     assert result.event_id == "$existing"
     assert result.delivery_kind == "edited"

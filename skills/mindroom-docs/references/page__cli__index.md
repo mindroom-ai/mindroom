@@ -189,9 +189,10 @@ Profiles control the template style:
 - `--profile full` (default) — rich example config with interactive provider selection
 - `--profile minimal` — bare-minimum config
 - `--profile public` — hosted Matrix (`mindroom.chat`) with prefilled homeserver settings
+- `--profile public-codex` — hosted Matrix with Codex CLI subscription defaults
 - `--profile public-vertexai-anthropic` — hosted Matrix with Vertex AI Claude defaults
 
-Provider presets (`--provider`) set the default model: `anthropic`, `openai`, `openrouter`, or `vertexai_claude`.
+Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `openai`, `openrouter`, or `vertexai_claude`.
 
 ```
 # Hosted Matrix quickstart (creates ~/.mindroom/config.yaml)
@@ -200,12 +201,17 @@ mindroom config init --profile public
 # Minimal config with Anthropic
 mindroom config init --minimal --provider anthropic
 
-# Full config with Vertex AI Claude on hosted Matrix
+# Hosted Matrix with Codex CLI ChatGPT subscription auth
+mindroom config init --profile public-codex
+
+# Hosted Matrix with Vertex AI Claude
 mindroom config init --profile public-vertexai-anthropic
 
 # Force overwrite existing config
 mindroom config init --force
 ```
+
+The `public-codex` profile and `--provider codex` preset generate `provider: codex` with `id: gpt-5.5`. They set `extra_kwargs.reasoning_effort: medium`. Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key. Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 
 ### config show
 

@@ -17,16 +17,16 @@ from agno.run.agent import RunCancelledEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 
 from mindroom.bot import AgentBot
-from mindroom.cancellation import request_task_cancel
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import CANCELLED_RESPONSE_NOTE, INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from tests.conftest import (
@@ -214,7 +214,14 @@ class TestAIErrorDisplay:
             error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
             with patch(
                 "mindroom.delivery_gateway.DeliveryGateway.deliver_stream",
-                new=AsyncMock(return_value=("$msg_id", error_text)),
+                new=AsyncMock(
+                    return_value=StreamTransportOutcome(
+                        last_physical_stream_event_id="$msg_id",
+                        terminal_status="completed",
+                        rendered_body=error_text,
+                        visible_body_state="visible_body",
+                    ),
+                ),
             ) as mock_deliver_stream:
                 # Call the method with an existing_event_id
                 await bot._response_runner.process_and_respond_streaming(
@@ -251,11 +258,9 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.side_effect = asyncio.CancelledError()
 
-            # Call the method and expect it to raise CancelledError
-            with pytest.raises(asyncio.CancelledError):
-                await bot._response_runner.process_and_respond(
-                    _response_request(existing_event_id="$thinking_msg"),
-                )
+            await bot._response_runner.process_and_respond(
+                _response_request(existing_event_id="$thinking_msg"),
+            )
 
             # Verify the thinking message was edited with the generic interruption message.
             assert len(edited_messages) == 1
@@ -290,15 +295,16 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.side_effect = asyncio.CancelledError(USER_STOP_CANCEL_MSG)
 
-            with pytest.raises(asyncio.CancelledError):
-                await bot._response_runner.process_and_respond(
-                    _response_request(existing_event_id="$thinking_msg"),
-                )
+            outcome = await bot._response_runner.process_and_respond(
+                _response_request(existing_event_id="$thinking_msg"),
+            )
 
         assert len(edited_messages) == 1
         event_id, text = edited_messages[0]
         assert event_id == "$thinking_msg"
         assert text == CANCELLED_RESPONSE_NOTE
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_cancelled_run_status_preserves_user_stop_note(self, tmp_path: Path) -> None:
@@ -352,15 +358,16 @@ class TestAIErrorDisplay:
         ):
             _build_response_runner(bot)
 
-            with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
-                await bot._response_runner.process_and_respond(
-                    _response_request(existing_event_id="$thinking_msg"),
-                )
+            outcome = await bot._response_runner.process_and_respond(
+                _response_request(existing_event_id="$thinking_msg"),
+            )
 
         assert len(edited_messages) == 1
         event_id, text = edited_messages[0]
         assert event_id == "$thinking_msg"
         assert text == CANCELLED_RESPONSE_NOTE
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_run_cancelled_event_preserves_user_stop_note_in_streaming(self, tmp_path: Path) -> None:
@@ -411,15 +418,16 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_agent.arun = MagicMock(return_value=fake_arun_stream())
 
-            with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
-                await bot._response_runner.process_and_respond_streaming(
-                    _response_request(existing_event_id="$thinking_msg"),
-                )
+            outcome = await bot._response_runner.process_and_respond_streaming(
+                _response_request(existing_event_id="$thinking_msg"),
+            )
 
         assert len(edited_messages) == 2
         event_id, text = edited_messages[-1]
         assert event_id == "$thinking_msg"
         assert text == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_various_error_messages_are_user_friendly(self, tmp_path: Path) -> None:
@@ -510,10 +518,9 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.side_effect = asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
 
-            with pytest.raises(asyncio.CancelledError):
-                await bot._response_runner.process_and_respond(
-                    _response_request(existing_event_id="$thinking_msg"),
-                )
+            await bot._response_runner.process_and_respond(
+                _response_request(existing_event_id="$thinking_msg"),
+            )
 
         assert len(edited_messages) == 1
         event_id, content, text = edited_messages[0]

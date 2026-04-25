@@ -13,6 +13,8 @@ from .context import (
     CompactionHookContext,
     ConfigReloadedContext,
     CustomEventContext,
+    FinalResponseDraft,
+    FinalResponseTransformContext,
     HookContext,
     HookContextSupport,
     MessageEnrichContext,
@@ -32,7 +34,7 @@ from .enrichment import (
     render_enrichment_block,
     render_system_enrichment_block,
 )
-from .execution import emit, emit_collect, emit_gate, emit_transform
+from .execution import emit, emit_collect, emit_final_response_transform, emit_gate, emit_transform
 from .registry import HookRegistry
 from .state import build_hook_room_state_putter, build_hook_room_state_querier
 from .types import (
@@ -47,6 +49,7 @@ from .types import (
     EVENT_MESSAGE_BEFORE_RESPONSE,
     EVENT_MESSAGE_CANCELLED,
     EVENT_MESSAGE_ENRICH,
+    EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
     EVENT_MESSAGE_RECEIVED,
     EVENT_REACTION_RECEIVED,
     EVENT_SCHEDULE_FIRED,
@@ -79,6 +82,7 @@ __all__ = [
     "EVENT_MESSAGE_BEFORE_RESPONSE",
     "EVENT_MESSAGE_CANCELLED",
     "EVENT_MESSAGE_ENRICH",
+    "EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM",
     "EVENT_MESSAGE_RECEIVED",
     "EVENT_REACTION_RECEIVED",
     "EVENT_SCHEDULE_FIRED",
@@ -95,6 +99,8 @@ __all__ = [
     "ConfigReloadedContext",
     "CustomEventContext",
     "EnrichmentItem",
+    "FinalResponseDraft",
+    "FinalResponseTransformContext",
     "HookContext",
     "HookContextSupport",
     "HookMatrixAdmin",
@@ -119,6 +125,7 @@ __all__ = [
     "build_hook_room_state_querier",
     "emit",
     "emit_collect",
+    "emit_final_response_transform",
     "emit_gate",
     "emit_transform",
     "hook",
