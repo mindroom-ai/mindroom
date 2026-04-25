@@ -729,6 +729,96 @@ async def test_git_ready_snapshot_schedules_refresh_after_poll_interval(
 
 
 @pytest.mark.asyncio
+async def test_private_git_ready_refresh_on_access_honors_poll_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requester-local Git knowledge should not poll before its configured interval has elapsed."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=60)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        knowledge=AgentPrivateKnowledgeConfig(path="knowledge", git=git_config),
+                    ),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths,
+    )
+    base_id = config.get_agent_private_knowledge_base_id("helper")
+    assert base_id is not None
+    identity = _identity("@alice:localhost")
+    key = resolve_snapshot_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    knowledge_path = Path(key.knowledge_path)
+    knowledge_path.mkdir(parents=True, exist_ok=True)
+    (knowledge_path / "note.md").write_text("alice private git note", encoding="utf-8")
+
+    async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        _ = index_changes
+        self._git_last_successful_commit = "rev-a"
+        _set_git_tracked_files(self, "note.md")
+        return {"updated": False, "changed_count": 0, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
+    await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    unavailable: dict[str, KnowledgeAvailability] = {}
+
+    knowledge = get_agent_knowledge(
+        "helper",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        refresh_owner=owner,
+        on_unavailable_bases=unavailable.update,
+    )
+
+    assert knowledge is not None
+    assert unavailable == {}
+    owner.schedule_initial_load.assert_not_called()
+    owner.schedule_refresh.assert_not_called()
+
+    metadata_path = snapshot_metadata_path(key)
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["last_published_at"] = "2000-01-01T00:00:00+00:00"
+    metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    clear_published_snapshots()
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    unavailable = {}
+
+    stale_knowledge = get_agent_knowledge(
+        "helper",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        refresh_owner=owner,
+        on_unavailable_bases=unavailable.update,
+    )
+
+    assert stale_knowledge is not None
+    assert unavailable == {base_id: KnowledgeAvailability.STALE}
+    owner.schedule_initial_load.assert_not_called()
+    owner.schedule_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_existing_published_snapshot_is_used_while_refresh_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

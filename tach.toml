@@ -1804,6 +1804,7 @@ expose = [
     "credential_free_url_identity",
     "knowledge_binding_mutation_lock",
     "knowledge_source_signature",
+    "list_git_tracked_knowledge_files",
     "list_knowledge_files",
     "load_published_indexing_state",
     "OrchestratorKnowledgeRefreshOwner",

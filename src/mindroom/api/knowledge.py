@@ -29,6 +29,9 @@ from mindroom.knowledge import (
     snapshot_metadata_path,
 )
 from mindroom.knowledge import (
+    list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files,
+)
+from mindroom.knowledge import (
     list_knowledge_files as list_managed_knowledge_files,
 )
 from mindroom.logging_config import get_logger
@@ -97,7 +100,7 @@ def _list_file_info(
     if not root.is_dir():
         return files, total_size
 
-    managed_paths = set(list_managed_knowledge_files(config, base_id, root))
+    managed_paths = set(_list_managed_file_paths(config, base_id, root))
     paths = (
         sorted(managed_paths) if file_paths is None else sorted(path for path in file_paths if path in managed_paths)
     )
@@ -116,6 +119,13 @@ def _list_file_info(
         )
 
     return files, total_size
+
+
+def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> list[Path]:
+    base_config = config.knowledge_bases[base_id]
+    if base_config.git is None:
+        return list_managed_knowledge_files(config, base_id, root)
+    return list_git_tracked_managed_knowledge_files(config, base_id, root)
 
 
 def _request_refresh_owner(request: Request) -> KnowledgeRefreshOwner | None:
@@ -251,15 +261,43 @@ def _git_status(
     }
 
 
-def _reject_git_file_mutation(config: Config, base_id: str) -> None:
-    if config.knowledge_bases[base_id].git is None:
+def _git_backed_bases_for_source(
+    config: Config,
+    root: Path,
+    runtime_paths: constants.RuntimePaths,
+) -> tuple[str, ...]:
+    resolved_root = root.resolve()
+    git_base_ids: list[str] = []
+    for candidate_id, candidate_config in config.knowledge_bases.items():
+        candidate_root = constants.resolve_config_relative_path(candidate_config.path, runtime_paths).resolve()
+        if candidate_root == resolved_root and candidate_config.git is not None:
+            git_base_ids.append(candidate_id)
+    return tuple(git_base_ids)
+
+
+def _reject_git_file_mutation(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
+    root = _knowledge_root(config, base_id, runtime_paths)
+    git_base_ids = _git_backed_bases_for_source(config, root, runtime_paths)
+    if not git_base_ids:
         return
-    raise HTTPException(
-        status_code=409,
-        detail=(
+    if base_id in git_base_ids:
+        detail = (
             f"Knowledge base '{base_id}' is Git-backed. "
             "Update the configured repository and reindex instead of mutating files through this API."
-        ),
+        )
+    else:
+        joined_base_ids = ", ".join(sorted(git_base_ids))
+        detail = (
+            f"Knowledge base '{base_id}' shares its source path with Git-backed knowledge base(s): "
+            f"{joined_base_ids}. Update the configured repository and reindex instead of mutating files through this API."
+        )
+    raise HTTPException(
+        status_code=409,
+        detail=detail,
     )
 
 
@@ -409,7 +447,7 @@ async def upload_knowledge_files(
     """Upload one or more files into a knowledge base folder."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
-    _reject_git_file_mutation(config, base_id)
+    _reject_git_file_mutation(config, base_id, runtime_paths)
     uploaded: list[str] = []
     staged_uploads: list[_StagedUpload] = []
 
@@ -457,7 +495,7 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
     """Delete one knowledge file from disk and from the vector index."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
-    _reject_git_file_mutation(config, base_id)
+    _reject_git_file_mutation(config, base_id, runtime_paths)
     root = _knowledge_root(config, base_id, runtime_paths)
     decoded_path = unquote(path)
     target = _resolve_within_root(root, decoded_path)

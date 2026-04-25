@@ -188,7 +188,15 @@ def _ready_refresh_on_access_cooldown_seconds(lookup: KnowledgeSnapshotLookup, c
     """Return READY refresh throttle without request-path source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return _REFRESH_RETRY_COOLDOWN_SECONDS
-    return _REFRESH_RETRY_COOLDOWN_SECONDS
+    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
+    return max(poll_interval_seconds or _REFRESH_RETRY_COOLDOWN_SECONDS, 1.0)
+
+
+def _ready_refresh_on_access_due(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
+    """Return whether READY on-access refresh should be scheduled without source scans."""
+    if config.get_knowledge_base_config(lookup.key.base_id).git is None:
+        return True
+    return _git_poll_due(lookup, config)
 
 
 def _refresh_owner_is_refreshing(
@@ -230,6 +238,7 @@ def _schedule_refresh_for_availability(
     if availability is KnowledgeAvailability.READY:
         if (
             lookup.refresh_on_access
+            and _ready_refresh_on_access_due(lookup, config)
             and not _refresh_owner_is_refreshing(
                 refresh_owner,
                 base_id,

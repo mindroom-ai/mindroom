@@ -2,7 +2,12 @@
 
 # ruff: noqa: RUF022
 
-from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature, list_knowledge_files
+from mindroom.knowledge.manager import (
+    KnowledgeManager,
+    knowledge_source_signature,
+    list_git_tracked_knowledge_files,
+    list_knowledge_files,
+)
 from mindroom.knowledge.redaction import (
     credential_free_url_identity,
     redact_credentials_in_text,
@@ -81,6 +86,7 @@ __all__ = [
     "refresh_knowledge_binding",
     "is_refresh_active_for_binding",
     "knowledge_binding_mutation_lock",
+    "list_git_tracked_knowledge_files",
     "list_knowledge_files",
     "knowledge_source_signature",
     "credential_free_url_identity",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -88,6 +89,12 @@ def _write_snapshot_metadata(
     if indexed_count is not None:
         payload["indexed_count"] = indexed_count
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
+def _init_git_checkout(path: Path, *tracked_paths: str) -> None:
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    if tracked_paths:
+        subprocess.run(["git", "add", *tracked_paths], cwd=path, check=True, capture_output=True)
 
 
 def _test_client(tmp_path: Path) -> TestClient:
@@ -227,14 +234,20 @@ def test_knowledge_files_use_managed_file_filters(tmp_path: Path) -> None:
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     (docs / "content" / "private").mkdir(parents=True)
-    (docs / ".git").mkdir()
     (docs / ".hidden").mkdir()
     (docs / "content" / "guide.md").write_text("managed", encoding="utf-8")
     (docs / "content" / "raw.txt").write_text("wrong extension", encoding="utf-8")
     (docs / "content" / "private" / "secret.md").write_text("excluded pattern", encoding="utf-8")
-    (docs / ".git" / "config.md").write_text("git internals", encoding="utf-8")
     (docs / ".hidden" / "note.md").write_text("hidden", encoding="utf-8")
     (docs / "outside.md").write_text("outside include pattern", encoding="utf-8")
+    _init_git_checkout(
+        docs,
+        "content/guide.md",
+        "content/raw.txt",
+        "content/private/secret.md",
+        ".hidden/note.md",
+        "outside.md",
+    )
     config = Config(
         agents={},
         models={},
@@ -263,12 +276,37 @@ def test_knowledge_files_use_managed_file_filters(tmp_path: Path) -> None:
     assert status_response.json()["file_count"] == 1
 
 
+def test_git_backed_file_counts_use_tracked_semantic_files(tmp_path: Path) -> None:
+    """Git-backed API file counts should match the tracked files the indexer can search."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "tracked.md").write_text("tracked", encoding="utf-8")
+    (docs / "untracked.md").write_text("untracked", encoding="utf-8")
+    _init_git_checkout(docs, "tracked.md")
+    config = _knowledge_config(docs, git=True)
+    _publish_committed_runtime_config(client.app, config)
+
+    files_response = client.get("/api/knowledge/bases/research/files")
+    status_response = client.get("/api/knowledge/bases/research/status")
+    list_response = client.get("/api/knowledge/bases")
+
+    assert files_response.status_code == 200
+    assert status_response.status_code == 200
+    assert list_response.status_code == 200
+    assert [entry["path"] for entry in files_response.json()["files"]] == ["tracked.md"]
+    assert files_response.json()["file_count"] == 1
+    assert status_response.json()["file_count"] == 1
+    assert list_response.json()["bases"][0]["file_count"] == 1
+
+
 def test_git_status_reads_disk_and_snapshot_metadata(tmp_path: Path) -> None:
     """Git status should expose cheap disk/snapshot facts without constructing a manager."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
-    (docs / ".git").mkdir(parents=True)
+    docs.mkdir()
+    _init_git_checkout(docs)
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
     _write_snapshot_metadata(
@@ -392,6 +430,37 @@ def test_git_backed_upload_is_rejected_before_creating_cold_checkout(tmp_path: P
     assert owner.scheduled == []
 
 
+def test_upload_to_local_base_sharing_git_source_is_rejected(tmp_path: Path) -> None:
+    """A local alias of a Git-backed source must not bypass Git mutation restrictions."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(docs), watch=False),
+            "summary": KnowledgeBaseConfig(
+                path=str(docs),
+                watch=False,
+                git=KnowledgeGitConfig(repo_url="https://example.com/org/research.git"),
+            ),
+        },
+    )
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    response = client.post(
+        "/api/knowledge/bases/research/upload",
+        files=[("files", ("guide.md", b"hello", "text/markdown"))],
+    )
+
+    assert response.status_code == 409
+    assert "Git-backed" in response.json()["detail"]
+    assert not docs.exists()
+    assert owner.scheduled == []
+
+
 def test_upload_over_existing_directory_is_rejected_before_mutation(tmp_path: Path) -> None:
     """Uploads must not replace an existing directory with a file."""
     client = _test_client(tmp_path)
@@ -471,6 +540,36 @@ def test_git_backed_delete_is_rejected_without_mutating_checkout(tmp_path: Path)
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs, git=True)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    response = client.delete("/api/knowledge/bases/research/files/guide.md")
+
+    assert response.status_code == 409
+    assert "Git-backed" in response.json()["detail"]
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
+    assert owner.scheduled == []
+
+
+def test_delete_from_local_base_sharing_git_source_is_rejected(tmp_path: Path) -> None:
+    """Deletes through a local alias must not mutate a Git-backed source directory."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(docs), watch=False),
+            "summary": KnowledgeBaseConfig(
+                path=str(docs),
+                watch=False,
+                git=KnowledgeGitConfig(repo_url="https://example.com/org/research.git"),
+            ),
+        },
+    )
     _publish_committed_runtime_config(client.app, config)
     owner = _RecordingRefreshOwner()
     client.app.state.knowledge_refresh_owner = owner

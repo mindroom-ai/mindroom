@@ -263,10 +263,15 @@ async def _maybe_publish_unchanged_snapshot(
         git_sync_result = await manager.sync_git_repository(index_changes=False)
         if force_reindex or git_sync_result.get("updated", False):
             return None
-        return await _publish_unchanged_git_snapshot(manager, key)
+        return await _publish_unchanged_snapshot(
+            manager,
+            key,
+            published_revision=manager._git_last_successful_commit,
+            mark_git_initial_sync_complete=True,
+        )
     if force_reindex:
         return None
-    return await _publish_unchanged_local_snapshot(manager, key)
+    return await _publish_unchanged_snapshot(manager, key)
 
 
 async def _refresh_result_from_persisted_state(
@@ -343,9 +348,12 @@ async def _refresh_result_from_persisted_state(
     )
 
 
-async def _publish_unchanged_local_snapshot(
+async def _publish_unchanged_snapshot(
     manager: KnowledgeManager,
     key: KnowledgeSnapshotKey,
+    *,
+    published_revision: str | None = None,
+    mark_git_initial_sync_complete: bool = False,
 ) -> KnowledgeRefreshResult | None:
     state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
     if (
@@ -373,6 +381,7 @@ async def _publish_unchanged_local_snapshot(
         state,
         availability="ready",
         last_published_at=datetime.now(tz=UTC).isoformat(),
+        published_revision=published_revision or state.published_revision,
         last_error=None,
     )
     await asyncio.to_thread(
@@ -380,62 +389,8 @@ async def _publish_unchanged_local_snapshot(
         snapshot_metadata_path(key),
         updated_state,
     )
-    publish_snapshot_from_state(
-        key,
-        state=updated_state,
-        config=manager.config,
-        runtime_paths=manager.runtime_paths,
-        metadata_path=snapshot_metadata_path(key),
-    )
-    _clear_stale_markers_after_publish(refresh_key_for_snapshot_key(key), state=updated_state)
-    return KnowledgeRefreshResult(
-        key=key,
-        indexed_count=updated_state.indexed_count or 0,
-        published=True,
-        availability=snapshot_availability_for_state(key=key, state=updated_state),
-        last_error=updated_state.last_error,
-    )
-
-
-async def _publish_unchanged_git_snapshot(
-    manager: KnowledgeManager,
-    key: KnowledgeSnapshotKey,
-) -> KnowledgeRefreshResult | None:
-    state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
-    if (
-        state is None
-        or state.status != "complete"
-        or state.source_signature is None
-        or state.availability == KnowledgeAvailability.REFRESH_FAILED.value
-        or snapshot_availability_for_state(key=key, state=state) is not KnowledgeAvailability.READY
-        or not indexing_settings_metadata_equal(state.settings, key.indexing_settings)
-        or not snapshot_collection_exists_for_state(key, state)
-    ):
-        return None
-
-    current_source_signature = await asyncio.to_thread(
-        knowledge_source_signature,
-        manager.config,
-        manager.base_id,
-        manager._knowledge_source_path(),
-        tracked_relative_paths=manager._git_tracked_relative_paths,
-    )
-    if current_source_signature != state.source_signature:
-        return None
-
-    updated_state = replace(
-        state,
-        availability="ready",
-        last_published_at=datetime.now(tz=UTC).isoformat(),
-        published_revision=manager._git_last_successful_commit or state.published_revision,
-        last_error=None,
-    )
-    await asyncio.to_thread(
-        save_published_indexing_state,
-        snapshot_metadata_path(key),
-        updated_state,
-    )
-    manager._mark_git_initial_sync_complete()
+    if mark_git_initial_sync_complete:
+        manager._mark_git_initial_sync_complete()
     publish_snapshot_from_state(
         key,
         state=updated_state,

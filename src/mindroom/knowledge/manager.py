@@ -525,6 +525,19 @@ def _git_tracked_relative_paths_from_checkout(config: Config, base_id: str, know
     }
 
 
+def list_git_tracked_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
+    """List Git-tracked semantic files using the same source set as indexing."""
+    root = knowledge_root.resolve()
+    if not (root / ".git").is_dir():
+        return []
+    return _semantic_file_paths_from_relative_paths(
+        config,
+        base_id,
+        root,
+        _git_tracked_relative_paths_from_checkout(config, base_id, root),
+    )
+
+
 def knowledge_source_signature(
     config: Config,
     base_id: str,
