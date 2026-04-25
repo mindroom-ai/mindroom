@@ -164,6 +164,8 @@ agents:
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
 
+Skills are opt-in: a skill is only loaded when its name appears in an agent's `skills` list. `metadata.openclaw.always: true` bypasses eligibility requirements, but it does not auto-attach the skill to agents.
+
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime.
