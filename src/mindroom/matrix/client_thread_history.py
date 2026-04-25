@@ -435,7 +435,7 @@ async def _load_cached_thread_history_if_usable(
     runtime_started_at: float | None,
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[ThreadHistoryResult | None, dict[str, str | int | float | bool] | None]:
-    """Return a fresh durable thread snapshot when the current runtime may safely trust it."""
+    """Return a durable thread snapshot when the current runtime may safely trust it."""
     cache_state = await event_cache.get_thread_cache_state(room_id, thread_id)
     rejection_reason = thread_cache_rejection_reason(
         cache_state,

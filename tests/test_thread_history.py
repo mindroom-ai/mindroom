@@ -2634,6 +2634,65 @@ class TestThreadHistoryCache:
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_restored_token_post_sync_reuses_old_thread_cache_inside_trusted_boundary(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Certified sync catch-up should make cache age irrelevant inside the token cache window."""
+        cache = _EventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        runtime_started_at = time.time()
+        thread_cache_valid_after = runtime_started_at - 1000.0
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Cached reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Cached reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        await cache.replace_thread(
+            "!room:localhost",
+            "$thread_root",
+            [self._cache_source(root_event), self._cache_source(reply_event)],
+            validated_at=runtime_started_at - 900.0,
+        )
+
+        client = MagicMock()
+        client.room_messages = AsyncMock(side_effect=AssertionError("should reuse old trusted cache"))
+        conversation_cache, coordinator = self._conversation_cache_for_runtime(
+            tmp_path=tmp_path,
+            client=client,
+            event_cache=cache,
+            runtime_started_at=runtime_started_at,
+            thread_cache_valid_after=thread_cache_valid_after,
+        )
+
+        try:
+            history = await conversation_cache.get_dispatch_thread_history(
+                "!room:localhost",
+                "$thread_root",
+            )
+        finally:
+            await coordinator.close()
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics
+        client.room_messages.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_untrusted_restart_rejects_pre_runtime_thread_cache(
         self,
         tmp_path: Path,
