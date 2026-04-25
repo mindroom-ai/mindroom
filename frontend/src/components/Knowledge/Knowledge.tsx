@@ -126,12 +126,15 @@ function formatModifiedDate(value: string): string {
 function redactUrlCredentials(value: string): string {
   try {
     const parsed = new URL(value);
-    if (!parsed.username && !parsed.password) {
-      return value;
-    }
-    return `${parsed.protocol}//***@${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+    const authority =
+      parsed.username || parsed.password ? `***@${parsed.host}` : parsed.host;
+    return `${parsed.protocol}//${authority}${parsed.pathname}`;
   } catch {
-    return value.replace(/^([a-z][a-z0-9+.-]*:\/\/)([^@\s]+)@/i, "$1***@");
+    const withoutQueryOrFragment = value.replace(/[?#].*$/, "");
+    return withoutQueryOrFragment.replace(
+      /^([a-z][a-z0-9+.-]*:\/\/)([^@\s/?#]+)@/i,
+      "$1***@",
+    );
   }
 }
 

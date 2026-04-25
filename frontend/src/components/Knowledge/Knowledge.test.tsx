@@ -350,6 +350,76 @@ describe("Knowledge", () => {
     expect(gitCard).toHaveTextContent("Branch: release");
   });
 
+  it.each([
+    {
+      repoUrl: "https://github.com/org/git-docs?token=query-secret",
+      secret: "query-secret",
+    },
+    {
+      repoUrl: "https://github.com/org/git-docs#fragment-secret",
+      secret: "fragment-secret",
+    },
+    {
+      repoUrl:
+        "https://token:password@github.com/org/git-docs?token=query-secret#fragment-secret",
+      secret: "query-secret",
+    },
+  ])(
+    "strips git repo URL query and fragment secrets",
+    async ({ repoUrl, secret }) => {
+      mockStore({
+        git_docs: {
+          path: "./knowledge_docs/git_docs",
+          watch: true,
+          git: {
+            repo_url: repoUrl,
+            branch: "release",
+          },
+        },
+      });
+      setKnowledgeApiMock({
+        git_docs: {
+          status: {
+            base_id: "git_docs",
+            folder_path: "./knowledge_docs/git_docs",
+            watch: true,
+            file_count: 0,
+            indexed_count: 0,
+            git: {
+              repo_url: repoUrl,
+              branch: "release",
+              lfs: false,
+              startup_behavior: "blocking",
+              syncing: false,
+              repo_present: true,
+              initial_sync_complete: true,
+              last_successful_sync_at: null,
+              last_successful_commit: null,
+              last_error: null,
+              pending_startup_mode: null,
+            },
+          },
+          files: {
+            base_id: "git_docs",
+            files: [],
+            total_size: 0,
+            file_count: 0,
+          },
+        },
+      });
+
+      render(<Knowledge />);
+      await screen.findByText("Active: git_docs");
+
+      expect(
+        screen.getAllByText(/https:\/\/.*github\.com\/org\/git-docs/),
+      ).not.toHaveLength(0);
+      expect(screen.queryByText(new RegExp(secret))).not.toBeInTheDocument();
+      expect(screen.queryByText(/fragment-secret/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/token:password/)).not.toBeInTheDocument();
+    },
+  );
+
   it("describes watch false as advisory instead of manual-only", async () => {
     mockStore({
       docs: { path: "./knowledge_docs/docs", watch: false },

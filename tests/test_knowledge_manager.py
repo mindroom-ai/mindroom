@@ -39,6 +39,7 @@ from mindroom.knowledge import (
     snapshot_indexed_count,
 )
 from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature, list_knowledge_files
+from mindroom.knowledge.refresh_owner import KnowledgeRefreshSupersededError
 from mindroom.knowledge.registry import load_published_indexing_state, resolve_snapshot_key, snapshot_metadata_path
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -678,6 +679,58 @@ def test_config_rejects_parent_child_knowledge_roots(tmp_path: Path) -> None:
             bases={"parent": parent, "child": child},
             agent_bases=["parent"],
         )
+
+
+def test_config_rejects_exact_duplicate_roots_with_mixed_git_ownership(tmp_path: Path) -> None:
+    """Exact duplicate knowledge roots must agree on local vs Git source ownership."""
+    docs = tmp_path / "docs"
+
+    with pytest.raises(ValueError, match="exact duplicate aliases must use compatible source configuration"):
+        _config(
+            tmp_path,
+            bases={"local": docs, "git": docs},
+            agent_bases=["local"],
+            git_configs={"git": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")},
+        )
+
+
+def test_config_rejects_exact_duplicate_git_roots_with_different_source_semantics(tmp_path: Path) -> None:
+    """Exact duplicate Git roots must not share one checkout across incompatible source config."""
+    docs = tmp_path / "docs"
+
+    with pytest.raises(ValueError, match="exact duplicate aliases must use compatible source configuration"):
+        _config(
+            tmp_path,
+            bases={"main": docs, "release": docs},
+            agent_bases=["main"],
+            git_configs={
+                "main": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main"),
+                "release": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="release"),
+            },
+        )
+
+
+def test_config_allows_exact_duplicate_roots_with_compatible_source_semantics(tmp_path: Path) -> None:
+    """Exact duplicate aliases remain valid when their source ownership semantics match."""
+    docs = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(
+        repo_url="https://token:secret@example.com/org/repo.git?token=query-secret#fragment-secret",
+        branch="main",
+        include_patterns=["docs/**"],
+        exclude_patterns=["docs/private/**"],
+    )
+
+    config = _config(
+        tmp_path,
+        bases={"alpha": docs, "beta": docs},
+        agent_bases=["alpha", "beta"],
+        git_configs={
+            "alpha": git_config,
+            "beta": git_config.model_copy(deep=True),
+        },
+    )
+
+    assert sorted(config.knowledge_bases) == ["alpha", "beta"]
 
 
 def test_legacy_git_raw_url_metadata_is_compatible_with_redacted_identity(tmp_path: Path) -> None:
@@ -2276,11 +2329,11 @@ async def test_refresh_owner_superseded_manual_waiters_complete(
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_schedule_does_not_orphan_manual_waiter(
+async def test_refresh_owner_schedule_supersedes_incompatible_manual_waiter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Newest queued refresh payload should run while preserving awaited pending futures."""
+    """A newer incompatible payload must not complete an old waiter with the wrong result."""
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     stale_config = config.model_copy(deep=True)
@@ -2290,6 +2343,7 @@ async def test_refresh_owner_schedule_does_not_orphan_manual_waiter(
     runtime_paths = runtime_paths_for(config)
     owner = PerBindingKnowledgeRefreshOwner()
     first_started = asyncio.Event()
+    second_started = asyncio.Event()
     release_first = asyncio.Event()
     seen: list[tuple[int, bool]] = []
 
@@ -2302,6 +2356,8 @@ async def test_refresh_owner_schedule_does_not_orphan_manual_waiter(
         if len(seen) == 1:
             first_started.set()
             await release_first.wait()
+        else:
+            second_started.set()
         return knowledge_refresh_runner.KnowledgeRefreshResult(
             key=resolve_snapshot_key("docs", config=refresh_config, runtime_paths=runtime_paths),
             indexed_count=len(seen),
@@ -2318,12 +2374,15 @@ async def test_refresh_owner_schedule_does_not_orphan_manual_waiter(
     )
     await asyncio.sleep(0)
     owner.schedule_refresh("docs", config=newer_config, runtime_paths=runtime_paths)
+
+    with pytest.raises(KnowledgeRefreshSupersededError, match="superseded"):
+        await asyncio.wait_for(manual_task, timeout=1)
+
     release_first.set()
-    result = await asyncio.wait_for(manual_task, timeout=1)
+    await asyncio.wait_for(second_started.wait(), timeout=1)
     await owner.shutdown()
 
-    assert result.indexed_count == 2
-    assert seen == [(1024, False), (2048, True)]
+    assert seen == [(1024, False), (2048, False)]
 
 
 @pytest.mark.asyncio

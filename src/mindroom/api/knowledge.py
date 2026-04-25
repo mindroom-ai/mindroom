@@ -240,6 +240,12 @@ def _snapshot_state(
         return None
 
 
+def _redacted_last_error(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return redact_credentials_in_text(value)
+
+
 def _is_refreshing(
     config: Config,
     base_id: str,
@@ -285,7 +291,7 @@ def _git_status(
         ),
         "last_successful_sync_at": state.last_published_at if state is not None else None,
         "last_successful_commit": state.published_revision if state is not None else None,
-        "last_error": state.last_error if state is not None else None,
+        "last_error": _redacted_last_error(state.last_error if state is not None else None),
         "pending_startup_mode": None,
     }
 
@@ -587,7 +593,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "indexed_count": indexed_count,
         "manager_available": snapshot_available,
         "refreshing": refreshing,
-        "last_error": state.last_error if state is not None else None,
+        "last_error": _redacted_last_error(state.last_error if state is not None else None),
         "file_listing_degraded": file_info.degraded,
         "file_listing_error": file_info.error,
     }
@@ -634,7 +640,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
                 "base_id": base_id,
                 "indexed_count": state.indexed_count or 0 if state is not None else 0,
                 "availability": availability.value,
-                "last_error": state.last_error if state is not None else redact_credentials_in_text(str(exc)),
+                "last_error": _redacted_last_error(state.last_error if state is not None else str(exc)),
             },
         ) from exc
     if not (result.published and result.availability is KnowledgeAvailability.READY):
@@ -645,7 +651,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
                 "base_id": base_id,
                 "indexed_count": result.indexed_count,
                 "availability": result.availability.value,
-                "last_error": result.last_error,
+                "last_error": _redacted_last_error(result.last_error),
             },
         )
     return {

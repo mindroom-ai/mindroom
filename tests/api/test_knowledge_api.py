@@ -379,6 +379,30 @@ def test_git_status_surfaces_last_refresh_error_from_snapshot_metadata(tmp_path:
     assert payload["git"]["last_error"] == "Git command failed: https://***@example.com/repo.git"
 
 
+def test_knowledge_status_redacts_legacy_snapshot_last_error(tmp_path: Path) -> None:
+    """Status responses must not trust persisted legacy refresh errors."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs, git=True)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(
+        config,
+        runtime_paths,
+        last_error="Git command failed: https://token:secret@example.com/repo.git?token=query-secret#frag-secret",
+    )
+
+    response = client.get("/api/knowledge/bases/research/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["last_error"] == "Git command failed: https://***@example.com/repo.git"
+    assert payload["git"]["last_error"] == "Git command failed: https://***@example.com/repo.git"
+    assert "secret" not in json.dumps(payload)
+    assert "query-secret" not in json.dumps(payload)
+    assert "frag-secret" not in json.dumps(payload)
+
+
 def test_api_lifespan_does_not_schedule_all_configured_knowledge_bases(tmp_path: Path) -> None:
     """API startup should load config but not warm every configured KB."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -946,6 +970,35 @@ def test_explicit_reindex_returns_structured_failure_when_refresh_raises(tmp_pat
     assert detail["availability"] == "refresh_failed"
     assert detail["indexed_count"] == 0
     assert detail["last_error"] == "Git failed https://***@example.com/repo.git"
+
+
+def test_explicit_reindex_redacts_legacy_snapshot_last_error_on_failure(tmp_path: Path) -> None:
+    """Reindex failure responses must redact persisted legacy snapshot errors."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs, git=True)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(
+        config,
+        runtime_paths,
+        last_error="Git failed https://token:secret@example.com/repo.git?token=query-secret#frag-secret",
+        indexed_count=2,
+    )
+
+    with patch(
+        "mindroom.api.knowledge.refresh_knowledge_binding",
+        new=AsyncMock(side_effect=RuntimeError("ignored raw failure")),
+    ):
+        response = client.post("/api/knowledge/bases/research/reindex")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["indexed_count"] == 2
+    assert detail["last_error"] == "Git failed https://***@example.com/repo.git"
+    assert "secret" not in json.dumps(detail)
+    assert "query-secret" not in json.dumps(detail)
+    assert "frag-secret" not in json.dumps(detail)
 
 
 def test_status_degrades_gracefully_when_snapshot_key_resolution_fails(tmp_path: Path) -> None:

@@ -26,6 +26,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class KnowledgeRefreshSupersededError(RuntimeError):
+    """A queued awaited refresh was replaced by an incompatible newer request."""
+
+
 class KnowledgeRefreshOwner(Protocol):
     """Owns background refresh tasks keyed by resolved knowledge binding."""
 
@@ -247,6 +251,16 @@ class PerBindingKnowledgeRefreshOwner:
             self._pending[key] = request
             return
 
+        if not _scheduled_refreshes_compatible(existing, request):
+            _complete_request_exception(
+                existing,
+                KnowledgeRefreshSupersededError(
+                    "Knowledge refresh request was superseded by a newer incompatible configuration",
+                ),
+            )
+            self._pending[key] = request
+            return
+
         completions = [*existing.completions, *request.completions]
         self._pending[key] = replace(
             request,
@@ -302,6 +316,15 @@ class PerBindingKnowledgeRefreshOwner:
                 return
             raise
         _complete_request_result(request, result)
+
+
+def _scheduled_refreshes_compatible(left: _ScheduledRefresh, right: _ScheduledRefresh) -> bool:
+    return (
+        left.base_id == right.base_id
+        and left.config.authored_model_dump() == right.config.authored_model_dump()
+        and left.runtime_paths == right.runtime_paths
+        and left.execution_identity == right.execution_identity
+    )
 
 
 def _complete_request_result(request: _ScheduledRefresh, result: KnowledgeRefreshResult) -> None:
