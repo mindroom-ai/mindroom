@@ -61,7 +61,7 @@ from mindroom.delivery_gateway import (
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionLifecycleStart, CompactionOutcome
-from mindroom.history.types import HistoryScope
+from mindroom.history.types import HistoryScope, PostResponseCompactionCheck
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -147,6 +147,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
 
+    from mindroom.post_response_effects import ResponseOutcome
     from mindroom.turn_store import TurnStore
 
 
@@ -4342,6 +4343,111 @@ class TestAgentBot:
         assert compaction_notice_kwargs["target"].resolved_thread_id == root_event_id
         assert compaction_notice_kwargs["reply_to_event_id"] == "$response"
         assert "thread_summary_!test:localhost_$root_event" in scheduled_names
+
+    @pytest.mark.asyncio
+    async def test_generate_response_marks_non_streaming_model_error_unsuccessful_for_post_effects(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A delivered non-streaming Matrix error reply should not be a successful run outcome."""
+        captured_outcomes: list[ResponseOutcome] = []
+        check = cast("PostResponseCompactionCheck", MagicMock())
+
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            collector = kwargs["post_response_compaction_checks_collector"]
+            collector.append(check)
+            return "friendly-error"
+
+        async def fake_apply_post_response_effects(
+            _delivery: FinalDeliveryOutcome,
+            outcome: ResponseOutcome,
+            _deps: object,
+        ) -> None:
+            captured_outcomes.append(outcome)
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        _install_runtime_cache_support(bot)
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            should_use_streaming=AsyncMock(return_value=False),
+            ai_response=AsyncMock(side_effect=fake_ai_response),
+            apply_post_response_effects=AsyncMock(side_effect=fake_apply_post_response_effects),
+        ):
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Please answer",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                user_id="@alice:localhost",
+            )
+
+        assert len(captured_outcomes) == 1
+        assert captured_outcomes[0].run_succeeded is False
+        assert captured_outcomes[0].post_response_compaction_checks == (check,)
+
+    @pytest.mark.asyncio
+    async def test_generate_response_marks_streaming_model_error_unsuccessful_for_post_effects(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A delivered streaming Matrix error reply should not be a successful run outcome."""
+        captured_outcomes: list[ResponseOutcome] = []
+        check = cast("PostResponseCompactionCheck", MagicMock())
+
+        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
+            collector = kwargs["post_response_compaction_checks_collector"]
+            collector.append(check)
+            yield "friendly-error"
+
+        async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
+            response_stream = cast("AsyncGenerator[object, None]", args[7])
+            body_parts = [str(chunk) async for chunk in response_stream]
+            return _stream_outcome("$response", "".join(body_parts))
+
+        async def fake_apply_post_response_effects(
+            _delivery: FinalDeliveryOutcome,
+            outcome: ResponseOutcome,
+            _deps: object,
+        ) -> None:
+            captured_outcomes.append(outcome)
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        _install_runtime_cache_support(bot)
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_streaming_response",
+                new=AsyncMock(side_effect=fake_send_streaming_response),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=True),
+                stream_agent_response=MagicMock(side_effect=fake_stream_agent_response),
+                apply_post_response_effects=AsyncMock(side_effect=fake_apply_post_response_effects),
+            ),
+        ):
+            await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Please answer",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                user_id="@alice:localhost",
+            )
+
+        assert len(captured_outcomes) == 1
+        assert captured_outcomes[0].run_succeeded is False
+        assert captured_outcomes[0].post_response_compaction_checks == (check,)
 
     @pytest.mark.asyncio
     async def test_generate_response_runs_post_effects_after_cancellable_wrapper(

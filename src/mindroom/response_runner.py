@@ -1647,6 +1647,7 @@ class ResponseRunner:
                 session_id=session_id,
                 session_type=SessionType.TEAM,
                 execution_identity=tool_dispatch.execution_identity,
+                run_succeeded=team_turn_recorder.outcome == "completed",
                 post_response_compaction_checks=tuple(post_response_compaction_checks),
                 interactive_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
@@ -2064,7 +2065,7 @@ class ResponseRunner:
             )
             raise
 
-    async def process_and_respond(  # noqa: C901
+    async def process_and_respond(  # noqa: C901, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2072,6 +2073,7 @@ class ResponseRunner:
         response_kind: str = "ai",
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
         post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+        run_success_collector: list[bool] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
     ) -> FinalDeliveryOutcome:
         """Process a message and send a response without streaming."""
@@ -2198,6 +2200,8 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
+        if run_success_collector is not None:
+            run_success_collector.append(turn_recorder.outcome == "completed")
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.extend(compaction_outcomes)
         if post_response_compaction_checks_collector is not None:
@@ -2212,6 +2216,7 @@ class ResponseRunner:
         response_kind: str = "ai",
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
         post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+        run_success_collector: list[bool] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
         tool_trace_collector: list[Any] | None = None,
         run_metadata_content_collector: dict[str, Any] | None = None,
@@ -2307,6 +2312,8 @@ class ResponseRunner:
                     is_team=False,
                     response_event_id=error.event_id,
                 )
+            if run_success_collector is not None:
+                run_success_collector.append(turn_recorder.outcome == "completed")
             if compaction_outcomes_collector is not None:
                 compaction_outcomes_collector.extend(compaction_outcomes)
             if post_response_compaction_checks_collector is not None:
@@ -2389,6 +2396,8 @@ class ResponseRunner:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
 
+        if run_success_collector is not None:
+            run_success_collector.append(turn_recorder.outcome == "completed")
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.extend(compaction_outcomes)
         if post_response_compaction_checks_collector is not None:
@@ -2467,6 +2476,7 @@ class ResponseRunner:
         final_delivery_outcome: FinalDeliveryOutcome | None = None
         compaction_outcomes: list[CompactionOutcome] = []
         post_response_compaction_checks: list[PostResponseCompactionCheck] = []
+        run_successes: list[bool] = []
         response_run_id = str(uuid4())
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
@@ -2540,6 +2550,7 @@ class ResponseRunner:
                     run_id=response_run_id,
                     compaction_outcomes_collector=compaction_outcomes,
                     post_response_compaction_checks_collector=post_response_compaction_checks,
+                    run_success_collector=run_successes,
                     on_delivery_started=note_delivery_started,
                     tool_trace_collector=tool_trace,
                     run_metadata_content_collector=run_metadata_content,
@@ -2550,6 +2561,7 @@ class ResponseRunner:
                     run_id=response_run_id,
                     compaction_outcomes_collector=compaction_outcomes,
                     post_response_compaction_checks_collector=post_response_compaction_checks,
+                    run_success_collector=run_successes,
                     on_delivery_started=note_delivery_started,
                 )
 
@@ -2693,6 +2705,7 @@ class ResponseRunner:
             session_id=session_id,
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
             execution_identity=execution_identity,
+            run_succeeded=run_successes[-1] if run_successes else False,
             post_response_compaction_checks=tuple(post_response_compaction_checks),
             interactive_target=resolved_target,
             thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),

@@ -57,6 +57,7 @@ class ResponseOutcome:
     session_id: str | None = None
     session_type: SessionType | None = None
     execution_identity: ToolExecutionIdentity | None = None
+    run_succeeded: bool = True
     post_response_compaction_checks: tuple[PostResponseCompactionCheck, ...] = ()
     interactive_target: MessageTarget | None = None
     thread_summary_room_id: str | None = None
@@ -310,6 +311,7 @@ async def apply_post_response_effects(
         response_event_id is not None
         and final_delivery_outcome.terminal_status == "completed"
         and not final_delivery_outcome.suppressed
+        and outcome.run_succeeded
         and outcome.post_response_compaction_checks
         and deps.run_post_response_compaction is not None
     ):

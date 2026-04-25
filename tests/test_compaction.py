@@ -435,6 +435,62 @@ async def test_post_response_effects_start_compaction_check_after_response_link_
     assert events == ["persist_response_event_id", "start_compaction"]
 
 
+@pytest.mark.asyncio
+async def test_post_response_effects_skip_compaction_after_non_streaming_run_failure() -> None:
+    """A delivered Matrix error reply from a failed non-streaming run must not compact."""
+    check = _make_post_response_check()
+    start_compaction = AsyncMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Agent execution failed",
+            delivery_kind="sent",
+        ),
+        ResponseOutcome(
+            response_run_id="run-1",
+            run_succeeded=False,
+            post_response_compaction_checks=(check,),
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            run_post_response_compaction=start_compaction,
+        ),
+    )
+
+    start_compaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_skip_compaction_after_streaming_run_failure() -> None:
+    """A delivered Matrix error reply from a failed streaming run must not compact."""
+    check = _make_post_response_check()
+    start_compaction = AsyncMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="partial\n\nTeam execution failed.",
+            delivery_kind="edited",
+        ),
+        ResponseOutcome(
+            response_run_id="run-1",
+            run_succeeded=False,
+            post_response_compaction_checks=(check,),
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            run_post_response_compaction=start_compaction,
+        ),
+    )
+
+    start_compaction.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # Token estimation tests
 # ---------------------------------------------------------------------------
