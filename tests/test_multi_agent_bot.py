@@ -3169,8 +3169,7 @@ class TestAgentBot:
                 handled_turn=HandledTurnState.from_source_event_id(event.event_id),
             )
         tracker.record_handled_turn.assert_called_once_with(
-            HandledTurnState.from_source_event_id(event.event_id)
-            .with_response_event_id("$cancelled"),
+            HandledTurnState.from_source_event_id(event.event_id).with_response_event_id("$cancelled"),
         )
 
     @pytest.mark.asyncio
