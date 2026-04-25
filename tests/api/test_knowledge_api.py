@@ -144,27 +144,31 @@ def test_knowledge_bases_list_does_not_initialize_unused_configured_bases(tmp_pa
 
 
 def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: Path) -> None:
-    """Routine status endpoints use snapshot metadata counts without refresh work."""
+    """Routine status endpoints use snapshot metadata without query-handle construction."""
     client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    snapshot = SimpleNamespace(state=SimpleNamespace(indexed_count=9))
-    lookup = SimpleNamespace(snapshot=snapshot, availability=KnowledgeAvailability.READY)
+    _write_snapshot_metadata(config, runtime_paths, indexed_count=9)
 
     with (
-        patch("mindroom.api.knowledge.get_published_snapshot", return_value=lookup),
+        patch("mindroom.knowledge.manager.ChromaDb", side_effect=AssertionError("ChromaDb should not load")),
+        patch("mindroom.knowledge.manager._create_embedder", side_effect=AssertionError("embedder should not load")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
     ):
         status_response = client.get("/api/knowledge/bases/research/status")
         list_response = client.get("/api/knowledge/bases")
+        files_response = client.get("/api/knowledge/bases/research/files")
 
     assert status_response.status_code == 200
     assert list_response.status_code == 200
+    assert files_response.status_code == 200
     assert status_response.json()["indexed_count"] == 9
     assert list_response.json()["bases"][0]["indexed_count"] == 9
+    assert files_response.json()["manager_available"] is True
     refresh.assert_not_awaited()
 
 

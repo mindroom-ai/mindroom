@@ -14,13 +14,13 @@ from mindroom.api import config_lifecycle
 from mindroom.knowledge import (
     KnowledgeAvailability,
     PublishedIndexingState,
-    get_published_snapshot,
+    knowledge_binding_mutation_lock,
     load_published_indexing_state,
     redact_url_credentials,
     refresh_knowledge_binding,
     remove_source_path_from_published_snapshots,
     resolve_snapshot_key,
-    snapshot_indexed_count,
+    snapshot_availability_for_state,
     snapshot_metadata_path,
 )
 from mindroom.knowledge import (
@@ -132,14 +132,22 @@ def _snapshot_status(
     base_id: str,
     runtime_paths: constants.RuntimePaths,
 ) -> tuple[bool, int]:
-    lookup = get_published_snapshot(
+    key = resolve_snapshot_key(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
+        create=False,
     )
-    if lookup.snapshot is None:
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    if state is None:
         return False, 0
-    return lookup.availability is not KnowledgeAvailability.INITIALIZING, snapshot_indexed_count(lookup.snapshot)
+    availability = snapshot_availability_for_state(key=key, state=state)
+    available = state.status == "complete" and availability in {
+        KnowledgeAvailability.READY,
+        KnowledgeAvailability.REFRESH_FAILED,
+        KnowledgeAvailability.STALE,
+    }
+    return available, state.indexed_count or 0
 
 
 def _snapshot_state(
@@ -302,31 +310,33 @@ async def upload_knowledge_files(
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
     _reject_git_file_mutation(config, base_id)
-    root = _knowledge_root(config, base_id, runtime_paths, create=True)
-
     uploaded: list[str] = []
     uploaded_paths: list[Path] = []
-    for upload in files:
-        filename = Path(upload.filename or "").name
-        if not filename:
-            await upload.close()
-            continue
 
-        destination = _resolve_within_root(root, filename)
+    async with knowledge_binding_mutation_lock(base_id, config=config, runtime_paths=runtime_paths):
+        root = _knowledge_root(config, base_id, runtime_paths, create=True)
 
-        try:
-            _validate_upload_size_hint(upload, filename)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            await _stream_upload_to_destination(upload, destination, filename)
-        except Exception:
-            destination.unlink(missing_ok=True)
-            _rollback_uploaded_files(uploaded_paths)
-            raise
-        finally:
-            await upload.close()
+        for upload in files:
+            filename = Path(upload.filename or "").name
+            if not filename:
+                await upload.close()
+                continue
 
-        uploaded_paths.append(destination)
-        uploaded.append(destination.relative_to(root).as_posix())
+            destination = _resolve_within_root(root, filename)
+
+            try:
+                _validate_upload_size_hint(upload, filename)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                await _stream_upload_to_destination(upload, destination, filename)
+            except Exception:
+                destination.unlink(missing_ok=True)
+                _rollback_uploaded_files(uploaded_paths)
+                raise
+            finally:
+                await upload.close()
+
+            uploaded_paths.append(destination)
+            uploaded.append(destination.relative_to(root).as_posix())
 
     _schedule_refresh(config, base_id, runtime_paths, request=request)
 
@@ -347,17 +357,18 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
     decoded_path = unquote(path)
     target = _resolve_within_root(root, decoded_path)
 
-    if not target.exists() or not target.is_file():
-        raise HTTPException(status_code=404, detail="Knowledge file not found")
+    async with knowledge_binding_mutation_lock(base_id, config=config, runtime_paths=runtime_paths):
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="Knowledge file not found")
 
-    relative_path = target.relative_to(root).as_posix()
-    target.unlink()
-    remove_source_path_from_published_snapshots(
-        base_id,
-        relative_path,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+        relative_path = target.relative_to(root).as_posix()
+        target.unlink()
+        remove_source_path_from_published_snapshots(
+            base_id,
+            relative_path,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
 
     _schedule_refresh(config, base_id, runtime_paths, request=request)
 

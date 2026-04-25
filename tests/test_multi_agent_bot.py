@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import os
 import signal
@@ -812,7 +813,19 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         expected_knowledge = object()
         lookup = SimpleNamespace(
-            snapshot=SimpleNamespace(knowledge=expected_knowledge),
+            key=SimpleNamespace(
+                base_id="research",
+                storage_root=str(tmp_path),
+                knowledge_path=str(tmp_path / "kb"),
+                indexing_settings=(),
+            ),
+            snapshot=SimpleNamespace(
+                knowledge=expected_knowledge,
+                state=SimpleNamespace(
+                    source_signature=hashlib.sha256().hexdigest(),
+                    last_published_at="2999-01-01T00:00:00+00:00",
+                ),
+            ),
             availability=KnowledgeAvailability.READY,
         )
 
@@ -882,8 +895,18 @@ class TestAgentBot:
 
         def _lookup(base_id: str, **_kwargs: object) -> SimpleNamespace:
             return SimpleNamespace(
+                key=SimpleNamespace(
+                    base_id=base_id,
+                    storage_root=str(tmp_path),
+                    knowledge_path=str(tmp_path / f"kb_{base_id}"),
+                    indexing_settings=(),
+                ),
                 snapshot=SimpleNamespace(
                     knowledge={"research": research_knowledge, "legal": legal_knowledge}[base_id],
+                    state=SimpleNamespace(
+                        source_signature=hashlib.sha256().hexdigest(),
+                        last_published_at="2999-01-01T00:00:00+00:00",
+                    ),
                 ),
                 availability=KnowledgeAvailability.READY,
             )

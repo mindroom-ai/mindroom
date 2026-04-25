@@ -41,6 +41,8 @@ from mindroom.knowledge.redaction import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
 
@@ -414,6 +416,19 @@ def knowledge_source_signature(config: Config, base_id: str, knowledge_root: Pat
         digest.update(str(stat.st_mtime_ns).encode("ascii"))
         digest.update(b"\0")
         digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _source_signature_from_file_signatures(file_signatures: Mapping[str, tuple[int, int]]) -> str:
+    """Return the same corpus signature from already-indexed relative path signatures."""
+    digest = hashlib.sha256()
+    for relative_path, (source_mtime_ns, source_size) in sorted(file_signatures.items()):
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(source_mtime_ns).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(source_size).encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -1165,22 +1180,10 @@ class KnowledgeManager:
         previous_state: _PersistedIndexingState | None,
         retained_collections: tuple[str, ...],
     ) -> None:
-        if previous_state is None:
-            return
-        candidates = [
-            collection for collection in (previous_state.collection, *previous_state.retained_collections) if collection
-        ]
-        for collection_name in tuple(dict.fromkeys(candidates)):
-            if collection_name in retained_collections:
-                continue
-            try:
-                self._delete_vector_db(self._build_vector_db(collection_name))
-            except Exception:
-                logger.exception(
-                    "Failed to delete superseded knowledge collection",
-                    base_id=self.base_id,
-                    collection=collection_name,
-                )
+        _ = (previous_state, retained_collections)
+        # Returned Knowledge handles can outlive the process-local registry entry that
+        # originally exposed them. Runtime cleanup therefore cannot safely delete old
+        # collections; offline/startup cleanup can reclaim them later.
 
     def _reset_vector_db(self, vector_db: ChromaDb) -> None:
         vector_db.delete()
@@ -1479,9 +1482,8 @@ class KnowledgeManager:
 
     async def reindex_all(self) -> int:
         """Clear and rebuild the knowledge index from disk."""
-        files = self.list_files()
-
         async with self._lock:
+            files = self.list_files()
             persisted_state = await asyncio.to_thread(self._load_persisted_indexing_state)
             live_collection_name = self._current_collection_name()
             has_published_snapshot = (
@@ -1527,11 +1529,6 @@ class KnowledgeManager:
                     availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
                     last_error=error,
                     indexed_count=0,
-                    source_signature=knowledge_source_signature(
-                        self.config,
-                        self.base_id,
-                        self._knowledge_source_path(),
-                    ),
                     retained_collections=(),
                 )
 
@@ -1554,11 +1551,30 @@ class KnowledgeManager:
                 )
                 return indexed_count
 
+            expected_paths = {self._relative_path(file_path) for file_path in files}
+            candidate_signatures = {
+                relative_path: signature
+                for relative_path, signature in candidate_indexed_signatures.items()
+                if signature is not None
+            }
+            if set(candidate_signatures) != expected_paths:
+                await asyncio.to_thread(self._delete_vector_db, candidate_vector_db)
+                await _save_refresh_failed_state(
+                    f"Indexed signatures covered {len(candidate_signatures)} of {len(expected_paths)} managed files",
+                )
+                return indexed_count
+
+            candidate_source_signature = _source_signature_from_file_signatures(candidate_signatures)
+            live_source_signature = knowledge_source_signature(self.config, self.base_id, self._knowledge_source_path())
+            if live_source_signature != candidate_source_signature:
+                await asyncio.to_thread(self._delete_vector_db, candidate_vector_db)
+                await _save_refresh_failed_state("Knowledge source changed during refresh; refresh skipped")
+                return indexed_count
+
             self._knowledge.vector_db = candidate_vector_db
             async with self._state_lock:
                 self._indexed_files = candidate_indexed_files
                 self._indexed_signatures = candidate_indexed_signatures
-            source_signature = knowledge_source_signature(self.config, self.base_id, self._knowledge_source_path())
             retained_collections = self._retained_collections_after_publish(
                 published_collection=candidate_vector_db.collection_name,
                 previous_state=persisted_state,
@@ -1566,7 +1582,7 @@ class KnowledgeManager:
             await asyncio.to_thread(
                 self._save_persisted_indexing_settings,
                 indexed_count=len(candidate_indexed_files),
-                source_signature=source_signature,
+                source_signature=candidate_source_signature,
                 retained_collections=retained_collections,
             )
             await asyncio.to_thread(

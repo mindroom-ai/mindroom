@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
@@ -34,7 +35,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
+_SOURCE_FRESHNESS_CHECK_COOLDOWN_SECONDS = 300.0
 _refresh_scheduled_at: dict[tuple[KnowledgeRefreshKey, KnowledgeAvailability], float] = {}
+_source_freshness_checked_at: dict[KnowledgeRefreshKey, float] = {}
+_stale_ready_snapshots: set[tuple[KnowledgeRefreshKey, str | None]] = set()
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -92,14 +96,54 @@ def _lookup_knowledge_for_base(
 def _refresh_schedule_due(
     key: KnowledgeRefreshKey,
     availability: KnowledgeAvailability,
+    *,
+    cooldown_seconds: float = _REFRESH_RETRY_COOLDOWN_SECONDS,
 ) -> bool:
     now = time.monotonic()
     cache_key = (key, availability)
     last_scheduled_at = _refresh_scheduled_at.get(cache_key)
-    if last_scheduled_at is not None and now - last_scheduled_at < _REFRESH_RETRY_COOLDOWN_SECONDS:
+    if last_scheduled_at is not None and now - last_scheduled_at < cooldown_seconds:
         return False
     _refresh_scheduled_at[cache_key] = now
     return True
+
+
+def _source_freshness_check_due(key: KnowledgeRefreshKey) -> bool:
+    now = time.monotonic()
+    last_checked_at = _source_freshness_checked_at.get(key)
+    if last_checked_at is not None and now - last_checked_at < _SOURCE_FRESHNESS_CHECK_COOLDOWN_SECONDS:
+        return False
+    _source_freshness_checked_at[key] = now
+    return True
+
+
+def _published_snapshot_age_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        published_at = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if published_at.tzinfo is None:
+        published_at = published_at.replace(tzinfo=UTC)
+    return max((datetime.now(tz=UTC) - published_at).total_seconds(), 0.0)
+
+
+def _git_poll_interval_seconds(lookup: KnowledgeSnapshotLookup, config: Config) -> float | None:
+    git_config = config.get_knowledge_base_config(lookup.key.base_id).git
+    if git_config is None:
+        return None
+    return max(float(git_config.poll_interval_seconds), 0.0)
+
+
+def _git_poll_due(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
+    if lookup.snapshot is None:
+        return False
+    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
+    if poll_interval_seconds is None:
+        return False
+    published_age_seconds = _published_snapshot_age_seconds(lookup.snapshot.state.last_published_at)
+    return published_age_seconds is None or published_age_seconds >= poll_interval_seconds
 
 
 def _ready_snapshot_source_stale(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
@@ -112,6 +156,77 @@ def _ready_snapshot_source_stale(lookup: KnowledgeSnapshotLookup, config: Config
         logger.exception("Knowledge source freshness check failed", base_id=lookup.key.base_id)
         return False
     return current_signature != snapshot.state.source_signature
+
+
+def _ready_snapshot_effective_availability(
+    lookup: KnowledgeSnapshotLookup,
+    config: Config,
+) -> KnowledgeAvailability:
+    """Return request-path availability for a ready snapshot without eager rescans."""
+    availability = lookup.availability
+    if availability is KnowledgeAvailability.READY and lookup.snapshot is not None:
+        refresh_key = refresh_key_for_snapshot_key(lookup.key)
+        source_signature = lookup.snapshot.state.source_signature
+        stale_key = (refresh_key, source_signature)
+        if source_signature is None:
+            _stale_ready_snapshots.add(stale_key)
+            availability = KnowledgeAvailability.STALE
+        elif _git_poll_due(lookup, config) or stale_key in _stale_ready_snapshots:
+            availability = KnowledgeAvailability.STALE
+        elif _source_freshness_check_due(refresh_key) and _ready_snapshot_source_stale(lookup, config):
+            _stale_ready_snapshots.add(stale_key)
+            availability = KnowledgeAvailability.STALE
+    return availability
+
+
+def _refresh_cooldown_seconds(
+    lookup: KnowledgeSnapshotLookup | None,
+    config: Config,
+    availability: KnowledgeAvailability,
+) -> float:
+    if lookup is None or availability is not KnowledgeAvailability.STALE:
+        return _REFRESH_RETRY_COOLDOWN_SECONDS
+    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
+    if poll_interval_seconds is None:
+        return _REFRESH_RETRY_COOLDOWN_SECONDS
+    return max(poll_interval_seconds, 1.0)
+
+
+def _schedule_refresh_for_availability(
+    refresh_owner: KnowledgeRefreshOwner,
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    lookup: KnowledgeSnapshotLookup | None,
+    availability: KnowledgeAvailability,
+) -> None:
+    if lookup is None or availability is KnowledgeAvailability.READY:
+        return
+
+    refresh_key = refresh_key_for_snapshot_key(lookup.key)
+    if availability is KnowledgeAvailability.INITIALIZING:
+        if _refresh_schedule_due(refresh_key, availability):
+            refresh_owner.schedule_initial_load(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+            )
+        return
+
+    if _refresh_schedule_due(
+        refresh_key,
+        availability,
+        cooldown_seconds=_refresh_cooldown_seconds(lookup, config, availability),
+    ):
+        refresh_owner.schedule_refresh(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
 
 
 def get_agent_knowledge(
@@ -143,37 +258,19 @@ def get_agent_knowledge(
             execution_identity=execution_identity,
             on_availability=_set_availability,
         )
+        if lookup is not None and availability is KnowledgeAvailability.READY:
+            availability = _ready_snapshot_effective_availability(lookup, config)
         knowledge = lookup.snapshot.knowledge if lookup is not None and lookup.snapshot is not None else None
         if refresh_owner is not None:
-            refresh_key = refresh_key_for_snapshot_key(lookup.key) if lookup is not None else None
-            if availability is KnowledgeAvailability.INITIALIZING:
-                if refresh_key is not None and _refresh_schedule_due(refresh_key, availability):
-                    refresh_owner.schedule_initial_load(
-                        base_id,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                        execution_identity=execution_identity,
-                    )
-            elif availability is KnowledgeAvailability.READY:
-                if (
-                    lookup is not None
-                    and refresh_key is not None
-                    and _ready_snapshot_source_stale(lookup, config)
-                    and _refresh_schedule_due(refresh_key, availability)
-                ):
-                    refresh_owner.schedule_refresh(
-                        base_id,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                        execution_identity=execution_identity,
-                    )
-            elif refresh_key is not None and _refresh_schedule_due(refresh_key, availability):
-                refresh_owner.schedule_refresh(
-                    base_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                )
+            _schedule_refresh_for_availability(
+                refresh_owner,
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                lookup=lookup,
+                availability=availability,
+            )
         resolved_knowledge[base_id] = (knowledge, availability)
         return resolved_knowledge[base_id]
 
@@ -204,6 +301,11 @@ def format_knowledge_availability_notice(
         elif availability is KnowledgeAvailability.CONFIG_MISMATCH:
             lines.append(
                 f"Knowledge base `{base_id}` is refreshing against newer config and may be stale this turn. "
+                "Do not claim to have searched the latest contents.",
+            )
+        elif availability is KnowledgeAvailability.STALE:
+            lines.append(
+                f"Knowledge base `{base_id}` may be stale while a refresh is pending this turn. "
                 "Do not claim to have searched the latest contents.",
             )
         elif availability is KnowledgeAvailability.REFRESH_FAILED:

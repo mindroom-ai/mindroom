@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import contextmanager
@@ -112,7 +113,17 @@ def _knowledge_lookup(
     base_id: str = "docs",
     availability: KnowledgeAvailability = KnowledgeAvailability.READY,
 ) -> SimpleNamespace:
-    snapshot = SimpleNamespace(knowledge=knowledge) if knowledge is not None else None
+    snapshot = (
+        SimpleNamespace(
+            knowledge=knowledge,
+            state=SimpleNamespace(
+                source_signature=hashlib.sha256().hexdigest(),
+                last_published_at="2999-01-01T00:00:00+00:00",
+            ),
+        )
+        if knowledge is not None
+        else None
+    )
     key = SimpleNamespace(
         base_id=base_id,
         storage_root="memory",

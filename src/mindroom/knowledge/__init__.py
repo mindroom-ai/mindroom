@@ -14,7 +14,7 @@ from mindroom.knowledge.refresh_owner import (
     PerBindingKnowledgeRefreshOwner,
     StandaloneKnowledgeRefreshOwner,
 )
-from mindroom.knowledge.refresh_runner import refresh_knowledge_binding
+from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     KnowledgeRefreshKey,
     KnowledgeSnapshotKey,
@@ -28,6 +28,7 @@ from mindroom.knowledge.registry import (
     remove_source_path_from_published_snapshots,
     resolve_refresh_key,
     resolve_snapshot_key,
+    snapshot_availability_for_state,
     snapshot_indexed_count,
     snapshot_metadata_path,
 )
@@ -58,11 +59,13 @@ __all__ = [
     "publish_snapshot",
     "resolve_snapshot_key",
     "resolve_refresh_key",
+    "snapshot_availability_for_state",
     "snapshot_metadata_path",
     "snapshot_indexed_count",
     "clear_published_snapshots",
     "remove_source_path_from_published_snapshots",
     "refresh_knowledge_binding",
+    "knowledge_binding_mutation_lock",
     "list_knowledge_files",
     "knowledge_source_signature",
     "credential_free_url_identity",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
@@ -18,6 +19,7 @@ from mindroom.knowledge.registry import (
     load_published_indexing_state,
     publish_snapshot,
     refresh_key_for_snapshot_key,
+    resolve_refresh_key,
     resolve_snapshot_key,
     snapshot_availability_for_state,
     snapshot_metadata_path,
@@ -25,6 +27,8 @@ from mindroom.knowledge.registry import (
 from mindroom.runtime_resolution import resolve_knowledge_binding
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -52,6 +56,27 @@ def _refresh_lock_for_key(key: KnowledgeRefreshKey) -> asyncio.Lock:
             lock = asyncio.Lock()
             _refresh_locks[key] = lock
         return lock
+
+
+@asynccontextmanager
+async def knowledge_binding_mutation_lock(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+    create: bool = False,
+) -> AsyncIterator[None]:
+    """Serialize direct source mutations with refresh publishes for one binding."""
+    key = resolve_refresh_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=create,
+    )
+    async with _refresh_lock_for_key(key):
+        yield
 
 
 async def refresh_knowledge_binding(
@@ -130,10 +155,21 @@ async def _refresh_knowledge_binding_locked(
             indexed_count=indexed_count,
         )
     availability = snapshot_availability_for_state(key=key, state=state)
-    if (
-        not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings)
-        or availability is KnowledgeAvailability.REFRESH_FAILED
-    ):
+    if not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings):
+        return KnowledgeRefreshResult(
+            key=key,
+            indexed_count=indexed_count,
+            published=False,
+            availability=availability,
+            last_error=state.last_error,
+        )
+    if availability is KnowledgeAvailability.REFRESH_FAILED:
+        publish_snapshot(
+            key,
+            knowledge=manager.get_knowledge(),
+            state=state,
+            metadata_path=snapshot_metadata_path(key),
+        )
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,

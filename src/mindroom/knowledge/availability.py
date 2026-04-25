@@ -10,5 +10,6 @@ class KnowledgeAvailability(Enum):
 
     READY = "ready"
     INITIALIZING = "initializing"
+    STALE = "stale"
     REFRESH_FAILED = "refresh_failed"
     CONFIG_MISMATCH = "config_mismatch"

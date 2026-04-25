@@ -421,6 +421,8 @@ def _snapshot_availability(
     availability = KnowledgeAvailability.INITIALIZING
     if state.status == "complete" and not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings):
         availability = KnowledgeAvailability.CONFIG_MISMATCH
+    elif state.availability == KnowledgeAvailability.STALE.value:
+        availability = KnowledgeAvailability.STALE
     elif state.availability == KnowledgeAvailability.REFRESH_FAILED.value:
         availability = KnowledgeAvailability.REFRESH_FAILED
     elif state.status != "complete":
