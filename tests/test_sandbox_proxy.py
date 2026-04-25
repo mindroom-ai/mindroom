@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import threading
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
@@ -47,16 +48,19 @@ from mindroom.tool_system.metadata import (
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context, worker_progress_pump_scope
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
+    agent_workspace_root_path,
     resolve_worker_key,
     resolve_worker_target,
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
 from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock
@@ -294,6 +298,272 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "kwargs": {},
     }
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
+
+
+def test_sandbox_proxy_schema_keeps_mindroom_output_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Proxy wrapping should preserve the augmented output-path schema and forward the kwarg."""
+    captured: dict[str, Any] = {}
+
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"calculator"},
+        credential_policy={},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured=captured),
+    )
+
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        tool_output_workspace_root=tmp_path,
+        worker_target=None,
+    )
+    function = tool.functions["add"].model_copy(deep=True)
+    function.process_entrypoint()
+
+    assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+
+    result = entrypoint(1, 2, mindroom_output_path="tool-results/add.json")
+
+    assert result == "sandbox-result"
+    assert captured["json"]["args"] == [1, 2]
+    assert captured["json"]["kwargs"] == {OUTPUT_PATH_ARGUMENT: "tool-results/add.json"}
+
+
+def test_static_proxy_payload_carries_agent_identity_for_output_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Default static-runner proxy requests should carry enough identity for runner-side wrapping."""
+    captured: dict[str, Any] = {}
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"calculator"},
+        credential_policy={},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured=captured),
+    )
+
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        tool_output_workspace_root=tmp_path,
+        worker_target=_worker_target(runtime_paths, None, "general", execution_identity),
+    )
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+
+    result = entrypoint(1, 2, mindroom_output_path="tool-results/add.json")
+
+    assert result == "sandbox-result"
+    assert captured["json"]["routing_agent_name"] == "general"
+    assert captured["json"]["execution_identity"] == asdict(execution_identity)
+
+
+def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Path) -> None:
+    """Runner-side wrapping should save raw output before proxy response serialization."""
+    tool_name = "test_runner_output_redirect"
+    marker = "ISSUE200_RUNNER_MARKER"
+
+    class _RunnerRedirectToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name=tool_name, tools=[self.large])
+
+        def large(self) -> dict[str, str]:
+            return {"marker": marker * 20}
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Runner Redirect",
+        description="Test-only runner redirect coverage.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def _runner_redirect_factory() -> type[_RunnerRedirectToolkit]:
+        return _RunnerRedirectToolkit
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    try:
+        _toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+            runtime_paths=runtime_paths,
+            config=Config(agents={}, models={}),
+            tool_name=tool_name,
+            function_name="large",
+            tool_output_workspace_root=tmp_path,
+        )
+
+        result = entrypoint(mindroom_output_path="runner/result.json")
+        proxy_result = sandbox_runner_module.to_json_compatible(result)
+
+        assert marker in (tmp_path / "runner/result.json").read_text(encoding="utf-8")
+        assert marker not in str(proxy_result)
+        assert proxy_result["mindroom_tool_output"]["status"] == "saved_to_file"
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
+@pytest.mark.asyncio
+async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_worker(tmp_path: Path) -> None:
+    """Static runner redirects should rebuild with the routing agent workspace root."""
+    tool_name = "test_static_runner_output_redirect"
+    marker = "ISSUE200_STATIC_RUNNER_MARKER"
+
+    class _StaticRunnerRedirectToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name=tool_name, tools=[self.large])
+
+        def large(self) -> str:
+            return marker * 20
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Static Runner Redirect",
+        description="Test-only static runner redirect coverage.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def _static_runner_redirect_factory() -> type[_StaticRunnerRedirectToolkit]:
+        return _StaticRunnerRedirectToolkit
+
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={},
+    )
+    config = Config(
+        agents={"general": AgentConfig(display_name="General", memory_backend="file")},
+        models={},
+    )
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name=tool_name,
+        function_name="large",
+        kwargs={OUTPUT_PATH_ARGUMENT: "tool-results/static.txt"},
+        routing_agent_name="general",
+    )
+    try:
+        response = await sandbox_runner_module._execute_request_inprocess(request, runtime_paths, config)
+
+        workspace = agent_workspace_root_path(storage_root, "general")
+        output_path = workspace / "tool-results/static.txt"
+        assert response.ok is True
+        assert marker in output_path.read_text(encoding="utf-8")
+        assert marker not in str(response.result)
+        assert response.result["mindroom_tool_output"]["status"] == "saved_to_file"
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
+@pytest.mark.asyncio
+async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path: Path) -> None:
+    """Worker-routed redirects should save where later agent file tools can read them."""
+    tool_name = "test_worker_output_redirect"
+    marker = "ISSUE200_WORKER_REDIRECT_MARKER"
+
+    class _WorkerRedirectToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name=tool_name, tools=[self.large])
+
+        def large(self) -> dict[str, str]:
+            return {"marker": marker}
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Worker Redirect",
+        description="Test-only worker redirect coverage.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def _worker_redirect_factory() -> type[_WorkerRedirectToolkit]:
+        return _WorkerRedirectToolkit
+
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={},
+    )
+    config = Config(
+        agents={"general": AgentConfig(display_name="General", memory_backend="file")},
+        models={},
+    )
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_key = resolve_worker_key("shared", execution_identity, agent_name="general")
+    worker_paths = local_worker_state_paths_for_root(tmp_path / "worker-scratch")
+    worker_paths.workspace.mkdir(parents=True, exist_ok=True)
+    prepared_worker = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker-1",
+            worker_key=worker_key,
+            endpoint="/api/sandbox-runner/execute",
+            auth_token=_TEST_AUTH_TOKEN,
+            status="ready",
+            backend_name="local",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=worker_paths,
+        runtime_overrides={"base_dir": worker_paths.workspace},
+    )
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name=tool_name,
+        function_name="large",
+        kwargs={OUTPUT_PATH_ARGUMENT: "tool-results/worker.json"},
+        worker_key=worker_key,
+        worker_scope="shared",
+        routing_agent_name="general",
+        execution_identity=asdict(execution_identity),
+    )
+    try:
+        response = await sandbox_runner_module._execute_request_inprocess(
+            request,
+            runtime_paths,
+            config,
+            prepared_worker=prepared_worker,
+        )
+
+        workspace = agent_workspace_root_path(storage_root, "general")
+        output_path = workspace / "tool-results/worker.json"
+        assert response.ok is True
+        assert marker in output_path.read_text(encoding="utf-8")
+        assert not (worker_paths.workspace / "tool-results/worker.json").exists()
+        assert response.result["mindroom_tool_output"]["path"] == "tool-results/worker.json"
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
 
 
 def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.MonkeyPatch) -> None:

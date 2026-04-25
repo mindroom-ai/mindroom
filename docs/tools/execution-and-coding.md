@@ -36,6 +36,10 @@ When `worker_scope` is unset, worker-routed calls still execute in the sandbox, 
 Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for the deployment model, storage visibility rules, and scope tradeoffs.
 When an agent has a canonical workspace root, MindRoom injects that workspace as `base_dir` for tools that expose a `base_dir` constructor field.
 In normal `config.yaml` authoring, `base_dir` is therefore usually runtime-managed instead of something you set inline.
+Those workspace-backed agents also receive the optional `mindroom_output_path` argument on eligible tools.
+Set it to a workspace-relative file path to save the full supported tool output to that file and return a compact receipt to the model.
+Agents without a resolved workspace do not receive this argument.
+No extra configuration is required beyond that workspace root, and `MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES` only overrides the default 64 MiB per-output write cap.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 That matters most here for `docker`, `file_generation`, and `visualization`, which depend on Docker access, `reportlab`, and `matplotlib`.
 

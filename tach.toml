@@ -70,6 +70,7 @@ depends_on = [
     "mindroom.timing",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.dynamic_toolkits",
+    "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.skills",
@@ -346,7 +347,9 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.logging_config",
+    "mindroom.runtime_resolution",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.sandbox_proxy",
@@ -1286,6 +1289,7 @@ path = "mindroom.tool_system.metadata"
 depends_on = [
     "mindroom.mcp.registry",
     "mindroom.tool_system.dependencies",
+    "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.sandbox_proxy",
@@ -1309,6 +1313,13 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.dependencies"
 depends_on = []
+
+[[modules]]
+path = "mindroom.tool_system.output_files"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.workspaces",
+]
 
 [[modules]]
 path = "mindroom.tool_system.plugin_imports"

@@ -284,7 +284,12 @@ def _build_worker_routing_payload(
     routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
     if worker_scope is None:
         if primary_worker_backend_name(runtime_paths) != "kubernetes":
-            return {}, None
+            payload: dict[str, object] = {}
+            if routing_agent_name is not None:
+                payload["routing_agent_name"] = routing_agent_name
+            if execution_identity is not None:
+                payload["execution_identity"] = to_json_compatible(asdict(execution_identity))
+            return payload, None
 
         effective_agent_name = routing_agent_name
         if effective_agent_name is None:
