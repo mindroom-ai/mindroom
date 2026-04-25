@@ -299,6 +299,15 @@ def _coerce_int(value: object) -> int | None:
     return None
 
 
+def _credential_free_repo_url(repo_url: str) -> str:
+    """Return a repository URL suitable for persistent Git config."""
+    parsed = urlparse(repo_url)
+    if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+        return repo_url
+    hostname = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunparse(parsed._replace(netloc=hostname))
+
+
 def _authenticated_repo_url(
     repo_url: str,
     credentials_service: str | None,
@@ -337,6 +346,33 @@ def _authenticated_repo_url(
     hostname = parsed.netloc.split("@")[-1]
     auth_netloc = f"{quote(username, safe='')}:{quote(secret, safe='')}@{hostname}"
     return urlunparse(parsed._replace(netloc=auth_netloc))
+
+
+def _git_auth_env(
+    repo_url: str,
+    credentials_service: str | None,
+    runtime_paths: RuntimePaths,
+) -> dict[str, str] | None:
+    """Return process-local Git config that injects credentials without persisting them."""
+    clean_url = _credential_free_repo_url(repo_url)
+    authenticated_url = (
+        repo_url if clean_url != repo_url else _authenticated_repo_url(clean_url, credentials_service, runtime_paths)
+    )
+    if authenticated_url == clean_url:
+        return None
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": f"url.{authenticated_url}.insteadOf",
+        "GIT_CONFIG_VALUE_0": clean_url,
+    }
+
+
+def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
+    merged: dict[str, str] = {}
+    for env in envs:
+        if env:
+            merged.update(env)
+    return merged or None
 
 
 def _split_posix_parts(value: str) -> tuple[str, ...]:
@@ -615,6 +651,39 @@ def _source_signature_from_file_signatures(file_signatures: Mapping[str, _FileSi
         digest.update(source_digest.encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _indexing_settings_value_compatible(published_value: str, current_value: str, *, index: int) -> bool:
+    if index != INDEXING_SETTINGS_REPO_IDENTITY_INDEX:
+        return published_value == current_value
+    return _normalized_repo_identity_setting(published_value) == _normalized_repo_identity_setting(current_value)
+
+
+def _normalized_repo_identity_setting(value: str) -> str:
+    if not value or value.startswith("repo-url-sha256:"):
+        return value
+    return credential_free_url_identity(value)
+
+
+def _indexing_settings_metadata_equal(
+    published_settings: tuple[str, ...],
+    current_settings: tuple[str, ...],
+) -> bool:
+    if len(published_settings) != len(current_settings):
+        return False
+    return all(
+        _indexing_settings_value_compatible(published_value, current_value, index=index)
+        for index, (published_value, current_value) in enumerate(zip(published_settings, current_settings, strict=True))
+    )
+
+
+def _repersisted_indexing_settings(
+    persisted_settings: tuple[str, ...],
+    current_settings: tuple[str, ...],
+) -> tuple[str, ...]:
+    if _indexing_settings_metadata_equal(persisted_settings, current_settings):
+        return current_settings
+    return persisted_settings
 
 
 @dataclass
@@ -1066,6 +1135,7 @@ class KnowledgeManager:
         await self._run_git(
             ["lfs", "pull", "origin", git_config.branch],
             cwd=repo_root or self._knowledge_source_path(),
+            env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
         )
         if resolved_head is None:
             resolved_head = await self._git_rev_parse("HEAD")
@@ -1098,14 +1168,9 @@ class KnowledgeManager:
             self._git_repo_present = True
             await self._ensure_git_lfs_repository_ready(knowledge_root)
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
-            expected_remote = _authenticated_repo_url(
-                git_config.repo_url,
-                git_config.credentials_service,
-                runtime_paths,
-            )
+            expected_remote = _credential_free_repo_url(git_config.repo_url)
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
-            await self._run_git(["checkout", git_config.branch])
             return False
 
         if knowledge_root.exists() and any(knowledge_root.iterdir()):
@@ -1118,11 +1183,7 @@ class KnowledgeManager:
         knowledge_root.parent.mkdir(parents=True, exist_ok=True)
         if git_config.lfs:
             await self._ensure_git_lfs_available(cwd=knowledge_root.parent)
-        clone_url = _authenticated_repo_url(
-            git_config.repo_url,
-            git_config.credentials_service,
-            runtime_paths,
-        )
+        clone_url = _credential_free_repo_url(git_config.repo_url)
         await self._run_git(
             [
                 "clone",
@@ -1133,9 +1194,13 @@ class KnowledgeManager:
                 str(knowledge_root),
             ],
             cwd=knowledge_root.parent,
-            env={"GIT_LFS_SKIP_SMUDGE": "1"} if git_config.lfs else None,
+            env=_merge_git_env(
+                _git_auth_env(git_config.repo_url, git_config.credentials_service, runtime_paths),
+                {"GIT_LFS_SKIP_SMUDGE": "1"} if git_config.lfs else None,
+            ),
         )
         self._git_repo_present = True
+        await self._run_git(["remote", "set-url", "origin", clone_url], cwd=knowledge_root)
         await asyncio.to_thread(self._clear_git_lfs_hydrated_head)
         await self._ensure_git_lfs_repository_ready(knowledge_root)
         await self._hydrate_git_lfs_worktree(git_config, repo_root=knowledge_root)
@@ -1150,8 +1215,11 @@ class KnowledgeManager:
         before_files = await self._git_list_tracked_files()
         dirty_tracked_files = set() if before_head is None else await self._git_dirty_tracked_files()
 
-        await self._run_git(["fetch", "origin", git_config.branch])
         remote_ref = f"origin/{git_config.branch}"
+        await self._run_git(
+            ["fetch", "origin", f"+refs/heads/{git_config.branch}:refs/remotes/{remote_ref}"],
+            env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
+        )
         remote_head = await self._git_rev_parse(remote_ref)
         if remote_head is None:
             msg = f"Could not resolve remote ref '{remote_ref}' for knowledge base '{self.base_id}'"
@@ -1162,7 +1230,7 @@ class KnowledgeManager:
                 await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
                 return set(), set(), False
 
-            await self._run_git(["checkout", git_config.branch])
+            await self._run_git(["checkout", "--force", "-B", git_config.branch, remote_ref])
             # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
             # intentional way to realign it with the configured remote state.
             await self._run_git(["reset", "--hard", remote_ref])
@@ -1171,7 +1239,7 @@ class KnowledgeManager:
             changed_files = {path for path in dirty_tracked_files if path in after_files}
             return changed_files, set(), True
 
-        await self._run_git(["checkout", git_config.branch])
+        await self._run_git(["checkout", "--force", "-B", git_config.branch, remote_ref])
         # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
         # intentional way to realign it with the configured remote state.
         await self._run_git(["reset", "--hard", remote_ref])
@@ -1534,8 +1602,10 @@ class KnowledgeManager:
     async def sync_indexed_files(self) -> dict[str, int]:
         """Incrementally align index with files on disk."""
         await self.load_indexed_files()
-        files = self.list_files()
-        current_signatures = {self._relative_path(path): self._file_signature(path) for path in files}
+        files = await asyncio.to_thread(self.list_files)
+        current_signatures = await asyncio.to_thread(
+            lambda: {self._relative_path(path): self._file_signature(path) for path in files},
+        )
         failed_signatures = await asyncio.to_thread(self._load_failed_signatures)
 
         async with self._lock:
@@ -1654,7 +1724,7 @@ class KnowledgeManager:
     ) -> bool:
         """Index one file while the caller owns the operation lock."""
         relative_path = self._relative_path(resolved_path)
-        source_mtime_ns, source_size, source_digest = self._file_signature(resolved_path)
+        source_mtime_ns, source_size, source_digest = await asyncio.to_thread(self._file_signature, resolved_path)
         metadata = {
             _SOURCE_PATH_KEY: relative_path,
             _SOURCE_MTIME_NS_KEY: source_mtime_ns,
@@ -1749,7 +1819,7 @@ class KnowledgeManager:
     async def reindex_all(self, *, protected_collections: tuple[str, ...] = ()) -> int:
         """Clear and rebuild the knowledge index from disk."""
         async with self._lock:
-            files = self.list_files()
+            files = await asyncio.to_thread(self.list_files)
             persisted_state = await asyncio.to_thread(self._load_persisted_indexing_state)
             live_collection_name = self._current_collection_name()
             has_published_snapshot = (
@@ -1774,10 +1844,14 @@ class KnowledgeManager:
 
             async def _save_refresh_failed_state(error: str) -> None:
                 if has_published_snapshot and persisted_state is not None:
+                    repersisted_settings = _repersisted_indexing_settings(
+                        persisted_state.settings,
+                        self._indexing_settings,
+                    )
                     await asyncio.to_thread(
                         self._save_persisted_indexing_state,
                         _INDEXING_STATUS_COMPLETE,
-                        settings=persisted_state.settings,
+                        settings=repersisted_settings,
                         collection=persisted_state.collection or live_collection_name,
                         availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
                         last_published_at=last_published_at,
@@ -1831,7 +1905,8 @@ class KnowledgeManager:
                 return indexed_count
 
             candidate_source_signature = _source_signature_from_file_signatures(candidate_signatures)
-            live_source_signature = knowledge_source_signature(
+            live_source_signature = await asyncio.to_thread(
+                knowledge_source_signature,
                 self.config,
                 self.base_id,
                 self._knowledge_source_path(),

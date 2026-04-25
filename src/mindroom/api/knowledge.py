@@ -118,13 +118,17 @@ async def _list_file_info(
         sorted(managed_paths) if file_paths is None else sorted(path for path in file_paths if path in managed_paths)
     )
     for file_path in paths:
-        stat = file_path.stat()
+        try:
+            stat = file_path.stat()
+            relative_path = file_path.relative_to(root).as_posix()
+        except (OSError, ValueError):
+            continue
         total_size += stat.st_size
         file_type = file_path.suffix.lstrip(".").lower() if file_path.suffix else "file"
         files.append(
             {
                 "name": file_path.name,
-                "path": file_path.relative_to(root).as_posix(),
+                "path": relative_path,
                 "size": stat.st_size,
                 "modified": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
                 "type": file_type,
@@ -137,7 +141,7 @@ async def _list_file_info(
 async def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> tuple[set[Path], str | None]:
     base_config = config.knowledge_bases[base_id]
     if base_config.git is None:
-        return set(list_managed_knowledge_files(config, base_id, root)), None
+        return set(await asyncio.to_thread(list_managed_knowledge_files, config, base_id, root)), None
     try:
         paths = await asyncio.to_thread(
             list_git_tracked_managed_knowledge_files,
@@ -509,6 +513,13 @@ async def upload_knowledge_files(
                 staged.temp_path.unlink(missing_ok=True)
             raise
 
+        if not staged_uploads:
+            return {
+                "base_id": base_id,
+                "uploaded": [],
+                "count": 0,
+            }
+
         _commit_staged_uploads(staged_uploads)
         uploaded = [staged.relative_path for staged in staged_uploads]
         affected_base_ids = mark_published_snapshot_stale(
@@ -592,12 +603,21 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     _ensure_base_exists(config, base_id)
 
     try:
-        result = await refresh_knowledge_binding(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            force_reindex=True,
-        )
+        owner = _request_refresh_owner(request)
+        if owner is not None:
+            result = await owner.refresh_now(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                force_reindex=True,
+            )
+        else:
+            result = await refresh_knowledge_binding(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                force_reindex=True,
+            )
     except Exception as exc:
         state = _snapshot_state(config, base_id, runtime_paths)
         availability = KnowledgeAvailability.REFRESH_FAILED

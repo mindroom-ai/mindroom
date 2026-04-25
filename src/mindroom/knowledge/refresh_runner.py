@@ -23,6 +23,7 @@ from mindroom.knowledge.registry import (
     indexing_settings_metadata_equal,
     indexing_settings_snapshot_compatible,
     load_published_indexing_state,
+    mark_published_snapshot_stale,
     prune_private_snapshot_bookkeeping,
     publish_snapshot_from_state,
     refresh_key_for_snapshot_key,
@@ -151,6 +152,15 @@ def is_refresh_active_for_binding(
     return is_refresh_active(key)
 
 
+def _repersisted_settings(
+    persisted_settings: tuple[str, ...],
+    current_settings: tuple[str, ...],
+) -> tuple[str, ...]:
+    if indexing_settings_metadata_equal(persisted_settings, current_settings):
+        return current_settings
+    return persisted_settings
+
+
 @asynccontextmanager
 async def knowledge_binding_mutation_lock(
     base_id: str,
@@ -262,6 +272,13 @@ async def _maybe_publish_unchanged_snapshot(
     if manager._git_config() is not None:
         git_sync_result = await manager.sync_git_repository(index_changes=False)
         if force_reindex or git_sync_result.get("updated", False):
+            if git_sync_result.get("updated", False):
+                await asyncio.to_thread(
+                    mark_published_snapshot_stale,
+                    key.base_id,
+                    config=manager.config,
+                    runtime_paths=manager.runtime_paths,
+                )
             return None
         return await _publish_unchanged_snapshot(
             manager,
@@ -388,6 +405,7 @@ async def _publish_unchanged_snapshot(
 
     updated_state = replace(
         state,
+        settings=key.indexing_settings,
         availability="ready",
         last_published_at=datetime.now(tz=UTC).isoformat(),
         published_revision=published_revision or state.published_revision,
@@ -444,10 +462,11 @@ async def _mark_refresh_failed(
         )
         return
     if state.status != "complete":
+        repersisted_settings = _repersisted_settings(state.settings, key.indexing_settings)
         await asyncio.to_thread(
             manager._save_persisted_indexing_state,
             state.status,
-            settings=state.settings,
+            settings=repersisted_settings,
             collection=state.collection,
             availability="refresh_failed",
             last_published_at=state.last_published_at,
@@ -458,10 +477,11 @@ async def _mark_refresh_failed(
             retained_collections=state.retained_collections,
         )
         return
+    repersisted_settings = _repersisted_settings(state.settings, key.indexing_settings)
     await asyncio.to_thread(
         manager._save_persisted_indexing_state,
         "complete",
-        settings=state.settings,
+        settings=repersisted_settings,
         collection=state.collection,
         availability="refresh_failed",
         last_published_at=state.last_published_at,
@@ -507,8 +527,10 @@ async def _mark_refresh_setup_failed(
             indexed_count=0,
         )
     else:
+        repersisted_settings = _repersisted_settings(state.settings, key.indexing_settings)
         failed_state = replace(
             state,
+            settings=repersisted_settings,
             availability=KnowledgeAvailability.REFRESH_FAILED.value,
             last_error=redacted_error,
         )

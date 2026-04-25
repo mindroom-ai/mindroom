@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import json
 import subprocess
+from io import BytesIO
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
+from starlette.requests import Request
 
 from mindroom import constants
+from mindroom.api import knowledge as knowledge_api
 from mindroom.api import main
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
@@ -19,8 +24,6 @@ from mindroom.knowledge.registry import resolve_snapshot_key, snapshot_metadata_
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
     from mindroom.constants import RuntimePaths
 
@@ -413,6 +416,40 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     refresh.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_empty_upload_parts_are_noop_without_stale_mark_or_refresh(tmp_path: Path) -> None:
+    """Multipart parts without filenames should not mutate source availability."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with (
+        patch("mindroom.api.knowledge.mark_published_snapshot_stale", side_effect=AssertionError("no mutation")),
+        patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
+    ):
+        response = await knowledge_api.upload_knowledge_files(
+            "research",
+            Request(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/api/knowledge/bases/research/upload",
+                    "headers": [],
+                    "app": client.app,
+                },
+            ),
+            [UploadFile(file=BytesIO(b"ignored"), filename="")],
+        )
+
+    assert response == {"base_id": "research", "uploaded": [], "count": 0}
+    assert owner.scheduled == []
+    refresh.assert_not_awaited()
+
+
 def test_upload_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path) -> None:
     """Uploads to a shared source folder refresh every configured base reading that source."""
     client = _test_client(tmp_path)
@@ -766,6 +803,49 @@ def test_explicit_reindex_uses_refresh_runner(tmp_path: Path) -> None:
         runtime_paths=main._app_context(client.app).runtime_paths,
         force_reindex=True,
     )
+
+
+def test_explicit_reindex_uses_refresh_owner_when_available(tmp_path: Path) -> None:
+    """Admin reindex should replace stale queued owner work instead of bypassing the owner."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    runtime_paths = main._app_context(client.app).runtime_paths
+
+    class _ManualRefreshOwner(_RecordingRefreshOwner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.manual_calls: list[tuple[str, Config, RuntimePaths, bool]] = []
+
+        async def refresh_now(
+            self,
+            base_id: str,
+            *,
+            config: Config,
+            runtime_paths: RuntimePaths,
+            execution_identity: object | None = None,
+            force_reindex: bool = False,
+        ) -> object:
+            _ = execution_identity
+            self.manual_calls.append((base_id, config, runtime_paths, force_reindex))
+            return SimpleNamespace(
+                indexed_count=11,
+                published=True,
+                availability=KnowledgeAvailability.READY,
+                last_error=None,
+            )
+
+    owner = _ManualRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.post("/api/knowledge/bases/research/reindex")
+
+    assert response.status_code == 200
+    assert response.json()["indexed_count"] == 11
+    assert owner.manual_calls == [("research", config, runtime_paths, True)]
+    refresh.assert_not_awaited()
 
 
 def test_explicit_reindex_returns_conflict_when_no_snapshot_is_published(tmp_path: Path) -> None:

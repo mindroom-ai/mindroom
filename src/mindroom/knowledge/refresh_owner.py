@@ -19,6 +19,7 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.refresh_runner import KnowledgeRefreshResult
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -61,6 +62,18 @@ class KnowledgeRefreshOwner(Protocol):
         """Return whether one resolved knowledge binding is refreshing."""
         ...
 
+    async def refresh_now(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+        force_reindex: bool = False,
+    ) -> KnowledgeRefreshResult:
+        """Run a refresh through the owner queue and wait for it."""
+        ...
+
 
 @dataclass(slots=True)
 class _ScheduledRefresh:
@@ -70,6 +83,8 @@ class _ScheduledRefresh:
     config: Config
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
+    force_reindex: bool = False
+    completion: asyncio.Future[KnowledgeRefreshResult] | None = None
 
 
 @dataclass(slots=True)
@@ -133,10 +148,56 @@ class PerBindingKnowledgeRefreshOwner:
             return False
         return is_refresh_active(key)
 
+    async def refresh_now(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+        force_reindex: bool = False,
+    ) -> KnowledgeRefreshResult:
+        """Replace queued work for this binding with an awaited current-config refresh."""
+        if self._shutting_down:
+            return await refresh_knowledge_binding(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                force_reindex=force_reindex,
+            )
+        key = resolve_refresh_key(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            create=False,
+        )
+        loop = asyncio.get_running_loop()
+        completion: asyncio.Future[KnowledgeRefreshResult] = loop.create_future()
+        request = _ScheduledRefresh(
+            base_id=base_id,
+            config=config.model_copy(deep=True),
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            force_reindex=force_reindex,
+            completion=completion,
+        )
+        task = self._tasks.get(key)
+        if task is not None:
+            self._pending[key] = request
+        else:
+            self._start_task(key, request)
+        return await completion
+
     async def shutdown(self) -> None:
         """Cancel any in-flight background refresh tasks."""
         self._shutting_down = True
+        pending = list(self._pending.values())
         self._pending.clear()
+        for request in pending:
+            if request.completion is not None and not request.completion.done():
+                request.completion.set_exception(asyncio.CancelledError())
         tasks = list(self._tasks.values())
         self._tasks.clear()
         for task in tasks:
@@ -212,12 +273,25 @@ class PerBindingKnowledgeRefreshOwner:
         *,
         request: _ScheduledRefresh,
     ) -> None:
-        await refresh_knowledge_binding(
-            key.base_id,
-            config=request.config,
-            runtime_paths=request.runtime_paths,
-            execution_identity=request.execution_identity,
-        )
+        try:
+            result = await refresh_knowledge_binding(
+                key.base_id,
+                config=request.config,
+                runtime_paths=request.runtime_paths,
+                execution_identity=request.execution_identity,
+                force_reindex=request.force_reindex,
+            )
+        except asyncio.CancelledError as exc:
+            if request.completion is not None and not request.completion.done():
+                request.completion.set_exception(exc)
+            raise
+        except Exception as exc:
+            if request.completion is not None and not request.completion.done():
+                request.completion.set_exception(exc)
+                return
+            raise
+        if request.completion is not None and not request.completion.done():
+            request.completion.set_result(result)
 
 
 StandaloneKnowledgeRefreshOwner = PerBindingKnowledgeRefreshOwner
