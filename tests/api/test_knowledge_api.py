@@ -85,6 +85,7 @@ def _write_snapshot_metadata(
 def _test_client(tmp_path: Path) -> TestClient:
     runtime_paths = _runtime_paths(tmp_path)
     main.initialize_api_app(main.app, runtime_paths)
+    main.app.state.knowledge_refresh_owner = None
     return TestClient(main.app)
 
 
@@ -102,6 +103,17 @@ class _RecordingRefreshOwner:
     ) -> None:
         _ = execution_identity
         self.scheduled.append((base_id, config, runtime_paths))
+
+    def is_refreshing(
+        self,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: object | None = None,
+    ) -> bool:
+        _ = (base_id, config, runtime_paths, execution_identity)
+        return False
 
 
 def test_knowledge_status_reads_snapshot_metadata_without_initializing(tmp_path: Path) -> None:
@@ -144,7 +156,7 @@ def test_knowledge_bases_list_does_not_initialize_unused_configured_bases(tmp_pa
 
 
 def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: Path) -> None:
-    """Routine status endpoints use snapshot metadata without query-handle construction."""
+    """Routine status endpoints keep metadata counts but do not report missing collections available."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -155,7 +167,6 @@ def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: P
     _write_snapshot_metadata(config, runtime_paths, indexed_count=9)
 
     with (
-        patch("mindroom.knowledge.manager.ChromaDb", side_effect=AssertionError("ChromaDb should not load")),
         patch("mindroom.knowledge.manager._create_embedder", side_effect=AssertionError("embedder should not load")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
     ):
@@ -168,8 +179,39 @@ def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: P
     assert files_response.status_code == 200
     assert status_response.json()["indexed_count"] == 9
     assert list_response.json()["bases"][0]["indexed_count"] == 9
-    assert files_response.json()["manager_available"] is True
+    assert status_response.json()["manager_available"] is False
+    assert list_response.json()["bases"][0]["manager_available"] is False
+    assert files_response.json()["manager_available"] is False
     refresh.assert_not_awaited()
+
+
+def test_status_treats_collection_probe_failure_as_unavailable(tmp_path: Path) -> None:
+    """Routine status endpoints should not fail when persisted vector metadata is corrupt."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(config, runtime_paths, indexed_count=4)
+
+    class _BrokenVectorDb:
+        def __init__(self, **_kwargs: object) -> None:
+            return
+
+        def exists(self) -> bool:
+            msg = "corrupt collection"
+            raise RuntimeError(msg)
+
+    with (
+        patch("mindroom.knowledge.manager.ChromaDb", _BrokenVectorDb),
+        patch("mindroom.knowledge.manager._create_embedder", side_effect=AssertionError("embedder should not load")),
+    ):
+        response = client.get("/api/knowledge/bases/research/status")
+
+    assert response.status_code == 200
+    assert response.json()["indexed_count"] == 4
+    assert response.json()["manager_available"] is False
 
 
 def test_knowledge_files_use_managed_file_filters(tmp_path: Path) -> None:
@@ -232,6 +274,8 @@ def test_git_status_reads_disk_and_snapshot_metadata(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     git_status = response.json()["git"]
+    assert git_status["syncing"] is False
+    assert git_status["pending_startup_mode"] is None
     assert git_status["repo_present"] is True
     assert git_status["initial_sync_complete"] is True
     assert git_status["last_successful_commit"] == "abc123"
@@ -378,6 +422,7 @@ def test_explicit_reindex_uses_refresh_runner(tmp_path: Path) -> None:
         "research",
         config=config,
         runtime_paths=main._app_context(client.app).runtime_paths,
+        force_reindex=True,
     )
 
 

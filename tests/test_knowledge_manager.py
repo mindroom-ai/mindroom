@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from pathlib import Path
 from threading import Lock
@@ -28,7 +29,6 @@ from mindroom.knowledge import (
     get_published_snapshot,
     redact_url_credentials,
     refresh_knowledge_binding,
-    remove_source_path_from_published_snapshots,
     snapshot_indexed_count,
 )
 from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
@@ -388,8 +388,8 @@ async def test_successful_publish_clears_stale_ready_markers(tmp_path: Path) -> 
     assert unavailable == {}
 
 
-def test_delete_uses_default_collection_for_legacy_metadata_without_collection(tmp_path: Path) -> None:
-    """Legacy metadata without a collection field still maps deletes to the default collection."""
+def test_mark_stale_uses_default_collection_for_legacy_metadata_without_collection(tmp_path: Path) -> None:
+    """Legacy metadata without a collection field can still be marked stale without mutating vectors."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("legacy delete", encoding="utf-8")
@@ -405,16 +405,17 @@ def test_delete_uses_default_collection_for_legacy_metadata_without_collection(t
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.write_text(json.dumps(list(key.indexing_settings)), encoding="utf-8")
 
-    removed = remove_source_path_from_published_snapshots(
+    marked = knowledge_registry.mark_published_snapshot_stale(
         "docs",
-        "guide.md",
         config=config,
         runtime_paths=runtime_paths,
     )
     state = load_published_indexing_state(metadata_path)
 
-    assert removed is True
-    assert _VectorDb.collections[default_collection] == []
+    assert marked is True
+    assert _VectorDb.collections[default_collection] == [
+        {"content": "legacy delete", "metadata": {"source_path": "guide.md"}},
+    ]
     assert state is not None
     assert state.availability == KnowledgeAvailability.STALE.value
 
@@ -694,6 +695,8 @@ async def test_published_snapshot_handle_survives_later_refresh_generations(tmp_
     assert first_lookup.snapshot is not None
     first_knowledge = first_lookup.snapshot.knowledge
     first_collection = first_knowledge.vector_db.collection_name
+    del first_lookup
+    gc.collect()
 
     for generation in range(2, 7):
         doc.write_text(f"generation {generation}", encoding="utf-8")
@@ -1245,8 +1248,8 @@ async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
 
 
 @pytest.mark.asyncio
-async def test_api_delete_removes_published_vectors_before_background_refresh(tmp_path: Path) -> None:
-    """DELETE success means the deleted source is no longer queryable immediately."""
+async def test_api_delete_marks_snapshot_stale_without_mutating_published_vectors(tmp_path: Path) -> None:
+    """DELETE success schedules refresh while retained published collections stay immutable."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("delete me now", encoding="utf-8")
@@ -1265,17 +1268,24 @@ async def test_api_delete_removes_published_vectors_before_background_refresh(tm
     client = TestClient(main.app)
 
     response = client.delete("/api/knowledge/bases/docs/files/guide.md")
+    unavailable: dict[str, KnowledgeAvailability] = {}
+    after_delete = get_agent_knowledge(
+        "helper",
+        config,
+        runtime_paths,
+        on_unavailable_bases=unavailable.update,
+    )
 
     assert response.status_code == 200
-    after_delete = get_agent_knowledge("helper", config, runtime_paths)
     assert after_delete is not None
-    assert after_delete.search("delete", max_results=5) == []
+    assert unavailable == {"docs": KnowledgeAvailability.STALE}
+    assert [document.content for document in after_delete.search("delete", max_results=5)] == ["delete me now"]
     owner.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_api_upload_marks_snapshot_stale_and_removes_overwritten_vectors(tmp_path: Path) -> None:
-    """Upload mutations should make immediate lookups stale instead of silently serving old vectors."""
+async def test_api_upload_marks_snapshot_stale_without_mutating_published_vectors(tmp_path: Path) -> None:
+    """Upload mutations should not edit the retained last-good published collection."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("old upload", encoding="utf-8")
@@ -1304,8 +1314,37 @@ async def test_api_upload_marks_snapshot_stale_and_removes_overwritten_vectors(t
     assert response.status_code == 200
     assert knowledge is not None
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    assert knowledge.search("upload", max_results=5) == []
+    assert [document.content for document in knowledge.search("upload", max_results=5)] == ["old upload"]
     owner.schedule_refresh.assert_called_once()
+
+
+def test_api_upload_failure_preserves_existing_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later upload failure must not leave earlier replacements committed."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("existing upload", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    owner = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    main.app.state.knowledge_refresh_owner = owner
+    monkeypatch.setattr("mindroom.api.knowledge._MAX_UPLOAD_BYTES", 5)
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/api/knowledge/bases/docs/upload",
+        files=[
+            ("files", ("guide.md", b"small", "text/markdown")),
+            ("files", ("new.md", b"too large", "text/markdown")),
+        ],
+    )
+
+    assert response.status_code == 413
+    assert (docs_path / "guide.md").read_text(encoding="utf-8") == "existing upload"
+    assert not (docs_path / "new.md").exists()
+    owner.schedule_refresh.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1542,6 +1581,74 @@ async def test_private_request_scoped_knowledge_publishes_isolated_snapshots(tmp
 
 
 @pytest.mark.asyncio
+async def test_private_request_scoped_knowledge_schedules_refresh_when_source_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requester-local READY snapshots should be served and refreshed without request-time scans."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        knowledge=AgentPrivateKnowledgeConfig(path="knowledge"),
+                    ),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths,
+    )
+    base_id = config.get_agent_private_knowledge_base_id("helper")
+    assert base_id is not None
+    identity = _identity("@alice:localhost")
+    key = resolve_snapshot_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    knowledge_path = Path(key.knowledge_path)
+    knowledge_path.mkdir(parents=True, exist_ok=True)
+    note = knowledge_path / "note.md"
+    note.write_text("alice private old", encoding="utf-8")
+
+    await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
+    note.write_text("alice private new", encoding="utf-8")
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    unavailable: dict[str, KnowledgeAvailability] = {}
+
+    def _unexpected_signature(*_args: object, **_kwargs: object) -> str:
+        msg = "private READY access should not scan the local corpus"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.knowledge.manager.knowledge_source_signature", _unexpected_signature)
+    monkeypatch.setattr(knowledge_utils, "knowledge_source_signature", _unexpected_signature, raising=False)
+
+    knowledge = get_agent_knowledge(
+        "helper",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        refresh_owner=owner,
+        on_unavailable_bases=unavailable.update,
+    )
+
+    assert knowledge is not None
+    assert [document.content for document in knowledge.search("private", max_results=5)] == ["alice private old"]
+    assert unavailable == {}
+    owner.schedule_initial_load.assert_not_called()
+    owner.schedule_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_snapshot_indexed_count_uses_persisted_metadata_without_collection_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1663,6 +1770,172 @@ async def test_git_noop_refresh_skips_full_reindex_when_snapshot_is_complete(
     assert result.published is True
     assert result.indexed_count == 1
     assert reindex_count == 1
+
+
+@pytest.mark.asyncio
+async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unchanged Git poll must repair metadata that points at a missing collection."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("git repaired", encoding="utf-8")
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    sync_results = [
+        {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
+        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+    ]
+    reindex_count = 0
+    original_reindex = KnowledgeManager.reindex_all
+
+    async def _sync(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        assert index_changes is False
+        result = sync_results.pop(0)
+        self._git_last_successful_commit = str(result["commit"])
+        return result
+
+    async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
+        nonlocal reindex_count
+        reindex_count += 1
+        return await original_reindex(self, protected_collections=protected_collections)
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync)
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    assert state is not None
+    assert state.collection is not None
+    _VectorDb.collections.pop(state.collection, None)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.published is True
+    assert reindex_count == 2
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.snapshot is not None
+    assert [document.content for document in lookup.snapshot.knowledge.search("git", max_results=5)] == [
+        "git repaired",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_git_noop_refresh_rebuilds_after_chunking_config_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chunking changes must rebuild even when Git reports no repository updates."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("git chunking old", encoding="utf-8")
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    changed_config = config.model_copy(deep=True)
+    changed_config.knowledge_bases["docs"].chunk_size = 1024
+    sync_results = [
+        {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
+        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+    ]
+    reindex_count = 0
+    original_reindex = KnowledgeManager.reindex_all
+
+    async def _sync(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        assert index_changes is False
+        result = sync_results.pop(0)
+        self._git_last_successful_commit = str(result["commit"])
+        return result
+
+    async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
+        nonlocal reindex_count
+        reindex_count += 1
+        return await original_reindex(self, protected_collections=protected_collections)
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync)
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    doc.write_text("git chunking rebuilt", encoding="utf-8")
+    result = await refresh_knowledge_binding("docs", config=changed_config, runtime_paths=runtime_paths)
+
+    assert result.published is True
+    assert reindex_count == 2
+    lookup = get_published_snapshot("docs", config=changed_config, runtime_paths=runtime_paths)
+    assert lookup.snapshot is not None
+    assert [document.content for document in lookup.snapshot.knowledge.search("git", max_results=5)] == [
+        "git chunking rebuilt",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_force_git_reindex_bypasses_noop_fast_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit reindex should rebuild even when Git reports updated=False."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("git force old", encoding="utf-8")
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    sync_results = [
+        {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
+        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+    ]
+    reindex_count = 0
+    original_reindex = KnowledgeManager.reindex_all
+
+    async def _sync(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
+        assert index_changes is False
+        result = sync_results.pop(0)
+        self._git_last_successful_commit = str(result["commit"])
+        return result
+
+    async def _track_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
+        nonlocal reindex_count
+        reindex_count += 1
+        return await original_reindex(self, protected_collections=protected_collections)
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync)
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    doc.write_text("git force rebuilt", encoding="utf-8")
+    result = await refresh_knowledge_binding(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        force_reindex=True,
+    )
+
+    assert result.published is True
+    assert reindex_count == 2
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.snapshot is not None
+    assert [document.content for document in lookup.snapshot.knowledge.search("git", max_results=5)] == [
+        "git force rebuilt",
+    ]
 
 
 @pytest.mark.asyncio

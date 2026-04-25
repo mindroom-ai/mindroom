@@ -237,9 +237,5 @@ class PerBindingKnowledgeRefreshOwner:
         )
 
 
-class StandaloneKnowledgeRefreshOwner(PerBindingKnowledgeRefreshOwner):
-    """API/runtime-owned per-binding refresh scheduler."""
-
-
-class OrchestratorKnowledgeRefreshOwner(PerBindingKnowledgeRefreshOwner):
-    """Orchestrator-owned per-binding refresh scheduler."""
+StandaloneKnowledgeRefreshOwner = PerBindingKnowledgeRefreshOwner
+OrchestratorKnowledgeRefreshOwner = PerBindingKnowledgeRefreshOwner

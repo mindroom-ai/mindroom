@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -19,9 +21,9 @@ from mindroom.knowledge import (
     mark_published_snapshot_stale,
     redact_url_credentials,
     refresh_knowledge_binding,
-    remove_source_path_from_published_snapshots,
     resolve_snapshot_key,
     snapshot_availability_for_state,
+    snapshot_collection_exists_for_state,
     snapshot_metadata_path,
 )
 from mindroom.knowledge import (
@@ -36,6 +38,15 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
 _MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GiB
 _UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB
+
+
+@dataclass(frozen=True)
+class _StagedUpload:
+    """Uploaded bytes staged beside their final destination."""
+
+    destination: Path
+    temp_path: Path
+    relative_path: str
 
 
 def _ensure_base_exists(config: Config, base_id: str) -> None:
@@ -148,6 +159,8 @@ def _snapshot_status(
         KnowledgeAvailability.REFRESH_FAILED,
         KnowledgeAvailability.STALE,
     }
+    if available:
+        available = snapshot_collection_exists_for_state(key, state)
     return available, state.indexed_count or 0
 
 
@@ -183,14 +196,14 @@ def _git_status(
         "branch": git_config.branch,
         "lfs": git_config.lfs,
         "startup_behavior": git_config.startup_behavior,
-        "syncing": (
+        "syncing": bool(
             owner.is_refreshing(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
             )
             if owner is not None
-            else None
+            else False,
         ),
         "repo_present": (root / ".git").is_dir(),
         "initial_sync_complete": (
@@ -199,6 +212,7 @@ def _git_status(
         "last_successful_sync_at": state.last_published_at if state is not None else None,
         "last_successful_commit": state.published_revision if state is not None else None,
         "last_error": state.last_error if state is not None else None,
+        "pending_startup_mode": None,
     }
 
 
@@ -212,11 +226,6 @@ def _reject_git_file_mutation(config: Config, base_id: str) -> None:
             "Update the configured repository and reindex instead of mutating files through this API."
         ),
     )
-
-
-def _rollback_uploaded_files(uploaded_paths: list[Path]) -> None:
-    for uploaded_path in uploaded_paths:
-        uploaded_path.unlink(missing_ok=True)
 
 
 def _validate_upload_size_hint(upload: UploadFile, filename: str) -> None:
@@ -251,6 +260,51 @@ async def _stream_upload_to_destination(upload: UploadFile, destination: Path, f
             bytes_written += len(chunk)
             _ensure_within_upload_limit(bytes_written, filename)
             handle.write(chunk)
+
+
+def _upload_temp_path(destination: Path) -> Path:
+    return destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.upload.tmp")
+
+
+async def _stage_upload(upload: UploadFile, destination: Path, filename: str, root: Path) -> _StagedUpload:
+    _validate_upload_size_hint(upload, filename)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = _upload_temp_path(destination)
+    try:
+        await _stream_upload_to_destination(upload, temp_path, filename)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return _StagedUpload(
+        destination=destination,
+        temp_path=temp_path,
+        relative_path=destination.relative_to(root).as_posix(),
+    )
+
+
+def _commit_staged_uploads(staged_uploads: list[_StagedUpload]) -> None:
+    backups: list[tuple[Path, Path | None]] = []
+    try:
+        for staged in staged_uploads:
+            backup_path: Path | None = None
+            if staged.destination.exists():
+                backup_path = staged.destination.with_name(
+                    f".{staged.destination.name}.{uuid.uuid4().hex}.upload.bak",
+                )
+                staged.destination.replace(backup_path)
+            backups.append((staged.destination, backup_path))
+            staged.temp_path.replace(staged.destination)
+    except Exception:
+        for destination, backup_path in reversed(backups):
+            destination.unlink(missing_ok=True)
+            if backup_path is not None and backup_path.exists():
+                backup_path.replace(destination)
+        for staged in staged_uploads:
+            staged.temp_path.unlink(missing_ok=True)
+        raise
+    for _destination, backup_path in backups:
+        if backup_path is not None:
+            backup_path.unlink(missing_ok=True)
 
 
 @router.get("/bases")
@@ -312,40 +366,30 @@ async def upload_knowledge_files(
     _ensure_base_exists(config, base_id)
     _reject_git_file_mutation(config, base_id)
     uploaded: list[str] = []
-    uploaded_paths: list[Path] = []
+    staged_uploads: list[_StagedUpload] = []
 
     async with knowledge_binding_mutation_lock(base_id, config=config, runtime_paths=runtime_paths):
         root = _knowledge_root(config, base_id, runtime_paths, create=True)
 
-        for upload in files:
-            filename = Path(upload.filename or "").name
-            if not filename:
-                await upload.close()
-                continue
+        try:
+            for upload in files:
+                filename = Path(upload.filename or "").name
+                if not filename:
+                    await upload.close()
+                    continue
 
-            destination = _resolve_within_root(root, filename)
+                try:
+                    destination = _resolve_within_root(root, filename)
+                    staged_uploads.append(await _stage_upload(upload, destination, filename, root))
+                finally:
+                    await upload.close()
+        except Exception:
+            for staged in staged_uploads:
+                staged.temp_path.unlink(missing_ok=True)
+            raise
 
-            try:
-                _validate_upload_size_hint(upload, filename)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                await _stream_upload_to_destination(upload, destination, filename)
-            except Exception:
-                destination.unlink(missing_ok=True)
-                _rollback_uploaded_files(uploaded_paths)
-                raise
-            finally:
-                await upload.close()
-
-            uploaded_paths.append(destination)
-            uploaded.append(destination.relative_to(root).as_posix())
-
-        for relative_path in uploaded:
-            remove_source_path_from_published_snapshots(
-                base_id,
-                relative_path,
-                config=config,
-                runtime_paths=runtime_paths,
-            )
+        _commit_staged_uploads(staged_uploads)
+        uploaded = [staged.relative_path for staged in staged_uploads]
         mark_published_snapshot_stale(
             base_id,
             config=config,
@@ -377,9 +421,8 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
 
         relative_path = target.relative_to(root).as_posix()
         target.unlink()
-        remove_source_path_from_published_snapshots(
+        mark_published_snapshot_stale(
             base_id,
-            relative_path,
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -423,7 +466,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
 
-    result = await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths)
+    result = await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, force_reindex=True)
     if not result.published:
         raise HTTPException(
             status_code=409,

@@ -175,10 +175,24 @@ def _schedule_refresh_for_availability(
     lookup: KnowledgeSnapshotLookup | None,
     availability: KnowledgeAvailability,
 ) -> None:
-    if lookup is None or availability is KnowledgeAvailability.READY:
+    if lookup is None:
         return
 
     refresh_key = refresh_key_for_snapshot_key(lookup.key)
+    if availability is KnowledgeAvailability.READY:
+        if lookup.refresh_on_access and _refresh_schedule_due(
+            refresh_key,
+            KnowledgeAvailability.READY,
+            settings=lookup.key.indexing_settings,
+        ):
+            refresh_owner.schedule_refresh(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+            )
+        return
+
     if availability is KnowledgeAvailability.INITIALIZING:
         if _refresh_schedule_due(refresh_key, availability):
             refresh_owner.schedule_initial_load(

@@ -18,6 +18,7 @@ from mindroom.knowledge.registry import (
     PublishedIndexingState,
     active_snapshot_collection_names,
     clear_stale_ready_snapshot_markers,
+    indexing_settings_metadata_equal,
     indexing_settings_snapshot_compatible,
     load_published_indexing_state,
     publish_snapshot,
@@ -26,6 +27,7 @@ from mindroom.knowledge.registry import (
     resolve_snapshot_key,
     save_published_indexing_state,
     snapshot_availability_for_state,
+    snapshot_collection_exists_for_state,
     snapshot_metadata_path,
 )
 from mindroom.runtime_resolution import resolve_knowledge_binding
@@ -89,6 +91,7 @@ async def refresh_knowledge_binding(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
+    force_reindex: bool = False,
 ) -> KnowledgeRefreshResult:
     """Build and publish one resolved knowledge binding."""
     key = resolve_snapshot_key(
@@ -104,6 +107,7 @@ async def refresh_knowledge_binding(
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
+            force_reindex=force_reindex,
         )
 
 
@@ -113,6 +117,7 @@ async def _refresh_knowledge_binding_locked(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
+    force_reindex: bool = False,
 ) -> KnowledgeRefreshResult:
     base_id = key.base_id
     binding = resolve_knowledge_binding(
@@ -134,7 +139,7 @@ async def _refresh_knowledge_binding_locked(
     try:
         if manager._git_config() is not None:
             git_sync_result = await manager.sync_git_repository(index_changes=False)
-            if not git_sync_result.get("updated", False):
+            if not force_reindex and not git_sync_result.get("updated", False):
                 unchanged_result = await _publish_unchanged_git_snapshot(manager, key)
                 if unchanged_result is not None:
                     return unchanged_result
@@ -212,7 +217,9 @@ async def _publish_unchanged_git_snapshot(
         or state.status != "complete"
         or state.source_signature is None
         or state.availability == KnowledgeAvailability.REFRESH_FAILED.value
-        or not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings)
+        or snapshot_availability_for_state(key=key, state=state) is not KnowledgeAvailability.READY
+        or not indexing_settings_metadata_equal(state.settings, key.indexing_settings)
+        or not snapshot_collection_exists_for_state(key, state)
     ):
         return None
 
