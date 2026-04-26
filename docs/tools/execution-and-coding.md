@@ -149,7 +149,7 @@ MindRoom marks `shell` as worker-routed by default, so it usually executes in th
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working directory when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
 | `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()` and the companion handle APIs. |
 | `all` | `boolean` | `no` | `false` | Enable all shell functions. |
-| `extra_env_passthrough` | `text` | `no` | `null` | Extra exported process env var names or glob patterns exposed to shell execution in addition to MindRoom's sandbox runtime env. This does not re-expose filtered runtime `.env` entries. |
+| `extra_env_passthrough` | `text` | `no` | `null` | Extra exported process env var names or glob patterns exposed to shell execution in addition to MindRoom's sandbox runtime env. This matches exported process env, not config-adjacent `.env` entries. |
 | `shell_path_prepend` | `text` | `no` | `null` | Extra PATH entries prepended for shell subprocesses only. |
 
 ### Example
@@ -177,7 +177,7 @@ kill_shell_command("shell:abcd1234")
 
 ### Notes
 
-- `extra_env_passthrough` only affects `shell`, matches exported process env, and MindRoom excludes known sensitive names and secret-suffixed env vars even when a glob would otherwise match them.
+- `extra_env_passthrough` only affects `shell` and matches exported process env, not config-adjacent `.env` entries. MindRoom drops runner control names (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`; everything else that matches passes through, including service tokens and provider credentials.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.

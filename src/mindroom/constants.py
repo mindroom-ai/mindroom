@@ -53,6 +53,9 @@ _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
         "MINDROOM_SANDBOX_PROXY_TOKEN",
     },
 )
+# Startup/public runtime env scoping still withholds common credential suffixes
+# before booting isolated workers. This is separate from explicit shell
+# passthrough and workspace hook overlays, which trust user-selected values.
 _RUNTIME_STARTUP_SECRET_SUFFIXES = (
     "_API_KEY",
     "_API_KEYS",
@@ -68,13 +71,14 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
-_SHELL_EXTRA_ENV_EXCLUDED_NAMES = frozenset({*_EXECUTION_RUNTIME_EXCLUDED_NAMES, "CI_JOB_TOKEN"})
-# Suffixes that mark env vars as too sensitive for shell passthrough even when
-# matched by a user-supplied glob.  Narrower than _RUNTIME_STARTUP_SECRET_SUFFIXES
-# because _TOKEN is a common suffix for legitimately passthrough-worthy service
-# tokens (e.g. GITEA_TOKEN) while _API_KEY/_PASSWORD/_SECRET reliably identify
-# provider credentials that should never leak to shell commands.
-_SHELL_EXTRA_ENV_SECRET_SUFFIXES = ("_API_KEY", "_API_KEYS", "_PASSWORD", "_SECRET")
+_RUNNER_CONTROL_ENV_EXCLUDED_NAMES = frozenset(
+    {
+        "MINDROOM_API_KEY",
+        "MINDROOM_LOCAL_CLIENT_SECRET",
+        "MINDROOM_SANDBOX_PROXY_TOKEN",
+        SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+    },
+)
 
 # Bash bookkeeping vars that change every time printenv runs and are never
 # meaningful overlay output from `.mindroom/worker-env.sh`.
@@ -84,16 +88,12 @@ WORKSPACE_ENV_OVERLAY_TRANSIENT_NAMES = frozenset({"PWD", "OLDPWD", "SHLVL", "_"
 def is_workspace_env_overlay_name_allowed(name: str) -> bool:
     """Return whether one env var name may be returned from `.mindroom/worker-env.sh`.
 
-    Reuses the same secret-suffix and excluded-name rules that protect the
-    `extra_env_passthrough` shell config so the agent-editable overlay can
-    never expose provider credentials, runner control tokens, or sandbox
-    auth state, even if the script intentionally re-exports them.
+    The agent-editable overlay only protects runner control-plane names.
+    Other explicitly exported values are user intent and pass through.
     """
     if not name:
         return False
-    if name in _SHELL_EXTRA_ENV_EXCLUDED_NAMES:
-        return False
-    if name.endswith(_SHELL_EXTRA_ENV_SECRET_SUFFIXES):
+    if name in _RUNNER_CONTROL_ENV_EXCLUDED_NAMES:
         return False
     return not name.startswith("MINDROOM_SANDBOX_")
 
@@ -551,9 +551,9 @@ def shell_extra_env_values(
     source_env = os.environ if process_env is None else process_env
 
     for key, value in source_env.items():
-        if key in _SHELL_EXTRA_ENV_EXCLUDED_NAMES:
+        if key in _RUNNER_CONTROL_ENV_EXCLUDED_NAMES:
             continue
-        if key.endswith(_SHELL_EXTRA_ENV_SECRET_SUFFIXES):
+        if key.startswith("MINDROOM_SANDBOX_"):
             continue
         if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns):
             selected_env[key] = value

@@ -173,20 +173,25 @@ def request_execution_env(
 def runtime_paths_with_execution_env(
     runtime_paths: RuntimePaths,
     execution_env: dict[str, str],
+    *,
+    trusted_env_overlay: Mapping[str, str] | None = None,
 ) -> RuntimePaths:
     """Return runtime paths overlaid with one execution env snapshot."""
-    if not execution_env:
+    if not execution_env and not trusted_env_overlay:
         return runtime_paths
 
     process_env = dict(runtime_paths.process_env)
     process_env.update(execution_env)
+    env_file_values = dict(runtime_paths.env_file_values)
+    if trusted_env_overlay:
+        env_file_values.update(trusted_env_overlay)
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
         env_path=runtime_paths.env_path,
         storage_root=runtime_paths.storage_root,
         process_env=MappingProxyType(process_env),
-        env_file_values=runtime_paths.env_file_values,
+        env_file_values=MappingProxyType(env_file_values),
     )
 
 
