@@ -191,11 +191,14 @@ def test_codex_responses_request_params_include_required_instructions() -> None:
     assert configured_model.get_request_params()["instructions"] == "Be brief.\n\nReturn plain text."
 
 
-def test_codex_responses_request_params_drop_unsupported_limits() -> None:
+def test_codex_responses_request_params_drop_unsupported_params() -> None:
     """Unsupported OpenAI Responses parameters should not be sent to Codex."""
-    model = CodexResponses(id="gpt-5.5", max_output_tokens=40)
+    model = CodexResponses(id="gpt-5.5", max_output_tokens=40, temperature=0)
 
-    assert "max_output_tokens" not in model.get_request_params()
+    params = model.get_request_params()
+
+    assert "max_output_tokens" not in params
+    assert "temperature" not in params
 
 
 def test_codex_responses_request_params_include_prompt_cache_key(tmp_path: Path) -> None:
@@ -313,7 +316,13 @@ def test_codex_model_loader_derives_prompt_cache_key_from_execution_identity(tmp
 def test_codex_responses_invoke_aggregates_streaming_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
     """Non-streaming callers should still work with Codex's stream-only endpoint."""
     model = CodexResponses(id="gpt-5.5")
-    usage = MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
+    usage = MessageMetrics(
+        input_tokens=7,
+        output_tokens=3,
+        total_tokens=10,
+        cache_read_tokens=5,
+        reasoning_tokens=2,
+    )
 
     def fake_invoke_stream(
         *,
@@ -343,6 +352,8 @@ def test_codex_responses_invoke_aggregates_streaming_deltas(monkeypatch: pytest.
     assert assistant_message.content == "mindroom-codex-live-ok"
     assert assistant_message.provider_data == {"response_id": "resp_123"}
     assert assistant_message.metrics.input_tokens == 7
+    assert assistant_message.metrics.cache_read_tokens == 5
+    assert assistant_message.metrics.reasoning_tokens == 2
 
 
 def test_get_model_instance_supports_codex_provider(tmp_path: Path) -> None:
