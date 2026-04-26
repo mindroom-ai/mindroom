@@ -109,6 +109,7 @@ const DEFAULT_GIT_SETTINGS: KnowledgeGitConfig = {
   sync_timeout_seconds: 3600,
   skip_hidden: true,
 };
+const REDACTED_CREDENTIALS_SENTINEL = "***";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -127,19 +128,21 @@ function redactUrlCredentials(value: string): string {
   try {
     const parsed = new URL(value);
     const authority =
-      parsed.username || parsed.password ? `***@${parsed.host}` : parsed.host;
+      parsed.username || parsed.password
+        ? `${REDACTED_CREDENTIALS_SENTINEL}@${parsed.host}`
+        : parsed.host;
     return `${parsed.protocol}//${authority}${parsed.pathname}`;
   } catch {
     const withoutQueryOrFragment = value.replace(/[?#].*$/, "");
     return withoutQueryOrFragment.replace(
       /^([a-z][a-z0-9+.-]*:\/\/)([^@\s/?#]+)@/i,
-      "$1***@",
+      `$1${REDACTED_CREDENTIALS_SENTINEL}@`,
     );
   }
 }
 
-function gitRepoUrlInputValue(value: string): string {
-  return redactUrlCredentials(value);
+function gitRepoUrlHasRedactionSentinel(value: string): boolean {
+  return value.includes(REDACTED_CREDENTIALS_SENTINEL);
 }
 
 function formatStartupMode(value: "resume" | "incremental"): string {
@@ -275,6 +278,7 @@ export function Knowledge() {
   const [settings, setSettings] = useState<KnowledgeBaseConfig>(
     DEFAULT_BASE_SETTINGS,
   );
+  const [gitRepoUrlReplacement, setGitRepoUrlReplacement] = useState("");
   const [totalSize, setTotalSize] = useState(0);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -425,6 +429,13 @@ export function Knowledge() {
   const settingsSourceType: KnowledgeSourceType = settings.git
     ? "git"
     : "local";
+  const hasGitRepoUrlReplacement =
+    settingsSourceType === "git" && gitRepoUrlReplacement.trim().length > 0;
+  const canSaveSettings = isDirty || hasGitRepoUrlReplacement;
+
+  useEffect(() => {
+    setGitRepoUrlReplacement("");
+  }, [selectedBase, settingsSourceType]);
 
   const updateGitSettings = useCallback(
     (updates: Partial<KnowledgeGitConfig>) => {
@@ -456,8 +467,20 @@ export function Knowledge() {
       return;
     }
 
-    if (settings.git && !settings.git.repo_url.trim()) {
+    const repoUrlReplacement = gitRepoUrlReplacement.trim();
+    const gitSettings = settings.git
+      ? {
+          ...settings.git,
+          repo_url: repoUrlReplacement || settings.git.repo_url,
+        }
+      : undefined;
+
+    if (gitSettings && !gitSettings.repo_url.trim()) {
       setError("Repository URL is required when Git source is enabled");
+      return;
+    }
+    if (gitSettings && gitRepoUrlHasRedactionSentinel(gitSettings.repo_url)) {
+      setError("Repository URL contains a redacted credential placeholder");
       return;
     }
 
@@ -465,11 +488,11 @@ export function Knowledge() {
       settings.chunk_size,
       settings.chunk_overlap,
     );
-    const nextSettings: KnowledgeBaseConfig = settings.git
+    const nextSettings: KnowledgeBaseConfig = gitSettings
       ? {
           ...settings,
           ...normalizedChunking,
-          git: normalizeGitConfig(settings.git),
+          git: normalizeGitConfig(gitSettings),
         }
       : {
           ...settings,
@@ -497,6 +520,7 @@ export function Knowledge() {
         return;
       }
       await loadData(selectedBase);
+      setGitRepoUrlReplacement("");
       toast({
         title: "Knowledge settings saved",
         description: "Configuration has been updated.",
@@ -520,6 +544,7 @@ export function Knowledge() {
     saveConfig,
     selectedBase,
     settings,
+    gitRepoUrlReplacement,
     toast,
     updateKnowledgeBase,
   ]);
@@ -1270,15 +1295,30 @@ export function Knowledge() {
                     <div className="space-y-2">
                       <label
                         className="text-sm font-medium"
-                        htmlFor="knowledge-git-repo-url"
+                        htmlFor="knowledge-git-current-repo-url"
                       >
-                        Repository URL
+                        Current Repository URL
                       </label>
                       <Input
-                        id="knowledge-git-repo-url"
-                        value={gitRepoUrlInputValue(settings.git.repo_url)}
+                        id="knowledge-git-current-repo-url"
+                        value={redactUrlCredentials(settings.git.repo_url)}
+                        readOnly
+                        placeholder="https://github.com/org/repo"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="knowledge-git-replacement-repo-url"
+                      >
+                        Replacement Repository URL
+                      </label>
+                      <Input
+                        id="knowledge-git-replacement-repo-url"
+                        value={gitRepoUrlReplacement}
                         onChange={(event) =>
-                          updateGitSettings({ repo_url: event.target.value })
+                          setGitRepoUrlReplacement(event.target.value)
                         }
                         placeholder="https://github.com/org/repo"
                       />
@@ -1519,7 +1559,7 @@ export function Knowledge() {
                   <Button
                     variant="outline"
                     onClick={handleSaveSettings}
-                    disabled={savingSettings || !isDirty}
+                    disabled={savingSettings || !canSaveSettings}
                   >
                     {savingSettings ? "Saving..." : "Save Settings"}
                   </Button>

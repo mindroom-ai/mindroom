@@ -194,21 +194,24 @@ async def refresh_knowledge_binding(
     )
     refresh_key = refresh_key_for_snapshot_key(key)
     _mark_refresh_active(refresh_key)
-    initial_state: PublishedIndexingState | None = None
     try:
-        await _save_refreshing_state(key)
-        initial_state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
-        async with _refresh_lock_for_key(source_key_for_snapshot_key(key)):
-            return await _refresh_knowledge_binding_locked(
-                key,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-                force_reindex=force_reindex,
-            )
-    except asyncio.CancelledError:
-        await _reconcile_cancelled_refresh(key, initial_state=initial_state)
-        raise
+        initial_state = await asyncio.to_thread(
+            load_published_indexing_state,
+            snapshot_metadata_path(key),
+        )
+        try:
+            await _save_refreshing_state(key)
+            async with _refresh_lock_for_key(source_key_for_snapshot_key(key)):
+                return await _refresh_knowledge_binding_locked(
+                    key,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                    force_reindex=force_reindex,
+                )
+        except asyncio.CancelledError:
+            await _reconcile_cancelled_refresh(key, initial_state=initial_state)
+            raise
     finally:
         _mark_refresh_inactive(refresh_key)
         prune_private_snapshot_bookkeeping()

@@ -726,6 +726,54 @@ async def test_refreshing_advisory_cancellation_clears_active_refresh_count(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_refresh_after_refreshing_write_keeps_existing_snapshot_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after the refreshing advisory write must not clear a stale snapshot advisory."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "guide.md"
+    doc.write_text("stable snapshot", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.save_snapshot_dirty_state(key, reason="source_changed")
+
+    loop = asyncio.get_running_loop()
+    refreshing_saved = asyncio.Event()
+    release_refreshing_save = Event()
+    original_save_refreshing = knowledge_refresh_runner.save_snapshot_refreshing_state
+
+    def _block_after_refreshing_state(*args: object, **kwargs: object) -> None:
+        original_save_refreshing(*args, **kwargs)
+        loop.call_soon_threadsafe(refreshing_saved.set)
+        assert release_refreshing_save.wait(timeout=5)
+
+    monkeypatch.setattr(
+        knowledge_refresh_runner,
+        "save_snapshot_refreshing_state",
+        _block_after_refreshing_state,
+    )
+
+    refresh_task = asyncio.create_task(
+        refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths),
+    )
+    await refreshing_saved.wait()
+    refresh_task.cancel()
+    release_refreshing_save.set()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_task
+
+    advisory = knowledge_registry.load_snapshot_advisory_state(
+        knowledge_registry.snapshot_advisory_path(key),
+    )
+    assert advisory.state == "stale"
+    assert advisory.refresh_job == "idle"
+
+
+@pytest.mark.asyncio
 async def test_cancelled_refresh_waiting_for_source_lock_clears_running_advisory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

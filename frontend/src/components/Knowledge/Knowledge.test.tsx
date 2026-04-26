@@ -528,12 +528,18 @@ describe("Knowledge", () => {
     await screen.findByText("Active: git_docs");
 
     const repoInput = screen.getByLabelText(
-      "Repository URL",
+      "Current Repository URL",
     ) as HTMLInputElement;
     expect(repoInput.value).toBe("https://***@github.com/org/git-docs");
+    expect(repoInput.readOnly).toBe(true);
     expect(repoInput.value).not.toContain("secret");
     expect(repoInput.value).not.toContain("query-secret");
     expect(repoInput.value).not.toContain("fragment-secret");
+
+    const replacementInput = screen.getByLabelText(
+      "Replacement Repository URL",
+    ) as HTMLInputElement;
+    expect(replacementInput.value).toBe("");
   });
 
   it.each([
@@ -920,13 +926,21 @@ describe("Knowledge", () => {
     await screen.findByText("Active: docs");
 
     expect(screen.getByLabelText("Folder Path")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Repository URL")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Current Repository URL"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Replacement Repository URL"),
+    ).not.toBeInTheDocument();
 
     fireEvent.click(
       screen.getByRole("button", { name: "Settings git source" }),
     );
 
-    expect(screen.getByLabelText("Repository URL")).toBeInTheDocument();
+    expect(screen.getByLabelText("Current Repository URL")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Replacement Repository URL"),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("Folder Path")).toBeInTheDocument();
     expect(mockUpdateKnowledgeBase).toHaveBeenCalledWith(
       "docs",
@@ -944,7 +958,12 @@ describe("Knowledge", () => {
       screen.getByRole("button", { name: "Settings local source" }),
     );
 
-    expect(screen.queryByLabelText("Repository URL")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Current Repository URL"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Replacement Repository URL"),
+    ).not.toBeInTheDocument();
     expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
       "docs",
       expect.objectContaining({ git: undefined }),
@@ -988,7 +1007,7 @@ describe("Knowledge", () => {
     render(<Knowledge />);
     await screen.findByText("Active: docs");
 
-    fireEvent.change(screen.getByLabelText("Repository URL"), {
+    fireEvent.change(screen.getByLabelText("Replacement Repository URL"), {
       target: { value: "  https://github.com/org/repo-updated  " },
     });
     fireEvent.change(screen.getByLabelText("Branch"), {
@@ -1039,6 +1058,110 @@ describe("Knowledge", () => {
         }),
       );
     });
+  });
+
+  it("preserves a credential-bearing git URL when saving other git settings", async () => {
+    mockStore(
+      {
+        docs: {
+          path: "./knowledge_docs/docs",
+          watch: true,
+          chunk_size: 5000,
+          chunk_overlap: 0,
+          git: {
+            repo_url: "https://token:secret@github.com/org/repo",
+            branch: "main",
+          },
+        },
+      },
+      { isDirty: true },
+    );
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          folder_path: "./knowledge_docs/docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    fireEvent.change(screen.getByLabelText("Branch"), {
+      target: { value: "  release  " },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => {
+      expect(mockSaveConfig).toHaveBeenCalledTimes(1);
+      expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
+        "docs",
+        expect.objectContaining({
+          git: expect.objectContaining({
+            repo_url: "https://token:secret@github.com/org/repo",
+            branch: "release",
+          }),
+        }),
+      );
+    });
+  });
+
+  it("rejects git URL replacements containing the redaction sentinel", async () => {
+    mockStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        chunk_size: 5000,
+        chunk_overlap: 0,
+        git: {
+          repo_url: "https://github.com/org/repo",
+          branch: "main",
+        },
+      },
+    });
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          folder_path: "./knowledge_docs/docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    fireEvent.change(screen.getByLabelText("Replacement Repository URL"), {
+      target: { value: "https://***@github.com/org/repo" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    expect(
+      await screen.findByText(
+        "Repository URL contains a redacted credential placeholder",
+      ),
+    ).toBeInTheDocument();
+    expect(mockSaveConfig).not.toHaveBeenCalled();
+    expect(mockUpdateKnowledgeBase).not.toHaveBeenCalled();
   });
 
   it("saves advanced git settings from base settings", async () => {
