@@ -228,8 +228,15 @@ class _TombstoneFilteringVectorDb:
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
-        documents = self.vector_db.search(query=query, limit=limit, filters=filters)
-        return self._filter_documents(documents)
+        if limit <= 0:
+            return []
+        fetch_limit = limit
+        while True:
+            documents = self.vector_db.search(query=query, limit=fetch_limit, filters=filters)
+            filtered = self._filter_documents(documents)
+            if len(filtered) >= limit or len(documents) < fetch_limit:
+                return filtered[:limit]
+            fetch_limit *= 2
 
     async def async_search(
         self,
@@ -238,8 +245,15 @@ class _TombstoneFilteringVectorDb:
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
-        documents = await self.vector_db.async_search(query=query, limit=limit, filters=filters)
-        return self._filter_documents(documents)
+        if limit <= 0:
+            return []
+        fetch_limit = limit
+        while True:
+            documents = await self.vector_db.async_search(query=query, limit=fetch_limit, filters=filters)
+            filtered = self._filter_documents(documents)
+            if len(filtered) >= limit or len(documents) < fetch_limit:
+                return filtered[:limit]
+            fetch_limit *= 2
 
     def _filter_documents(self, documents: list[Document]) -> list[Document]:
         return [document for document in documents if not self._document_matches_tombstone(document)]
@@ -533,9 +547,25 @@ def save_snapshot_delete_tombstones(
 
 def load_knowledge_snapshot_state(key: KnowledgeSnapshotKey) -> KnowledgeSnapshotState:
     """Load published plus advisory state for one resolved snapshot key."""
+    published = load_published_indexing_state(snapshot_metadata_path(key))
+    advisory_path = snapshot_advisory_path(key)
+    advisory = load_snapshot_advisory_state(advisory_path)
+    if not advisory_path.exists():
+        advisory = _advisory_from_legacy_published_state(published)
     return KnowledgeSnapshotState(
-        published=load_published_indexing_state(snapshot_metadata_path(key)),
-        advisory=load_snapshot_advisory_state(snapshot_advisory_path(key)),
+        published=published,
+        advisory=advisory,
+    )
+
+
+def _advisory_from_legacy_published_state(state: PublishedIndexingState | None) -> KnowledgeAdvisoryState:
+    if state is None or state.availability != "refresh_failed":
+        return KnowledgeAdvisoryState()
+    return KnowledgeAdvisoryState(
+        state="refresh_failed",
+        refresh_job="failed",
+        last_error=state.last_error,
+        last_refresh_at=state.last_published_at,
     )
 
 
@@ -993,7 +1023,11 @@ def snapshot_availability_for_state(
     advisory: KnowledgeAdvisoryState | None = None,
 ) -> KnowledgeAvailability:
     """Return the public availability value for persisted snapshot state."""
-    return _snapshot_availability(key=key, state=state, advisory=advisory or KnowledgeAdvisoryState())
+    return _snapshot_availability(
+        key=key,
+        state=state,
+        advisory=advisory or _advisory_from_legacy_published_state(state),
+    )
 
 
 def get_published_snapshot(
@@ -1012,7 +1046,8 @@ def get_published_snapshot(
         create=False,
     )
     try:
-        advisory = load_snapshot_advisory_state(snapshot_advisory_path(key))
+        snapshot_state = load_knowledge_snapshot_state(key)
+        advisory = snapshot_state.advisory
         snapshot = _published_snapshots.get(key)
         if snapshot is not None:
             if not _cached_snapshot_still_queryable(snapshot):
@@ -1036,7 +1071,7 @@ def get_published_snapshot(
             )
 
         metadata_path = snapshot_metadata_path(key)
-        state = load_published_indexing_state(metadata_path)
+        state = snapshot_state.published
         availability = _snapshot_availability(key=key, state=state, advisory=advisory)
         if state is None or state.status != "complete":
             return KnowledgeSnapshotLookup(

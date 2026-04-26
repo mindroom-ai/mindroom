@@ -127,6 +127,17 @@ function formatModifiedDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function stripPathParams(pathname: string): string {
+  return pathname.split(";", 1)[0] ?? "";
+}
+
+function stripFallbackPathParams(value: string): string {
+  return value.replace(
+    /^([a-z][a-z0-9+.-]*:\/\/[^/\s?#]*)(\/[^?#;]*);[^?#]*/i,
+    "$1$2",
+  );
+}
+
 function redactUrlCredentials(value: string): string {
   try {
     const parsed = new URL(value);
@@ -134,9 +145,11 @@ function redactUrlCredentials(value: string): string {
       parsed.username || parsed.password
         ? `${REDACTED_CREDENTIALS_SENTINEL}@${parsed.host}`
         : parsed.host;
-    return `${parsed.protocol}//${authority}${parsed.pathname}`;
+    return `${parsed.protocol}//${authority}${stripPathParams(parsed.pathname)}`;
   } catch {
-    const withoutQueryOrFragment = value.replace(/[?#].*$/, "");
+    const withoutQueryOrFragment = stripFallbackPathParams(
+      value.replace(/[?#].*$/, ""),
+    );
     return withoutQueryOrFragment.replace(
       /^([a-z][a-z0-9+.-]*:\/\/)([^@\s/?#]+)@/i,
       `$1${REDACTED_CREDENTIALS_SENTINEL}@`,

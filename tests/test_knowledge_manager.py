@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import gc
 import json
 import os
@@ -119,6 +120,15 @@ class _VectorDb:
         with self.lock:
             items = list(self.collections.get(self.collection_name, []))
         return [Document(content=str(item["content"]), meta_data=dict(item["metadata"])) for item in items[:limit]]
+
+    async def async_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, object] | list[object] | None = None,
+    ) -> list[Document]:
+        return self.search(query=query, limit=limit, filters=filters)
 
 
 class _Knowledge:
@@ -651,6 +661,41 @@ async def test_dashboard_delete_tombstone_filters_last_good_after_refresh_failur
         "kept public",
     ]
     owner.schedule_refresh.assert_called_once()
+
+
+def test_tombstone_filtering_overfetches_sync_results_to_fill_limit() -> None:
+    """A tombstoned top hit must not hide the next live result."""
+    collection = "tombstone_overfetch_sync"
+    _VectorDb.collections[collection] = [
+        {"content": "deleted", "metadata": {"source_path": "deleted.md"}},
+        {"content": "live", "metadata": {"source_path": "live.md"}},
+    ]
+    vector_db = knowledge_registry._TombstoneFilteringVectorDb(
+        _VectorDb(collection=collection),
+        deleted_source_paths=frozenset({"deleted.md"}),
+    )
+
+    documents = vector_db.search(query="anything", limit=1)
+
+    assert [document.content for document in documents] == ["live"]
+
+
+@pytest.mark.asyncio
+async def test_tombstone_filtering_overfetches_async_results_to_fill_limit() -> None:
+    """Async tombstone filtering should also continue to the next live result."""
+    collection = "tombstone_overfetch_async"
+    _VectorDb.collections[collection] = [
+        {"content": "deleted", "metadata": {"source_path": "deleted.md"}},
+        {"content": "live", "metadata": {"source_path": "live.md"}},
+    ]
+    vector_db = knowledge_registry._TombstoneFilteringVectorDb(
+        _VectorDb(collection=collection),
+        deleted_source_paths=frozenset({"deleted.md"}),
+    )
+
+    documents = await vector_db.async_search(query="anything", limit=1)
+
+    assert [document.content for document in documents] == ["live"]
 
 
 @pytest.mark.asyncio
@@ -1306,6 +1351,50 @@ def test_legacy_git_raw_url_metadata_is_compatible_with_redacted_identity(tmp_pa
     assert lookup.snapshot is not None
     assert lookup.availability is KnowledgeAvailability.READY
     assert [document.content for document in lookup.snapshot.knowledge.search("git", max_results=5)] == ["legacy git"]
+
+
+def test_legacy_refresh_failed_metadata_without_advisory_reports_failed(tmp_path: Path) -> None:
+    """Old refresh_failed metadata should remain failed until a sidecar state replaces it."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("legacy failed snapshot", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    collection = "legacy_refresh_failed_collection"
+    _VectorDb.collections[collection] = [
+        {"content": "legacy failed snapshot", "metadata": {"source_path": "doc.md"}},
+    ]
+    metadata_path = snapshot_metadata_path(key)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "settings": list(key.indexing_settings),
+                "status": "complete",
+                "collection": collection,
+                "availability": "refresh_failed",
+                "last_error": "legacy refresh failed",
+                "source_signature": "legacy-signature",
+            },
+        ),
+        encoding="utf-8",
+    )
+    advisory_path = knowledge_registry.snapshot_advisory_path(key)
+    assert not advisory_path.exists()
+
+    snapshot_state = knowledge_registry.load_knowledge_snapshot_state(key)
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+
+    assert snapshot_state.advisory.state == "refresh_failed"
+    assert snapshot_state.advisory.refresh_job == "failed"
+    assert snapshot_state.advisory.last_error == "legacy refresh failed"
+    assert lookup.snapshot is not None
+    assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
+    assert lookup.advisory.last_error == "legacy refresh failed"
+    assert [document.content for document in lookup.snapshot.knowledge.search("legacy", max_results=5)] == [
+        "legacy failed snapshot",
+    ]
 
 
 def test_indexing_settings_layout_constants_match_settings_key(tmp_path: Path) -> None:
@@ -4220,6 +4309,76 @@ async def test_cold_git_sync_failure_records_failed_availability_and_redacted_er
     assert "x-oauth-basic" not in advisory.last_error
     assert lookup.snapshot is None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
+
+
+@pytest.mark.asyncio
+async def test_git_failure_redacts_authorization_headers_from_raised_and_advisory_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Process-local Git Authorization headers should not leak through command failures."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    git_config = KnowledgeGitConfig(
+        repo_url="https://example.com/org/repo.git",
+        branch="main",
+        credentials_service="github_private",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        "github_private",
+        {"token": "secret-token"},
+    )
+    encoded = base64.b64encode(b"x-access-token:secret-token").decode("ascii")
+    bearer_value = "bearer-value"
+    stderr = (
+        "fatal: clone failed\n"
+        f"GIT_CONFIG_VALUE_0=Authorization: Basic {encoded}\n"
+        "decoded credential x-access-token:secret-token\n"
+        f"Authorization: Bearer {bearer_value}\n"
+    )
+
+    class _FailedGitProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", stderr.encode()
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    async def _fail_git_command(*args: object, **kwargs: object) -> _FailedGitProcess:
+        _ = (args, kwargs)
+        return _FailedGitProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fail_git_command)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    error_texts = [str(exc_info.value), advisory.last_error or "", lookup.advisory.last_error or ""]
+
+    assert advisory.state == "refresh_failed"
+    assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
+    for error_text in error_texts:
+        assert "Authorization: Basic ***" in error_text
+        assert "Authorization: Bearer ***" in error_text
+        assert encoded not in error_text
+        assert "x-access-token:secret-token" not in error_text
+        assert "secret-token" not in error_text
+        assert bearer_value not in error_text
 
 
 @pytest.mark.asyncio

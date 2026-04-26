@@ -491,7 +491,7 @@ describe("Knowledge", () => {
         watch: true,
         git: {
           repo_url:
-            "https://token:secret@github.com/org/git-docs?token=query-secret#fragment-secret",
+            "https://token:secret@github.com/org/git-docs;token=path-secret?token=query-secret#fragment-secret",
           branch: "release",
         },
       },
@@ -505,7 +505,8 @@ describe("Knowledge", () => {
           file_count: 0,
           indexed_count: 0,
           git: {
-            repo_url: "https://***@github.com/org/git-docs",
+            repo_url:
+              "https://token:secret@github.com/org/git-docs;token=path-secret?token=query-secret#fragment-secret",
             branch: "release",
             lfs: false,
             startup_behavior: "blocking",
@@ -536,8 +537,12 @@ describe("Knowledge", () => {
     expect(repoInput.value).toBe("https://***@github.com/org/git-docs");
     expect(repoInput.readOnly).toBe(true);
     expect(repoInput.value).not.toContain("secret");
+    expect(repoInput.value).not.toContain("path-secret");
     expect(repoInput.value).not.toContain("query-secret");
     expect(repoInput.value).not.toContain("fragment-secret");
+    expect(screen.queryByText(/path-secret/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/query-secret/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/fragment-secret/)).not.toBeInTheDocument();
 
     const replacementInput = screen.getByLabelText(
       "Replacement Repository URL",
@@ -559,8 +564,13 @@ describe("Knowledge", () => {
         "https://token:password@github.com/org/git-docs?token=query-secret#fragment-secret",
       secret: "query-secret",
     },
+    {
+      repoUrl:
+        "https://token:password@github.com/org/git-docs;token=path-secret?token=query-secret#fragment-secret",
+      secret: "path-secret",
+    },
   ])(
-    "strips git repo URL query and fragment secrets",
+    "strips git repo URL path params, query, and fragment secrets",
     async ({ repoUrl, secret }) => {
       mockStore({
         git_docs: {
