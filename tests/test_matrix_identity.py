@@ -264,6 +264,42 @@ class TestHelperFunctions:
         assert migrated_data["accounts"]["agent_general"]["domain"] == self.config.get_domain(runtime_paths)
         assert "known_user_ids" not in migrated_data["accounts"]["agent_general"]
 
+    def test_matrix_state_save_keeps_existing_file_when_temp_write_is_interrupted(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed Matrix state write should not leave partial YAML behind."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        domain = self.config.get_domain(runtime_paths)
+        state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
+
+        original_state = MatrixState()
+        original_state.add_account("agent_general", "mindroom_general", "pw", domain=domain)
+        original_state.save(runtime_paths=runtime_paths)
+        original_contents = state_file.read_text(encoding="utf-8")
+
+        class _InterruptedWriteError(RuntimeError):
+            """Sentinel write failure used to simulate an interrupted persistence attempt."""
+
+        def _partial_dump(*args: object, **kwargs: object) -> None:  # noqa: ARG001
+            file_obj = args[1]
+            assert hasattr(file_obj, "write")
+            file_obj.write("accounts:\n  partial")
+            file_obj.flush()
+            raise _InterruptedWriteError
+
+        replacement_state = MatrixState()
+        replacement_state.add_account("agent_other", "mindroom_other", "pw", domain=domain)
+        monkeypatch.setattr("mindroom.matrix.state.yaml.safe_dump", _partial_dump)
+
+        with pytest.raises(_InterruptedWriteError):
+            replacement_state.save(runtime_paths=runtime_paths)
+
+        assert state_file.read_text(encoding="utf-8") == original_contents
+        assert MatrixState.load(runtime_paths=runtime_paths).accounts["agent_general"].username == "mindroom_general"
+
     def test_extract_agent_name_ignores_removed_persisted_username(self, tmp_path: Path) -> None:
         """Persisted usernames for removed agents must not stay live-managed."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
