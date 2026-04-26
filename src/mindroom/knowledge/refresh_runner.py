@@ -75,16 +75,6 @@ class _RefreshLockEntry:
 _refresh_locks: dict[KnowledgeSourceKey, _RefreshLockEntry] = {}
 
 
-def _refresh_lock_for_key(key: KnowledgeSourceKey) -> _RefreshLockEntry:
-    with _refresh_locks_guard:
-        entry = _refresh_locks.get(key)
-        if entry is None:
-            _prune_refresh_locks_locked(reserve_slots=1)
-            entry = _RefreshLockEntry()
-            _refresh_locks[key] = entry
-        return entry
-
-
 def _borrow_refresh_lock_for_key(key: KnowledgeSourceKey) -> _RefreshLockEntry:
     with _refresh_locks_guard:
         entry = _refresh_locks.get(key)

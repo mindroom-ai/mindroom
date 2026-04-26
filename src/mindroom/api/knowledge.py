@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
-from urllib.parse import unquote
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
@@ -18,6 +17,7 @@ from mindroom.knowledge import (
     KnowledgeAdvisoryState,
     KnowledgeAvailability,
     PublishedIndexingState,
+    indexing_settings_snapshot_compatible,
     is_refresh_active_for_binding,
     knowledge_binding_mutation_lock,
     load_knowledge_snapshot_state,
@@ -301,10 +301,9 @@ def _snapshot_status_sync(
     state = snapshot_state.published
     if state is None:
         return False, 0
-    if (
-        snapshot_availability_for_state(key=key, state=state, advisory=snapshot_state.advisory)
-        is not KnowledgeAvailability.READY
-    ):
+    if state.status != "complete":
+        return False, 0
+    if not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings):
         return False, 0
     available = snapshot_collection_exists_for_state(key, state)
     return available, state.indexed_count or 0
@@ -776,8 +775,7 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
     root = _knowledge_root(config, base_id, runtime_paths)
-    decoded_path = unquote(path)
-    target = _resolve_within_root(root, decoded_path)
+    target = _resolve_within_root(root, path)
     _reject_git_file_mutation(config, base_id, runtime_paths, target)
 
     async with knowledge_binding_mutation_lock(base_id, config=config, runtime_paths=runtime_paths):

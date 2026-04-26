@@ -1123,12 +1123,6 @@ class KnowledgeManager:
     def _mark_git_initial_sync_complete(self) -> None:
         self._git_initial_sync_complete = True
 
-    async def reindex_explicitly(self) -> int:
-        """Run a manual full reindex."""
-        if self._git_config() is not None:
-            await self.sync_git_repository(index_changes=False)
-        return await self.reindex_all()
-
     def _git_sync_timeout_seconds(self) -> float | None:
         git_config = self._git_config()
         if git_config is None:
@@ -1763,22 +1757,6 @@ class KnowledgeManager:
             offset += fetched_count
 
         return indexed_files
-
-    async def initialize(self) -> None:
-        """Initialize and index all existing knowledge files."""
-        git_config = self._git_config()
-        if git_config is not None:
-            await self.sync_git_repository(index_changes=False)
-
-        indexed_count = await self.reindex_all()
-        if git_config is not None:
-            self._mark_git_initial_sync_complete()
-        logger.info(
-            "Knowledge base initialized",
-            base_id=self.base_id,
-            indexed_count=indexed_count,
-            path=str(self._knowledge_source_path()),
-        )
 
     async def load_indexed_files(self) -> int:
         """Load in-memory indexed file state from the existing vector DB collection."""

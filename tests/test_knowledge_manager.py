@@ -200,6 +200,11 @@ async def _wait_for_refresh_lock_borrowers(
     pytest.fail(f"refresh lock for {key} did not reach {expected} borrowers")
 
 
+def _create_idle_refresh_lock(key: knowledge_registry.KnowledgeSourceKey) -> None:
+    entry = knowledge_refresh_runner._borrow_refresh_lock_for_key(key)
+    knowledge_refresh_runner._release_refresh_lock_for_key(key, entry)
+
+
 def _config(
     tmp_path: Path,
     *,
@@ -1196,7 +1201,7 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     original_entry = knowledge_refresh_runner._refresh_locks[source_key]
 
     for index in range(5):
-        knowledge_refresh_runner._refresh_lock_for_key(
+        _create_idle_refresh_lock(
             knowledge_registry.KnowledgeSourceKey(
                 storage_root=str(tmp_path / f"other-{index}"),
                 knowledge_path=str(tmp_path / f"other-{index}" / "docs"),
@@ -4004,7 +4009,7 @@ def test_private_request_scoped_bookkeeping_is_bounded(tmp_path: Path) -> None:
             settings=key.indexing_settings,
             cooldown_seconds=300,
         )
-        knowledge_refresh_runner._refresh_lock_for_key(knowledge_registry.source_key_for_refresh_key(refresh_key))
+        _create_idle_refresh_lock(knowledge_registry.source_key_for_refresh_key(refresh_key))
 
     private_snapshot_count = sum(
         key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)

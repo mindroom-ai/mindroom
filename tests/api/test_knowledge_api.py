@@ -270,21 +270,72 @@ def test_status_collection_probe_runs_off_event_loop(tmp_path: Path, monkeypatch
     assert saw_running_loop is False
 
 
-def test_status_rejects_config_mismatched_published_snapshot(tmp_path: Path) -> None:
-    """Dashboard availability should match runtime snapshot safety checks."""
+@pytest.mark.parametrize(
+    ("advisory", "expected_refresh_job"),
+    [
+        ("stale", "pending"),
+        ("refresh_failed", "failed"),
+    ],
+)
+def test_status_reports_queryable_last_good_snapshot_when_advisory_is_not_ready(
+    tmp_path: Path,
+    advisory: str,
+    expected_refresh_job: str,
+) -> None:
+    """Freshness advisory state should not hide a valid queryable snapshot."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(config, runtime_paths, indexed_count=7)
+    key = resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths)
+    if advisory == "stale":
+        knowledge_registry.save_snapshot_dirty_state(key, reason="source_changed")
+    else:
+        knowledge_registry.save_snapshot_refresh_failed_state(key, error="refresh failed")
+
+    with (
+        patch("mindroom.api.knowledge.snapshot_collection_exists_for_state", return_value=True),
+        patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
+    ):
+        status_response = client.get("/api/knowledge/bases/research/status")
+        list_response = client.get("/api/knowledge/bases")
+
+    assert status_response.status_code == 200
+    assert list_response.status_code == 200
+    status_payload = status_response.json()
+    list_payload = list_response.json()["bases"][0]
+    assert status_payload["indexed_count"] == 7
+    assert list_payload["indexed_count"] == 7
+    assert status_payload["manager_available"] is True
+    assert list_payload["manager_available"] is True
+    assert status_payload["advisory_state"] == advisory
+    assert list_payload["advisory_state"] == advisory
+    assert status_payload["refresh_job"] == expected_refresh_job
+    assert list_payload["refresh_job"] == expected_refresh_job
+    refresh.assert_not_awaited()
+
+
+def test_status_rejects_query_incompatible_published_snapshot(tmp_path: Path) -> None:
+    """Dashboard availability should still fail closed for snapshots unsafe to query."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs)
     _write_snapshot_metadata(config, runtime_paths, indexed_count=9)
-    changed_config = _knowledge_config(docs)
-    changed_config.knowledge_bases["research"].chunk_size = 1024
-    _publish_committed_runtime_config(client.app, changed_config)
+    key = resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths)
+    metadata_path = snapshot_metadata_path(key)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["settings"][3] = "different-embedder-provider"
+    metadata_path.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+    _publish_committed_runtime_config(client.app, config)
 
     with patch(
         "mindroom.api.knowledge.snapshot_collection_exists_for_state",
-        side_effect=AssertionError("config-mismatched snapshots should not probe collection availability"),
+        side_effect=AssertionError("query-incompatible snapshots should not probe collection availability"),
     ):
         response = client.get("/api/knowledge/bases/research/status")
 
@@ -1076,6 +1127,63 @@ def test_delete_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
 
     assert response.status_code == 200
     assert not (docs / "guide.md").exists()
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+    refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("literal_path", "decoded_path"),
+    [
+        ("a%2Fb.md", "a/b.md"),
+        ("%2e%2e.md", "...md"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_delete_uses_once_decoded_route_path_for_percent_bearing_filenames(
+    tmp_path: Path,
+    literal_path: str,
+    decoded_path: str,
+) -> None:
+    """A dashboard-encoded literal percent filename must not be decoded into another path."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    literal_file = docs / literal_path
+    decoded_file = docs / decoded_path
+    literal_file.parent.mkdir(parents=True, exist_ok=True)
+    decoded_file.parent.mkdir(parents=True, exist_ok=True)
+    literal_file.write_text("literal", encoding="utf-8")
+    decoded_file.write_text("decoded", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(config, runtime_paths, base_id="research")
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = await knowledge_api.delete_knowledge_file(
+            "research",
+            literal_path,
+            Request(
+                {
+                    "type": "http",
+                    "method": "DELETE",
+                    "path": f"/api/knowledge/bases/research/files/{literal_path}",
+                    "headers": [],
+                    "app": client.app,
+                },
+            ),
+        )
+
+    assert response["path"] == literal_path
+    assert not literal_file.exists()
+    assert decoded_file.read_text(encoding="utf-8") == "decoded"
+    key = resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths)
+    tombstones = knowledge_registry.load_snapshot_delete_tombstones(
+        knowledge_registry.snapshot_delete_tombstones_path(key),
+    )
+    assert [tombstone.source_path for tombstone in tombstones] == [literal_path]
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
     refresh.assert_not_awaited()
 
