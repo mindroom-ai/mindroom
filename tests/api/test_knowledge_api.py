@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
 
+import mindroom.knowledge.registry as knowledge_registry
 from mindroom import constants
 from mindroom.api import knowledge as knowledge_api
 from mindroom.api import main
@@ -505,7 +506,7 @@ async def test_empty_upload_parts_are_noop_without_stale_mark_or_refresh(tmp_pat
     client.app.state.knowledge_refresh_owner = owner
 
     with (
-        patch("mindroom.api.knowledge.mark_published_snapshot_stale", side_effect=AssertionError("no mutation")),
+        patch("mindroom.api.knowledge.mark_published_snapshot_stale_async", side_effect=AssertionError("no mutation")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
     ):
         response = await knowledge_api.upload_knowledge_files(
@@ -551,6 +552,47 @@ def test_upload_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
         ("research", config),
         ("summary", config),
     ]
+    refresh.assert_not_awaited()
+
+
+def test_upload_stale_metadata_write_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upload stale-mark metadata I/O should be offloaded while the API mutation lock is held."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(config, runtime_paths, base_id="research")
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+    saw_running_loop: bool | None = None
+    original_load = knowledge_registry.load_published_indexing_state
+
+    def _offloaded_load(*args: object, **kwargs: object) -> object:
+        nonlocal saw_running_loop
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            saw_running_loop = False
+        else:
+            saw_running_loop = True
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(knowledge_registry, "load_published_indexing_state", _offloaded_load)
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", ("guide.md", b"hello", "text/markdown"))],
+        )
+
+    assert response.status_code == 200
+    assert saw_running_loop is False
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
     refresh.assert_not_awaited()
 
 

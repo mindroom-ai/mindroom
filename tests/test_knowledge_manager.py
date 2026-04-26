@@ -451,6 +451,44 @@ async def test_shared_local_watch_ready_refresh_on_access_is_throttled(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_ready_refresh_on_access_reports_stale_while_owner_is_active(tmp_path: Path) -> None:
+    """Due refresh-on-access remains visible as STALE even when the owner already has work active."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("active refresh old", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], watch=True)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    owner = MagicMock()
+    owner.is_refreshing = MagicMock(return_value=True)
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    unavailable: dict[str, KnowledgeAvailability] = {}
+    unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
+
+    knowledge = get_agent_knowledge(
+        "helper",
+        config,
+        runtime_paths,
+        refresh_owner=owner,
+        on_unavailable_bases=unavailable.update,
+        on_unavailable_base_details=unavailable_details.update,
+    )
+
+    assert knowledge is not None
+    assert [document.content for document in knowledge.search("active", max_results=5)] == ["active refresh old"]
+    assert unavailable == {"docs": KnowledgeAvailability.STALE}
+    assert unavailable_details == {
+        "docs": KnowledgeAvailabilityDetail(
+            availability=KnowledgeAvailability.STALE,
+            snapshot_attached=True,
+        ),
+    }
+    owner.schedule_initial_load.assert_not_called()
+    owner.schedule_refresh.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_stale_snapshot_metadata_schedules_refresh_without_source_scan(tmp_path: Path) -> None:
     """Ready access only uses persisted metadata/dirty markers, not request-time source scans."""
     docs_path = tmp_path / "docs"
@@ -1117,6 +1155,61 @@ async def test_existing_published_snapshot_is_used_while_refresh_runs(
     knowledge = get_agent_knowledge("helper", config, runtime_paths)
     assert knowledge is not None
     assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["new snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_refresh_deletes_unpublished_candidate_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling a candidate refresh must not leave an owned candidate collection behind."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("cancel stable", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    existing_collections = set(_VectorDb.collections)
+    doc.write_text("cancel candidate", encoding="utf-8")
+    candidate_started = asyncio.Event()
+    original_index_file_locked = KnowledgeManager._index_file_locked
+
+    async def _block_candidate(
+        self: KnowledgeManager,
+        resolved_path: Path,
+        *,
+        upsert: bool,
+        knowledge: object | None = None,
+        indexed_files: set[str] | None = None,
+        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+    ) -> bool:
+        if knowledge is not None and knowledge is not self.get_knowledge():
+            candidate_started.set()
+            await asyncio.Event().wait()
+        return await original_index_file_locked(
+            self,
+            resolved_path,
+            upsert=upsert,
+            knowledge=knowledge,
+            indexed_files=indexed_files,
+            indexed_signatures=indexed_signatures,
+        )
+
+    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _block_candidate)
+    refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
+    await candidate_started.wait()
+    cancelled_candidate_collections = set(_VectorDb.collections) - existing_collections
+    assert any("_candidate_" in collection for collection in cancelled_candidate_collections)
+
+    refresh_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_task
+
+    assert set(_VectorDb.collections).isdisjoint(cancelled_candidate_collections)
+    knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    assert knowledge is not None
+    assert [document.content for document in knowledge.search("cancel", max_results=5)] == ["cancel stable"]
 
 
 @pytest.mark.asyncio
@@ -2035,12 +2128,17 @@ async def test_first_time_partial_refresh_does_not_publish_ready_snapshot(
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _skip_bad_file)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert result.indexed_count == 1
     assert result.published is False
+    assert state is not None
+    assert state.collection is None
     assert lookup.snapshot is None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
+    assert not any("_candidate_" in collection for collection in _VectorDb.collections)
 
 
 @pytest.mark.asyncio
@@ -3626,15 +3724,73 @@ async def test_git_credentials_service_token_stays_out_of_git_config_and_metadat
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     metadata_text = snapshot_metadata_path(key).read_text(encoding="utf-8")
     git_config_text = (docs_path / ".git" / "config").read_text(encoding="utf-8")
+    clone_env = clone_envs[0]
 
     assert result.published is True
-    assert clone_envs
-    assert "secret-token" in str(clone_envs[0])
+    assert clone_env is not None
+    assert clone_env["GIT_CONFIG_KEY_0"] == f"http.{clean_url}.extraHeader"
+    assert clone_env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
+    assert "secret-token" not in str(clone_env)
     assert "secret-token" not in git_config_text
     assert "x-access-token" not in git_config_text
     assert clean_url in git_config_text
     assert "secret-token" not in metadata_text
     assert "x-access-token" not in metadata_text
+
+
+@pytest.mark.asyncio
+async def test_git_embedded_userinfo_url_is_not_reused_in_git_auth_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedded Git URL userinfo should become process-local auth without echoing the raw URL."""
+    docs_path = tmp_path / "docs"
+    raw_url = "https://git-user:secret-token@example.com/org/private.git"
+    clean_url = "https://example.com/org/private.git"
+    git_config = KnowledgeGitConfig(repo_url=raw_url, branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    clone_envs: list[dict[str, str] | None] = []
+
+    async def _fake_run_git(
+        self: KnowledgeManager,
+        args: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        _ = (self, cwd)
+        if args[0] == "clone":
+            clone_envs.append(env)
+            assert args[-2] == clean_url
+            target = Path(args[-1])
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "doc.md").write_text("embedded userinfo content", encoding="utf-8")
+            return ""
+        if args == ["remote", "set-url", "origin", clean_url]:
+            return ""
+        if args == ["ls-files", "-z"]:
+            return "doc.md\x00"
+        if args == ["rev-parse", "HEAD"]:
+            return "rev-userinfo\n"
+        return ""
+
+    monkeypatch.setattr(KnowledgeManager, "_run_git", _fake_run_git)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    clone_env = clone_envs[0]
+
+    assert result.published is True
+    assert clone_env is not None
+    assert clone_env["GIT_CONFIG_KEY_0"] == f"http.{clean_url}.extraHeader"
+    assert clone_env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
+    assert raw_url not in str(clone_env)
+    assert "secret-token" not in str(clone_env)
 
 
 @pytest.mark.asyncio

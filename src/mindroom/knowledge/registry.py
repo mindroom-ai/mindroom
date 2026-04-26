@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
@@ -842,19 +843,14 @@ def _state_collection_names(key: KnowledgeSnapshotKey, state: PublishedIndexingS
     return tuple(dict.fromkeys(collections))
 
 
-def mark_published_snapshot_stale(
+def _snapshot_keys_for_shared_source(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> tuple[str, ...]:
-    """Mark metadata stale after a direct source mutation.
-
-    Callers that mutate files must hold ``knowledge_binding_mutation_lock`` so
-    stale writes stay serialized with refresh publishes for the same binding.
-    Returns the configured base IDs sharing the mutated physical source.
-    """
+) -> tuple[KnowledgeSnapshotKey, ...]:
+    """Return snapshot keys reading the same physical source as ``base_id``."""
     key = resolve_snapshot_key(
         base_id,
         config=config,
@@ -884,21 +880,73 @@ def mark_published_snapshot_stale(
             continue
         if _same_physical_source(candidate_key, key):
             matching_keys.append(candidate_key)
+    return tuple(matching_keys)
 
+
+def _mark_snapshot_key_stale_on_disk(matching_key: KnowledgeSnapshotKey) -> bool:
+    metadata_path = snapshot_metadata_path(matching_key)
+    state = load_published_indexing_state(metadata_path)
+    if state is None:
+        return False
+
+    updated_state = replace(
+        state,
+        availability=KnowledgeAvailability.STALE.value,
+        source_signature=None,
+    )
+    save_published_indexing_state(metadata_path, updated_state)
+    return True
+
+
+def mark_published_snapshot_stale(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> tuple[str, ...]:
+    """Mark metadata stale after a direct source mutation.
+
+    Callers that mutate files must hold ``knowledge_binding_mutation_lock`` so
+    stale writes stay serialized with refresh publishes for the same binding.
+    Returns the configured base IDs sharing the mutated physical source.
+    """
+    matching_keys = _snapshot_keys_for_shared_source(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
     for matching_key in matching_keys:
-        metadata_path = snapshot_metadata_path(matching_key)
-        state = load_published_indexing_state(metadata_path)
-        if state is None:
-            continue
+        if _mark_snapshot_key_stale_on_disk(matching_key):
+            _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
+    return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
-        updated_state = replace(
-            state,
-            availability=KnowledgeAvailability.STALE.value,
-            source_signature=None,
-        )
-        save_published_indexing_state(metadata_path, updated_state)
-        _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
-    return tuple(dict.fromkeys(matching_key.base_id for matching_key in matching_keys))
+
+async def mark_published_snapshot_stale_async(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> tuple[str, ...]:
+    """Async variant for request handlers that keeps disk I/O off the event loop.
+
+    The caller still holds ``knowledge_binding_mutation_lock`` while this runs.
+    Metadata load/save happens in a worker thread, then process-local registry
+    eviction runs back on the event-loop thread so the globals remain single-threaded.
+    """
+    matching_keys = _snapshot_keys_for_shared_source(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    for matching_key in matching_keys:
+        stale_written = await asyncio.to_thread(_mark_snapshot_key_stale_on_disk, matching_key)
+        if stale_written:
+            _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
+    return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 
 def clear_published_snapshots() -> None:

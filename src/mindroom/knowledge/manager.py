@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -16,7 +17,7 @@ from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 from agno.knowledge.embedder.ollama import OllamaEmbedder
 from agno.knowledge.knowledge import Knowledge
@@ -348,6 +349,49 @@ def _authenticated_repo_url(
     return urlunparse(parsed._replace(netloc=auth_netloc))
 
 
+def _embedded_http_userinfo(repo_url: str) -> tuple[str, str] | None:
+    parsed = urlparse(repo_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or "@" not in parsed.netloc:
+        return None
+    if not parsed.username:
+        return None
+    return unquote(parsed.username), unquote(parsed.password or "")
+
+
+def _credentials_service_http_userinfo(
+    credentials_service: str | None,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, str] | None:
+    if not credentials_service:
+        return None
+
+    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
+    username = credentials.get("username")
+    token = credentials.get("token") or credentials.get("api_key")
+    password = credentials.get("password")
+
+    if not isinstance(username, str) and token and not password:
+        username = "x-access-token"
+
+    if not isinstance(username, str) or not username:
+        return None
+
+    if isinstance(password, str) and password:
+        return username, password
+    if isinstance(token, str) and token:
+        return username, token
+    return None
+
+
+def _git_http_basic_auth_env(clean_url: str, username: str, secret: str) -> dict[str, str]:
+    encoded = base64.b64encode(f"{username}:{secret}".encode()).decode("ascii")
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": f"http.{clean_url}.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {encoded}",
+    }
+
+
 def _git_auth_env(
     repo_url: str,
     credentials_service: str | None,
@@ -355,6 +399,20 @@ def _git_auth_env(
 ) -> dict[str, str] | None:
     """Return process-local Git config that injects credentials without persisting them."""
     clean_url = _credential_free_repo_url(repo_url)
+    parsed_clean_url = urlparse(clean_url)
+
+    embedded_userinfo = _embedded_http_userinfo(repo_url)
+    if embedded_userinfo is not None:
+        return _git_http_basic_auth_env(clean_url, *embedded_userinfo)
+
+    credentials_userinfo = (
+        _credentials_service_http_userinfo(credentials_service, runtime_paths)
+        if parsed_clean_url.scheme in {"http", "https"}
+        else None
+    )
+    if credentials_userinfo is not None:
+        return _git_http_basic_auth_env(clean_url, *credentials_userinfo)
+
     authenticated_url = (
         repo_url if clean_url != repo_url else _authenticated_repo_url(clean_url, credentials_service, runtime_paths)
     )
@@ -1517,6 +1575,29 @@ class KnowledgeManager:
     def _delete_vector_db(self, vector_db: ChromaDb) -> None:
         vector_db.delete()
 
+    async def _delete_unpublished_candidate_vector_db(self, vector_db: ChromaDb) -> None:
+        cleanup_task = asyncio.create_task(asyncio.to_thread(self._delete_vector_db, vector_db))
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            try:
+                await cleanup_task
+            except Exception:
+                logger.warning(
+                    "Failed to clean unpublished knowledge candidate collection",
+                    base_id=self.base_id,
+                    collection=vector_db.collection_name,
+                    exc_info=True,
+                )
+            raise
+        except Exception:
+            logger.warning(
+                "Failed to clean unpublished knowledge candidate collection",
+                base_id=self.base_id,
+                collection=vector_db.collection_name,
+                exc_info=True,
+            )
+
     def _reset_collection(self) -> None:
         vector_db = self._knowledge.vector_db
         if not isinstance(vector_db, ChromaDb):
@@ -1834,13 +1915,9 @@ class KnowledgeManager:
                 raise TypeError(msg)
 
             await asyncio.to_thread(self._reset_vector_db, candidate_vector_db)
+            candidate_published = False
             candidate_indexed_files: set[str] = set()
             candidate_indexed_signatures: dict[str, _FileSignature | None] = {}
-            last_published_at = persisted_state.last_published_at if persisted_state is not None else None
-            published_revision = persisted_state.published_revision if persisted_state is not None else None
-            persisted_indexed_count = persisted_state.indexed_count if persisted_state is not None else None
-            persisted_source_signature = persisted_state.source_signature if persisted_state is not None else None
-            persisted_retained_collections = persisted_state.retained_collections if persisted_state is not None else ()
 
             async def _save_refresh_failed_state(error: str) -> None:
                 if has_published_snapshot and persisted_state is not None:
@@ -1854,18 +1931,17 @@ class KnowledgeManager:
                         settings=repersisted_settings,
                         collection=persisted_state.collection or live_collection_name,
                         availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
-                        last_published_at=last_published_at,
-                        published_revision=published_revision,
+                        last_published_at=persisted_state.last_published_at,
+                        published_revision=persisted_state.published_revision,
                         last_error=error,
-                        indexed_count=persisted_indexed_count,
-                        source_signature=persisted_source_signature,
-                        retained_collections=persisted_retained_collections,
+                        indexed_count=persisted_state.indexed_count,
+                        source_signature=persisted_state.source_signature,
+                        retained_collections=persisted_state.retained_collections,
                     )
                     return
                 await asyncio.to_thread(
                     self._save_persisted_indexing_state,
                     _INDEXING_STATUS_INDEXING,
-                    collection=candidate_vector_db.collection_name,
                     availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
                     last_error=error,
                     indexed_count=0,
@@ -1879,70 +1955,71 @@ class KnowledgeManager:
                     indexed_files=candidate_indexed_files,
                     indexed_signatures=candidate_indexed_signatures,
                 )
+                if indexed_count != len(files):
+                    await _save_refresh_failed_state(
+                        f"Indexed {indexed_count} of {len(files)} managed knowledge files",
+                    )
+                    return indexed_count
+
+                expected_paths = {self._relative_path(file_path) for file_path in files}
+                candidate_signatures = {
+                    relative_path: signature
+                    for relative_path, signature in candidate_indexed_signatures.items()
+                    if signature is not None
+                }
+                if set(candidate_signatures) != expected_paths:
+                    await _save_refresh_failed_state(
+                        "Indexed signatures covered "
+                        f"{len(candidate_signatures)} of {len(expected_paths)} managed files",
+                    )
+                    return indexed_count
+
+                candidate_source_signature = _source_signature_from_file_signatures(candidate_signatures)
+                live_source_signature = await asyncio.to_thread(
+                    knowledge_source_signature,
+                    self.config,
+                    self.base_id,
+                    self._knowledge_source_path(),
+                    tracked_relative_paths=self._git_tracked_relative_paths,
+                )
+                if live_source_signature != candidate_source_signature:
+                    await _save_refresh_failed_state("Knowledge source changed during refresh; refresh skipped")
+                    return indexed_count
+
+                retained_collections = self._retained_collections_after_publish(
+                    published_collection=candidate_vector_db.collection_name,
+                    previous_state=persisted_state,
+                )
+                await asyncio.to_thread(
+                    self._save_persisted_indexing_state,
+                    _INDEXING_STATUS_COMPLETE,
+                    collection=candidate_vector_db.collection_name,
+                    availability=_INDEXING_AVAILABILITY_READY,
+                    last_published_at=datetime.now(tz=UTC).isoformat(),
+                    published_revision=self._git_last_successful_commit,
+                    indexed_count=len(candidate_indexed_files),
+                    source_signature=candidate_source_signature,
+                    retained_collections=retained_collections,
+                )
+                candidate_published = True
+                self._knowledge.vector_db = candidate_vector_db
+                async with self._state_lock:
+                    self._indexed_files = candidate_indexed_files
+                    self._indexed_signatures = candidate_indexed_signatures
+                await asyncio.to_thread(
+                    self._cleanup_superseded_collections,
+                    previous_state=persisted_state,
+                    retained_collections=retained_collections,
+                    protected_collections=protected_collections,
+                )
             except Exception as exc:
-                await asyncio.to_thread(self._delete_vector_db, candidate_vector_db)
                 await _save_refresh_failed_state(redact_credentials_in_text(str(exc)))
                 raise
-
-            if indexed_count != len(files):
-                await asyncio.to_thread(self._delete_vector_db, candidate_vector_db)
-                await _save_refresh_failed_state(
-                    f"Indexed {indexed_count} of {len(files)} managed knowledge files",
-                )
+            else:
                 return indexed_count
-
-            expected_paths = {self._relative_path(file_path) for file_path in files}
-            candidate_signatures = {
-                relative_path: signature
-                for relative_path, signature in candidate_indexed_signatures.items()
-                if signature is not None
-            }
-            if set(candidate_signatures) != expected_paths:
-                await asyncio.to_thread(self._delete_vector_db, candidate_vector_db)
-                await _save_refresh_failed_state(
-                    f"Indexed signatures covered {len(candidate_signatures)} of {len(expected_paths)} managed files",
-                )
-                return indexed_count
-
-            candidate_source_signature = _source_signature_from_file_signatures(candidate_signatures)
-            live_source_signature = await asyncio.to_thread(
-                knowledge_source_signature,
-                self.config,
-                self.base_id,
-                self._knowledge_source_path(),
-                tracked_relative_paths=self._git_tracked_relative_paths,
-            )
-            if live_source_signature != candidate_source_signature:
-                await asyncio.to_thread(self._delete_vector_db, candidate_vector_db)
-                await _save_refresh_failed_state("Knowledge source changed during refresh; refresh skipped")
-                return indexed_count
-
-            retained_collections = self._retained_collections_after_publish(
-                published_collection=candidate_vector_db.collection_name,
-                previous_state=persisted_state,
-            )
-            await asyncio.to_thread(
-                self._save_persisted_indexing_state,
-                _INDEXING_STATUS_COMPLETE,
-                collection=candidate_vector_db.collection_name,
-                availability=_INDEXING_AVAILABILITY_READY,
-                last_published_at=datetime.now(tz=UTC).isoformat(),
-                published_revision=self._git_last_successful_commit,
-                indexed_count=len(candidate_indexed_files),
-                source_signature=candidate_source_signature,
-                retained_collections=retained_collections,
-            )
-            self._knowledge.vector_db = candidate_vector_db
-            async with self._state_lock:
-                self._indexed_files = candidate_indexed_files
-                self._indexed_signatures = candidate_indexed_signatures
-            await asyncio.to_thread(
-                self._cleanup_superseded_collections,
-                previous_state=persisted_state,
-                retained_collections=retained_collections,
-                protected_collections=protected_collections,
-            )
-            return indexed_count
+            finally:
+                if not candidate_published:
+                    await self._delete_unpublished_candidate_vector_db(candidate_vector_db)
 
     async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:
         """Index or reindex a single file."""

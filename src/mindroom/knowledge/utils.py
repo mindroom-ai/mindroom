@@ -285,31 +285,34 @@ def _schedule_refresh_for_availability(
 
     refresh_key = refresh_key_for_snapshot_key(lookup.key)
     if availability is KnowledgeAvailability.READY:
-        if (
-            lookup.refresh_on_access
-            and _ready_refresh_on_access_due(lookup, config)
-            and not _refresh_owner_is_refreshing(
-                refresh_owner,
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-            )
-            and _refresh_schedule_due(
+        if not lookup.refresh_on_access or not _ready_refresh_on_access_due(lookup, config):
+            return availability
+
+        owner_is_refreshing = _refresh_owner_is_refreshing(
+            refresh_owner,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
+        schedule_due = (
+            False
+            if owner_is_refreshing
+            else _refresh_schedule_due(
                 refresh_key,
                 KnowledgeAvailability.READY,
                 settings=lookup.key.indexing_settings,
                 cooldown_seconds=_ready_refresh_on_access_cooldown_seconds(lookup, config),
             )
-        ):
+        )
+        if schedule_due:
             refresh_owner.schedule_refresh(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             )
-            return KnowledgeAvailability.STALE
-        return availability
+        return KnowledgeAvailability.STALE
 
     if availability is KnowledgeAvailability.INITIALIZING:
         if _refresh_schedule_due(refresh_key, availability, settings=lookup.key.indexing_settings):

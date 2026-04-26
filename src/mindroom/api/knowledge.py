@@ -20,7 +20,7 @@ from mindroom.knowledge import (
     is_refresh_active_for_binding,
     knowledge_binding_mutation_lock,
     load_published_indexing_state,
-    mark_published_snapshot_stale,
+    mark_published_snapshot_stale_async,
     redact_credentials_in_text,
     redact_url_credentials,
     refresh_knowledge_binding,
@@ -536,7 +536,7 @@ async def upload_knowledge_files(
 
         _commit_staged_uploads(staged_uploads)
         uploaded = [staged.relative_path for staged in staged_uploads]
-        affected_base_ids = mark_published_snapshot_stale(
+        affected_base_ids = await mark_published_snapshot_stale_async(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -567,7 +567,7 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
 
         relative_path = target.relative_to(root.resolve()).as_posix()
         target.unlink()
-        affected_base_ids = mark_published_snapshot_stale(
+        affected_base_ids = await mark_published_snapshot_stale_async(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
