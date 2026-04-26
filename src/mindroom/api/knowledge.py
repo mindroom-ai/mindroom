@@ -24,6 +24,7 @@ from mindroom.knowledge import (
     load_published_indexing_state,
     mark_snapshot_dirty_async,
     mark_snapshot_file_deleted_async,
+    mark_snapshot_files_deleted_async,
     redact_credentials_in_text,
     redact_url_credentials,
     refresh_knowledge_binding,
@@ -234,6 +235,7 @@ async def _mark_deleted_after_committed_mutation(
     config: Config,
     runtime_paths: constants.RuntimePaths,
     relative_path: str,
+    reason: str = "dashboard_delete",
 ) -> tuple[tuple[str, ...], bool]:
     deleted_task = asyncio.create_task(
         mark_snapshot_file_deleted_async(
@@ -241,6 +243,39 @@ async def _mark_deleted_after_committed_mutation(
             config=config,
             runtime_paths=runtime_paths,
             relative_path=relative_path,
+            reason=reason,
+        ),
+    )
+    try:
+        return await asyncio.shield(deleted_task), False
+    except asyncio.CancelledError:
+        return await deleted_task, True
+
+
+async def _mark_upload_after_committed_mutation(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    committed_uploads: list[_CommittedUpload],
+) -> tuple[tuple[str, ...], bool]:
+    replacement_paths = tuple(
+        dict.fromkeys(committed.relative_path for committed in committed_uploads if committed.backup_path is not None),
+    )
+    if not replacement_paths:
+        return await _mark_dirty_after_committed_mutation(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            reason="dashboard_upload",
+        )
+    deleted_task = asyncio.create_task(
+        mark_snapshot_files_deleted_async(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            relative_paths=replacement_paths,
+            reason="dashboard_upload",
         ),
     )
     try:
@@ -681,11 +716,11 @@ async def upload_knowledge_files(
         committed_uploads: list[_CommittedUpload] = []
         try:
             committed_uploads = _commit_staged_uploads(staged_uploads)
-            affected_base_ids, cancelled_after_dirty = await _mark_dirty_after_committed_mutation(
+            affected_base_ids, cancelled_after_dirty = await _mark_upload_after_committed_mutation(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
-                reason="dashboard_upload",
+                committed_uploads=committed_uploads,
             )
         except (asyncio.CancelledError, Exception):
             _rollback_committed_uploads(committed_uploads)

@@ -1052,6 +1052,8 @@ describe("Knowledge", () => {
     await screen.findByText("Active: docs");
 
     expect(screen.getByLabelText("Folder Path")).toBeInTheDocument();
+    expect(screen.getByText("Refresh on Access")).toBeInTheDocument();
+    expect(screen.getByText(/Local folders only/)).toBeInTheDocument();
     expect(
       screen.queryByLabelText("Current Repository URL"),
     ).not.toBeInTheDocument();
@@ -1068,6 +1070,7 @@ describe("Knowledge", () => {
       screen.getByLabelText("Replacement Repository URL"),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Folder Path")).toBeInTheDocument();
+    expect(screen.queryByText("Refresh on Access")).not.toBeInTheDocument();
     expect(mockUpdateKnowledgeBase).toHaveBeenCalledWith(
       "docs",
       expect.objectContaining({
@@ -1090,6 +1093,7 @@ describe("Knowledge", () => {
     expect(
       screen.queryByLabelText("Replacement Repository URL"),
     ).not.toBeInTheDocument();
+    expect(screen.getByText("Refresh on Access")).toBeInTheDocument();
     expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
       "docs",
       expect.objectContaining({ git: undefined }),

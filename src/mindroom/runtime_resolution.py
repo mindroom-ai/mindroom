@@ -84,7 +84,6 @@ class ResolvedKnowledgeBinding:
     storage_root: Path
     knowledge_path: Path
     request_scoped: bool
-    start_background_watchers: bool
     incremental_sync_on_access: bool
 
 
@@ -294,7 +293,6 @@ def resolve_knowledge_binding(
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
             knowledge_path=knowledge_path,
             request_scoped=False,
-            start_background_watchers=start_watchers and refresh_enabled,
             # Shared Git bases poll through STALE scheduling after their interval, not through READY refresh_on_access.
             incremental_sync_on_access=base_config.watch and base_config.git is None and not start_watchers,
         )
@@ -319,9 +317,6 @@ def resolve_knowledge_binding(
             field_name=f"knowledge base '{base_id}' path",
         ),
         request_scoped=agent_runtime.policy.request_scoped_knowledge_enabled,
-        start_background_watchers=(
-            start_watchers and refresh_enabled and not agent_runtime.policy.request_scoped_knowledge_enabled
-        ),
         incremental_sync_on_access=(
             refresh_enabled and (agent_runtime.policy.request_scoped_knowledge_enabled or not start_watchers)
         ),

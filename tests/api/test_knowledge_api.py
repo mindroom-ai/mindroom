@@ -216,10 +216,11 @@ def test_status_treats_collection_probe_failure_as_unavailable(tmp_path: Path) -
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     _write_snapshot_metadata(config, runtime_paths, indexed_count=4)
+    seen_embedders: list[str] = []
 
     class _BrokenVectorDb:
         def __init__(self, *, embedder: object, **_kwargs: object) -> None:
-            assert type(embedder).__name__ == "_SnapshotExistenceEmbedder"
+            seen_embedders.append(type(embedder).__name__)
 
         def exists(self) -> bool:
             msg = "corrupt collection"
@@ -234,6 +235,7 @@ def test_status_treats_collection_probe_failure_as_unavailable(tmp_path: Path) -
     assert response.status_code == 200
     assert response.json()["indexed_count"] == 4
     assert response.json()["manager_available"] is False
+    assert seen_embedders == ["_CollectionExistenceEmbedder"]
 
 
 def test_status_collection_probe_runs_off_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -703,7 +705,7 @@ def test_upload_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", _fail_dirty_mark),
+        patch("mindroom.api.knowledge.mark_snapshot_files_deleted_async", _fail_dirty_mark),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="dirty mark failed"),
     ):
@@ -779,7 +781,7 @@ async def test_upload_cancellation_after_dirty_mark_finalizes_backup_and_schedul
         await release_dirty.wait()
         return ("research",)
 
-    monkeypatch.setattr(knowledge_api, "mark_snapshot_dirty_async", _slow_dirty_mark)
+    monkeypatch.setattr(knowledge_api, "mark_snapshot_files_deleted_async", _slow_dirty_mark)
 
     upload_task = asyncio.create_task(
         knowledge_api.upload_knowledge_files(
@@ -830,7 +832,7 @@ def test_upload_commit_failure_leaves_ready_snapshot_unchanged_and_skips_refresh
 
     with (
         patch("mindroom.api.knowledge._commit_staged_uploads", _fail_commit),
-        patch("mindroom.api.knowledge.mark_snapshot_file_deleted_async", side_effect=AssertionError("no dirty")),
+        patch("mindroom.api.knowledge.mark_snapshot_files_deleted_async", side_effect=AssertionError("no dirty")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="commit failed"),
     ):

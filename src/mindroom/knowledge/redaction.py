@@ -75,14 +75,18 @@ def redact_credentials_in_text(value: str) -> str:
 
 
 def credential_free_url_identity(value: str) -> str:
-    """Return a stable repo URL identity that never persists URL userinfo."""
+    """Return a stable repo URL identity that never persists secret-bearing userinfo."""
     parsed = urlparse(value)
     if parsed.scheme and parsed.netloc:
-        host = parsed.netloc.rsplit("@", 1)[-1].lower()
+        netloc = parsed.netloc.rsplit("@", 1)[-1].lower()
+        if parsed.scheme == "ssh" and "@" in parsed.netloc and parsed.password is None:
+            userinfo, host = parsed.netloc.rsplit("@", 1)
+            if userinfo and ":" not in userinfo:
+                netloc = f"{userinfo}@{host.lower()}"
         normalized = urlunparse(
             parsed._replace(
                 scheme=parsed.scheme.lower(),
-                netloc=host,
+                netloc=netloc,
                 path=_strip_path_params(parsed.path),
                 params="",
                 query="",

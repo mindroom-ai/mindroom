@@ -846,7 +846,6 @@ class KnowledgeManager:
     runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
-    git_background_startup_allowed: bool = field(default=True, repr=False)
     _settings: tuple[str, ...] = field(init=False)
     _indexing_settings: tuple[str, ...] = field(init=False)
     _base_storage_path: Path = field(init=False)

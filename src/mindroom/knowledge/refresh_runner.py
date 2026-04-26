@@ -262,7 +262,6 @@ async def _refresh_knowledge_binding_locked(
             runtime_paths=runtime_paths,
             storage_path=binding.storage_root,
             knowledge_path=binding.knowledge_path,
-            git_background_startup_allowed=False,
         )
         unchanged_result = await _maybe_publish_unchanged_snapshot(
             manager,

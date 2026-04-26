@@ -94,6 +94,14 @@ class SnapshotDeleteTombstone:
 
 
 @dataclass(frozen=True)
+class _SidecarBackup:
+    """Exact pre-mutation bytes for a snapshot sidecar."""
+
+    path: Path
+    content: bytes | None
+
+
+@dataclass(frozen=True)
 class KnowledgeAdvisoryState:
     """Sidecar state for dirty/refresh/failure notices about a published snapshot."""
 
@@ -543,6 +551,35 @@ def save_snapshot_delete_tombstones(
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _capture_sidecar(path: Path) -> _SidecarBackup:
+    return _SidecarBackup(
+        path=path,
+        content=path.read_bytes() if path.exists() else None,
+    )
+
+
+def _restore_sidecar(backup: _SidecarBackup) -> None:
+    if backup.content is None:
+        backup.path.unlink(missing_ok=True)
+        return
+    backup.path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = backup.path.with_name(f".{backup.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_bytes(backup.content)
+        tmp_path.replace(backup.path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _restore_sidecars(backups: tuple[_SidecarBackup, ...]) -> None:
+    for backup in backups:
+        try:
+            _restore_sidecar(backup)
+        except Exception:
+            logger.warning("Failed to roll back knowledge snapshot sidecar", path=str(backup.path), exc_info=True)
 
 
 def load_knowledge_snapshot_state(key: KnowledgeSnapshotKey) -> KnowledgeSnapshotState:
@@ -1220,26 +1257,41 @@ def _mark_snapshot_key_dirty_on_disk(matching_key: KnowledgeSnapshotKey, *, reas
     return True
 
 
-def _mark_snapshot_key_file_deleted_on_disk(matching_key: KnowledgeSnapshotKey, *, relative_path: str) -> bool:
+def _snapshot_key_mutation_sidecar_backups(matching_key: KnowledgeSnapshotKey) -> tuple[_SidecarBackup, ...]:
+    return (
+        _capture_sidecar(snapshot_delete_tombstones_path(matching_key)),
+        _capture_sidecar(snapshot_advisory_path(matching_key)),
+    )
+
+
+def _mark_snapshot_key_files_deleted_on_disk(
+    matching_key: KnowledgeSnapshotKey,
+    *,
+    relative_paths: tuple[str, ...],
+    reason: str,
+) -> bool:
     state = load_published_indexing_state(snapshot_metadata_path(matching_key))
     if state is not None and state.status == "complete":
         collection = _state_collection_name(matching_key, state)
         sidecar_path = snapshot_delete_tombstones_path(matching_key)
+        deleted_paths = frozenset(relative_paths)
         tombstones = [
             tombstone
             for tombstone in load_snapshot_delete_tombstones(sidecar_path)
-            if not (tombstone.collection == collection and tombstone.source_path == relative_path)
+            if not (tombstone.collection == collection and tombstone.source_path in deleted_paths)
         ]
-        tombstones.append(
+        deleted_at = _utc_now()
+        tombstones.extend(
             SnapshotDeleteTombstone(
                 source_path=relative_path,
                 collection=collection,
-                deleted_at=_utc_now(),
-            ),
+                deleted_at=deleted_at,
+            )
+            for relative_path in relative_paths
         )
         save_snapshot_delete_tombstones(sidecar_path, tuple(tombstones))
         _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
-    save_snapshot_dirty_state(matching_key, reason="dashboard_delete")
+    save_snapshot_dirty_state(matching_key, reason=reason)
     return True
 
 
@@ -1268,6 +1320,47 @@ def mark_snapshot_dirty(
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 
+def mark_snapshot_files_deleted(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    relative_paths: tuple[str, ...],
+    execution_identity: ToolExecutionIdentity | None = None,
+    reason: str = "dashboard_delete",
+) -> tuple[str, ...]:
+    """Mark destructive source deletes without blocking last-good reads for other files."""
+    unique_relative_paths = tuple(dict.fromkeys(relative_paths))
+    if not unique_relative_paths:
+        return mark_snapshot_dirty(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            reason=reason,
+        )
+    matching_keys = _snapshot_keys_for_shared_source(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    backups = tuple(
+        backup for matching_key in matching_keys for backup in _snapshot_key_mutation_sidecar_backups(matching_key)
+    )
+    try:
+        for matching_key in matching_keys:
+            _mark_snapshot_key_files_deleted_on_disk(
+                matching_key,
+                relative_paths=unique_relative_paths,
+                reason=reason,
+            )
+    except Exception:
+        _restore_sidecars(backups)
+        raise
+    return tuple(dict.fromkeys(key.base_id for key in matching_keys))
+
+
 def mark_snapshot_file_deleted(
     base_id: str,
     *,
@@ -1275,17 +1368,17 @@ def mark_snapshot_file_deleted(
     runtime_paths: RuntimePaths,
     relative_path: str,
     execution_identity: ToolExecutionIdentity | None = None,
+    reason: str = "dashboard_delete",
 ) -> tuple[str, ...]:
-    """Mark a destructive source delete without blocking last-good reads for other files."""
-    matching_keys = _snapshot_keys_for_shared_source(
+    """Mark one destructive source delete without blocking last-good reads for other files."""
+    return mark_snapshot_files_deleted(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
+        relative_paths=(relative_path,),
         execution_identity=execution_identity,
+        reason=reason,
     )
-    for matching_key in matching_keys:
-        _mark_snapshot_key_file_deleted_on_disk(matching_key, relative_path=relative_path)
-    return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 
 async def mark_snapshot_dirty_async(
@@ -1326,23 +1419,25 @@ async def mark_snapshot_dirty_async(
         raise
 
 
-async def mark_snapshot_file_deleted_async(
+async def mark_snapshot_files_deleted_async(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    relative_path: str,
+    relative_paths: tuple[str, ...],
     execution_identity: ToolExecutionIdentity | None = None,
+    reason: str = "dashboard_delete",
 ) -> tuple[str, ...]:
     """Async destructive-delete marker that keeps advisory I/O off the event loop."""
     write_task = asyncio.create_task(
         asyncio.to_thread(
-            mark_snapshot_file_deleted,
+            mark_snapshot_files_deleted,
             base_id,
             config=config,
             runtime_paths=runtime_paths,
-            relative_path=relative_path,
+            relative_paths=relative_paths,
             execution_identity=execution_identity,
+            reason=reason,
         ),
     )
     try:
@@ -1354,10 +1449,30 @@ async def mark_snapshot_file_deleted_async(
             logger.warning(
                 "Knowledge delete tombstone write failed after cancellation",
                 base_id=base_id,
-                relative_path=relative_path,
+                relative_paths=relative_paths,
                 exc_info=True,
             )
         raise
+
+
+async def mark_snapshot_file_deleted_async(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    relative_path: str,
+    execution_identity: ToolExecutionIdentity | None = None,
+    reason: str = "dashboard_delete",
+) -> tuple[str, ...]:
+    """Async single-file destructive-delete marker that keeps advisory I/O off the event loop."""
+    return await mark_snapshot_files_deleted_async(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        relative_paths=(relative_path,),
+        execution_identity=execution_identity,
+        reason=reason,
+    )
 
 
 def clear_published_snapshots() -> None:

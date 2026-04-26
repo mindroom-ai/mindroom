@@ -663,6 +663,105 @@ async def test_dashboard_delete_tombstone_filters_last_good_after_refresh_failur
     owner.schedule_refresh.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_dashboard_replacement_upload_tombstone_filters_last_good_after_refresh_failure(tmp_path: Path) -> None:
+    """A dashboard replacement upload must hide old vectors for that source path until replacement publish."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("replaced secret", encoding="utf-8")
+    (docs_path / "keep.md").write_text("kept public", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    initial_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    assert initial_knowledge is not None
+    assert {document.content for document in initial_knowledge.search("anything", max_results=5)} == {
+        "replaced secret",
+        "kept public",
+    }
+
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    owner = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    owner.is_refreshing = MagicMock(return_value=False)
+    main.app.state.knowledge_refresh_owner = owner
+    try:
+        response = TestClient(main.app).post(
+            "/api/knowledge/bases/docs/upload",
+            files=[("files", ("guide.md", b"replacement content", "text/markdown"))],
+        )
+    finally:
+        main.app.state.knowledge_refresh_owner = None
+    assert response.status_code == 200
+
+    pending_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    assert pending_knowledge is not None
+    assert [document.content for document in pending_knowledge.search("anything", max_results=5)] == [
+        "kept public",
+    ]
+
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.save_snapshot_refresh_failed_state(key, error="refresh failed after replacement")
+    filtered_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+
+    assert (docs_path / "guide.md").read_text(encoding="utf-8") == "replacement content"
+    assert filtered_knowledge is not None
+    assert [document.content for document in filtered_knowledge.search("anything", max_results=5)] == [
+        "kept public",
+    ]
+    owner.schedule_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_delete_rolls_back_tombstones_when_same_source_advisory_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a later same-source marker write fails, restored files must remain searchable."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("restored public", encoding="utf-8")
+    config = _config(tmp_path, bases={"research": docs_path, "summary": docs_path}, agent_bases=["research", "summary"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("research", config=config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding("summary", config=config, runtime_paths=runtime_paths)
+    original_save_dirty = knowledge_registry.save_snapshot_dirty_state
+    dirty_write_count = 0
+
+    def _fail_second_dirty_write(*args: object, **kwargs: object) -> None:
+        nonlocal dirty_write_count
+        dirty_write_count += 1
+        if dirty_write_count == 2:
+            msg = "same-source dirty write failed"
+            raise RuntimeError(msg)
+        original_save_dirty(*args, **kwargs)
+
+    monkeypatch.setattr(knowledge_registry, "save_snapshot_dirty_state", _fail_second_dirty_write)
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    owner = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    owner.is_refreshing = MagicMock(return_value=False)
+    main.app.state.knowledge_refresh_owner = owner
+    try:
+        with pytest.raises(RuntimeError, match="same-source dirty write failed"):
+            TestClient(main.app).delete("/api/knowledge/bases/research/files/guide.md")
+    finally:
+        main.app.state.knowledge_refresh_owner = None
+
+    assert dirty_write_count == 2
+    assert (docs_path / "guide.md").read_text(encoding="utf-8") == "restored public"
+    for base_id in ("research", "summary"):
+        lookup = get_published_snapshot(base_id, config=config, runtime_paths=runtime_paths)
+        assert lookup.snapshot is not None
+        assert lookup.availability is KnowledgeAvailability.READY
+        assert [document.content for document in lookup.snapshot.knowledge.search("anything", max_results=5)] == [
+            "restored public",
+        ]
+    owner.schedule_refresh.assert_not_called()
+
+
 def test_tombstone_filtering_overfetches_sync_results_to_fill_limit() -> None:
     """A tombstoned top hit must not hide the next live result."""
     collection = "tombstone_overfetch_sync"
@@ -1351,6 +1450,63 @@ def test_legacy_git_raw_url_metadata_is_compatible_with_redacted_identity(tmp_pa
     assert lookup.snapshot is not None
     assert lookup.availability is KnowledgeAvailability.READY
     assert [document.content for document in lookup.snapshot.knowledge.search("git", max_results=5)] == ["legacy git"]
+
+
+def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_path: Path) -> None:
+    """Passwordless SSH usernames are part of the persisted snapshot identity."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("git user snapshot", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="ssh://git@example.com/org/repo.git")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    collection = "ssh_git_user_collection"
+    _VectorDb.collections[collection] = [
+        {"content": "git user snapshot", "metadata": {"source_path": "doc.md"}},
+    ]
+    metadata_path = snapshot_metadata_path(key)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "settings": list(key.indexing_settings),
+                "status": "complete",
+                "collection": collection,
+            },
+        ),
+        encoding="utf-8",
+    )
+    changed_config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="ssh://deploy@example.com/org/repo.git")},
+    )
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    unavailable: dict[str, KnowledgeAvailability] = {}
+
+    lookup = get_published_snapshot("docs", config=changed_config, runtime_paths=runtime_paths)
+    knowledge = get_agent_knowledge(
+        "helper",
+        changed_config,
+        runtime_paths,
+        refresh_owner=owner,
+        on_unavailable_bases=unavailable.update,
+    )
+
+    assert lookup.snapshot is None
+    assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
+    assert knowledge is None
+    assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
+    owner.schedule_initial_load.assert_not_called()
+    owner.schedule_refresh.assert_called_once()
 
 
 def test_legacy_refresh_failed_metadata_without_advisory_reports_failed(tmp_path: Path) -> None:
@@ -2915,8 +3071,10 @@ async def test_api_delete_marks_snapshot_stale_and_filters_retained_vectors(tmp_
 
 
 @pytest.mark.asyncio
-async def test_api_upload_marks_snapshot_stale_without_mutating_published_vectors(tmp_path: Path) -> None:
-    """Upload mutations should not edit the retained last-good published collection."""
+async def test_api_replacement_upload_marks_snapshot_stale_and_hides_published_file(
+    tmp_path: Path,
+) -> None:
+    """Replacement uploads should hide the replaced last-good file until refresh publishes."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("old upload", encoding="utf-8")
@@ -2945,7 +3103,8 @@ async def test_api_upload_marks_snapshot_stale_without_mutating_published_vector
     assert response.status_code == 200
     assert knowledge is not None
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    assert [document.content for document in knowledge.search("upload", max_results=5)] == ["old upload"]
+    assert [document.content for document in knowledge.search("old upload", max_results=5)] == []
+    assert [document.content for document in knowledge.search("new upload", max_results=5)] == []
     owner.schedule_refresh.assert_called_once()
 
 
@@ -5442,8 +5601,11 @@ def test_credential_free_repo_url_strips_secret_bearing_userinfo() -> None:
     )
 
 
-def test_git_url_identity_strips_non_http_userinfo() -> None:
-    """Credential rotation in parsed Git URLs must not change the persisted repo identity."""
+def test_git_url_identity_preserves_passwordless_ssh_usernames() -> None:
+    """Passwordless SSH usernames are identity, but secret-bearing userinfo is not."""
+    assert credential_free_url_identity("ssh://git@example.com/org/repo.git") != credential_free_url_identity(
+        "ssh://deploy@example.com/org/repo.git",
+    )
     assert credential_free_url_identity("ssh://user:old@example.com/org/repo.git") == credential_free_url_identity(
         "ssh://user:new@example.com/org/repo.git",
     )

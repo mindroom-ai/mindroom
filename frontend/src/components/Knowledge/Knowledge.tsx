@@ -1228,21 +1228,23 @@ export function Knowledge() {
                   />
                 </div>
 
-                <div className="flex items-center justify-between rounded-md border p-3">
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium">Refresh on Access</p>
-                    <p className="text-xs text-muted-foreground">
-                      Schedule a background refresh when assigned agents access
-                      this base.
-                    </p>
+                {settingsSourceType === "local" ? (
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium">Refresh on Access</p>
+                      <p className="text-xs text-muted-foreground">
+                        Local folders only. Schedule a background refresh when
+                        assigned agents access this base.
+                      </p>
+                    </div>
+                    <Checkbox
+                      checked={settings.watch}
+                      onCheckedChange={(checked) =>
+                        updateSettings({ watch: checked === true })
+                      }
+                    />
                   </div>
-                  <Checkbox
-                    checked={settings.watch}
-                    onCheckedChange={(checked) =>
-                      updateSettings({ watch: checked === true })
-                    }
-                  />
-                </div>
+                ) : null}
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
