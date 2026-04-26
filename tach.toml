@@ -1674,13 +1674,20 @@ expose = [
     "show_tool_calls_for_agent",
     "build_agent_toolkit",
     "get_agent_toolkit_names",
-    "create_session_storage",
-    "get_agent_session",
-    "get_team_session",
     "remove_run_by_event_id",
     "get_agent_ids_for_room",
 ]
 from = ["mindroom.agents"]
+
+[[interfaces]]
+expose = [
+    "create_session_storage",
+    "create_state_storage_db",
+    "get_agent_runtime_sqlite_dbs",
+    "get_agent_session",
+    "get_team_session",
+]
+from = ["mindroom.agent_storage"]
 
 [[interfaces]]
 expose = [
