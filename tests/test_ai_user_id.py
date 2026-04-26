@@ -5307,6 +5307,9 @@ class TestUserIdPassthrough:
             input_tokens=800,
             output_tokens=120,
             total_tokens=920,
+            cache_read_tokens=640,
+            cache_write_tokens=32,
+            reasoning_tokens=24,
             time_to_first_token=0.42,
             duration=1.75,
         )
@@ -5336,6 +5339,9 @@ class TestUserIdPassthrough:
         assert payload["run_id"] == "run-1"
         assert payload["status"] == "completed"
         assert payload["usage"]["input_tokens"] == 800
+        assert payload["usage"]["cache_read_tokens"] == 640
+        assert payload["usage"]["cache_write_tokens"] == 32
+        assert payload["usage"]["reasoning_tokens"] == 24
         assert payload["context"]["input_tokens"] == 800
         assert payload["context"]["window_tokens"] == 2000
         assert "utilization_pct" not in payload["context"]
@@ -6049,6 +6055,8 @@ class TestUserIdPassthrough:
                 input_tokens=700,
                 output_tokens=50,
                 total_tokens=750,
+                cache_read_tokens=512,
+                reasoning_tokens=40,
             )
             yield RunContentEvent(content="step two")
             yield ModelRequestCompletedEvent(
@@ -6057,6 +6065,8 @@ class TestUserIdPassthrough:
                 input_tokens=120,
                 output_tokens=20,
                 total_tokens=140,
+                cache_read_tokens=64,
+                reasoning_tokens=8,
             )
 
         mock_agent.arun = MagicMock(return_value=fake_arun_stream())
@@ -6086,5 +6096,7 @@ class TestUserIdPassthrough:
         assert payload["usage"]["input_tokens"] == 820
         assert payload["usage"]["output_tokens"] == 70
         assert payload["usage"]["total_tokens"] == 890
+        assert payload["usage"]["cache_read_tokens"] == 576
+        assert payload["usage"]["reasoning_tokens"] == 48
         assert payload["context"]["input_tokens"] == 120
         assert payload["context"]["window_tokens"] == 1000
