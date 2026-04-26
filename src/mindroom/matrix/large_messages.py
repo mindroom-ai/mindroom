@@ -114,7 +114,11 @@ def _build_nonterminal_streaming_edit_preview(
     """Build an in-progress edit preview without uploading an obsolete sidecar."""
     preview_limit = _NONTERMINAL_STREAM_PREVIEW_BYTES
     while True:
-        preview = _create_preview(preview_text, preview_limit)
+        preview = _create_preview(
+            preview_text,
+            preview_limit,
+            continuation_indicator=_STREAMING_PREVIEW_TRUNCATION_INDICATOR,
+        )
         preview_content: dict[str, Any] = {
             "msgtype": source_content.get("msgtype", "m.text"),
             "body": preview,
@@ -150,14 +154,21 @@ def _prefix_by_bytes(text: str, max_bytes: int) -> str:
 
 
 _CONTINUATION_INDICATOR = "\n\n[Message continues in attached file]"
+_STREAMING_PREVIEW_TRUNCATION_INDICATOR = "\n\n[Streaming preview truncated]"
 
 
-def _create_preview(text: str, max_bytes: int) -> str:
+def _create_preview(
+    text: str,
+    max_bytes: int,
+    *,
+    continuation_indicator: str = _CONTINUATION_INDICATOR,
+) -> str:
     """Create a preview that fits within byte limit.
 
     Args:
         text: The full text to preview
         max_bytes: Maximum size in bytes for the preview
+        continuation_indicator: Marker appended when the preview truncates text
 
     Returns:
         Preview text that fits within the byte limit
@@ -166,12 +177,12 @@ def _create_preview(text: str, max_bytes: int) -> str:
     if len(text.encode("utf-8")) <= max_bytes:
         return text
 
-    indicator_bytes = len(_CONTINUATION_INDICATOR.encode("utf-8"))
+    indicator_bytes = len(continuation_indicator.encode("utf-8"))
     target_bytes = max_bytes - indicator_bytes
     if target_bytes <= 0:
-        return _CONTINUATION_INDICATOR.lstrip()
+        return continuation_indicator.lstrip()
 
-    return _prefix_by_bytes(text, target_bytes) + _CONTINUATION_INDICATOR
+    return _prefix_by_bytes(text, target_bytes) + continuation_indicator
 
 
 async def _upload_text_as_mxc(  # noqa: C901

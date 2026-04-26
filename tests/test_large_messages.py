@@ -245,7 +245,8 @@ async def test_prepare_nonterminal_streaming_edit_uses_preview_without_sidecar()
     assert "url" not in result["m.new_content"]
     assert "file" not in result["m.new_content"]
     assert len(result["m.new_content"]["body"]) < len(text)
-    assert "[Message continues in attached file]" in result["m.new_content"]["body"]
+    assert "[Streaming preview truncated]" in result["m.new_content"]["body"]
+    assert "[Message continues in attached file]" not in result["m.new_content"]["body"]
     assert _calculate_event_size(result) <= 64000
 
 
