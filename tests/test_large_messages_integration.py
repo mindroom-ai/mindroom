@@ -12,7 +12,13 @@ from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.config.models import DefaultsConfig
-from mindroom.constants import AI_RUN_METADATA_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_STREAMING,
+    RuntimePaths,
+    resolve_runtime_paths,
+)
 from mindroom.matrix.client import edit_message_result, send_message_result
 from mindroom.matrix.large_messages import _NORMAL_MESSAGE_LIMIT, prepare_large_message
 from mindroom.streaming import (
@@ -422,18 +428,14 @@ async def test_streaming_multiple_edits_with_growth() -> None:
     # Check final state
     assert len(client.messages_sent) == len(sizes)
 
-    # Last two should have large message handling
-    for i in [-2, -1]:
-        content = client.messages_sent[i][2]
-        # These are edits, so check m.new_content
-        if "m.new_content" in content:
-            assert content["m.new_content"]["msgtype"] == "m.file"
-            assert "io.mindroom.long_text" in content["m.new_content"], (
-                f"Message {i} should have large message handling"
-            )
-        else:
-            assert content["msgtype"] == "m.file"
-            assert "io.mindroom.long_text" in content, f"Message {i} should have large message handling"
+    nonterminal_large_edit = client.messages_sent[-2][2]
+    assert nonterminal_large_edit["m.new_content"]["msgtype"] == "m.text"
+    assert nonterminal_large_edit["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+    assert "io.mindroom.long_text" not in nonterminal_large_edit["m.new_content"]
+
+    terminal_large_edit = client.messages_sent[-1][2]
+    assert terminal_large_edit["m.new_content"]["msgtype"] == "m.file"
+    assert "io.mindroom.long_text" in terminal_large_edit["m.new_content"]
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,13 @@ import json
 import nio
 import pytest
 
-from mindroom.constants import AI_RUN_METADATA_KEY, ORIGINAL_SENDER_KEY, STREAM_WARMUP_SUFFIX_KEY
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    ORIGINAL_SENDER_KEY,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_STREAMING,
+    STREAM_WARMUP_SUFFIX_KEY,
+)
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
     _calculate_event_size,
@@ -204,6 +210,44 @@ async def test_prepare_edit_message() -> None:
     assert result["m.new_content"]["io.mindroom.long_text"]["version"] == 2
     assert client.uploaded_data is not None
     assert json.loads(client.uploaded_data.decode("utf-8")) == edit_content
+
+
+@pytest.mark.asyncio
+async def test_prepare_nonterminal_streaming_edit_uses_preview_without_sidecar() -> None:
+    """In-progress stream edits should not upload obsolete full-content sidecars."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+
+        async def upload(self, **_kwargs: object) -> tuple:
+            msg = "non-terminal stream edit should not upload a sidecar"
+            raise AssertionError(msg)
+
+    client = MockClient()
+    text = "streaming " * 10000
+    edit_content = {
+        "body": f"* {text}",
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.text",
+            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
+        "msgtype": "m.text",
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    assert result["m.new_content"]["msgtype"] == "m.text"
+    assert result["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+    assert result[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+    assert "io.mindroom.long_text" not in result["m.new_content"]
+    assert "url" not in result["m.new_content"]
+    assert "file" not in result["m.new_content"]
+    assert len(result["m.new_content"]["body"]) < len(text)
+    assert "[Streaming preview truncated]" in result["m.new_content"]["body"]
+    assert "[Message continues in attached file]" not in result["m.new_content"]["body"]
+    assert _calculate_event_size(result) <= 64000
 
 
 @pytest.mark.asyncio
