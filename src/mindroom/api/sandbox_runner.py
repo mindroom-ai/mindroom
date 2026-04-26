@@ -245,8 +245,6 @@ def _request_private_agent_names(request: SandboxRunnerExecuteRequest) -> frozen
 def _request_runtime_overrides(
     request: SandboxRunnerExecuteRequest,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None,
-    *,
-    workspace_env_overlay: dict[str, str] | None = None,
 ) -> dict[str, object] | None:
     """Return runtime overrides for one runner-side tool rebuild."""
     runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(
@@ -265,11 +263,6 @@ def _request_runtime_overrides(
             process_env=request.execution_env,
         )
         resolved_keys.extend(resolved.keys())
-    if workspace_env_overlay:
-        # Expose `.mindroom/worker-env.sh` overlay names through the same
-        # extra_env_passthrough channel so the shell tool reads them out of
-        # the effective runtime_paths.process_env snapshot we just built.
-        resolved_keys.extend(name for name in workspace_env_overlay if name not in resolved_keys)
 
     if not resolved_keys:
         return runtime_overrides
@@ -664,10 +657,11 @@ async def _execute_request_inprocess(
         return overlay_failure
     if overlay:
         execution_env.update(overlay)
-    runtime_overrides = _request_runtime_overrides(request, prepared, workspace_env_overlay=overlay)
+    runtime_overrides = _request_runtime_overrides(request, prepared)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
         execution_env,
+        trusted_env_overlay=overlay,
     )
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
@@ -803,9 +797,14 @@ def _execute_request_subprocess_sync(
     if overlay:
         execution_env.update(overlay)
     subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, execution_env)
+    effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
+        runtime_paths,
+        execution_env,
+        trusted_env_overlay=overlay,
+    )
     envelope = sandbox_protocol.serialize_subprocess_envelope(
         request=request.model_dump(mode="json"),
-        runtime_paths=constants.serialize_runtime_paths(runtime_paths),
+        runtime_paths=constants.serialize_runtime_paths(effective_runtime_paths),
         committed_config=base64.b64encode(pickle.dumps(config)).decode("ascii"),
     )
 

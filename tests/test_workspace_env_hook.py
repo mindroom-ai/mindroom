@@ -149,16 +149,16 @@ def test_source_workspace_env_hook_can_append_to_path(tmp_path: Path) -> None:
 
 
 @REQUIRES_BASH
-def test_source_workspace_env_hook_drops_secret_suffixes(tmp_path: Path) -> None:
-    """Secret-suffixed names are filtered while non-secret tokens stay."""
+def test_source_workspace_env_hook_keeps_user_exported_credentials(tmp_path: Path) -> None:
+    """Credential-looking names pass when the hook explicitly exports them."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     hook_path = _write_hook(
         workspace,
-        "export OPENAI_API_KEY=leaked\n"
-        "export SOMETHING_PASSWORD=leaked\n"
-        "export SOMETHING_SECRET=leaked\n"
-        "export GITEA_TOKEN=keep\n",
+        "export OPENAI_API_KEY=from-hook\n"
+        "export STRIPE_SECRET=from-hook\n"
+        "export CI_JOB_TOKEN=from-hook\n"
+        "export GITEA_TOKEN=from-hook\n",
     )
 
     overlay = source_workspace_env_hook(
@@ -167,23 +167,24 @@ def test_source_workspace_env_hook_drops_secret_suffixes(tmp_path: Path) -> None
         cwd=workspace,
     )
 
-    assert "OPENAI_API_KEY" not in overlay
-    assert "SOMETHING_PASSWORD" not in overlay
-    assert "SOMETHING_SECRET" not in overlay
-    assert overlay["GITEA_TOKEN"] == "keep"  # noqa: S105
+    assert overlay["OPENAI_API_KEY"] == "from-hook"
+    assert overlay["STRIPE_SECRET"] == "from-hook"  # noqa: S105
+    assert overlay["CI_JOB_TOKEN"] == "from-hook"  # noqa: S105
+    assert overlay["GITEA_TOKEN"] == "from-hook"  # noqa: S105
 
 
 @REQUIRES_BASH
 def test_source_workspace_env_hook_drops_runner_control_names(tmp_path: Path) -> None:
-    """Runner control names (MINDROOM_SANDBOX_*, MINDROOM_API_KEY, CI_JOB_TOKEN) are filtered."""
+    """Only runner control names are filtered from the hook overlay."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     hook_path = _write_hook(
         workspace,
         "export MINDROOM_SANDBOX_PROXY_TOKEN=leaked\n"
         "export MINDROOM_API_KEY=leaked\n"
-        "export MINDROOM_SANDBOX_DEDICATED_WORKER_KEY=leaked\n"
-        "export CI_JOB_TOKEN=leaked\n"
+        "export MINDROOM_LOCAL_CLIENT_SECRET=leaked\n"
+        "export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH=leaked\n"
+        "export MINDROOM_SANDBOX_FOO=leaked\n"
         "export NPM_CONFIG_PREFIX=keep\n",
     )
 
@@ -195,8 +196,9 @@ def test_source_workspace_env_hook_drops_runner_control_names(tmp_path: Path) ->
 
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in overlay
     assert "MINDROOM_API_KEY" not in overlay
-    assert "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY" not in overlay
-    assert "CI_JOB_TOKEN" not in overlay
+    assert "MINDROOM_LOCAL_CLIENT_SECRET" not in overlay
+    assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" not in overlay
+    assert "MINDROOM_SANDBOX_FOO" not in overlay
     assert overlay["NPM_CONFIG_PREFIX"] == "keep"
 
 

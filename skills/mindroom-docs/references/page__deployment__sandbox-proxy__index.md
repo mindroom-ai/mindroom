@@ -196,7 +196,7 @@ When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker e
 
 ## Shell env and PATH
 
-When `shell` runs through the sandbox proxy, it receives the stricter sandbox runtime env rather than the main process's ordinary committed runtime `.env`. Additional env is not forwarded implicitly: configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit. `extra_env_passthrough` does not re-expose config-adjacent `.env` entries that the sandbox contract filtered out.
+When `shell` runs through the sandbox proxy, it receives the stricter sandbox runtime env rather than the main process's ordinary committed runtime `.env`. Additional env is not forwarded implicitly: configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit. `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries. To prevent the runner from leaking its own control-plane credentials to tools, shell passthrough drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`. Everything else that matches your configured names or globs passes through, including service tokens and provider credentials. If you don't want a value to reach shell commands, don't match it with `extra_env_passthrough`.
 
 If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`. This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates. That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
 
@@ -225,12 +225,7 @@ The runner sources this script with `bash` before each worker-routed `shell`, `p
 
 **Filtering:**
 
-The overlay reuses the same secret rules that protect `extra_env_passthrough`:
-
-- Names ending in `_API_KEY`, `_API_KEYS`, `_PASSWORD`, or `_SECRET` are dropped.
-- Runner control names (`MINDROOM_SANDBOX_*`, `MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) are dropped.
-- `CI_JOB_TOKEN` and bash bookkeeping (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are dropped.
-- Non-secret service tokens such as `GITEA_TOKEN` are kept.
+`.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.). To prevent the runner from leaking its own control-plane credentials to tools, the overlay drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`. Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export. Everything else passes through, including service tokens and provider credentials you intentionally export from the hook. If you don't want a value to reach tools, don't export it.
 
 **Limits and failure handling:**
 

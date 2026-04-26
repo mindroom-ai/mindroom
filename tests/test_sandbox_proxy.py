@@ -1064,7 +1064,7 @@ async def test_local_shell_exposes_configured_extra_parent_env_without_leaking_c
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     save_scoped_credentials(
         "shell",
-        {"extra_env_passthrough": "GITEA_*, MINDROOM_*"},
+        {"extra_env_passthrough": "GITEA_*, MINDROOM_*, CI_JOB_TOKEN"},
         credentials_manager=credentials_manager,
         worker_target=None,
     )
@@ -1086,7 +1086,7 @@ async def test_local_shell_exposes_configured_extra_parent_env_without_leaking_c
         ],
     )
 
-    assert result == "visible-gitea-token|||visible-in-shell"
+    assert result == "visible-gitea-token||ci-secret|visible-in-shell"
 
 
 @pytest.mark.asyncio
@@ -1176,7 +1176,6 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
         _recording_client_class(captured=captured),
     )
     monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
-    monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -1209,7 +1208,6 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
     assert captured["json"]["tool_init_overrides"]["shell_path_prepend"] == "/opt/custom/bin"
     assert "TEST_EXECUTION_ENV" not in captured["json"]["execution_env"]
     assert captured["json"]["execution_env"]["GITEA_TOKEN"] == "visible-gitea-token"  # noqa: S105
-    assert "CI_JOB_TOKEN" not in captured["json"]["execution_env"]
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in captured["json"]["execution_env"]
 
     captured.clear()
@@ -1236,7 +1234,6 @@ async def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild
     )
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
-    monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -1277,11 +1274,11 @@ async def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild
         [
             "bash",
             "-lc",
-            "printf '%s' \"$GITEA_TOKEN|$CI_JOB_TOKEN|$TEST_EXECUTION_ENV\"",
+            "printf '%s' \"$GITEA_TOKEN|$TEST_EXECUTION_ENV\"",
         ],
     )
 
-    assert result == "visible-gitea-token||visible-in-shell"
+    assert result == "visible-gitea-token|visible-in-shell"
 
 
 @pytest.mark.asyncio
@@ -3227,8 +3224,8 @@ async def test_inprocess_runner_blocks_cross_runtime_secret_leakage(
     assert response.result == "https://whisper.example|"
 
 
-def test_shell_extra_env_excludes_api_key_suffixes() -> None:
-    """Wildcard passthrough must not expose vars ending with secret suffixes."""
+def test_shell_extra_env_trusts_explicit_patterns_except_runner_control() -> None:
+    """Wildcard passthrough keeps matched user env and drops only runner control names."""
     env = {
         "ANTHROPIC_API_KEY": "sk-ant-secret",
         "OPENAI_API_KEY": "sk-oai-secret",
@@ -3239,22 +3236,31 @@ def test_shell_extra_env_excludes_api_key_suffixes() -> None:
         "GITEA_TOKEN": "gitea-token",
         "WHISPER_URL": "https://whisper.example",
         "GITEA_HOST": "gitea.local",
+        "MINDROOM_API_KEY": "runner-api-key",
+        "MINDROOM_LOCAL_CLIENT_SECRET": "runner-client-secret",
+        "MINDROOM_SANDBOX_PROXY_TOKEN": "runner-proxy-token",
+        "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH": "/var/lib/mindroom/manifest.json",
+        "MINDROOM_SANDBOX_FOO": "runner-sandbox-value",
+        "MINDROOM_LOCAL_CLIENT_ID": "local-client-id",
     }
     result = dict(shell_extra_env_values(extra_env_passthrough="*", process_env=env))
 
-    # Safe non-secret vars should be present
     assert result["WHISPER_URL"] == "https://whisper.example"
     assert result["GITEA_HOST"] == "gitea.local"
-    # _TOKEN suffix is allowed (common for service tokens like GITEA_TOKEN)
     assert result["GITEA_TOKEN"] == "gitea-token"  # noqa: S105
+    assert result["ANTHROPIC_API_KEY"] == "sk-ant-secret"
+    assert result["OPENAI_API_KEY"] == "sk-oai-secret"
+    assert result["GOOGLE_API_KEY"] == "goog-secret"
+    assert result["MY_SERVICE_PASSWORD"] == "pass-secret"  # noqa: S105
+    assert result["WEBHOOK_SECRET"] == "hook-secret"  # noqa: S105
+    assert result["CI_JOB_TOKEN"] == "ci-token"  # noqa: S105
+    assert result["MINDROOM_LOCAL_CLIENT_ID"] == "local-client-id"
 
-    # Provider API keys and passwords/secrets must be excluded
-    assert "ANTHROPIC_API_KEY" not in result
-    assert "OPENAI_API_KEY" not in result
-    assert "GOOGLE_API_KEY" not in result
-    assert "MY_SERVICE_PASSWORD" not in result
-    assert "WEBHOOK_SECRET" not in result
-    assert "CI_JOB_TOKEN" not in result  # also in _SHELL_EXTRA_ENV_EXCLUDED_NAMES
+    assert "MINDROOM_API_KEY" not in result
+    assert "MINDROOM_LOCAL_CLIENT_SECRET" not in result
+    assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in result
+    assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" not in result
+    assert "MINDROOM_SANDBOX_FOO" not in result
 
 
 def test_shell_extra_env_requires_explicit_patterns_for_service_urls() -> None:
