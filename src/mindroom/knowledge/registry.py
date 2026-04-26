@@ -827,46 +827,6 @@ def mark_snapshot_dirty(
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 
-def mark_snapshot_files_deleted(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    relative_paths: tuple[str, ...],
-    execution_identity: ToolExecutionIdentity | None = None,
-    reason: str = "dashboard_delete",
-) -> tuple[str, ...]:
-    """Mark source deletes stale; old data may be served until refresh completes."""
-    _ = relative_paths
-    return mark_snapshot_dirty(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        reason=reason,
-    )
-
-
-def mark_snapshot_file_deleted(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    relative_path: str,
-    execution_identity: ToolExecutionIdentity | None = None,
-    reason: str = "dashboard_delete",
-) -> tuple[str, ...]:
-    """Mark one source delete stale; old data may be served until refresh completes."""
-    return mark_snapshot_files_deleted(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        relative_paths=(relative_path,),
-        execution_identity=execution_identity,
-        reason=reason,
-    )
-
-
 async def mark_snapshot_dirty_async(
     base_id: str,
     *,
@@ -881,47 +841,6 @@ async def mark_snapshot_dirty_async(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        reason=reason,
-    )
-
-
-async def mark_snapshot_files_deleted_async(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    relative_paths: tuple[str, ...],
-    execution_identity: ToolExecutionIdentity | None = None,
-    reason: str = "dashboard_delete",
-) -> tuple[str, ...]:
-    """Async delete marker; delete filtering is intentionally best effort."""
-    return await _run_to_thread_to_completion_on_cancel(
-        mark_snapshot_files_deleted,
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        relative_paths=relative_paths,
-        execution_identity=execution_identity,
-        reason=reason,
-    )
-
-
-async def mark_snapshot_file_deleted_async(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    relative_path: str,
-    execution_identity: ToolExecutionIdentity | None = None,
-    reason: str = "dashboard_delete",
-) -> tuple[str, ...]:
-    """Async single-file delete marker."""
-    return await mark_snapshot_files_deleted_async(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        relative_paths=(relative_path,),
         execution_identity=execution_identity,
         reason=reason,
     )

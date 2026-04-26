@@ -17,7 +17,6 @@ from agno.knowledge.document.base import Document
 from fastapi.testclient import TestClient
 
 import mindroom.knowledge.manager as knowledge_manager_module
-import mindroom.knowledge.refresh_owner as knowledge_refresh_owner
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
@@ -46,7 +45,6 @@ from mindroom.knowledge.manager import (
     list_git_tracked_knowledge_files,
     list_knowledge_files,
 )
-from mindroom.knowledge.refresh_owner import KnowledgeRefreshSupersededError
 from mindroom.knowledge.registry import load_published_indexing_state, resolve_snapshot_key, snapshot_metadata_path
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -796,11 +794,11 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
 
 
 @pytest.mark.asyncio
-async def test_dashboard_delete_rolls_back_file_when_same_source_dirty_write_fails(
+async def test_dashboard_delete_dirty_write_failure_keeps_best_effort_source_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If a later same-source marker write fails, restored files must remain searchable."""
+    """Dirty metadata failures do not roll back source deletes or last-good snapshots."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("restored public", encoding="utf-8")
@@ -833,7 +831,7 @@ async def test_dashboard_delete_rolls_back_file_when_same_source_dirty_write_fai
         main.app.state.knowledge_refresh_owner = None
 
     assert dirty_write_count == 2
-    assert (docs_path / "guide.md").read_text(encoding="utf-8") == "restored public"
+    assert not (docs_path / "guide.md").exists()
     for base_id in ("research", "summary"):
         lookup = get_published_snapshot(base_id, config=config, runtime_paths=runtime_paths)
         assert lookup.snapshot is not None
@@ -3255,8 +3253,8 @@ async def test_api_replacement_upload_marks_snapshot_stale_and_keeps_last_good_b
     owner.schedule_refresh.assert_called_once()
 
 
-def test_api_upload_failure_preserves_existing_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A later upload failure must not leave earlier replacements committed."""
+def test_api_upload_failure_keeps_earlier_best_effort_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later upload failure does not roll back earlier direct source writes."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("existing upload", encoding="utf-8")
@@ -3279,7 +3277,7 @@ def test_api_upload_failure_preserves_existing_files(tmp_path: Path, monkeypatch
     )
 
     assert response.status_code == 413
-    assert (docs_path / "guide.md").read_text(encoding="utf-8") == "existing upload"
+    assert (docs_path / "guide.md").read_text(encoding="utf-8") == "small"
     assert not (docs_path / "new.md").exists()
     owner.schedule_refresh.assert_not_called()
 
@@ -3362,29 +3360,25 @@ async def test_refresh_owner_runs_independent_per_binding_tasks(
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_runs_one_pending_refresh_after_active_task(
+async def test_refresh_owner_drops_duplicate_schedule_while_active(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Schedules received during an active refresh run once more after the active task."""
+    """Best-effort schedules do not queue duplicate work for an already active binding."""
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     owner = PerBindingKnowledgeRefreshOwner()
     started_count = 0
     first_started = asyncio.Event()
-    second_started = asyncio.Event()
     release_first = asyncio.Event()
 
     async def _fake_refresh(_base_id: str, **_kwargs: object) -> object:
         _ = _base_id
         nonlocal started_count
         started_count += 1
-        if started_count == 1:
-            first_started.set()
-            await release_first.wait()
-        else:
-            second_started.set()
+        first_started.set()
+        await release_first.wait()
         return object()
 
     monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
@@ -3398,268 +3392,41 @@ async def test_refresh_owner_runs_one_pending_refresh_after_active_task(
     assert started_count == 1
 
     release_first.set()
-    await second_started.wait()
     await owner.shutdown()
 
-    assert started_count == 2
+    assert started_count == 1
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_superseded_manual_waiters_complete(
+async def test_refresh_owner_refresh_now_runs_directly_with_force_reindex(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Multiple queued manual refreshes should share the eventual refresh result."""
+    """Explicit refreshes do not go through the best-effort background queue."""
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     owner = PerBindingKnowledgeRefreshOwner()
-    started_count = 0
-    first_started = asyncio.Event()
-    release_first = asyncio.Event()
+    seen_force_reindex: list[bool] = []
 
     async def _fake_refresh(base_id: str, **kwargs: object) -> object:
         assert base_id == "docs"
         refresh_config = kwargs["config"]
         assert isinstance(refresh_config, Config)
-        nonlocal started_count
-        started_count += 1
-        if started_count == 1:
-            first_started.set()
-            await release_first.wait()
+        seen_force_reindex.append(bool(kwargs.get("force_reindex", False)))
         return knowledge_refresh_runner.KnowledgeRefreshResult(
             key=resolve_snapshot_key("docs", config=refresh_config, runtime_paths=runtime_paths),
-            indexed_count=started_count,
+            indexed_count=1,
             published=True,
             availability=KnowledgeAvailability.READY,
         )
 
     monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
 
-    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
-    await first_started.wait()
-    manual_b = asyncio.create_task(
-        owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
-    )
-    manual_c = asyncio.create_task(
-        owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
-    )
-    await asyncio.sleep(0)
+    result = await owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
 
-    release_first.set()
-    result_b, result_c = await asyncio.wait_for(asyncio.gather(manual_b, manual_c), timeout=1)
-    await owner.shutdown()
-
-    assert started_count == 2
-    assert result_b.indexed_count == 2
-    assert result_c.indexed_count == 2
-
-
-@pytest.mark.asyncio
-async def test_refresh_owner_shutdown_completes_active_manual_waiter_before_refresh_advances(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Immediate shutdown of an awaited owner refresh must not leave the waiter pending."""
-    docs_path = tmp_path / "docs"
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
-    runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
-    refresh_called = False
-
-    async def _fake_refresh(_base_id: str, **_kwargs: object) -> object:
-        nonlocal refresh_called
-        refresh_called = True
-        await asyncio.Event().wait()
-        return object()
-
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
-
-    loop = asyncio.get_running_loop()
-    completion: asyncio.Future[object] = loop.create_future()
-    key = knowledge_registry.resolve_refresh_key("docs", config=config, runtime_paths=runtime_paths)
-    request = knowledge_refresh_owner._ScheduledRefresh(
-        base_id="docs",
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=None,
-        completions=[completion],
-    )
-    owner._start_task(key, request, loop=loop)
-    await owner.shutdown()
-
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(completion, timeout=1)
-    assert refresh_called is False
-
-
-@pytest.mark.asyncio
-async def test_refresh_owner_merges_shared_pending_refreshes_with_different_execution_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shared-base pending refreshes with identical output should merge waiters and force flags."""
-    docs_path = tmp_path / "docs"
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
-    runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
-    first_started = asyncio.Event()
-    release_first = asyncio.Event()
-    seen: list[tuple[ToolExecutionIdentity | None, bool]] = []
-    identity_a = _identity("@alice:localhost")
-    identity_b = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="helper",
-        requester_id="@bob:localhost",
-        room_id="!room:localhost",
-        thread_id="thread-b",
-        resolved_thread_id="thread-b",
-        session_id="session-b",
-    )
-
-    async def _fake_refresh(base_id: str, **kwargs: object) -> object:
-        assert base_id == "docs"
-        refresh_config = kwargs["config"]
-        assert isinstance(refresh_config, Config)
-        force_reindex = bool(kwargs.get("force_reindex", False))
-        identity = kwargs.get("execution_identity")
-        assert identity is None or isinstance(identity, ToolExecutionIdentity)
-        seen.append((identity, force_reindex))
-        if len(seen) == 1:
-            first_started.set()
-            await release_first.wait()
-        return knowledge_refresh_runner.KnowledgeRefreshResult(
-            key=resolve_snapshot_key("docs", config=refresh_config, runtime_paths=runtime_paths),
-            indexed_count=len(seen),
-            published=True,
-            availability=KnowledgeAvailability.READY,
-        )
-
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
-
-    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths, execution_identity=identity_a)
-    await first_started.wait()
-    manual_a = asyncio.create_task(
-        owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, execution_identity=identity_a),
-    )
-    manual_b = asyncio.create_task(
-        owner.refresh_now(
-            "docs",
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=identity_b,
-            force_reindex=True,
-        ),
-    )
-    await asyncio.sleep(0)
-
-    release_first.set()
-    result_a, result_b = await asyncio.wait_for(asyncio.gather(manual_a, manual_b), timeout=1)
-    await owner.shutdown()
-
-    assert len(seen) == 2
-    assert seen[1] == (identity_b, True)
-    assert result_a.indexed_count == 2
-    assert result_b.indexed_count == 2
-
-
-@pytest.mark.asyncio
-async def test_refresh_owner_schedule_supersedes_incompatible_manual_waiter(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A newer incompatible payload must not complete an old waiter with the wrong result."""
-    docs_path = tmp_path / "docs"
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
-    stale_config = config.model_copy(deep=True)
-    stale_config.knowledge_bases["docs"].chunk_size = 1024
-    newer_config = config.model_copy(deep=True)
-    newer_config.knowledge_bases["docs"].chunk_size = 2048
-    runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
-    first_started = asyncio.Event()
-    second_started = asyncio.Event()
-    release_first = asyncio.Event()
-    seen: list[tuple[int, bool]] = []
-
-    async def _fake_refresh(base_id: str, **kwargs: object) -> object:
-        assert base_id == "docs"
-        refresh_config = kwargs["config"]
-        assert isinstance(refresh_config, Config)
-        force_reindex = bool(kwargs.get("force_reindex", False))
-        seen.append((refresh_config.knowledge_bases["docs"].chunk_size, force_reindex))
-        if len(seen) == 1:
-            first_started.set()
-            await release_first.wait()
-        else:
-            second_started.set()
-        return knowledge_refresh_runner.KnowledgeRefreshResult(
-            key=resolve_snapshot_key("docs", config=refresh_config, runtime_paths=runtime_paths),
-            indexed_count=len(seen),
-            published=True,
-            availability=KnowledgeAvailability.READY,
-        )
-
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
-
-    owner.schedule_refresh("docs", config=stale_config, runtime_paths=runtime_paths)
-    await first_started.wait()
-    manual_task = asyncio.create_task(
-        owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
-    )
-    await asyncio.sleep(0)
-    owner.schedule_refresh("docs", config=newer_config, runtime_paths=runtime_paths)
-
-    with pytest.raises(KnowledgeRefreshSupersededError, match="superseded"):
-        await asyncio.wait_for(manual_task, timeout=1)
-
-    release_first.set()
-    await asyncio.wait_for(second_started.wait(), timeout=1)
-    await owner.shutdown()
-
-    assert seen == [(1024, False), (2048, False)]
-
-
-@pytest.mark.asyncio
-async def test_refresh_owner_done_task_keeps_newest_pending_request(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A completed task still owned by its callback must not let an older pending request run."""
-    docs_path = tmp_path / "docs"
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
-    old_config = config.model_copy(deep=True)
-    old_config.knowledge_bases["docs"].chunk_size = 2048
-    newest_config = config.model_copy(deep=True)
-    newest_config.knowledge_bases["docs"].chunk_size = 4096
-    runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
-    key = knowledge_registry.resolve_refresh_key("docs", config=config, runtime_paths=runtime_paths)
-    seen_chunk_sizes: list[int] = []
-
-    async def _completed_refresh() -> None:
-        return None
-
-    async def _fake_refresh(base_id: str, **kwargs: object) -> object:
-        _ = base_id
-        refresh_config = kwargs["config"]
-        assert isinstance(refresh_config, Config)
-        seen_chunk_sizes.append(refresh_config.knowledge_bases["docs"].chunk_size)
-        return object()
-
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
-    done_task = asyncio.create_task(_completed_refresh())
-    await asyncio.sleep(0)
-    assert done_task.done()
-    owner._tasks[key] = done_task
-
-    owner.schedule_refresh("docs", config=old_config, runtime_paths=runtime_paths)
-    owner.schedule_refresh("docs", config=newest_config, runtime_paths=runtime_paths)
-    owner._handle_done(key, done_task)
-    await asyncio.sleep(0)
-    await owner.shutdown()
-
-    assert seen_chunk_sizes == [4096]
+    assert result.indexed_count == 1
+    assert seen_force_reindex == [True]
 
 
 @pytest.mark.asyncio
@@ -5314,11 +5081,11 @@ async def test_git_updated_stale_registry_mark_uses_async_registry_path(
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_manual_reindex_replaces_stale_pending_refresh(
+async def test_refresh_owner_manual_reindex_runs_without_background_queue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An awaited manual refresh should replace old queued owner work for the same binding."""
+    """An awaited manual refresh should bypass duplicate best-effort background schedules."""
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     old_config = config.model_copy(deep=True)

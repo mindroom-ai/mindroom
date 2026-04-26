@@ -806,8 +806,8 @@ def test_upload_dirty_mark_write_runs_off_event_loop(
     refresh.assert_not_awaited()
 
 
-def test_upload_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp_path: Path) -> None:
-    """Uploads fail closed when dirty state cannot be committed."""
+def test_upload_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_path: Path) -> None:
+    """Uploads fail when dirty state cannot be committed without rolling back the source write."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -822,7 +822,7 @@ def test_upload_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge.mark_snapshot_files_deleted_async", _fail_dirty_mark),
+        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", _fail_dirty_mark),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="dirty mark failed"),
     ):
@@ -831,18 +831,17 @@ def test_upload_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
             files=[("files", ("guide.md", b"new", "text/markdown"))],
         )
 
-    assert (docs / "guide.md").read_text(encoding="utf-8") == "old"
-    assert list(docs.glob("*.upload.*")) == []
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "new"
     assert owner.scheduled == []
     refresh.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_upload_cancellation_during_staging_removes_temp_file(
+async def test_upload_cancellation_during_write_keeps_best_effort_partial_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upload cancellation before commit should remove staged temp files."""
+    """Upload cancellation leaves any direct filesystem write as best effort."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
@@ -871,8 +870,7 @@ async def test_upload_cancellation_during_staging_removes_temp_file(
             [UploadFile(file=BytesIO(b"new"), filename="guide.md")],
         )
 
-    assert not (docs / "guide.md").exists()
-    assert list(docs.glob(".*.upload.tmp")) == []
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "partial"
     assert owner.scheduled == []
 
 
@@ -898,7 +896,7 @@ async def test_upload_cancellation_after_dirty_mark_finalizes_backup_and_schedul
         await release_dirty.wait()
         return ("research",)
 
-    monkeypatch.setattr(knowledge_api, "mark_snapshot_files_deleted_async", _slow_dirty_mark)
+    monkeypatch.setattr(knowledge_api, "mark_snapshot_dirty_async", _slow_dirty_mark)
 
     upload_task = asyncio.create_task(
         knowledge_api.upload_knowledge_files(
@@ -923,15 +921,13 @@ async def test_upload_cancellation_after_dirty_mark_finalizes_backup_and_schedul
         await upload_task
 
     assert (docs / "guide.md").read_text(encoding="utf-8") == "new"
-    assert list(docs.glob(".*.upload.tmp")) == []
-    assert list(docs.glob(".*.upload.bak")) == []
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
 
 
-def test_upload_commit_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
+def test_upload_write_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
     tmp_path: Path,
 ) -> None:
-    """Failed upload commits must not pre-mark unchanged snapshots stale."""
+    """Failed upload writes must not pre-mark unchanged snapshots stale."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -943,15 +939,15 @@ def test_upload_commit_failure_leaves_ready_snapshot_unchanged_and_skips_refresh
     owner = _RecordingRefreshOwner()
     client.app.state.knowledge_refresh_owner = owner
 
-    def _fail_commit(*_args: object, **_kwargs: object) -> list[object]:
-        msg = "commit failed"
+    async def _fail_write(*_args: object, **_kwargs: object) -> None:
+        msg = "write failed"
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge._commit_staged_uploads", _fail_commit),
-        patch("mindroom.api.knowledge.mark_snapshot_files_deleted_async", side_effect=AssertionError("no dirty")),
+        patch("mindroom.api.knowledge._stream_upload_to_destination", _fail_write),
+        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", side_effect=AssertionError("no dirty")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
-        pytest.raises(RuntimeError, match="commit failed"),
+        pytest.raises(RuntimeError, match="write failed"),
     ):
         client.post(
             "/api/knowledge/bases/research/upload",
@@ -964,7 +960,6 @@ def test_upload_commit_failure_leaves_ready_snapshot_unchanged_and_skips_refresh
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert "availability" not in metadata
     assert (docs / "guide.md").read_text(encoding="utf-8") == "old"
-    assert list(docs.glob("*.upload.*")) == []
     assert owner.scheduled == []
     refresh.assert_not_awaited()
 
@@ -1267,8 +1262,8 @@ def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     refresh.assert_not_awaited()
 
 
-def test_delete_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp_path: Path) -> None:
-    """Deletes fail closed when dirty state cannot be committed."""
+def test_delete_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_path: Path) -> None:
+    """Deletes fail when dirty state cannot be committed without rolling back the source write."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -1283,13 +1278,13 @@ def test_delete_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge.mark_snapshot_file_deleted_async", _fail_dirty_mark),
+        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", _fail_dirty_mark),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="dirty mark failed"),
     ):
         client.delete("/api/knowledge/bases/research/files/guide.md")
 
-    assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
+    assert not (docs / "guide.md").exists()
     assert owner.scheduled == []
     refresh.assert_not_awaited()
 
@@ -1316,7 +1311,7 @@ async def test_delete_cancellation_after_dirty_mark_removes_backup_and_schedules
         await release_dirty.wait()
         return ("research",)
 
-    monkeypatch.setattr(knowledge_api, "mark_snapshot_file_deleted_async", _slow_dirty_mark)
+    monkeypatch.setattr(knowledge_api, "mark_snapshot_dirty_async", _slow_dirty_mark)
 
     delete_task = asyncio.create_task(
         knowledge_api.delete_knowledge_file(
@@ -1341,7 +1336,6 @@ async def test_delete_cancellation_after_dirty_mark_removes_backup_and_schedules
         await delete_task
 
     assert not (docs / "guide.md").exists()
-    assert list(docs.glob(".*.delete.bak")) == []
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
 
 
@@ -1365,7 +1359,7 @@ def test_delete_filesystem_failure_leaves_ready_snapshot_unchanged_and_skips_ref
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge._move_file_to_delete_backup", _fail_delete_stage),
+        patch("pathlib.Path.unlink", _fail_delete_stage),
         patch("mindroom.api.knowledge.mark_snapshot_dirty_async", side_effect=AssertionError("no dirty")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="unlink failed"),
