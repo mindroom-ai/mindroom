@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import secrets
+import selectors
 import shutil
 import signal
 import site
 import subprocess
 import sys
+import time
 from contextlib import suppress
 from pathlib import Path
 from types import MappingProxyType
@@ -287,6 +289,15 @@ class WorkspaceEnvHookError(RuntimeError):
     """One `.mindroom/worker-env.sh` request failed sourcing or validation."""
 
 
+class _WorkspaceEnvHookOutputLimitError(RuntimeError):
+    """Raised when hook stdout or stderr exceeds the capture cap."""
+
+    def __init__(self, stream_name: str, size: int) -> None:
+        super().__init__(stream_name, size)
+        self.stream_name = stream_name
+        self.size = size
+
+
 def resolve_workspace_env_hook_path(base_dir: Path | str | None) -> Path | None:
     """Resolve the workspace env hook for one effective base_dir, if any.
 
@@ -356,19 +367,28 @@ def source_workspace_env_hook(
     try:
         process = subprocess.Popen(
             [bash_path, "-c", bash_script, "bash", str(hook_path), capture_marker],
-            stdin=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=str(cwd),
             env=dict(base_env),
             start_new_session=True,
         )
-        stdout, stderr = process.communicate(input=b"", timeout=WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS)
+        stdout, stderr = _capture_workspace_env_hook_output(process)
     except subprocess.TimeoutExpired as exc:
         _kill_workspace_env_hook_process_group(process)
         with suppress(OSError, subprocess.TimeoutExpired):
             process.wait(timeout=1.0)
         msg = f".mindroom/worker-env.sh timed out after {WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS} seconds."
+        raise WorkspaceEnvHookError(msg) from exc
+    except _WorkspaceEnvHookOutputLimitError as exc:
+        _kill_workspace_env_hook_process_group(process)
+        with suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=1.0)
+        msg = (
+            f".mindroom/worker-env.sh produced too much {exc.stream_name} output "
+            f"({exc.size} bytes; limit {_WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES})."
+        )
         raise WorkspaceEnvHookError(msg) from exc
     except OSError as exc:
         msg = f"Failed to start bash for .mindroom/worker-env.sh: {exc}"
@@ -377,12 +397,6 @@ def source_workspace_env_hook(
         excerpt = (stderr or stdout or b"").decode(errors="replace")[:512].strip()
         suffix = f" output: {excerpt}" if excerpt else ""
         msg = f".mindroom/worker-env.sh exited with code {process.returncode}.{suffix}"
-        raise WorkspaceEnvHookError(msg)
-    if len(stdout) > _WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES:
-        msg = (
-            f".mindroom/worker-env.sh produced {len(stdout)} bytes of "
-            f"capture output (limit {_WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES})."
-        )
         raise WorkspaceEnvHookError(msg)
     return _parse_workspace_env_hook_output(
         stdout,
@@ -394,6 +408,58 @@ def source_workspace_env_hook(
 def _kill_workspace_env_hook_process_group(process: subprocess.Popen[bytes]) -> None:
     with suppress(OSError):
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+
+
+def _capture_workspace_env_hook_output(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+    selector = selectors.DefaultSelector()
+    buffers = {
+        "stdout": bytearray(),
+        "stderr": bytearray(),
+    }
+    for stream_name, pipe in (("stdout", process.stdout), ("stderr", process.stderr)):
+        if pipe is None:
+            continue
+        fd = pipe.fileno()
+        os.set_blocking(fd, False)
+        selector.register(fd, selectors.EVENT_READ, stream_name)
+
+    deadline = time.monotonic() + WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd="bash", timeout=WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS)
+            events = selector.select(remaining)
+            if not events:
+                if process.poll() is not None:
+                    break
+                raise subprocess.TimeoutExpired(cmd="bash", timeout=WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS)
+            for key, _mask in events:
+                _read_workspace_env_hook_event(key, selector, buffers)
+
+        remaining = max(0.0, deadline - time.monotonic())
+        process.wait(timeout=remaining)
+    finally:
+        selector.close()
+    return bytes(buffers["stdout"]), bytes(buffers["stderr"])
+
+
+def _read_workspace_env_hook_event(
+    key: selectors.SelectorKey,
+    selector: selectors.BaseSelector,
+    buffers: dict[str, bytearray],
+) -> None:
+    stream_name = str(key.data)
+    try:
+        chunk = os.read(key.fd, 8192)
+    except BlockingIOError:
+        return
+    if not chunk:
+        selector.unregister(key.fd)
+        return
+    buffers[stream_name].extend(chunk)
+    if len(buffers[stream_name]) > _WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES:
+        raise _WorkspaceEnvHookOutputLimitError(stream_name, len(buffers[stream_name]))
 
 
 def _resolve_bash(base_env: Mapping[str, str]) -> str:

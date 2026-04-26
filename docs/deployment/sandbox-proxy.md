@@ -286,7 +286,7 @@ The overlay reuses the same secret rules that protect `extra_env_passthrough`:
 
 **Limits and failure handling:**
 
-- Script ≤ 64 KiB; total overlay ≤ 128 KiB; per-value ≤ 32 KiB.
+- Script ≤ 64 KiB; stdout and stderr capture each ≤ 256 KiB; total overlay ≤ 128 KiB; per-value ≤ 32 KiB.
 - Hook execution times out after 10 seconds.
 - Symlinks that escape the workspace are rejected.
 - Any failure (non-zero exit, timeout, escape, missing `bash`) returns the tool call as `ok: false` with `failure_kind: "tool"` and an error mentioning `.mindroom/worker-env.sh`.

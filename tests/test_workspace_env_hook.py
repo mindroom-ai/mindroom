@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,7 +19,8 @@ from mindroom.api.sandbox_exec import (
 )
 
 REQUIRES_BASH = pytest.mark.skipif(
-    sys.platform != "linux" and sys.platform != "darwin",
+    (sys.platform != "linux" and sys.platform != "darwin")
+    or (shutil.which("bash") is None and not os.access("/bin/bash", os.X_OK)),
     reason="bash hook execution is validated on POSIX hosts",
 )
 
@@ -270,6 +272,25 @@ def test_source_workspace_env_hook_raises_on_timeout(
         )
 
 
+@REQUIRES_BASH
+def test_source_workspace_env_hook_rejects_oversized_stderr_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Successful hooks cannot write unbounded stderr output."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    hook_path = _write_hook(workspace, "python -c \"import sys; sys.stderr.write('x' * 3000)\"\nexport FOO=bar\n")
+    monkeypatch.setattr(sandbox_exec, "_WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES", 2048)
+
+    with pytest.raises(WorkspaceEnvHookError, match="stderr output"):
+        source_workspace_env_hook(
+            hook_path=hook_path,
+            base_env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            cwd=workspace,
+        )
+
+
 def test_source_workspace_env_hook_kills_process_group_on_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -283,14 +304,14 @@ def test_source_workspace_env_hook_kills_process_group_on_timeout(
     class _TimeoutProcess:
         pid = 12345
 
-        def communicate(self, **kwargs: object) -> tuple[bytes, bytes]:
-            timeout = float(kwargs["timeout"])
-            raise subprocess.TimeoutExpired(cmd="bash", timeout=timeout)
-
         def wait(self, **_kwargs: object) -> int:
             return -9
 
-    monkeypatch.setattr(sandbox_exec.subprocess, "run", pytest.fail)
+    def _raise_timeout(_process: object) -> tuple[bytes, bytes]:
+        raise subprocess.TimeoutExpired(cmd="bash", timeout=0.01)
+
+    monkeypatch.setattr(sandbox_exec, "_resolve_bash", lambda _base_env: "/fake/bash")
+    monkeypatch.setattr(sandbox_exec, "_capture_workspace_env_hook_output", _raise_timeout)
     monkeypatch.setattr(sandbox_exec.subprocess, "Popen", lambda *_args, **_kwargs: _TimeoutProcess())
     monkeypatch.setattr(sandbox_exec.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(sandbox_exec.os, "killpg", lambda pgid, _sig: killed_pgids.append(pgid))
