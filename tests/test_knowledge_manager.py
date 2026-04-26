@@ -265,6 +265,22 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
     assert owner.schedule_refresh.call_count == 0
 
 
+def test_real_refresh_owner_without_running_loop_does_not_mark_active(tmp_path: Path) -> None:
+    """Synchronous callers should not leave a binding stuck refreshing when no event loop is running."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    owner = PerBindingKnowledgeRefreshOwner()
+
+    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is None
+    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    refresh_key = knowledge_registry.resolve_refresh_key("docs", config=config, runtime_paths=runtime_paths)
+
+    assert knowledge_refresh_runner.is_refresh_active(refresh_key) is False
+    assert owner.is_refreshing("docs", config=config, runtime_paths=runtime_paths) is False
+
+
 def test_failed_notice_without_snapshot_says_unavailable() -> None:
     """Cold failed knowledge must not be described as stale when no snapshot is attached."""
     notice = knowledge_utils.format_knowledge_availability_notice(
@@ -666,6 +682,43 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
     assert beta_state is not None
     assert beta_state.availability == KnowledgeAvailability.STALE.value
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
+
+
+@pytest.mark.asyncio
+async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_change(tmp_path: Path) -> None:
+    """Refreshing one local alias after an external source edit should stale sibling aliases."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "guide.md"
+    doc.write_text("shared local old", encoding="utf-8")
+    config = _config(tmp_path, bases={"alpha": docs_path, "beta": docs_path}, agent_bases=["alpha", "beta"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
+    beta_lookup = get_published_snapshot("beta", config=config, runtime_paths=runtime_paths)
+    assert beta_lookup.snapshot is not None
+    assert beta_lookup.availability is KnowledgeAvailability.READY
+
+    doc.write_text("shared local new", encoding="utf-8")
+    await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
+    alpha_lookup = get_published_snapshot("alpha", config=config, runtime_paths=runtime_paths)
+    beta_key = resolve_snapshot_key("beta", config=config, runtime_paths=runtime_paths)
+    beta_state = load_published_indexing_state(snapshot_metadata_path(beta_key))
+    refreshed_beta_lookup = get_published_snapshot("beta", config=config, runtime_paths=runtime_paths)
+
+    assert alpha_lookup.snapshot is not None
+    assert [document.content for document in alpha_lookup.snapshot.knowledge.search("local", max_results=5)] == [
+        "shared local new",
+    ]
+    assert beta_state is not None
+    assert beta_state.availability == KnowledgeAvailability.STALE.value
+    assert refreshed_beta_lookup.snapshot is not None
+    assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
+    assert [
+        document.content for document in refreshed_beta_lookup.snapshot.knowledge.search("local", max_results=5)
+    ] == [
+        "shared local old",
+    ]
 
 
 def test_config_rejects_parent_child_knowledge_roots(tmp_path: Path) -> None:
@@ -1653,6 +1706,53 @@ async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) ->
     assert owner.schedule_refresh.call_count == 2
     assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
     assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
+
+
+@pytest.mark.asyncio
+async def test_failed_git_refresh_cooldown_is_credentials_service_aware(tmp_path: Path) -> None:
+    """Changing Git auth service config should bypass the failed-refresh retry cooldown."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    git_config = KnowledgeGitConfig(
+        repo_url="https://example.com/org/private.git",
+        credentials_service="old_service",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_path = snapshot_metadata_path(key)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "settings": list(key.indexing_settings),
+                "status": "indexing",
+                "availability": KnowledgeAvailability.REFRESH_FAILED.value,
+                "last_error": "auth failed",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    changed_config = config.model_copy(deep=True)
+    changed_git_config = changed_config.knowledge_bases["docs"].git
+    assert changed_git_config is not None
+    changed_git_config.credentials_service = "new_service"
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+
+    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is None
+    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_owner=owner) is None
+
+    assert owner.schedule_refresh.call_count == 2
+    assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is config
+    assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is changed_config
 
 
 @pytest.mark.asyncio

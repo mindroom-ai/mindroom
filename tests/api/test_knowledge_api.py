@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from contextlib import suppress
@@ -217,8 +218,8 @@ def test_status_treats_collection_probe_failure_as_unavailable(tmp_path: Path) -
     _write_snapshot_metadata(config, runtime_paths, indexed_count=4)
 
     class _BrokenVectorDb:
-        def __init__(self, **_kwargs: object) -> None:
-            return
+        def __init__(self, *, embedder: object, **_kwargs: object) -> None:
+            assert type(embedder).__name__ == "_SnapshotExistenceEmbedder"
 
         def exists(self) -> bool:
             msg = "corrupt collection"
@@ -233,6 +234,36 @@ def test_status_treats_collection_probe_failure_as_unavailable(tmp_path: Path) -
     assert response.status_code == 200
     assert response.json()["indexed_count"] == 4
     assert response.json()["manager_available"] is False
+
+
+def test_status_collection_probe_runs_off_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Collection existence probes should not run on the async API handler thread."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(config, runtime_paths, indexed_count=4)
+    saw_running_loop = True
+
+    def _offloaded_collection_probe(*_args: object) -> bool:
+        nonlocal saw_running_loop
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            saw_running_loop = False
+        else:
+            saw_running_loop = True
+        return False
+
+    monkeypatch.setattr(knowledge_api, "snapshot_collection_exists_for_state", _offloaded_collection_probe)
+
+    response = client.get("/api/knowledge/bases/research/status")
+
+    assert response.status_code == 200
+    assert response.json()["manager_available"] is False
+    assert saw_running_loop is False
 
 
 def test_knowledge_files_use_managed_file_filters(tmp_path: Path) -> None:

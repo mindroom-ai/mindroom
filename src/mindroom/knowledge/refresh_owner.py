@@ -191,7 +191,7 @@ class PerBindingKnowledgeRefreshOwner:
         if task is not None:
             self._queue_pending(key, request)
         else:
-            self._start_task(key, request)
+            self._start_task(key, request, loop=loop)
         return await completion
 
     async def shutdown(self) -> None:
@@ -220,6 +220,9 @@ class PerBindingKnowledgeRefreshOwner:
         if self._shutting_down:
             logger.debug("Skipping knowledge refresh schedule after shutdown", base_id=base_id)
             return
+        loop = _running_loop_for_schedule(base_id)
+        if loop is None:
+            return
         try:
             key = resolve_refresh_key(
                 base_id,
@@ -243,7 +246,7 @@ class PerBindingKnowledgeRefreshOwner:
             self._queue_pending(key, request)
             return
 
-        self._start_task(key, request)
+        self._start_task(key, request, loop=loop)
 
     def _queue_pending(self, key: KnowledgeRefreshKey, request: _ScheduledRefresh) -> None:
         existing = self._pending.get(key)
@@ -268,9 +271,19 @@ class PerBindingKnowledgeRefreshOwner:
             completions=completions,
         )
 
-    def _start_task(self, key: KnowledgeRefreshKey, request: _ScheduledRefresh) -> None:
+    def _start_task(
+        self,
+        key: KnowledgeRefreshKey,
+        request: _ScheduledRefresh,
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
+        if loop is None:
+            loop = _running_loop_for_schedule(request.base_id)
+        if loop is None:
+            return
         mark_refresh_active(key)
-        task = asyncio.create_task(
+        task = loop.create_task(
             self._run_refresh(key, request=request),
             name=f"knowledge_refresh:{request.base_id}",
         )
@@ -325,6 +338,14 @@ def _scheduled_refreshes_compatible(left: _ScheduledRefresh, right: _ScheduledRe
         and left.runtime_paths == right.runtime_paths
         and left.execution_identity == right.execution_identity
     )
+
+
+def _running_loop_for_schedule(base_id: str) -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning("Skipping knowledge refresh schedule without a running event loop", base_id=base_id)
+        return None
 
 
 def _complete_request_result(request: _ScheduledRefresh, result: KnowledgeRefreshResult) -> None:

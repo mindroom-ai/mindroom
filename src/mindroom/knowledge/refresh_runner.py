@@ -293,8 +293,19 @@ async def _maybe_publish_unchanged_snapshot(
             mark_git_initial_sync_complete=True,
         )
     if force_reindex:
+        mark_published_snapshot_stale(
+            key.base_id,
+            config=manager.config,
+            runtime_paths=manager.runtime_paths,
+            execution_identity=execution_identity,
+        )
         return None
-    return await _publish_unchanged_snapshot(manager, key)
+    return await _publish_unchanged_snapshot(
+        manager,
+        key,
+        mark_stale_on_source_change=True,
+        execution_identity=execution_identity,
+    )
 
 
 async def _refresh_result_from_persisted_state(
@@ -386,6 +397,8 @@ async def _publish_unchanged_snapshot(
     *,
     published_revision: str | None = None,
     mark_git_initial_sync_complete: bool = False,
+    mark_stale_on_source_change: bool = False,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeRefreshResult | None:
     state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
     if (
@@ -395,7 +408,7 @@ async def _publish_unchanged_snapshot(
         or state.availability == KnowledgeAvailability.REFRESH_FAILED.value
         or snapshot_availability_for_state(key=key, state=state) is not KnowledgeAvailability.READY
         or not indexing_settings_metadata_equal(state.settings, key.indexing_settings)
-        or not snapshot_collection_exists_for_state(key, state)
+        or not await asyncio.to_thread(snapshot_collection_exists_for_state, key, state)
     ):
         return None
 
@@ -407,6 +420,13 @@ async def _publish_unchanged_snapshot(
         tracked_relative_paths=manager._git_tracked_relative_paths,
     )
     if current_source_signature != state.source_signature:
+        if mark_stale_on_source_change:
+            mark_published_snapshot_stale(
+                key.base_id,
+                config=manager.config,
+                runtime_paths=manager.runtime_paths,
+                execution_identity=execution_identity,
+            )
         return None
 
     updated_state = replace(

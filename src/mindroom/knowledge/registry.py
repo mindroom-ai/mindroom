@@ -10,13 +10,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
+from agno.knowledge.embedder import Embedder
+
 import mindroom.knowledge.manager as manager_module
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
 
 if TYPE_CHECKING:
-    from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.knowledge import Knowledge
 
     from mindroom.config.main import Config
@@ -129,6 +130,30 @@ class _SnapshotVectorDb(Protocol):
     def exists(self) -> bool:
         """Return whether the collection exists."""
         ...
+
+
+class _SnapshotExistenceEmbedder(Embedder):
+    """Minimal embedder for Chroma collection probes that must never embed content."""
+
+    def get_embedding(self, text: str) -> list[float]:
+        _ = text
+        msg = "Snapshot collection existence checks must not embed content"
+        raise NotImplementedError(msg)
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
+        _ = text
+        msg = "Snapshot collection existence checks must not embed content"
+        raise NotImplementedError(msg)
+
+    async def async_get_embedding(self, text: str) -> list[float]:
+        _ = text
+        msg = "Snapshot collection existence checks must not embed content"
+        raise NotImplementedError(msg)
+
+    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
+        _ = text
+        msg = "Snapshot collection existence checks must not embed content"
+        raise NotImplementedError(msg)
 
 
 _published_snapshots: dict[KnowledgeSnapshotKey, PublishedKnowledgeSnapshot] = {}
@@ -540,7 +565,7 @@ def snapshot_collection_exists_for_state(key: KnowledgeSnapshotKey, state: Publi
                 collection=collection_name,
                 path=str(snapshot_base_storage_path(key)),
                 persistent_client=True,
-                embedder=cast("Embedder", object()),
+                embedder=_SnapshotExistenceEmbedder(),
             ),
         )
         return vector_db.exists()

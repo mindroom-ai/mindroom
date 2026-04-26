@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from agno.knowledge.knowledge import Knowledge
 
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.registry import (
     KnowledgeRefreshKey,
@@ -184,6 +185,54 @@ def _refresh_cooldown_seconds(
     return max(poll_interval_seconds, 1.0)
 
 
+def _failed_refresh_retry_fingerprint(
+    lookup: KnowledgeSnapshotLookup,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, ...]:
+    """Return a secret-free fingerprint for Git refresh/auth settings that can fix a failed retry."""
+    git_config = config.get_knowledge_base_config(lookup.key.base_id).git
+    if git_config is None:
+        return ()
+
+    fingerprint = [
+        "git-refresh",
+        f"credentials_service:{git_config.credentials_service or ''}",
+        f"sync_timeout_seconds:{git_config.sync_timeout_seconds}",
+    ]
+    if git_config.credentials_service is None:
+        return tuple(fingerprint)
+
+    credentials_path = get_runtime_shared_credentials_manager(runtime_paths).get_credentials_path(
+        git_config.credentials_service,
+    )
+    try:
+        credentials_stat = credentials_path.stat()
+    except OSError:
+        fingerprint.extend(("credentials_mtime_ns:", "credentials_size:"))
+    else:
+        fingerprint.extend(
+            (
+                f"credentials_mtime_ns:{credentials_stat.st_mtime_ns}",
+                f"credentials_size:{credentials_stat.st_size}",
+            ),
+        )
+    return tuple(fingerprint)
+
+
+def _refresh_retry_settings(
+    lookup: KnowledgeSnapshotLookup,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    availability: KnowledgeAvailability,
+) -> tuple[str, ...] | None:
+    if availability is KnowledgeAvailability.CONFIG_MISMATCH:
+        return lookup.key.indexing_settings
+    if availability is KnowledgeAvailability.REFRESH_FAILED:
+        return lookup.key.indexing_settings + _failed_refresh_retry_fingerprint(lookup, config, runtime_paths)
+    return None
+
+
 def _ready_refresh_on_access_cooldown_seconds(lookup: KnowledgeSnapshotLookup, config: Config) -> float:
     """Return READY refresh throttle without request-path source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
@@ -275,11 +324,7 @@ def _schedule_refresh_for_availability(
     if _refresh_schedule_due(
         refresh_key,
         availability,
-        settings=(
-            lookup.key.indexing_settings
-            if availability in {KnowledgeAvailability.CONFIG_MISMATCH, KnowledgeAvailability.REFRESH_FAILED}
-            else None
-        ),
+        settings=_refresh_retry_settings(lookup, config, runtime_paths, availability),
         cooldown_seconds=_refresh_cooldown_seconds(lookup, config, availability),
     ):
         refresh_owner.schedule_refresh(

@@ -193,7 +193,7 @@ def _schedule_refreshes(
         _schedule_refresh(config, base_id, runtime_paths, request=request)
 
 
-def _snapshot_status(
+def _snapshot_status_sync(
     config: Config,
     base_id: str,
     runtime_paths: constants.RuntimePaths,
@@ -220,6 +220,14 @@ def _snapshot_status(
     if available:
         available = snapshot_collection_exists_for_state(key, state)
     return available, state.indexed_count or 0
+
+
+async def _snapshot_status(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+) -> tuple[bool, int]:
+    return await asyncio.to_thread(_snapshot_status_sync, config, base_id, runtime_paths)
 
 
 def _snapshot_state(
@@ -439,7 +447,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
         file_info = await _list_file_info(config, base_id, root)
-        snapshot_available, indexed_count = _snapshot_status(config, base_id, runtime_paths)
+        snapshot_available, indexed_count = await _snapshot_status(config, base_id, runtime_paths)
         git_status = _git_status(config, base_id, runtime_paths, request=request)
         refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
@@ -470,7 +478,7 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
     """List all managed files currently present in one knowledge base folder."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
-    snapshot_available, _indexed_count = _snapshot_status(config, base_id, runtime_paths)
+    snapshot_available, _indexed_count = await _snapshot_status(config, base_id, runtime_paths)
     file_info = await _list_file_info(config, base_id, root)
 
     return {
@@ -579,7 +587,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     """Return current indexing status for one knowledge base."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
-    snapshot_available, indexed_count = _snapshot_status(config, base_id, runtime_paths)
+    snapshot_available, indexed_count = await _snapshot_status(config, base_id, runtime_paths)
     state = _snapshot_state(config, base_id, runtime_paths)
     file_info = await _list_file_info(config, base_id, root)
     git_status = _git_status(config, base_id, runtime_paths, request=request)
