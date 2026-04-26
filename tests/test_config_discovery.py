@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import os
+import tomllib
 from functools import cache
 from pathlib import Path
 
@@ -110,6 +111,17 @@ def _runtime_source_contexts() -> tuple[tuple[str, ast.AST, set[str]], ...]:
         tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
         contexts.append((relative_path, tree, _runtime_constant_aliases(tree)))
     return tuple(contexts)
+
+
+@cache
+def _tach_public_interfaces() -> dict[str, set[str]]:
+    tach_data = tomllib.loads((_repo_root() / "tach.toml").read_text(encoding="utf-8"))
+    interfaces: dict[str, set[str]] = {}
+    for entry in tach_data["interfaces"]:
+        exposed = set(entry["expose"])
+        for source in entry["from"]:
+            interfaces.setdefault(source, set()).update(exposed)
+    return interfaces
 
 
 def _runtime_constant_aliases(tree: ast.AST) -> set[str]:
@@ -1092,6 +1104,16 @@ class TestRuntimeGuardrails:
         """Keep storage-only helpers off the heavy agents facade in production code."""
         violations = _collect_agent_storage_helper_facade_import_violations()
         assert not violations, "\n".join(violations)
+
+    def test_agent_storage_helpers_are_owned_by_agent_storage_interface(self) -> None:
+        """Keep Tach's public interface metadata aligned with storage helper ownership."""
+        interfaces = _tach_public_interfaces()
+
+        agents_exports = interfaces.get("mindroom.agents", set())
+        agent_storage_exports = interfaces.get("mindroom.agent_storage", set())
+
+        assert not (_AGENT_STORAGE_HELPERS & agents_exports)
+        assert agent_storage_exports >= _AGENT_STORAGE_HELPERS
 
     def test_plain_config_remains_runtime_free(self) -> None:
         """Plain Config() should not silently acquire runtime bindings in tests."""
