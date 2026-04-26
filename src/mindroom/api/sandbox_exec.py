@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+import signal
 import site
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -352,38 +354,46 @@ def source_workspace_env_hook(
     capture_marker = secrets.token_hex(16)
     bash_script = '. "$1"; printf "%s\\0" "$2"; printenv -0'
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             [bash_path, "-c", bash_script, "bash", str(hook_path), capture_marker],
-            input=b"",
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=str(cwd),
             env=dict(base_env),
-            timeout=WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS,
-            check=False,
             start_new_session=True,
         )
+        stdout, stderr = process.communicate(input=b"", timeout=WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
+        _kill_workspace_env_hook_process_group(process)
+        with suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=1.0)
         msg = f".mindroom/worker-env.sh timed out after {WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS} seconds."
         raise WorkspaceEnvHookError(msg) from exc
     except OSError as exc:
         msg = f"Failed to start bash for .mindroom/worker-env.sh: {exc}"
         raise WorkspaceEnvHookError(msg) from exc
-    if completed.returncode != 0:
-        excerpt = (completed.stderr or completed.stdout or b"").decode(errors="replace")[:512].strip()
+    if process.returncode != 0:
+        excerpt = (stderr or stdout or b"").decode(errors="replace")[:512].strip()
         suffix = f" output: {excerpt}" if excerpt else ""
-        msg = f".mindroom/worker-env.sh exited with code {completed.returncode}.{suffix}"
+        msg = f".mindroom/worker-env.sh exited with code {process.returncode}.{suffix}"
         raise WorkspaceEnvHookError(msg)
-    if len(completed.stdout) > _WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES:
+    if len(stdout) > _WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES:
         msg = (
-            f".mindroom/worker-env.sh produced {len(completed.stdout)} bytes of "
+            f".mindroom/worker-env.sh produced {len(stdout)} bytes of "
             f"capture output (limit {_WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES})."
         )
         raise WorkspaceEnvHookError(msg)
     return _parse_workspace_env_hook_output(
-        completed.stdout,
+        stdout,
         capture_marker,
         base_env=base_env,
     )
+
+
+def _kill_workspace_env_hook_process_group(process: subprocess.Popen[bytes]) -> None:
+    with suppress(OSError):
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
 
 
 def _resolve_bash(base_env: Mapping[str, str]) -> str:
@@ -416,10 +426,13 @@ def _parse_workspace_env_hook_output(
         if kv is None:
             continue
         key, value = kv
+        entry_bytes = len(key.encode("utf-8")) + 1 + len(value.encode("utf-8"))
+        projected_bytes = total_bytes + entry_bytes
+        if projected_bytes > _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES:
+            msg = f".mindroom/worker-env.sh overlay is too large (limit {_WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES} bytes)."
+            raise WorkspaceEnvHookError(msg)
         overlay[key] = value
-        total_bytes += len(key) + 1 + len(value)
-        if total_bytes > _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES:
-            break
+        total_bytes = projected_bytes
     return overlay
 
 

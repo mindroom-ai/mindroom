@@ -545,61 +545,85 @@ def _serialize_worker(worker: WorkerHandle) -> SandboxWorkerResponse:
     )
 
 
-def _maybe_read_workspace_env_overlay(
+def _workspace_env_overlay_for_request(
     request: SandboxRunnerExecuteRequest,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-    base_env: dict[str, str],
+    execution_env: dict[str, str],
     *,
+    subprocess_env: dict[str, str] | None = None,
     apply: bool,
-) -> tuple[dict[str, str], SandboxRunnerExecuteResponse | None]:
+) -> tuple[dict[str, str], dict[str, str], SandboxRunnerExecuteResponse | None]:
     """Source `.mindroom/worker-env.sh` for one request.
 
-    Returns `(overlay, None)` on success (overlay is empty when no hook
-    exists). Returns `({}, tool_failure_response)` when the hook fails to
-    source — the caller should return that response directly. Skips silently
-    when `apply` is False, used by the in-subprocess re-execution path after
-    the parent already sourced the hook.
+    Returns `(base_env, overlay, None)` on success (overlay is empty when no
+    hook exists). Returns `(base_env, {}, tool_failure_response)` when the hook
+    fails to source — the caller should return that response directly. Skips
+    silently when `apply` is False, used by the in-subprocess re-execution path
+    after the parent already sourced the hook.
     """
+    base_env = _workspace_env_overlay_base_env(
+        prepared,
+        execution_env,
+        subprocess_env=subprocess_env,
+    )
     if not apply:
-        return {}, None
-    workspace = _workspace_for_env_hook(request, prepared)
+        return base_env, {}, None
+
+    workspace: Path | None = None
+    if prepared is not None:
+        base_dir = prepared.runtime_overrides.get("base_dir")
+        if isinstance(base_dir, Path):
+            workspace = base_dir
+        elif isinstance(base_dir, str):
+            workspace = Path(base_dir)
+    elif isinstance(raw_base_dir := request.tool_init_overrides.get("base_dir"), str):
+        candidate = Path(raw_base_dir).expanduser()
+        if candidate.is_absolute():
+            workspace = candidate
     if workspace is None:
-        return {}, None
+        return base_env, {}, None
+
     try:
         hook_path = sandbox_exec.resolve_workspace_env_hook_path(workspace)
         if hook_path is None:
-            return {}, None
+            return base_env, {}, None
         overlay = sandbox_exec.source_workspace_env_hook(
             hook_path=hook_path,
             base_env=base_env,
             cwd=workspace,
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
-        return {}, SandboxRunnerExecuteResponse(
-            ok=False,
-            error=str(exc),
-            failure_kind="tool",
+        return (
+            base_env,
+            {},
+            SandboxRunnerExecuteResponse(
+                ok=False,
+                error=str(exc),
+                failure_kind="tool",
+            ),
         )
-    return overlay, None
+    return base_env, overlay, None
 
 
-def _workspace_for_env_hook(
-    request: SandboxRunnerExecuteRequest,
+def _workspace_env_overlay_base_env(
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-) -> Path | None:
-    if prepared is not None:
-        base_dir = prepared.runtime_overrides.get("base_dir")
-        if isinstance(base_dir, Path):
-            return base_dir
-        if isinstance(base_dir, str):
-            return Path(base_dir)
-        return None
-    raw_base_dir = request.tool_init_overrides.get("base_dir")
-    if isinstance(raw_base_dir, str):
-        candidate = Path(raw_base_dir).expanduser()
-        if candidate.is_absolute():
-            return candidate
-    return None
+    execution_env: dict[str, str],
+    *,
+    subprocess_env: dict[str, str] | None,
+) -> dict[str, str]:
+    if subprocess_env is not None:
+        base_env = dict(subprocess_env)
+        base_env.update(execution_env)
+        return base_env
+
+    base_env = dict(execution_env)
+    # Seed PATH/HOME defaults so bash can locate `printenv` when sourcing the
+    # hook for inprocess unkeyed proxy calls (the subprocess path already gets
+    # these via worker_subprocess_env / generic_subprocess_env).
+    if prepared is None:
+        for key, value in sandbox_exec.generic_subprocess_env().items():
+            base_env.setdefault(key, value)
+    return base_env
 
 
 async def _execute_request_inprocess(
@@ -631,17 +655,10 @@ async def _execute_request_inprocess(
         worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
         worker_execution_env.update(execution_env)
         execution_env = worker_execution_env
-    # Seed PATH/HOME defaults so bash can locate `printenv` when sourcing the
-    # hook for inprocess unkeyed proxy calls (the subprocess path already gets
-    # these via worker_subprocess_env / generic_subprocess_env).
-    hook_base_env = dict(execution_env)
-    if prepared is None:
-        for key, value in sandbox_exec.generic_subprocess_env().items():
-            hook_base_env.setdefault(key, value)
-    overlay, overlay_failure = _maybe_read_workspace_env_overlay(
+    _hook_base_env, overlay, overlay_failure = _workspace_env_overlay_for_request(
         request,
         prepared,
-        hook_base_env,
+        execution_env,
         apply=apply_workspace_env_hook,
     )
     if overlay_failure is not None:
@@ -775,12 +792,11 @@ def _execute_request_subprocess_sync(
     python_executable, subprocess_env, cwd = sandbox_exec.resolve_subprocess_worker_context(
         prepared.paths if prepared is not None else None,
     )
-    overlay_base_env: dict[str, str] = dict(subprocess_env or {})
-    overlay_base_env.update(execution_env)
-    overlay, overlay_failure = _maybe_read_workspace_env_overlay(
+    _hook_base_env, overlay, overlay_failure = _workspace_env_overlay_for_request(
         request,
         prepared,
-        overlay_base_env,
+        execution_env,
+        subprocess_env=subprocess_env,
         apply=apply_workspace_env_hook,
     )
     if overlay_failure is not None:

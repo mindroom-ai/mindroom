@@ -3494,22 +3494,22 @@ def test_workspace_env_hook_failure_returns_tool_failure(
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
-def test_workspace_env_hook_overlays_worker_routed_subprocess_default_mode(
+def test_workspace_env_hook_overlays_worker_routed_python_default_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker-keyed non-shell tools (coding/file/python) get the overlay even in the default inprocess runner mode.
+    """Worker-keyed python gets the overlay even in the default inprocess runner mode.
 
-    These tools take the `tool_name != "shell" and worker_key is not None`
-    branch which always dispatches through `_execute_request_subprocess`, so
-    the overlay must reach `os.environ` of the per-worker subprocess.
+    Worker-keyed non-shell tools take the `tool_name != "shell" and
+    worker_key is not None` branch, which always dispatches through
+    `_execute_request_subprocess`.
     """
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     workspace = storage_root / "agents" / "general" / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
-    _write_workspace_env_hook(workspace, "export WORKSPACE_TOOLCHAIN_TOKEN=visible-to-coding-and-file\n")
+    _write_workspace_env_hook(workspace, "export WORKSPACE_TOOLCHAIN_TOKEN=visible-to-python\n")
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
@@ -3538,7 +3538,84 @@ def test_workspace_env_hook_overlays_worker_routed_subprocess_default_mode(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    assert "visible-to-coding-and-file" in str(payload["result"])
+    assert "visible-to-python" in str(payload["result"])
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_workspace_env_hook_overlays_worker_routed_coding_default_mode(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker-keyed coding sees hook PATH changes in the default inprocess runner mode."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    bin_dir = workspace / ".local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (workspace / "note.txt").write_text("needle\n", encoding="utf-8")
+    fake_rg = bin_dir / "rg"
+    fake_rg.write_text('#!/usr/bin/env bash\necho "hook-rg" >&2\nexit 2\n', encoding="utf-8")
+    fake_rg.chmod(0o755)
+    _write_workspace_env_hook(workspace, 'export PATH="$PWD/.local/bin:$PATH"\n')
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "coding",
+                "function_name": "grep",
+                "args": ["needle"],
+                "kwargs": {"path": "."},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    assert payload["result"] == "Error running grep: hook-rg"
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_workspace_env_hook_failure_blocks_worker_routed_file_default_mode(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker-keyed file requests source the hook before running."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(workspace, 'echo "file hook failed" >&2\nexit 6\n')
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["should not be written", "note.txt"],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False, payload
+    assert payload["failure_kind"] == "tool"
+    assert "exited with code 6" in payload["error"]
+    assert not (workspace / "note.txt").exists()
 
 
 @REQUIRES_LINUX_LOCAL_WORKER

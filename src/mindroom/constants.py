@@ -93,8 +93,6 @@ def is_workspace_env_overlay_name_allowed(name: str) -> bool:
         return False
     if name in _SHELL_EXTRA_ENV_EXCLUDED_NAMES:
         return False
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
-        return False
     if name.endswith(_SHELL_EXTRA_ENV_SECRET_SUFFIXES):
         return False
     return not name.startswith("MINDROOM_SANDBOX_")

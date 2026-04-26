@@ -258,16 +258,65 @@ def test_source_workspace_env_hook_raises_on_timeout(
     """Subprocess timeout becomes a hook error."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    hook_path = _write_hook(workspace, "export FOO=bar\n")
+    hook_path = _write_hook(workspace, "sleep 1\nexport FOO=bar\n")
 
     monkeypatch.setattr(sandbox_exec, "WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS", 0.01)
 
-    def _slow_run(*_args: object, **_kwargs: object) -> object:
-        raise subprocess.TimeoutExpired(cmd="bash", timeout=0.01)
+    with pytest.raises(WorkspaceEnvHookError, match="timed out"):
+        source_workspace_env_hook(
+            hook_path=hook_path,
+            base_env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            cwd=workspace,
+        )
 
-    monkeypatch.setattr(sandbox_exec.subprocess, "run", _slow_run)
+
+def test_source_workspace_env_hook_kills_process_group_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hook timeouts kill the whole child process group."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    hook_path = _write_hook(workspace, "sleep 60\n")
+    killed_pgids: list[int] = []
+
+    class _TimeoutProcess:
+        pid = 12345
+
+        def communicate(self, **kwargs: object) -> tuple[bytes, bytes]:
+            timeout = float(kwargs["timeout"])
+            raise subprocess.TimeoutExpired(cmd="bash", timeout=timeout)
+
+        def wait(self, **_kwargs: object) -> int:
+            return -9
+
+    monkeypatch.setattr(sandbox_exec.subprocess, "run", pytest.fail)
+    monkeypatch.setattr(sandbox_exec.subprocess, "Popen", lambda *_args, **_kwargs: _TimeoutProcess())
+    monkeypatch.setattr(sandbox_exec.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(sandbox_exec.os, "killpg", lambda pgid, _sig: killed_pgids.append(pgid))
 
     with pytest.raises(WorkspaceEnvHookError, match="timed out"):
+        source_workspace_env_hook(
+            hook_path=hook_path,
+            base_env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            cwd=workspace,
+        )
+
+    assert killed_pgids == [12345]
+
+
+@REQUIRES_BASH
+def test_source_workspace_env_hook_rejects_overlay_that_exceeds_total_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The total overlay byte cap rejects the first entry that would exceed it."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    hook_path = _write_hook(workspace, "export FIRST=12345\nexport SECOND=12345\n")
+    monkeypatch.setattr(sandbox_exec, "_WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES", len("FIRST=12345"))
+
+    with pytest.raises(WorkspaceEnvHookError, match="overlay is too large"):
         source_workspace_env_hook(
             hook_path=hook_path,
             base_env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
@@ -285,7 +334,7 @@ def test_source_workspace_env_hook_raises_when_bash_missing(
     hook_path = _write_hook(workspace, "export FOO=bar\n")
 
     monkeypatch.setattr(sandbox_exec.shutil, "which", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(sandbox_exec.Path, "exists", lambda _self: False)
+    monkeypatch.setattr(sandbox_exec.os, "access", lambda *_args, **_kwargs: False)
 
     with pytest.raises(WorkspaceEnvHookError, match="bash is required"):
         source_workspace_env_hook(
