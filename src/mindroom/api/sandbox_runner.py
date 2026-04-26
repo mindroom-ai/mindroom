@@ -552,14 +552,14 @@ def _workspace_env_overlay_for_request(
     *,
     subprocess_env: dict[str, str] | None = None,
     apply: bool,
-) -> tuple[dict[str, str], dict[str, str], SandboxRunnerExecuteResponse | None]:
+) -> tuple[dict[str, str], SandboxRunnerExecuteResponse | None]:
     """Source `.mindroom/worker-env.sh` for one request.
 
-    Returns `(base_env, overlay, None)` on success (overlay is empty when no
-    hook exists). Returns `(base_env, {}, tool_failure_response)` when the hook
-    fails to source — the caller should return that response directly. Skips
-    silently when `apply` is False, used by the in-subprocess re-execution path
-    after the parent already sourced the hook.
+    Returns `(overlay, None)` on success (overlay is empty when no hook exists).
+    Returns `({}, tool_failure_response)` when the hook fails to source — the
+    caller should return that response directly. Skips silently when `apply` is
+    False, used by the in-subprocess re-execution path after the parent already
+    sourced the hook.
     """
     base_env = _workspace_env_overlay_base_env(
         prepared,
@@ -567,7 +567,7 @@ def _workspace_env_overlay_for_request(
         subprocess_env=subprocess_env,
     )
     if not apply:
-        return base_env, {}, None
+        return {}, None
 
     workspace: Path | None = None
     if prepared is not None:
@@ -581,12 +581,12 @@ def _workspace_env_overlay_for_request(
         if candidate.is_absolute():
             workspace = candidate
     if workspace is None:
-        return base_env, {}, None
+        return {}, None
 
     try:
         hook_path = sandbox_exec.resolve_workspace_env_hook_path(workspace)
         if hook_path is None:
-            return base_env, {}, None
+            return {}, None
         overlay = sandbox_exec.source_workspace_env_hook(
             hook_path=hook_path,
             base_env=base_env,
@@ -594,7 +594,6 @@ def _workspace_env_overlay_for_request(
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
         return (
-            base_env,
             {},
             SandboxRunnerExecuteResponse(
                 ok=False,
@@ -602,7 +601,7 @@ def _workspace_env_overlay_for_request(
                 failure_kind="tool",
             ),
         )
-    return base_env, overlay, None
+    return overlay, None
 
 
 def _workspace_env_overlay_base_env(
@@ -655,7 +654,7 @@ async def _execute_request_inprocess(
         worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
         worker_execution_env.update(execution_env)
         execution_env = worker_execution_env
-    _hook_base_env, overlay, overlay_failure = _workspace_env_overlay_for_request(
+    overlay, overlay_failure = _workspace_env_overlay_for_request(
         request,
         prepared,
         execution_env,
@@ -792,7 +791,7 @@ def _execute_request_subprocess_sync(
     python_executable, subprocess_env, cwd = sandbox_exec.resolve_subprocess_worker_context(
         prepared.paths if prepared is not None else None,
     )
-    _hook_base_env, overlay, overlay_failure = _workspace_env_overlay_for_request(
+    overlay, overlay_failure = _workspace_env_overlay_for_request(
         request,
         prepared,
         execution_env,
