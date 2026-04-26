@@ -63,6 +63,9 @@ interface KnowledgeStatus {
   file_count: number;
   indexed_count: number;
   refreshing?: boolean;
+  advisory_state?: "none" | "stale" | "refreshing" | "refresh_failed";
+  refresh_job?: "idle" | "pending" | "running" | "failed";
+  last_error?: string | null;
   file_listing_degraded?: boolean;
   file_listing_error?: string | null;
   git?: {
@@ -1579,6 +1582,23 @@ export function Knowledge() {
                   <Badge variant="outline">
                     Total Size: {formatBytes(totalSize)}
                   </Badge>
+                  {status?.refreshing ||
+                  status?.refresh_job === "running" ||
+                  status?.advisory_state === "refreshing" ? (
+                    <Badge variant="default">Refresh Running</Badge>
+                  ) : null}
+                  {status?.refresh_job === "pending" ||
+                  status?.advisory_state === "stale" ? (
+                    <Badge variant="secondary">Refresh Pending</Badge>
+                  ) : null}
+                  {status?.refresh_job === "failed" ||
+                  status?.advisory_state === "refresh_failed" ||
+                  status?.last_error ? (
+                    <Badge variant="destructive">Refresh Failed</Badge>
+                  ) : null}
+                  {status?.file_listing_degraded ? (
+                    <Badge variant="destructive">File Listing Degraded</Badge>
+                  ) : null}
                   {status?.git ? (
                     <>
                       <Badge variant="outline">
@@ -1611,17 +1631,24 @@ export function Knowledge() {
                       {status.git.last_error ? (
                         <Badge variant="destructive">Git Error</Badge>
                       ) : null}
-                      {status.file_listing_degraded ? (
-                        <Badge variant="destructive">
-                          File Listing Degraded
-                        </Badge>
-                      ) : null}
                     </>
                   ) : null}
                 </div>
                 <p className="text-sm text-muted-foreground mt-2">
                   Folder: <code>{status?.folder_path ?? "-"}</code>
                 </p>
+                {status?.last_error ? (
+                  <p className="mt-2 text-sm text-destructive">
+                    Refresh Error: {status.last_error}
+                  </p>
+                ) : null}
+                {status?.file_listing_degraded ? (
+                  <p className="mt-2 text-sm text-destructive">
+                    File Listing:{" "}
+                    {status.file_listing_error ??
+                      "Knowledge file listing is incomplete."}
+                  </p>
+                ) : null}
                 {status?.git ? (
                   <div className="mt-2 space-y-1 text-sm text-muted-foreground">
                     <p>
@@ -1643,13 +1670,6 @@ export function Knowledge() {
                     ) : null}
                     {status.git.last_error ? (
                       <p>Git Error: {status.git.last_error}</p>
-                    ) : null}
-                    {status.file_listing_degraded ? (
-                      <p className="text-destructive">
-                        File Listing:{" "}
-                        {status.file_listing_error ??
-                          "Repository file listing is incomplete."}
-                      </p>
                     ) : null}
                   </div>
                 ) : null}

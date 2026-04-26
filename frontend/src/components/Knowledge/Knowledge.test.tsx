@@ -29,6 +29,9 @@ type KnowledgeApiPayloads = {
     file_count: number;
     indexed_count: number;
     refreshing?: boolean;
+    advisory_state?: "none" | "stale" | "refreshing" | "refresh_failed";
+    refresh_job?: "idle" | "pending" | "running" | "failed";
+    last_error?: string | null;
     file_listing_degraded?: boolean;
     file_listing_error?: string | null;
     git?: {
@@ -639,6 +642,74 @@ describe("Knowledge", () => {
 
     expect(screen.getByText("External edits need reindex")).toBeInTheDocument();
     expect(screen.queryByText("Manual reindex only")).not.toBeInTheDocument();
+  });
+
+  it("shows non-git refresh activity from top-level status fields", async () => {
+    mockStore({
+      docs: { path: "./knowledge_docs/docs", watch: true },
+    });
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          folder_path: "./knowledge_docs/docs",
+          watch: true,
+          file_count: 2,
+          indexed_count: 1,
+          refreshing: true,
+          advisory_state: "refreshing",
+          refresh_job: "running",
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    expect(screen.getByText("Refresh Running")).toBeInTheDocument();
+    expect(screen.queryByText("Git policy:")).not.toBeInTheDocument();
+  });
+
+  it("shows non-git refresh failures with redacted last error", async () => {
+    mockStore({
+      docs: { path: "./knowledge_docs/docs", watch: true },
+    });
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          folder_path: "./knowledge_docs/docs",
+          watch: true,
+          file_count: 2,
+          indexed_count: 1,
+          refreshing: false,
+          advisory_state: "refresh_failed",
+          refresh_job: "failed",
+          last_error: "Git command failed: https://***@example.com/repo.git",
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    expect(screen.getByText("Refresh Failed")).toBeInTheDocument();
+    expect(screen.getByText(/Refresh Error:/)).toHaveTextContent(
+      "Git command failed: https://***@example.com/repo.git",
+    );
+    expect(screen.queryByText(/token:secret/)).not.toBeInTheDocument();
   });
 
   it("shows git sync status details from the API", async () => {

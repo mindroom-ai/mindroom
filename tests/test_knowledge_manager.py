@@ -252,6 +252,34 @@ def _git_manager(
     return KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
 
+@pytest.mark.asyncio
+async def test_git_manager_construction_does_not_probe_checkout_on_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git checkout detection during construction must stay filesystem-only."""
+    loop_thread_id = get_ident()
+    knowledge_path = tmp_path / "knowledge"
+    (knowledge_path / ".git").mkdir(parents=True)
+    config = _config(
+        tmp_path,
+        bases={"docs": knowledge_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")},
+    )
+
+    def _unexpected_checkout_probe(*_args: object, **_kwargs: object) -> bool:
+        msg = f"git checkout probe ran during manager construction on thread {loop_thread_id}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(knowledge_manager_module, "git_checkout_present", _unexpected_checkout_probe)
+
+    await asyncio.sleep(0)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    assert manager._git_repo_present is True
+
+
 def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: Path) -> None:
     """A missing published snapshot is advisory and schedules only the referenced base."""
     config = _config(
@@ -1132,6 +1160,24 @@ def test_config_rejects_exact_duplicate_git_roots_with_different_source_semantic
             git_configs={
                 "main": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main"),
                 "release": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="release"),
+            },
+        )
+
+
+def test_config_rejects_exact_duplicate_git_roots_with_different_passwordless_ssh_usernames(
+    tmp_path: Path,
+) -> None:
+    """Passwordless SSH usernames are part of duplicate-root Git source identity."""
+    docs = tmp_path / "docs"
+
+    with pytest.raises(ValueError, match="exact duplicate aliases must use compatible source configuration"):
+        _config(
+            tmp_path,
+            bases={"git_user": docs, "deploy_user": docs},
+            agent_bases=["git_user"],
+            git_configs={
+                "git_user": KnowledgeGitConfig(repo_url="ssh://git@example.com/org/repo.git"),
+                "deploy_user": KnowledgeGitConfig(repo_url="ssh://deploy@example.com/org/repo.git"),
             },
         )
 

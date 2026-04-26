@@ -259,6 +259,11 @@ def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) ->
         return False
 
 
+def _git_metadata_present(root: Path) -> bool:
+    """Return whether root has cheap local Git metadata."""
+    return root.is_dir() and (root / ".git").exists()
+
+
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     """Check collection existence without constructing Agno Knowledge."""
     vector_db = ChromaDb(
@@ -871,10 +876,7 @@ class KnowledgeManager:
         self._index_failures_path = self._base_storage_path / "index_failures.json"
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
-        self._git_repo_present = base_config.git is not None and git_checkout_present(
-            self.knowledge_path,
-            timeout_seconds=float(base_config.git.sync_timeout_seconds),
-        )
+        self._git_repo_present = base_config.git is not None and _git_metadata_present(self.knowledge_path)
         persisted_state = self._load_persisted_indexing_state()
         self._cached_persisted_indexing_state = persisted_state
         self._persisted_collection_missing_on_init = self._persisted_collection_missing(persisted_state)
