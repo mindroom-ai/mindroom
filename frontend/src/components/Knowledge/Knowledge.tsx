@@ -283,6 +283,7 @@ export function Knowledge() {
   const [error, setError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const loadRequestIdRef = useRef(0);
 
   const knowledgeBases = useMemo(
     () => config?.knowledge_bases ?? {},
@@ -337,14 +338,20 @@ export function Knowledge() {
   }, [knowledgeBases, selectedBase]);
 
   const loadData = useCallback(async (baseId: string | null) => {
+    const requestId = loadRequestIdRef.current + 1;
+    loadRequestIdRef.current = requestId;
+    const isCurrentRequest = () => loadRequestIdRef.current === requestId;
+
     setLoading(true);
     setError(null);
 
     try {
       if (!baseId) {
-        setFiles([]);
-        setStatus(null);
-        setTotalSize(0);
+        if (isCurrentRequest()) {
+          setFiles([]);
+          setStatus(null);
+          setTotalSize(0);
+        }
         return;
       }
 
@@ -355,21 +362,40 @@ export function Knowledge() {
         ),
       ]);
 
-      setStatus({
-        ...statusData,
-        file_listing_degraded:
-          filesData.file_listing_degraded ?? statusData.file_listing_degraded,
-        file_listing_error:
-          filesData.file_listing_error ?? statusData.file_listing_error ?? null,
-      });
-      setFiles(filesData.files);
-      setTotalSize(filesData.total_size);
+      if (!isCurrentRequest()) {
+        return;
+      }
+
+      if (statusData.base_id !== baseId || filesData.base_id !== baseId) {
+        throw new Error(
+          "Loaded knowledge data did not match the selected base",
+        );
+      }
+
+      if (isCurrentRequest()) {
+        setStatus({
+          ...statusData,
+          file_listing_degraded:
+            filesData.file_listing_degraded ?? statusData.file_listing_degraded,
+          file_listing_error:
+            filesData.file_listing_error ??
+            statusData.file_listing_error ??
+            null,
+        });
+        setFiles(filesData.files);
+        setTotalSize(filesData.total_size);
+      }
     } catch (err) {
+      if (!isCurrentRequest()) {
+        return;
+      }
       const message =
         err instanceof Error ? err.message : "Failed to load knowledge data";
       setError(message);
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) {
+        setLoading(false);
+      }
     }
   }, []);
 

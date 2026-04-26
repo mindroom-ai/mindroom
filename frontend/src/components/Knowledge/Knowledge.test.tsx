@@ -68,6 +68,17 @@ function jsonResponse(payload: unknown, status = 200): Response {
   });
 }
 
+function deferredJsonResponse(payload: unknown): {
+  promise: Promise<Response>;
+  resolve: () => void;
+} {
+  let resolve!: () => void;
+  const promise = new Promise<Response>((resolvePromise) => {
+    resolve = () => resolvePromise(jsonResponse(payload));
+  });
+  return { promise, resolve };
+}
+
 function setKnowledgeApiMock(
   payloadByBase: Record<string, KnowledgeApiPayloads>,
   options: {
@@ -269,6 +280,126 @@ describe("Knowledge", () => {
     expect(
       screen.getByRole("button", { name: "Delete Active Base" }),
     ).not.toBeDisabled();
+  });
+
+  it("ignores stale status and file responses after the selected base changes", async () => {
+    let knowledgeBases: Record<string, KnowledgeBaseConfig> = {
+      alpha: { path: "./knowledge_docs/alpha", watch: true },
+    };
+    const storeMock = useConfigStore as unknown as Mock;
+    storeMock.mockImplementation(() => ({
+      config: {
+        knowledge_bases: knowledgeBases,
+      } as unknown as Config,
+      updateKnowledgeBase: mockUpdateKnowledgeBase,
+      deleteKnowledgeBase: mockDeleteKnowledgeBase,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    }));
+
+    const alphaStatus = deferredJsonResponse({
+      base_id: "alpha",
+      folder_path: "./knowledge_docs/alpha",
+      watch: true,
+      file_count: 1,
+      indexed_count: 1,
+    });
+    const alphaFiles = deferredJsonResponse({
+      base_id: "alpha",
+      files: [
+        {
+          name: "alpha.md",
+          path: "alpha.md",
+          size: 10,
+          modified: "2026-02-09T00:00:00.000Z",
+          type: "md",
+        },
+      ],
+      total_size: 10,
+      file_count: 1,
+    });
+    const betaStatus = deferredJsonResponse({
+      base_id: "beta",
+      folder_path: "./knowledge_docs/beta",
+      watch: false,
+      file_count: 1,
+      indexed_count: 1,
+    });
+    const betaFiles = deferredJsonResponse({
+      base_id: "beta",
+      files: [
+        {
+          name: "beta.md",
+          path: "beta.md",
+          size: 20,
+          modified: "2026-02-09T00:01:00.000Z",
+          type: "md",
+        },
+      ],
+      total_size: 20,
+      file_count: 1,
+    });
+
+    vi.mocked(global.fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === API_ENDPOINTS.knowledge.status("alpha")) {
+        return alphaStatus.promise;
+      }
+      if (url === API_ENDPOINTS.knowledge.files("alpha")) {
+        return alphaFiles.promise;
+      }
+      if (url === API_ENDPOINTS.knowledge.status("beta")) {
+        return betaStatus.promise;
+      }
+      if (url === API_ENDPOINTS.knowledge.files("beta")) {
+        return betaFiles.promise;
+      }
+      return Promise.resolve(
+        jsonResponse({ detail: `Unhandled URL: ${url}` }, 404),
+      );
+    });
+
+    const { rerender } = render(<Knowledge />);
+
+    await waitFor(() => {
+      expect(vi.mocked(global.fetch)).toHaveBeenCalledWith(
+        API_ENDPOINTS.knowledge.status("alpha"),
+        undefined,
+      );
+      expect(vi.mocked(global.fetch)).toHaveBeenCalledWith(
+        API_ENDPOINTS.knowledge.files("alpha"),
+        undefined,
+      );
+    });
+
+    knowledgeBases = {
+      beta: { path: "./knowledge_docs/beta", watch: false },
+    };
+    rerender(<Knowledge />);
+
+    await waitFor(() => {
+      expect(vi.mocked(global.fetch)).toHaveBeenCalledWith(
+        API_ENDPOINTS.knowledge.status("beta"),
+        undefined,
+      );
+      expect(vi.mocked(global.fetch)).toHaveBeenCalledWith(
+        API_ENDPOINTS.knowledge.files("beta"),
+        undefined,
+      );
+    });
+
+    betaStatus.resolve();
+    betaFiles.resolve();
+    await screen.findByText("Active: beta");
+    expect(screen.getAllByText("beta.md")).not.toHaveLength(0);
+
+    alphaStatus.resolve();
+    alphaFiles.resolve();
+    await waitFor(() => {
+      expect(screen.getByText("Active: beta")).toBeInTheDocument();
+      expect(screen.getAllByText("beta.md")).not.toHaveLength(0);
+      expect(screen.queryByText("alpha.md")).not.toBeInTheDocument();
+    });
   });
 
   it("creates a git-based knowledge base in one step", async () => {

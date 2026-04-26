@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, runtime_checkable
 from urllib.parse import quote, unquote, urlparse, urlunparse
 
 from agno.knowledge.embedder.ollama import OllamaEmbedder
@@ -181,6 +181,15 @@ class _PersistedIndexingState:
     indexed_count: int | None = None
     source_signature: str | None = None
     retained_collections: tuple[str, ...] = ()
+
+
+@dataclass
+class _CandidatePublishState:
+    published: bool = False
+
+
+def _raise_cancelled() -> NoReturn:
+    raise asyncio.CancelledError
 
 
 def _resolve_knowledge_path(
@@ -1598,6 +1607,72 @@ class KnowledgeManager:
                 exc_info=True,
             )
 
+    async def _save_candidate_publish_metadata(
+        self,
+        *,
+        candidate_vector_db: ChromaDb,
+        indexed_count: int,
+        source_signature: str,
+        retained_collections: tuple[str, ...],
+    ) -> bool:
+        save_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._save_persisted_indexing_state,
+                _INDEXING_STATUS_COMPLETE,
+                collection=candidate_vector_db.collection_name,
+                availability=_INDEXING_AVAILABILITY_READY,
+                last_published_at=datetime.now(tz=UTC).isoformat(),
+                published_revision=self._git_last_successful_commit,
+                indexed_count=indexed_count,
+                source_signature=source_signature,
+                retained_collections=retained_collections,
+            ),
+        )
+        try:
+            await asyncio.shield(save_task)
+        except asyncio.CancelledError:
+            await save_task
+            return True
+        return False
+
+    async def _adopt_candidate_vector_db(
+        self,
+        *,
+        candidate_vector_db: ChromaDb,
+        indexed_files: set[str],
+        indexed_signatures: dict[str, _FileSignature | None],
+    ) -> None:
+        self._knowledge.vector_db = candidate_vector_db
+        async with self._state_lock:
+            self._indexed_files = indexed_files
+            self._indexed_signatures = indexed_signatures
+
+    async def _publish_candidate_after_metadata_save(
+        self,
+        *,
+        candidate_vector_db: ChromaDb,
+        indexed_files: set[str],
+        indexed_signatures: dict[str, _FileSignature | None],
+        indexed_count: int,
+        source_signature: str,
+        retained_collections: tuple[str, ...],
+        publish_state: _CandidatePublishState,
+    ) -> None:
+        publish_cancelled = await self._save_candidate_publish_metadata(
+            candidate_vector_db=candidate_vector_db,
+            indexed_count=indexed_count,
+            source_signature=source_signature,
+            retained_collections=retained_collections,
+        )
+        publish_state.published = True
+        await self._adopt_candidate_vector_db(
+            candidate_vector_db=candidate_vector_db,
+            indexed_files=indexed_files,
+            indexed_signatures=indexed_signatures,
+        )
+        if publish_cancelled:
+            _raise_cancelled()
+
     def _reset_collection(self) -> None:
         vector_db = self._knowledge.vector_db
         if not isinstance(vector_db, ChromaDb):
@@ -1915,7 +1990,7 @@ class KnowledgeManager:
                 raise TypeError(msg)
 
             await asyncio.to_thread(self._reset_vector_db, candidate_vector_db)
-            candidate_published = False
+            candidate_publish_state = _CandidatePublishState()
             candidate_indexed_files: set[str] = set()
             candidate_indexed_signatures: dict[str, _FileSignature | None] = {}
 
@@ -1990,22 +2065,15 @@ class KnowledgeManager:
                     published_collection=candidate_vector_db.collection_name,
                     previous_state=persisted_state,
                 )
-                await asyncio.to_thread(
-                    self._save_persisted_indexing_state,
-                    _INDEXING_STATUS_COMPLETE,
-                    collection=candidate_vector_db.collection_name,
-                    availability=_INDEXING_AVAILABILITY_READY,
-                    last_published_at=datetime.now(tz=UTC).isoformat(),
-                    published_revision=self._git_last_successful_commit,
+                await self._publish_candidate_after_metadata_save(
+                    candidate_vector_db=candidate_vector_db,
+                    indexed_files=candidate_indexed_files,
+                    indexed_signatures=candidate_indexed_signatures,
                     indexed_count=len(candidate_indexed_files),
                     source_signature=candidate_source_signature,
                     retained_collections=retained_collections,
+                    publish_state=candidate_publish_state,
                 )
-                candidate_published = True
-                self._knowledge.vector_db = candidate_vector_db
-                async with self._state_lock:
-                    self._indexed_files = candidate_indexed_files
-                    self._indexed_signatures = candidate_indexed_signatures
                 await asyncio.to_thread(
                     self._cleanup_superseded_collections,
                     previous_state=persisted_state,
@@ -2018,7 +2086,7 @@ class KnowledgeManager:
             else:
                 return indexed_count
             finally:
-                if not candidate_published:
+                if not candidate_publish_state.published:
                     await self._delete_unpublished_candidate_vector_db(candidate_vector_db)
 
     async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:

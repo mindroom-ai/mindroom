@@ -596,6 +596,37 @@ def test_upload_stale_metadata_write_runs_off_event_loop(
     refresh.assert_not_awaited()
 
 
+def test_upload_stale_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp_path: Path) -> None:
+    """Uploads fail closed when stale metadata cannot be committed."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("old", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    async def _fail_stale_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        msg = "stale mark failed"
+        raise RuntimeError(msg)
+
+    with (
+        patch("mindroom.api.knowledge.mark_published_snapshot_stale_async", _fail_stale_mark),
+        patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
+        pytest.raises(RuntimeError, match="stale mark failed"),
+    ):
+        client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", ("guide.md", b"new", "text/markdown"))],
+        )
+
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "old"
+    assert list(docs.glob("*.upload.*")) == []
+    assert owner.scheduled == []
+    refresh.assert_not_awaited()
+
+
 def test_git_backed_upload_is_rejected_before_creating_cold_checkout(tmp_path: Path) -> None:
     """Uploads must not create a non-Git directory where a later clone will fail."""
     client = _test_client(tmp_path)
@@ -780,6 +811,33 @@ def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
         ("research", config),
         ("summary", config),
     ]
+    refresh.assert_not_awaited()
+
+
+def test_delete_stale_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp_path: Path) -> None:
+    """Deletes fail closed when stale metadata cannot be committed."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    async def _fail_stale_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        msg = "stale mark failed"
+        raise RuntimeError(msg)
+
+    with (
+        patch("mindroom.api.knowledge.mark_published_snapshot_stale_async", _fail_stale_mark),
+        patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
+        pytest.raises(RuntimeError, match="stale mark failed"),
+    ):
+        client.delete("/api/knowledge/bases/research/files/guide.md")
+
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
+    assert owner.scheduled == []
     refresh.assert_not_awaited()
 
 

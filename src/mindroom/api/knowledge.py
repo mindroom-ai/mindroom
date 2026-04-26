@@ -534,13 +534,18 @@ async def upload_knowledge_files(
                 "count": 0,
             }
 
-        _commit_staged_uploads(staged_uploads)
+        try:
+            affected_base_ids = await mark_published_snapshot_stale_async(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+            _commit_staged_uploads(staged_uploads)
+        except Exception:
+            for staged in staged_uploads:
+                staged.temp_path.unlink(missing_ok=True)
+            raise
         uploaded = [staged.relative_path for staged in staged_uploads]
-        affected_base_ids = await mark_published_snapshot_stale_async(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
 
     _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
 
@@ -565,13 +570,13 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         if not target.exists() or not target.is_file():
             raise HTTPException(status_code=404, detail="Knowledge file not found")
 
-        relative_path = target.relative_to(root.resolve()).as_posix()
-        target.unlink()
         affected_base_ids = await mark_published_snapshot_stale_async(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
         )
+        relative_path = target.relative_to(root.resolve()).as_posix()
+        target.unlink()
 
     _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
 

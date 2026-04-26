@@ -943,9 +943,8 @@ async def mark_published_snapshot_stale_async(
         execution_identity=execution_identity,
     )
     for matching_key in matching_keys:
-        stale_written = await asyncio.to_thread(_mark_snapshot_key_stale_on_disk, matching_key)
-        if stale_written:
-            _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
+        _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
+        await asyncio.to_thread(_mark_snapshot_key_stale_on_disk, matching_key)
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 

@@ -8,7 +8,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from threading import Lock, get_ident
+from threading import Event, Lock, get_ident
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import MagicMock
 
@@ -723,6 +723,57 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_async_mark_stale_cancellation_evicts_ready_snapshot_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during stale disk writes must not leave cached READY snapshots serving."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("cached old", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    ready_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert ready_lookup.snapshot is not None
+    assert ready_lookup.availability is KnowledgeAvailability.READY
+
+    loop = asyncio.get_running_loop()
+    stale_written = asyncio.Event()
+    release_stale_write = Event()
+    original_mark = knowledge_registry._mark_snapshot_key_stale_on_disk
+
+    def _block_after_stale_write(matching_key: knowledge_registry.KnowledgeSnapshotKey) -> bool:
+        result = original_mark(matching_key)
+        loop.call_soon_threadsafe(stale_written.set)
+        assert release_stale_write.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(knowledge_registry, "_mark_snapshot_key_stale_on_disk", _block_after_stale_write)
+
+    mark_task = asyncio.create_task(
+        knowledge_registry.mark_published_snapshot_stale_async(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        ),
+    )
+    await stale_written.wait()
+    mark_task.cancel()
+    release_stale_write.set()
+    with pytest.raises(asyncio.CancelledError):
+        await mark_task
+
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    refreshed_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+
+    assert state is not None
+    assert state.availability == KnowledgeAvailability.STALE.value
+    assert refreshed_lookup.availability is KnowledgeAvailability.STALE
+
+
+@pytest.mark.asyncio
 async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_change(tmp_path: Path) -> None:
     """Refreshing one local alias after an external source edit should stale sibling aliases."""
     docs_path = tmp_path / "docs"
@@ -1210,6 +1261,60 @@ async def test_cancelled_refresh_deletes_unpublished_candidate_collection(
     knowledge = get_agent_knowledge("helper", config, runtime_paths)
     assert knowledge is not None
     assert [document.content for document in knowledge.search("cancel", max_results=5)] == ["cancel stable"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_publish_metadata_save_keeps_published_candidate_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling during READY metadata save must not delete the metadata's candidate collection."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("stable metadata", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    doc.write_text("candidate metadata", encoding="utf-8")
+    loop = asyncio.get_running_loop()
+    metadata_saved = asyncio.Event()
+    release_metadata_save = Event()
+    original_save = KnowledgeManager._save_persisted_indexing_state
+
+    def _block_after_candidate_metadata_save(
+        self: KnowledgeManager,
+        status: object,
+        **kwargs: object,
+    ) -> None:
+        original_save(self, status, **kwargs)
+        if kwargs.get("availability") == "ready" and "_candidate_" in str(kwargs.get("collection")):
+            loop.call_soon_threadsafe(metadata_saved.set)
+            assert release_metadata_save.wait(timeout=5)
+
+    monkeypatch.setattr(KnowledgeManager, "_save_persisted_indexing_state", _block_after_candidate_metadata_save)
+
+    refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
+    await metadata_saved.wait()
+    refresh_task.cancel()
+    await asyncio.sleep(0)
+    release_metadata_save.set()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_task
+
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    assert state is not None
+    assert state.collection is not None
+    assert "_candidate_" in state.collection
+    assert state.collection in _VectorDb.collections
+
+    clear_published_snapshots()
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.snapshot is not None
+    assert [document.content for document in lookup.snapshot.knowledge.search("metadata", max_results=5)] == [
+        "candidate metadata",
+    ]
 
 
 @pytest.mark.asyncio

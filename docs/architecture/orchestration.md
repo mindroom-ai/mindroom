@@ -146,10 +146,11 @@ Edits from other agents are ignored, and the feature requires that the original 
 On `orchestrator.stop()`:
 
 1. Set `self.running = False`
-2. Stop memory auto-flush worker
-3. Cancel knowledge refresh task
-4. Cancel pending bot start tasks
-5. Shut down the per-binding knowledge refresh owner
-6. Cancel all sync tasks
-7. Signal all bots to stop (`bot.running = False`)
-8. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)
+2. Cancel config reload task
+3. Stop memory auto-flush worker
+4. Shut down the per-binding knowledge refresh owner
+5. Cancel pending bot start tasks
+6. Stop the MCP manager
+7. Cancel all sync tasks
+8. Signal all bots to stop (`bot.running = False`)
+9. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)
