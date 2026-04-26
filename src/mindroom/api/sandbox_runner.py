@@ -545,11 +545,48 @@ def _serialize_worker(worker: WorkerHandle) -> SandboxWorkerResponse:
     )
 
 
+def _maybe_read_workspace_env_overlay(
+    request: SandboxRunnerExecuteRequest,
+    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+    base_env: dict[str, str],
+    *,
+    apply: bool,
+) -> tuple[dict[str, str], SandboxRunnerExecuteResponse | None]:
+    """Source `.mindroom/worker-env.sh` for one request.
+
+    Returns `(overlay, None)` on success (overlay is empty when no hook
+    exists). Returns `({}, tool_failure_response)` when the hook fails to
+    source — the caller should return that response directly. Skips silently
+    when `apply` is False, used by the in-subprocess re-execution path after
+    the parent already sourced the hook.
+    """
+    if not apply:
+        return {}, None
+    workspace = _workspace_for_env_hook(request, prepared)
+    if workspace is None:
+        return {}, None
+    try:
+        hook_path = sandbox_exec.resolve_workspace_env_hook_path(workspace)
+        if hook_path is None:
+            return {}, None
+        overlay = sandbox_exec.source_workspace_env_hook(
+            hook_path=hook_path,
+            base_env=base_env,
+            cwd=workspace,
+        )
+    except sandbox_exec.WorkspaceEnvHookError as exc:
+        return {}, SandboxRunnerExecuteResponse(
+            ok=False,
+            error=str(exc),
+            failure_kind="tool",
+        )
+    return overlay, None
+
+
 def _workspace_for_env_hook(
     request: SandboxRunnerExecuteRequest,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
 ) -> Path | None:
-    """Return the effective workspace dir used for `.mindroom/worker-env.sh` discovery."""
     if prepared is not None:
         base_dir = prepared.runtime_overrides.get("base_dir")
         if isinstance(base_dir, Path):
@@ -563,62 +600,6 @@ def _workspace_for_env_hook(
         if candidate.is_absolute():
             return candidate
     return None
-
-
-def _maybe_read_workspace_env_overlay(
-    request: SandboxRunnerExecuteRequest,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-    execution_env: dict[str, str],
-    *,
-    apply: bool,
-) -> tuple[dict[str, str], SandboxRunnerExecuteResponse | None]:
-    """Source the workspace env hook for one request, returning overlay or a tool failure.
-
-    Skips silently when `apply` is False (used by the in-subprocess re-execution path
-    after the parent already sourced the hook).
-    """
-    if not apply:
-        return {}, None
-    hook_base_env = dict(execution_env)
-    if prepared is None:
-        # Unkeyed proxy: seed with the runner's PATH/HOME defaults so bash
-        # can locate `printenv` and friends when sourcing the hook.
-        for key, value in sandbox_exec.generic_subprocess_env().items():
-            hook_base_env.setdefault(key, value)
-    try:
-        overlay = _read_workspace_env_overlay(request, prepared, hook_base_env)
-    except sandbox_exec.WorkspaceEnvHookError as exc:
-        return {}, SandboxRunnerExecuteResponse(
-            ok=False,
-            error=str(exc),
-            failure_kind="tool",
-        )
-    return overlay, None
-
-
-def _read_workspace_env_overlay(
-    request: SandboxRunnerExecuteRequest,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-    base_env: dict[str, str],
-) -> dict[str, str]:
-    """Source `.mindroom/worker-env.sh` for one request, returning the overlay env values.
-
-    Returns an empty dict when no hook is configured. Raises
-    `sandbox_exec.WorkspaceEnvHookError` for the caller to convert into a
-    tool-failure response when the script escapes the workspace, exits
-    non-zero, times out, or otherwise fails to source cleanly.
-    """
-    workspace = _workspace_for_env_hook(request, prepared)
-    if workspace is None:
-        return {}
-    hook_path = sandbox_exec.resolve_workspace_env_hook_path(workspace)
-    if hook_path is None:
-        return {}
-    return sandbox_exec.source_workspace_env_hook(
-        hook_path=hook_path,
-        base_env=base_env,
-        cwd=workspace,
-    )
 
 
 async def _execute_request_inprocess(
@@ -650,10 +631,17 @@ async def _execute_request_inprocess(
         worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
         worker_execution_env.update(execution_env)
         execution_env = worker_execution_env
+    # Seed PATH/HOME defaults so bash can locate `printenv` when sourcing the
+    # hook for inprocess unkeyed proxy calls (the subprocess path already gets
+    # these via worker_subprocess_env / generic_subprocess_env).
+    hook_base_env = dict(execution_env)
+    if prepared is None:
+        for key, value in sandbox_exec.generic_subprocess_env().items():
+            hook_base_env.setdefault(key, value)
     overlay, overlay_failure = _maybe_read_workspace_env_overlay(
         request,
         prepared,
-        execution_env,
+        hook_base_env,
         apply=apply_workspace_env_hook,
     )
     if overlay_failure is not None:

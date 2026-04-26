@@ -3494,6 +3494,54 @@ def test_workspace_env_hook_failure_returns_tool_failure(
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
+def test_workspace_env_hook_overlays_worker_routed_subprocess_default_mode(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker-keyed non-shell tools (coding/file/python) get the overlay even in the default inprocess runner mode.
+
+    These tools take the `tool_name != "shell" and worker_key is not None`
+    branch which always dispatches through `_execute_request_subprocess`, so
+    the overlay must reach `os.environ` of the per-worker subprocess.
+    """
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(workspace, "export WORKSPACE_TOOLCHAIN_TOKEN=visible-to-coding-and-file\n")
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    def _venv_with_real_python(_self: object, venv_dir: Path) -> None:
+        bin_dir = venv_dir / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "python").symlink_to(Path(sys.executable))
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_venv_with_real_python):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "python",
+                "function_name": "run_python_code",
+                "args": [
+                    'import os\nresult = os.environ.get("WORKSPACE_TOOLCHAIN_TOKEN")',
+                    "result",
+                ],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    assert "visible-to-coding-and-file" in str(payload["result"])
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
 def test_workspace_env_hook_overlays_python_subprocess(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

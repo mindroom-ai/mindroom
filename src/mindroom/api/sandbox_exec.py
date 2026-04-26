@@ -337,21 +337,19 @@ def source_workspace_env_hook(
 ) -> dict[str, str]:
     """Source the hook with `base_env` and return new/changed exported values.
 
-    Bash sources the script with `set -a` so plain assignments are also
-    exported, prints a high-entropy capture marker, and emits a NUL-separated
-    `printenv -0` block. The runner ignores anything stdout the script
-    itself printed before the marker, then keeps only entries whose name
-    passes `constants.is_workspace_env_overlay_name_allowed` and whose value
-    differs from `base_env`.
+    Bash sources the script without `set -a`, so agents must write
+    `export FOO=bar` for values to overlay; bare `FOO=bar` does not persist.
+    A high-entropy capture marker separates anything the script printed to
+    stdout from the NUL-separated `printenv -0` block we read afterwards. The
+    runner keeps only entries whose name passes
+    `constants.is_workspace_env_overlay_name_allowed` and whose value differs
+    from `base_env`.
 
     Raises `WorkspaceEnvHookError` on timeout, non-zero exit, missing capture
     marker, missing bash, or oversized output.
     """
     bash_path = _resolve_bash(base_env)
     capture_marker = secrets.token_hex(16)
-    # No `set -a`: agents must write `export FOO=bar` for values to overlay,
-    # so the hook contract stays predictable and aligned with how
-    # `extra_env_passthrough` already documents shell env passthrough.
     bash_script = '. "$1"; printf "%s\\0" "$2"; printenv -0'
     try:
         completed = subprocess.run(
@@ -389,13 +387,10 @@ def source_workspace_env_hook(
 
 
 def _resolve_bash(base_env: Mapping[str, str]) -> str:
-    bash_path = shutil.which("bash", path=base_env.get("PATH"))
+    bash_path = shutil.which("bash", path=base_env.get("PATH")) or shutil.which("bash")
     if bash_path is not None:
         return bash_path
-    bash_path = shutil.which("bash")
-    if bash_path is not None:
-        return bash_path
-    if Path("/bin/bash").exists():
+    if os.access("/bin/bash", os.X_OK):
         return "/bin/bash"
     msg = "bash is required to source .mindroom/worker-env.sh and was not found."
     raise WorkspaceEnvHookError(msg)
@@ -452,4 +447,4 @@ def _accept_overlay_chunk(
 def _is_valid_env_name(name: str) -> bool:
     if not name or name[0].isdigit():
         return False
-    return all(ch == "_" or ch.isalnum() for ch in name)
+    return all(ch == "_" or (ch.isascii() and ch.isalnum()) for ch in name)
