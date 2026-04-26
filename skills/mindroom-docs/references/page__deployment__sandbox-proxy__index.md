@@ -202,6 +202,45 @@ If proxied shell commands need extra PATH entries such as wrapper directories, c
 
 Shell commands that exceed their timeout return a background handle. Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process. These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts. To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE=subprocess`.
 
+## Workspace env hook (`.mindroom/worker-env.sh`)
+
+Agents can drop a shell script at `<workspace>/.mindroom/worker-env.sh` to set custom env for worker-routed tool calls without changing config or redeploying.
+
+The runner sources this script with `bash` before each worker-routed `shell`, `python`, `coding`, or `file` request, then merges its exported env into the tool's execution environment.
+
+**Discovery:**
+
+- The hook lives at `<base_dir>/.mindroom/worker-env.sh` where `<base_dir>` is the resolved tool workspace.
+- For shared and unscoped agents that means `agents/<agent>/workspace/.mindroom/worker-env.sh`.
+- For private agents that means `private_instances/<scope>/<agent>/workspace/.mindroom/worker-env.sh`.
+- For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different agent workspaces.
+
+**Semantics:**
+
+- Edits take effect on the next worker-routed tool call. No pod restart, no config reload, no Helm change.
+- The script must `export FOO=bar` for values to overlay; bare `FOO=bar` does not persist (no `set -a`).
+- Filesystem side effects inside the worker sandbox are allowed because the hook is arbitrary agent-editable shell.
+- Shell aliases, functions, and `cd` do not persist — only exported env crosses the boundary.
+
+**Filtering:**
+
+The overlay reuses the same secret rules that protect `extra_env_passthrough`:
+
+- Names ending in `_API_KEY`, `_API_KEYS`, `_PASSWORD`, or `_SECRET` are dropped.
+- Runner control names (`MINDROOM_SANDBOX_*`, `MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) are dropped.
+- `CI_JOB_TOKEN` and bash bookkeeping (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are dropped.
+- Non-secret service tokens such as `GITEA_TOKEN` are kept.
+
+**Limits and failure handling:**
+
+- Script ≤ 64 KiB; total overlay ≤ 128 KiB; per-value ≤ 32 KiB.
+- Hook execution times out after 10 seconds.
+- Symlinks that escape the workspace are rejected.
+- Any failure (non-zero exit, timeout, escape, missing `bash`) returns the tool call as `ok: false` with `failure_kind: "tool"` and an error mentioning `.mindroom/worker-env.sh`.
+- Hook failures do not poison the worker; only the requesting tool call fails.
+
+This hook works identically for the static sidecar and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request. It is not a true container startup hook — it does not change pod templates, recreate Deployments, or alter Helm values. For an example, see `docs/tools/execution-and-coding.md`.
+
 ## Credential leases
 
 Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.

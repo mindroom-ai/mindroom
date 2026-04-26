@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import secrets
+import shutil
 import site
+import subprocess
 import sys
 from pathlib import Path
 from types import MappingProxyType
@@ -13,10 +16,18 @@ from mindroom import constants
 from mindroom.tool_system.worker_routing import worker_dir_name
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.constants import RuntimePaths
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
 DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
+WORKSPACE_ENV_HOOK_RELATIVE_PATH = Path(".mindroom") / "worker-env.sh"
+WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS = 10.0
+_WORKSPACE_ENV_HOOK_MAX_SCRIPT_BYTES = 64 * 1024
+_WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES = 256 * 1024
+_WORKSPACE_ENV_HOOK_MAX_VALUE_BYTES = 32 * 1024
+_WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES = 128 * 1024
 RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
 RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
 DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
@@ -268,3 +279,177 @@ def subprocess_worker_command(
 ) -> list[str]:
     """Build the sandbox subprocess worker command line."""
     return [python_executable or sys.executable, "-m", "mindroom.api.sandbox_runner", subprocess_worker_arg]
+
+
+class WorkspaceEnvHookError(RuntimeError):
+    """One `.mindroom/worker-env.sh` request failed sourcing or validation."""
+
+
+def resolve_workspace_env_hook_path(base_dir: Path | str | None) -> Path | None:
+    """Resolve the workspace env hook for one effective base_dir, if any.
+
+    Returns the resolved file path when a regular file exists at
+    `<base_dir>/.mindroom/worker-env.sh` and stays inside the resolved
+    base_dir. Returns None when the file is absent. Raises
+    `WorkspaceEnvHookError` when the candidate escapes the base_dir
+    (including symlink escape) or exceeds the size cap.
+    """
+    if base_dir is None:
+        return None
+    base_path = Path(base_dir).expanduser()
+    try:
+        base_resolved = base_path.resolve()
+    except OSError as exc:
+        msg = f"Failed to resolve base_dir for .mindroom/worker-env.sh: {exc}"
+        raise WorkspaceEnvHookError(msg) from exc
+    candidate = base_resolved / WORKSPACE_ENV_HOOK_RELATIVE_PATH
+    if not candidate.exists():
+        return None
+    try:
+        candidate_resolved = candidate.resolve()
+    except OSError as exc:
+        msg = f"Failed to resolve .mindroom/worker-env.sh: {exc}"
+        raise WorkspaceEnvHookError(msg) from exc
+    if not candidate_resolved.is_relative_to(base_resolved):
+        msg = (
+            f".mindroom/worker-env.sh resolves outside of {base_resolved}; "
+            "agent-editable workspace hooks must stay inside the resolved tool workspace."
+        )
+        raise WorkspaceEnvHookError(msg)
+    if not candidate_resolved.is_file():
+        return None
+    try:
+        size = candidate_resolved.stat().st_size
+    except OSError as exc:
+        msg = f"Failed to stat .mindroom/worker-env.sh: {exc}"
+        raise WorkspaceEnvHookError(msg) from exc
+    if size > _WORKSPACE_ENV_HOOK_MAX_SCRIPT_BYTES:
+        msg = f".mindroom/worker-env.sh is too large ({size} bytes; limit {_WORKSPACE_ENV_HOOK_MAX_SCRIPT_BYTES})."
+        raise WorkspaceEnvHookError(msg)
+    return candidate_resolved
+
+
+def source_workspace_env_hook(
+    *,
+    hook_path: Path,
+    base_env: Mapping[str, str],
+    cwd: Path,
+) -> dict[str, str]:
+    """Source the hook with `base_env` and return new/changed exported values.
+
+    Bash sources the script with `set -a` so plain assignments are also
+    exported, prints a high-entropy capture marker, and emits a NUL-separated
+    `printenv -0` block. The runner ignores anything stdout the script
+    itself printed before the marker, then keeps only entries whose name
+    passes `constants.is_workspace_env_overlay_name_allowed` and whose value
+    differs from `base_env`.
+
+    Raises `WorkspaceEnvHookError` on timeout, non-zero exit, missing capture
+    marker, missing bash, or oversized output.
+    """
+    bash_path = _resolve_bash(base_env)
+    capture_marker = secrets.token_hex(16)
+    # No `set -a`: agents must write `export FOO=bar` for values to overlay,
+    # so the hook contract stays predictable and aligned with how
+    # `extra_env_passthrough` already documents shell env passthrough.
+    bash_script = '. "$1"; printf "%s\\0" "$2"; printenv -0'
+    try:
+        completed = subprocess.run(
+            [bash_path, "-c", bash_script, "bash", str(hook_path), capture_marker],
+            input=b"",
+            capture_output=True,
+            cwd=str(cwd),
+            env=dict(base_env),
+            timeout=WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS,
+            check=False,
+            start_new_session=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        msg = f".mindroom/worker-env.sh timed out after {WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS} seconds."
+        raise WorkspaceEnvHookError(msg) from exc
+    except OSError as exc:
+        msg = f"Failed to start bash for .mindroom/worker-env.sh: {exc}"
+        raise WorkspaceEnvHookError(msg) from exc
+    if completed.returncode != 0:
+        excerpt = (completed.stderr or completed.stdout or b"").decode(errors="replace")[:512].strip()
+        suffix = f" output: {excerpt}" if excerpt else ""
+        msg = f".mindroom/worker-env.sh exited with code {completed.returncode}.{suffix}"
+        raise WorkspaceEnvHookError(msg)
+    if len(completed.stdout) > _WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES:
+        msg = (
+            f".mindroom/worker-env.sh produced {len(completed.stdout)} bytes of "
+            f"capture output (limit {_WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES})."
+        )
+        raise WorkspaceEnvHookError(msg)
+    return _parse_workspace_env_hook_output(
+        completed.stdout,
+        capture_marker,
+        base_env=base_env,
+    )
+
+
+def _resolve_bash(base_env: Mapping[str, str]) -> str:
+    bash_path = shutil.which("bash", path=base_env.get("PATH"))
+    if bash_path is not None:
+        return bash_path
+    bash_path = shutil.which("bash")
+    if bash_path is not None:
+        return bash_path
+    if Path("/bin/bash").exists():
+        return "/bin/bash"
+    msg = "bash is required to source .mindroom/worker-env.sh and was not found."
+    raise WorkspaceEnvHookError(msg)
+
+
+def _parse_workspace_env_hook_output(
+    raw: bytes,
+    capture_marker: str,
+    *,
+    base_env: Mapping[str, str],
+) -> dict[str, str]:
+    text = raw.decode("utf-8", errors="replace")
+    marker_chunk = capture_marker + "\0"
+    marker_index = text.find(marker_chunk)
+    if marker_index < 0:
+        msg = ".mindroom/worker-env.sh output did not include the expected env capture marker."
+        raise WorkspaceEnvHookError(msg)
+    env_block = text[marker_index + len(marker_chunk) :]
+    overlay: dict[str, str] = {}
+    total_bytes = 0
+    for chunk in env_block.split("\0"):
+        kv = _accept_overlay_chunk(chunk, base_env=base_env)
+        if kv is None:
+            continue
+        key, value = kv
+        overlay[key] = value
+        total_bytes += len(key) + 1 + len(value)
+        if total_bytes > _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES:
+            break
+    return overlay
+
+
+def _accept_overlay_chunk(
+    chunk: str,
+    *,
+    base_env: Mapping[str, str],
+) -> tuple[str, str] | None:
+    sep_idx = chunk.find("=") if chunk else -1
+    if sep_idx <= 0:
+        return None
+    key = chunk[:sep_idx]
+    value = chunk[sep_idx + 1 :]
+    if (
+        not _is_valid_env_name(key)
+        or key in constants.WORKSPACE_ENV_OVERLAY_TRANSIENT_NAMES
+        or not constants.is_workspace_env_overlay_name_allowed(key)
+        or base_env.get(key) == value
+        or len(value.encode("utf-8")) > _WORKSPACE_ENV_HOOK_MAX_VALUE_BYTES
+    ):
+        return None
+    return key, value
+
+
+def _is_valid_env_name(name: str) -> bool:
+    if not name or name[0].isdigit():
+        return False
+    return all(ch == "_" or ch.isalnum() for ch in name)

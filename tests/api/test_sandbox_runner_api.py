@@ -3307,3 +3307,303 @@ def test_sandbox_runner_records_worker_initialization_failures(
     assert worker["status"] == "failed"
     assert "boom" in worker["failure_reason"]
     assert worker["failure_count"] == 1
+
+
+# ----------------------------------------------------------------------------
+# Workspace env hook (.mindroom/worker-env.sh) integration tests
+# ----------------------------------------------------------------------------
+
+
+def _write_workspace_env_hook(workspace: Path, body: str) -> Path:
+    hook_dir = workspace / ".mindroom"
+    hook_dir.mkdir(parents=True, exist_ok=True)
+    hook_path = hook_dir / "worker-env.sh"
+    hook_path.write_text(body, encoding="utf-8")
+    return hook_path
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_workspace_env_hook_overlays_shell_execution(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`.mindroom/worker-env.sh` exports should be visible to worker-routed shell calls."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(
+        workspace,
+        'export WORKSPACE_HOOK_TOKEN=hello-from-hook\nexport PATH="$PWD/.local/bin:$PATH"\n',
+    )
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [["bash", "-c", 'printf "%s|%s" "$WORKSPACE_HOOK_TOKEN" "$PATH"']],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    token, path_value = payload["result"].split("|", 1)
+    assert token == "hello-from-hook"  # noqa: S105
+    assert path_value.startswith(f"{workspace.resolve()}/.local/bin:")
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_workspace_env_hook_edits_take_effect_on_next_call(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Editing `.mindroom/worker-env.sh` should be reflected in the next shell call."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(workspace, "export WORKSPACE_HOOK_TOKEN=first\n")
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        first = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [["bash", "-c", 'printf "%s" "$WORKSPACE_HOOK_TOKEN"']],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+        assert first.status_code == 200
+        assert first.json()["ok"] is True
+        assert first.json()["result"] == "first"
+
+        _write_workspace_env_hook(workspace, "export WORKSPACE_HOOK_TOKEN=second\n")
+
+        second = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [["bash", "-c", 'printf "%s" "$WORKSPACE_HOOK_TOKEN"']],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert second.status_code == 200
+    assert second.json()["ok"] is True
+    assert second.json()["result"] == "second"
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_workspace_env_hook_filters_secrets(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Secret-suffixed exports must not reach the executed shell environment."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(
+        workspace,
+        "export OPENAI_API_KEY=leaked\nexport GITEA_TOKEN=keep\n",
+    )
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [["bash", "-c", 'printf "%s|%s" "${OPENAI_API_KEY:-}" "${GITEA_TOKEN:-}"']],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    api_key, token = payload["result"].split("|", 1)
+    assert api_key == ""
+    assert token == "keep"  # noqa: S105
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_workspace_env_hook_failure_returns_tool_failure(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A non-zero hook exit should surface as a tool failure mentioning the hook."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(workspace, 'echo "bad hook" >&2\nexit 5\n')
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [["bash", "-c", "echo should-not-run"]],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False, payload
+    assert payload["failure_kind"] == "tool"
+    assert ".mindroom/worker-env.sh" in payload["error"]
+    assert "exited with code 5" in payload["error"]
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_workspace_env_hook_overlays_python_subprocess(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker-routed `python` subprocess should observe overlay env via os.environ."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(workspace, "export WORKSPACE_PIP_INDEX=https://wheels.example/simple\n")
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    def _venv_with_real_python(_self: object, venv_dir: Path) -> None:
+        bin_dir = venv_dir / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "python").symlink_to(Path(sys.executable))
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_venv_with_real_python):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "python",
+                "function_name": "run_python_code",
+                "args": [
+                    'import os\nresult = os.environ.get("WORKSPACE_PIP_INDEX")',
+                    "result",
+                ],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    assert "https://wheels.example/simple" in str(payload["result"])
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_workspace_env_hook_unkeyed_proxy_uses_init_override_base_dir(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unkeyed proxy requests should still pick up the workspace hook from the requested base_dir."""
+    _set_sandbox_token(monkeypatch)
+    workspace = tmp_path / "static-workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(workspace, "export STATIC_HOOK_TOKEN=visible\n")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["bash", "-c", 'printf "%s" "$STATIC_HOOK_TOKEN"']],
+            "kwargs": {},
+            "tool_init_overrides": {"base_dir": str(workspace)},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    assert payload["result"] == "visible"
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_workspace_env_hook_rejects_symlink_escape(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A `.mindroom/worker-env.sh` symlink that escapes the workspace must fail closed."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "evil.sh"
+    target.write_text("export OPENAI_API_KEY=leaked\n", encoding="utf-8")
+    hook_dir = workspace / ".mindroom"
+    hook_dir.mkdir()
+    (hook_dir / "worker-env.sh").symlink_to(target)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [["bash", "-c", "echo should-not-run"]],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["failure_kind"] == "tool"
+    assert "resolves outside" in payload["error"]
