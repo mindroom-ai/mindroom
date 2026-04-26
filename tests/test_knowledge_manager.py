@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import gc
 import json
 import os
 import subprocess
@@ -696,8 +695,8 @@ async def test_stale_snapshot_skips_duplicate_refresh_when_owner_is_active(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_dashboard_delete_tombstone_filters_last_good_after_refresh_failure(tmp_path: Path) -> None:
-    """A dashboard delete must hide old vectors for that source path until replacement publish."""
+async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_path: Path) -> None:
+    """A dashboard delete marks stale but old vectors can remain visible until refresh publishes."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("deleted secret", encoding="utf-8")
@@ -726,18 +725,19 @@ async def test_dashboard_delete_tombstone_filters_last_good_after_refresh_failur
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.save_snapshot_refresh_failed_state(key, error="refresh failed after delete")
-    filtered_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    stale_knowledge = get_agent_knowledge("helper", config, runtime_paths)
 
-    assert filtered_knowledge is not None
-    assert [document.content for document in filtered_knowledge.search("anything", max_results=5)] == [
+    assert stale_knowledge is not None
+    assert {document.content for document in stale_knowledge.search("anything", max_results=5)} == {
+        "deleted secret",
         "kept public",
-    ]
+    }
     owner.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_dashboard_replacement_upload_tombstone_filters_last_good_after_refresh_failure(tmp_path: Path) -> None:
-    """A dashboard replacement upload must hide old vectors for that source path until replacement publish."""
+async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_refresh(tmp_path: Path) -> None:
+    """A replacement upload marks stale but old vectors can remain visible until refresh publishes."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("replaced secret", encoding="utf-8")
@@ -769,9 +769,10 @@ async def test_dashboard_replacement_upload_tombstone_filters_last_good_after_re
 
     pending_knowledge = get_agent_knowledge("helper", config, runtime_paths)
     assert pending_knowledge is not None
-    assert [document.content for document in pending_knowledge.search("anything", max_results=5)] == [
+    assert {document.content for document in pending_knowledge.search("anything", max_results=5)} == {
+        "replaced secret",
         "kept public",
-    ]
+    }
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.save_snapshot_refresh_failed_state(key, error="refresh failed after replacement")
@@ -779,14 +780,15 @@ async def test_dashboard_replacement_upload_tombstone_filters_last_good_after_re
 
     assert (docs_path / "guide.md").read_text(encoding="utf-8") == "replacement content"
     assert filtered_knowledge is not None
-    assert [document.content for document in filtered_knowledge.search("anything", max_results=5)] == [
+    assert {document.content for document in filtered_knowledge.search("anything", max_results=5)} == {
+        "replaced secret",
         "kept public",
-    ]
+    }
     owner.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_dashboard_delete_rolls_back_tombstones_when_same_source_advisory_write_fails(
+async def test_dashboard_delete_rolls_back_file_when_same_source_dirty_write_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -831,41 +833,6 @@ async def test_dashboard_delete_rolls_back_tombstones_when_same_source_advisory_
             "restored public",
         ]
     owner.schedule_refresh.assert_not_called()
-
-
-def test_tombstone_filtering_overfetches_sync_results_to_fill_limit() -> None:
-    """A tombstoned top hit must not hide the next live result."""
-    collection = "tombstone_overfetch_sync"
-    _VectorDb.collections[collection] = [
-        {"content": "deleted", "metadata": {"source_path": "deleted.md"}},
-        {"content": "live", "metadata": {"source_path": "live.md"}},
-    ]
-    vector_db = knowledge_registry._TombstoneFilteringVectorDb(
-        _VectorDb(collection=collection),
-        deleted_source_paths=frozenset({"deleted.md"}),
-    )
-
-    documents = vector_db.search(query="anything", limit=1)
-
-    assert [document.content for document in documents] == ["live"]
-
-
-@pytest.mark.asyncio
-async def test_tombstone_filtering_overfetches_async_results_to_fill_limit() -> None:
-    """Async tombstone filtering should also continue to the next live result."""
-    collection = "tombstone_overfetch_async"
-    _VectorDb.collections[collection] = [
-        {"content": "deleted", "metadata": {"source_path": "deleted.md"}},
-        {"content": "live", "metadata": {"source_path": "live.md"}},
-    ]
-    vector_db = knowledge_registry._TombstoneFilteringVectorDb(
-        _VectorDb(collection=collection),
-        deleted_source_paths=frozenset({"deleted.md"}),
-    )
-
-    documents = await vector_db.async_search(query="anything", limit=1)
-
-    assert [document.content for document in documents] == ["live"]
 
 
 @pytest.mark.asyncio
@@ -1216,7 +1183,7 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     assert waiter_entered.is_set()
 
 
-def test_mark_dirty_uses_advisory_sidecar_without_mutating_published_metadata(tmp_path: Path) -> None:
+def test_mark_dirty_updates_advisory_state_without_changing_collection(tmp_path: Path) -> None:
     """Source mutation records advisory dirtiness without mutating published metadata or vectors."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -1294,7 +1261,7 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_async_mark_dirty_cancellation_waits_for_sidecar_commit(
+async def test_async_mark_dirty_cancellation_waits_for_state_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1677,8 +1644,8 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
     owner.schedule_refresh.assert_called_once()
 
 
-def test_missing_advisory_sidecar_makes_published_snapshot_unavailable(tmp_path: Path) -> None:
-    """Current-format published metadata still needs advisory metadata to be considered usable."""
+def test_missing_advisory_state_file_does_not_block_published_snapshot(tmp_path: Path) -> None:
+    """The simplified metadata model keeps active state in the metadata file."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("missing advisory snapshot", encoding="utf-8")
@@ -1709,11 +1676,9 @@ def test_missing_advisory_sidecar_makes_published_snapshot_unavailable(tmp_path:
     snapshot_state = knowledge_registry.load_knowledge_snapshot_state(key)
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
-    assert snapshot_state.advisory.state == "refresh_failed"
-    assert snapshot_state.advisory.refresh_job == "failed"
-    assert snapshot_state.advisory.reason == "snapshot_advisory_unavailable"
-    assert lookup.snapshot is None
-    assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
+    assert snapshot_state.advisory.state == "none"
+    assert lookup.snapshot is not None
+    assert lookup.availability is KnowledgeAvailability.READY
 
 
 def test_indexing_settings_layout_constants_match_settings_key(tmp_path: Path) -> None:
@@ -2292,8 +2257,8 @@ async def test_shared_source_mutation_waits_for_duplicate_base_refresh(
 
 
 @pytest.mark.asyncio
-async def test_published_snapshot_handle_survives_later_refresh_generations(tmp_path: Path) -> None:
-    """Already-returned read handles remain valid across later refresh generations."""
+async def test_refresh_generations_keep_latest_snapshot_without_protecting_old_handles(tmp_path: Path) -> None:
+    """Old read handles are best effort; refresh cleanup only guarantees the next active snapshot."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -2304,17 +2269,13 @@ async def test_published_snapshot_handle_survives_later_refresh_generations(tmp_
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     first_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
     assert first_lookup.snapshot is not None
-    first_knowledge = first_lookup.snapshot.knowledge
-    first_collection = first_knowledge.vector_db.collection_name
-    del first_lookup
-    gc.collect()
+    first_collection = first_lookup.snapshot.knowledge.vector_db.collection_name
 
     for generation in range(2, 7):
         doc.write_text(f"generation {generation}", encoding="utf-8")
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert first_collection in _VectorDb.collections
-    assert [document.content for document in first_knowledge.search("generation", max_results=5)] == ["generation one"]
+    assert first_collection not in _VectorDb.collections
     latest = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
     assert latest.snapshot is not None
     assert [document.content for document in latest.snapshot.knowledge.search("generation", max_results=5)] == [
@@ -2352,8 +2313,8 @@ async def test_publish_invalidates_cached_snapshots_for_same_physical_binding(tm
 
 
 @pytest.mark.asyncio
-async def test_successful_refreshes_keep_bounded_retention_metadata(tmp_path: Path) -> None:
-    """Repeated publishes bound retained metadata without deleting live read-handle collections."""
+async def test_successful_refreshes_keep_only_active_collection(tmp_path: Path) -> None:
+    """Repeated publishes keep the active collection and clean older generations best effort."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -2368,8 +2329,8 @@ async def test_successful_refreshes_keep_bounded_retention_metadata(tmp_path: Pa
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(snapshot_metadata_path(key))
     assert state is not None
-    assert len(state.retained_collections) <= 3
-    assert len(_VectorDb.collections) <= 3
+    assert state.collection in _VectorDb.collections
+    assert len(_VectorDb.collections) == 1
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.snapshot is not None
     assert [document.content for document in lookup.snapshot.knowledge.search("generation", max_results=5)] == [
@@ -3077,7 +3038,9 @@ async def test_first_time_partial_refresh_does_not_publish_ready_snapshot(
 
     assert result.indexed_count == 1
     assert result.published is False
-    assert state is None
+    assert state is not None
+    assert state.status == "indexing"
+    assert state.collection is None
     assert advisory.state == "refresh_failed"
     assert advisory.last_error == "Indexed 1 of 2 managed knowledge files"
     assert lookup.snapshot is None
@@ -3237,7 +3200,12 @@ async def test_refresh_setup_failure_records_failed_availability(tmp_path: Path)
     advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
-    assert state is None
+    assert state is not None
+    assert state.status == "indexing"
+    assert state.collection is None
+    assert state.refresh_job == "failed"
+    assert state.last_error is not None
+    assert "must be a directory" in state.last_error
     assert advisory.state == "refresh_failed"
     assert advisory.last_error is not None
     assert "must be a directory" in advisory.last_error
@@ -3246,8 +3214,8 @@ async def test_refresh_setup_failure_records_failed_availability(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_api_delete_marks_snapshot_stale_and_filters_retained_vectors(tmp_path: Path) -> None:
-    """DELETE success schedules refresh and hides the deleted source from last-good search."""
+async def test_api_delete_marks_snapshot_stale_and_keeps_last_good_best_effort(tmp_path: Path) -> None:
+    """DELETE success schedules refresh while old vectors remain usable until refresh publishes."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("delete me now", encoding="utf-8")
@@ -3277,15 +3245,15 @@ async def test_api_delete_marks_snapshot_stale_and_filters_retained_vectors(tmp_
     assert response.status_code == 200
     assert after_delete is not None
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    assert [document.content for document in after_delete.search("delete", max_results=5)] == []
+    assert [document.content for document in after_delete.search("delete", max_results=5)] == ["delete me now"]
     owner.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_api_replacement_upload_marks_snapshot_stale_and_hides_published_file(
+async def test_api_replacement_upload_marks_snapshot_stale_and_keeps_last_good_best_effort(
     tmp_path: Path,
 ) -> None:
-    """Replacement uploads should hide the replaced last-good file until refresh publishes."""
+    """Replacement uploads leave old vectors usable until refresh publishes."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("old upload", encoding="utf-8")
@@ -3314,8 +3282,8 @@ async def test_api_replacement_upload_marks_snapshot_stale_and_hides_published_f
     assert response.status_code == 200
     assert knowledge is not None
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    assert [document.content for document in knowledge.search("old upload", max_results=5)] == []
-    assert [document.content for document in knowledge.search("new upload", max_results=5)] == []
+    assert [document.content for document in knowledge.search("old upload", max_results=5)] == ["old upload"]
+    assert [document.content for document in knowledge.search("new upload", max_results=5)] == ["old upload"]
     owner.schedule_refresh.assert_called_once()
 
 
@@ -4086,8 +4054,8 @@ def test_private_snapshot_read_path_cache_insertion_is_bounded(tmp_path: Path) -
     assert private_snapshot_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_SNAPSHOTS
 
 
-def test_non_weakrefable_snapshot_handle_does_not_leak_collection_lease(tmp_path: Path) -> None:
-    """If weakref.finalize cannot protect a handle, its provisional lease is removed."""
+def test_publish_snapshot_caches_handle_without_collection_leases(tmp_path: Path) -> None:
+    """Published snapshots use only the active cache, not reader lease bookkeeping."""
 
     class _NonWeakrefKnowledge:
         __slots__ = ()
@@ -4098,7 +4066,7 @@ def test_non_weakrefable_snapshot_handle_does_not_leak_collection_lease(tmp_path
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge = _NonWeakrefKnowledge()
 
-    knowledge_registry.publish_snapshot(
+    snapshot = knowledge_registry.publish_snapshot(
         key,
         knowledge=knowledge,
         state=knowledge_registry.PublishedIndexingState(
@@ -4109,7 +4077,7 @@ def test_non_weakrefable_snapshot_handle_does_not_leak_collection_lease(tmp_path
         metadata_path=snapshot_metadata_path(key),
     )
 
-    assert id(knowledge) not in knowledge_registry._published_knowledge_leases
+    assert knowledge_registry._published_snapshots[key] is snapshot
 
 
 @pytest.mark.asyncio
@@ -4234,7 +4202,10 @@ async def test_refresh_does_not_synthesize_missing_published_metadata(
 
     assert result.published is False
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
-    assert state is None
+    assert state is not None
+    assert state.status == "failed"
+    assert state.collection is None
+    assert state.last_error == "Published snapshot metadata was missing after refresh"
     assert advisory.state == "refresh_failed"
 
 
@@ -4734,7 +4705,13 @@ async def test_cold_git_sync_failure_records_failed_availability_and_redacted_er
     advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
-    assert state is None
+    assert state is not None
+    assert state.status == "indexing"
+    assert state.collection is None
+    assert state.refresh_job == "failed"
+    assert state.last_error is not None
+    assert "ghp_secret" not in state.last_error
+    assert "x-oauth-basic" not in state.last_error
     assert advisory.state == "refresh_failed"
     assert advisory.last_error is not None
     assert "ghp_secret" not in advisory.last_error

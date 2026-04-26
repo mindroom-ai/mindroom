@@ -17,7 +17,6 @@ from mindroom.knowledge.registry import (
     KnowledgeSnapshotKey,
     KnowledgeSourceKey,
     PublishedIndexingState,
-    active_snapshot_collection_names,
     indexing_settings_metadata_equal,
     indexing_settings_snapshot_compatible,
     load_knowledge_snapshot_state,
@@ -446,7 +445,6 @@ async def _publish_unchanged_snapshot(
         state is None
         or state.status != "complete"
         or state.source_signature is None
-        or snapshot_availability_for_state(key=key, state=state) is not KnowledgeAvailability.READY
         or not indexing_settings_metadata_equal(state.settings, key.indexing_settings)
         or not await asyncio.to_thread(snapshot_collection_exists_for_state, key, state)
     ):
@@ -521,7 +519,6 @@ def _published_state_fingerprint(state: PublishedIndexingState | None) -> tuple[
         state.published_revision,
         state.indexed_count,
         state.source_signature,
-        state.retained_collections,
     )
 
 
@@ -556,9 +553,7 @@ async def _reconcile_cancelled_refresh(
 
 
 async def _reindex_manager_snapshot(manager: KnowledgeManager, key: KnowledgeSnapshotKey) -> int:
-    protected_collections = active_snapshot_collection_names(refresh_key_for_snapshot_key(key))
-    if protected_collections:
-        return await manager.reindex_all(protected_collections=protected_collections)
+    _ = key
     return await manager.reindex_all()
 
 

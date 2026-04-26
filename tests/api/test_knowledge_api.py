@@ -780,7 +780,7 @@ def test_upload_dirty_advisory_write_runs_off_event_loop(
     owner = _RecordingRefreshOwner()
     client.app.state.knowledge_refresh_owner = owner
     saw_running_loop: bool | None = None
-    original_save = knowledge_registry.save_snapshot_advisory_state
+    original_save = knowledge_registry.save_snapshot_dirty_state
 
     def _offloaded_save(*args: object, **kwargs: object) -> object:
         nonlocal saw_running_loop
@@ -792,7 +792,7 @@ def test_upload_dirty_advisory_write_runs_off_event_loop(
             saw_running_loop = True
         return original_save(*args, **kwargs)
 
-    monkeypatch.setattr(knowledge_registry, "save_snapshot_advisory_state", _offloaded_save)
+    monkeypatch.setattr(knowledge_registry, "save_snapshot_dirty_state", _offloaded_save)
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -1180,10 +1180,8 @@ async def test_delete_uses_once_decoded_route_path_for_percent_bearing_filenames
     assert not literal_file.exists()
     assert decoded_file.read_text(encoding="utf-8") == "decoded"
     key = resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths)
-    tombstones = knowledge_registry.load_snapshot_delete_tombstones(
-        knowledge_registry.snapshot_delete_tombstones_path(key),
-    )
-    assert [tombstone.source_path for tombstone in tombstones] == [literal_path]
+    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
+    assert advisory.state == "stale"
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
     refresh.assert_not_awaited()
 
