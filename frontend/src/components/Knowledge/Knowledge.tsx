@@ -63,7 +63,7 @@ interface KnowledgeStatus {
   file_count: number;
   indexed_count: number;
   refreshing?: boolean;
-  advisory_state?: "none" | "stale" | "refreshing" | "refresh_failed";
+  refresh_state?: "none" | "stale" | "refreshing" | "refresh_failed";
   refresh_job?: "idle" | "pending" | "running" | "failed";
   last_error?: string | null;
   file_listing_degraded?: boolean;
@@ -1607,15 +1607,15 @@ export function Knowledge() {
                   </Badge>
                   {status?.refreshing ||
                   status?.refresh_job === "running" ||
-                  status?.advisory_state === "refreshing" ? (
+                  status?.refresh_state === "refreshing" ? (
                     <Badge variant="default">Refresh Running</Badge>
                   ) : null}
                   {status?.refresh_job === "pending" ||
-                  status?.advisory_state === "stale" ? (
+                  status?.refresh_state === "stale" ? (
                     <Badge variant="secondary">Refresh Pending</Badge>
                   ) : null}
                   {status?.refresh_job === "failed" ||
-                  status?.advisory_state === "refresh_failed" ||
+                  status?.refresh_state === "refresh_failed" ||
                   status?.last_error ? (
                     <Badge variant="destructive">Refresh Failed</Badge>
                   ) : null}

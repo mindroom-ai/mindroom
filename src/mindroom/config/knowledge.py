@@ -15,7 +15,7 @@ class KnowledgeGitConfig(BaseModel):
     poll_interval_seconds: int = Field(
         default=300,
         ge=5,
-        description="Minimum age before READY Git snapshots schedule an advisory on-access refresh",
+        description="Minimum age before READY Git snapshots schedule a background on-access refresh",
     )
     credentials_service: str | None = Field(
         default=None,

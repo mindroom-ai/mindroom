@@ -121,7 +121,7 @@ def _refresh_schedule_due(
 
 
 def _prune_refresh_schedule_bookkeeping() -> None:
-    """Bound advisory refresh cooldown bookkeeping for request-scoped bindings."""
+    """Bound refresh cooldown bookkeeping for request-scoped bindings."""
     if len(_refresh_scheduled_at) <= _MAX_REFRESH_SCHEDULED_COOLDOWNS:
         return
     excess = len(_refresh_scheduled_at) - _MAX_REFRESH_SCHEDULED_COOLDOWNS
@@ -155,7 +155,7 @@ def _git_poll_due(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
     if poll_interval_seconds is None:
         return False
     published_age_seconds = _published_snapshot_age_seconds(
-        lookup.advisory.last_refresh_at or lookup.snapshot.state.last_published_at,
+        lookup.snapshot.state.last_refresh_at or lookup.snapshot.state.last_published_at,
     )
     return published_age_seconds is None or published_age_seconds >= poll_interval_seconds
 

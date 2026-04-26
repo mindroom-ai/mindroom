@@ -85,42 +85,13 @@ class PublishedKnowledgeSnapshot:
 
 
 @dataclass(frozen=True)
-class SnapshotDeleteTombstone:
-    """Compatibility shape for the old delete-tombstone API."""
-
-    source_path: str
-    collection: str
-    deleted_at: str
-
-
-@dataclass(frozen=True)
-class KnowledgeAdvisoryState:
-    """Derived dirty/refresh/failure status for callers that need user messaging."""
-
-    state: Literal["none", "stale", "refreshing", "refresh_failed"] = "none"
-    refresh_job: Literal["idle", "pending", "running", "failed"] = "idle"
-    reason: str | None = None
-    last_error: str | None = None
-    updated_at: str | None = None
-    last_refresh_at: str | None = None
-
-
-@dataclass(frozen=True)
-class KnowledgeSnapshotState:
-    """Loaded collection state plus derived advisory status."""
-
-    published: PublishedIndexingState | None
-    advisory: KnowledgeAdvisoryState
-
-
-@dataclass(frozen=True)
 class KnowledgeSnapshotLookup:
     """Result of resolving the active collection for one knowledge base."""
 
     key: KnowledgeSnapshotKey
     snapshot: PublishedKnowledgeSnapshot | None
+    state: PublishedIndexingState | None
     availability: KnowledgeAvailability
-    advisory: KnowledgeAdvisoryState
     refresh_on_access: bool = False
 
 
@@ -268,16 +239,6 @@ def snapshot_metadata_path(key: KnowledgeSnapshotKey) -> Path:
     return snapshot_base_storage_path(key) / "indexing_settings.json"
 
 
-def snapshot_advisory_path(key: KnowledgeSnapshotKey) -> Path:
-    """Return the advisory state path; active state is stored in metadata."""
-    return snapshot_base_storage_path(key) / "snapshot_advisory.json"
-
-
-def snapshot_delete_tombstones_path(key: KnowledgeSnapshotKey) -> Path:
-    """Return the former delete-tombstone path; delete filtering is no longer used."""
-    return snapshot_base_storage_path(key) / "snapshot_delete_tombstones.json"
-
-
 def _coerce_nonnegative_int(value: object) -> int | None:
     if isinstance(value, bool):
         return None
@@ -379,131 +340,21 @@ def save_published_indexing_state(metadata_path: Path, state: PublishedIndexingS
         raise
 
 
-def _advisory_for_state(
+def snapshot_refresh_state(
     state: PublishedIndexingState | None,
     *,
     metadata_exists: bool = False,
-) -> KnowledgeAdvisoryState:
+) -> Literal["none", "stale", "refreshing", "refresh_failed"]:
+    """Return the UI refresh state derived from the single metadata file."""
     if state is None:
-        return (
-            KnowledgeAdvisoryState(state="refresh_failed", refresh_job="failed", reason="snapshot_metadata_unavailable")
-            if metadata_exists
-            else KnowledgeAdvisoryState()
-        )
-    if state.status == "failed":
-        return KnowledgeAdvisoryState(
-            state="refresh_failed",
-            refresh_job="failed",
-            reason=state.reason,
-            last_error=state.last_error,
-            updated_at=state.updated_at,
-            last_refresh_at=state.last_refresh_at,
-        )
+        return "refresh_failed" if metadata_exists else "none"
+    if state.status == "failed" or state.refresh_job == "failed" or state.last_error is not None:
+        return "refresh_failed"
     if state.refresh_job == "running":
-        return KnowledgeAdvisoryState(
-            state="refreshing",
-            refresh_job="running",
-            reason=state.reason,
-            last_error=state.last_error,
-            updated_at=state.updated_at,
-            last_refresh_at=state.last_refresh_at,
-        )
-    if state.refresh_job == "failed" or state.last_error is not None:
-        return KnowledgeAdvisoryState(
-            state="refresh_failed",
-            refresh_job="failed",
-            reason=state.reason,
-            last_error=state.last_error,
-            updated_at=state.updated_at,
-            last_refresh_at=state.last_refresh_at,
-        )
+        return "refreshing"
     if state.refresh_job == "pending" or state.reason is not None:
-        return KnowledgeAdvisoryState(
-            state="stale",
-            refresh_job=state.refresh_job,
-            reason=state.reason,
-            last_error=state.last_error,
-            updated_at=state.updated_at,
-            last_refresh_at=state.last_refresh_at,
-        )
-    return KnowledgeAdvisoryState(
-        updated_at=state.updated_at,
-        last_refresh_at=state.last_refresh_at or state.last_published_at,
-    )
-
-
-def load_knowledge_snapshot_state(key: KnowledgeSnapshotKey) -> KnowledgeSnapshotState:
-    """Load active collection metadata and derived advisory state."""
-    metadata_path = snapshot_metadata_path(key)
-    published = load_published_indexing_state(metadata_path)
-    return KnowledgeSnapshotState(
-        published=published,
-        advisory=_advisory_for_state(published, metadata_exists=metadata_path.exists()),
-    )
-
-
-def load_snapshot_advisory_state(sidecar_path: Path) -> KnowledgeAdvisoryState:
-    """Return advisory state, preferring the single metadata file."""
-    if not sidecar_path.exists():
-        metadata_path = sidecar_path.with_name("indexing_settings.json")
-        state = load_published_indexing_state(metadata_path)
-        return _advisory_for_state(state, metadata_exists=metadata_path.exists())
-    try:
-        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return KnowledgeAdvisoryState()
-    if not isinstance(payload, dict):
-        return KnowledgeAdvisoryState()
-    state = payload.get("state")
-    refresh_job = payload.get("refresh_job")
-    if state not in {"none", "stale", "refreshing", "refresh_failed"}:
-        return KnowledgeAdvisoryState()
-    return KnowledgeAdvisoryState(
-        state=cast('Literal["none", "stale", "refreshing", "refresh_failed"]', state),
-        refresh_job=_coerce_refresh_job(refresh_job),
-        reason=_optional_str(payload.get("reason")),
-        last_error=_optional_str(payload.get("last_error")),
-        updated_at=_optional_str(payload.get("updated_at")),
-        last_refresh_at=_optional_str(payload.get("last_refresh_at")),
-    )
-
-
-def save_snapshot_advisory_state(sidecar_path: Path, state: KnowledgeAdvisoryState) -> None:
-    """Write advisory state through the single metadata file when possible."""
-    metadata_path = sidecar_path.with_name("indexing_settings.json")
-    published = load_published_indexing_state(metadata_path)
-    if published is not None:
-        status = "failed" if state.state == "refresh_failed" and published.collection is None else published.status
-        save_published_indexing_state(
-            metadata_path,
-            replace(
-                published,
-                status=status,
-                refresh_job=state.refresh_job,
-                reason=state.reason,
-                last_error=state.last_error,
-                updated_at=state.updated_at,
-                last_refresh_at=state.last_refresh_at,
-            ),
-        )
-    payload: dict[str, object] = {
-        "state": state.state,
-        "refresh_job": state.refresh_job,
-    }
-    payload.update(
-        {
-            key: value
-            for key, value in (
-                ("reason", state.reason),
-                ("last_error", state.last_error),
-                ("updated_at", state.updated_at),
-                ("last_refresh_at", state.last_refresh_at),
-            )
-            if value is not None
-        },
-    )
-    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-    sidecar_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        return "stale"
+    return "none"
 
 
 def _state_with_refresh_fields(
@@ -708,26 +559,27 @@ def _snapshot_availability(
     *,
     key: KnowledgeSnapshotKey,
     state: PublishedIndexingState | None,
-    advisory: KnowledgeAdvisoryState,
+    metadata_exists: bool = False,
 ) -> KnowledgeAvailability:
+    refresh_state = snapshot_refresh_state(state, metadata_exists=metadata_exists)
     if state is None:
         availability = (
             KnowledgeAvailability.REFRESH_FAILED
-            if advisory.state == "refresh_failed"
+            if refresh_state == "refresh_failed"
             else KnowledgeAvailability.INITIALIZING
         )
-    elif state.collection is None and (state.status == "failed" or advisory.state == "refresh_failed"):
+    elif state.collection is None and refresh_state == "refresh_failed":
         availability = KnowledgeAvailability.REFRESH_FAILED
     elif not indexing_settings_snapshot_compatible(
         state.settings,
         key.indexing_settings,
     ) or not indexing_settings_metadata_equal(state.settings, key.indexing_settings):
         availability = KnowledgeAvailability.CONFIG_MISMATCH
-    elif state.status == "failed" or advisory.state == "refresh_failed":
+    elif refresh_state == "refresh_failed":
         availability = KnowledgeAvailability.REFRESH_FAILED
     elif state.status != "complete":
         availability = KnowledgeAvailability.INITIALIZING
-    elif advisory.state in {"stale", "refreshing"}:
+    elif refresh_state in {"stale", "refreshing"}:
         availability = KnowledgeAvailability.STALE
     else:
         availability = KnowledgeAvailability.READY
@@ -738,13 +590,13 @@ def snapshot_availability_for_state(
     *,
     key: KnowledgeSnapshotKey,
     state: PublishedIndexingState | None,
-    advisory: KnowledgeAdvisoryState | None = None,
+    metadata_exists: bool = False,
 ) -> KnowledgeAvailability:
     """Return the public availability value for active collection state."""
     return _snapshot_availability(
         key=key,
         state=state,
-        advisory=advisory or _advisory_for_state(state),
+        metadata_exists=metadata_exists,
     )
 
 
@@ -784,10 +636,9 @@ def get_published_snapshot(
         execution_identity=execution_identity,
         create=False,
     )
-    snapshot_state = load_knowledge_snapshot_state(key)
-    state = snapshot_state.published
-    advisory = snapshot_state.advisory
-    availability = _snapshot_availability(key=key, state=state, advisory=advisory)
+    metadata_path = snapshot_metadata_path(key)
+    state = load_published_indexing_state(metadata_path)
+    availability = _snapshot_availability(key=key, state=state, metadata_exists=metadata_path.exists())
 
     snapshot = _published_snapshots.get(key)
     if snapshot is not None:
@@ -795,8 +646,8 @@ def get_published_snapshot(
             return KnowledgeSnapshotLookup(
                 key=key,
                 snapshot=snapshot,
+                state=state,
                 availability=availability,
-                advisory=advisory,
                 refresh_on_access=binding.incremental_sync_on_access,
             )
         _published_snapshots.pop(key, None)
@@ -805,8 +656,8 @@ def get_published_snapshot(
         return KnowledgeSnapshotLookup(
             key=key,
             snapshot=None,
+            state=state,
             availability=availability,
-            advisory=advisory,
             refresh_on_access=binding.incremental_sync_on_access,
         )
 
@@ -815,10 +666,10 @@ def get_published_snapshot(
         return KnowledgeSnapshotLookup(
             key=key,
             snapshot=None,
+            state=state,
             availability=availability
             if availability is not KnowledgeAvailability.READY
             else KnowledgeAvailability.REFRESH_FAILED,
-            advisory=advisory,
             refresh_on_access=binding.incremental_sync_on_access,
         )
 
@@ -832,8 +683,8 @@ def get_published_snapshot(
     return KnowledgeSnapshotLookup(
         key=key,
         snapshot=snapshot,
+        state=state,
         availability=availability,
-        advisory=advisory,
         refresh_on_access=binding.incremental_sync_on_access,
     )
 
@@ -909,12 +760,6 @@ def _evict_published_snapshots_for_refresh_key(refresh_key: KnowledgeRefreshKey)
     for cached_key in tuple(_published_snapshots):
         if _same_physical_binding(cached_key, refresh_key):
             _published_snapshots.pop(cached_key, None)
-
-
-def active_snapshot_collection_names(refresh_key: KnowledgeRefreshKey) -> tuple[str, ...]:
-    """Compatibility shim: in-flight collection protection is best effort only."""
-    _ = refresh_key
-    return ()
 
 
 def _snapshot_keys_for_shared_source(
@@ -1080,20 +925,6 @@ async def mark_snapshot_file_deleted_async(
         execution_identity=execution_identity,
         reason=reason,
     )
-
-
-def load_snapshot_delete_tombstones(sidecar_path: Path) -> tuple[SnapshotDeleteTombstone, ...]:
-    """Return no tombstones because delete filtering is intentionally removed."""
-    _ = sidecar_path
-    return ()
-
-
-def save_snapshot_delete_tombstones(
-    sidecar_path: Path,
-    tombstones: tuple[SnapshotDeleteTombstone, ...],
-) -> None:
-    """Ignore tombstone writes because delete filtering is intentionally removed."""
-    _ = (sidecar_path, tombstones)
 
 
 def clear_published_snapshots() -> None:

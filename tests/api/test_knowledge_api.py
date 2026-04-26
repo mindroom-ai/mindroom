@@ -24,7 +24,7 @@ from mindroom.api import main
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge import KnowledgeAvailability
-from mindroom.knowledge.registry import resolve_snapshot_key, snapshot_metadata_path
+from mindroom.knowledge.registry import load_published_indexing_state, resolve_snapshot_key, snapshot_metadata_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -271,18 +271,18 @@ def test_status_collection_probe_runs_off_event_loop(tmp_path: Path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("advisory", "expected_refresh_job"),
+    ("refresh_state", "expected_refresh_job"),
     [
         ("stale", "pending"),
         ("refresh_failed", "failed"),
     ],
 )
-def test_status_reports_queryable_last_good_snapshot_when_advisory_is_not_ready(
+def test_status_reports_queryable_last_good_snapshot_when_refresh_state_is_not_ready(
     tmp_path: Path,
-    advisory: str,
+    refresh_state: str,
     expected_refresh_job: str,
 ) -> None:
-    """Freshness advisory state should not hide a valid queryable snapshot."""
+    """Refresh state should not hide a valid queryable snapshot."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -291,7 +291,7 @@ def test_status_reports_queryable_last_good_snapshot_when_advisory_is_not_ready(
     _publish_committed_runtime_config(client.app, config)
     _write_snapshot_metadata(config, runtime_paths, indexed_count=7)
     key = resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths)
-    if advisory == "stale":
+    if refresh_state == "stale":
         knowledge_registry.save_snapshot_dirty_state(key, reason="source_changed")
     else:
         knowledge_registry.save_snapshot_refresh_failed_state(key, error="refresh failed")
@@ -311,8 +311,8 @@ def test_status_reports_queryable_last_good_snapshot_when_advisory_is_not_ready(
     assert list_payload["indexed_count"] == 7
     assert status_payload["manager_available"] is True
     assert list_payload["manager_available"] is True
-    assert status_payload["advisory_state"] == advisory
-    assert list_payload["advisory_state"] == advisory
+    assert status_payload["refresh_state"] == refresh_state
+    assert list_payload["refresh_state"] == refresh_state
     assert status_payload["refresh_job"] == expected_refresh_job
     assert list_payload["refresh_job"] == expected_refresh_job
     refresh.assert_not_awaited()
@@ -493,7 +493,7 @@ def test_git_status_reads_disk_and_snapshot_metadata(tmp_path: Path) -> None:
     assert git_status["last_successful_sync_at"] == "2026-04-24T12:34:56+00:00"
 
 
-def test_git_status_redacts_last_refresh_error_from_advisory(tmp_path: Path) -> None:
+def test_git_status_redacts_last_refresh_error_from_metadata(tmp_path: Path) -> None:
     """Git refresh failures should be observable through status without leaking credentials."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
@@ -765,11 +765,11 @@ def test_upload_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     refresh.assert_not_awaited()
 
 
-def test_upload_dirty_advisory_write_runs_off_event_loop(
+def test_upload_dirty_mark_write_runs_off_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upload dirty-advisory I/O should be offloaded while the API mutation lock is held."""
+    """Upload dirty-state I/O should be offloaded while the API mutation lock is held."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -807,7 +807,7 @@ def test_upload_dirty_advisory_write_runs_off_event_loop(
 
 
 def test_upload_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp_path: Path) -> None:
-    """Uploads fail closed when dirty advisory state cannot be committed."""
+    """Uploads fail closed when dirty state cannot be committed."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -1180,8 +1180,8 @@ async def test_delete_uses_once_decoded_route_path_for_percent_bearing_filenames
     assert not literal_file.exists()
     assert decoded_file.read_text(encoding="utf-8") == "decoded"
     key = resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths)
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
-    assert advisory.state == "stale"
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    assert knowledge_registry.snapshot_refresh_state(state) == "stale"
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
     refresh.assert_not_awaited()
 
@@ -1268,7 +1268,7 @@ def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
 
 
 def test_delete_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp_path: Path) -> None:
-    """Deletes fail closed when dirty advisory state cannot be committed."""
+    """Deletes fail closed when dirty state cannot be committed."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -1644,8 +1644,8 @@ def test_explicit_reindex_returns_structured_failure_when_refresh_raises(tmp_pat
     assert detail["last_error"] == "Git failed https://***@example.com/repo.git"
 
 
-def test_explicit_reindex_redacts_advisory_last_error_on_failure(tmp_path: Path) -> None:
-    """Reindex failure responses must redact persisted advisory errors."""
+def test_explicit_reindex_redacts_metadata_last_error_on_failure(tmp_path: Path) -> None:
+    """Reindex failure responses must redact persisted metadata errors."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"

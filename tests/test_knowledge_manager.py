@@ -237,6 +237,14 @@ def _publish_api_config(api_app: object, config: Config) -> None:
     context.config_load_result = main.ConfigLoadResult(success=True)
 
 
+def _refresh_state_for_key(key: knowledge_registry.KnowledgeSnapshotKey) -> str:
+    metadata_path = snapshot_metadata_path(key)
+    return knowledge_registry.snapshot_refresh_state(
+        load_published_indexing_state(metadata_path),
+        metadata_exists=metadata_path.exists(),
+    )
+
+
 def _identity(requester_id: str) -> ToolExecutionIdentity:
     return ToolExecutionIdentity(
         channel="matrix",
@@ -325,7 +333,7 @@ async def test_git_manager_construction_does_not_probe_checkout_on_event_loop(
 
 
 def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: Path) -> None:
-    """A missing published snapshot is advisory and schedules only the referenced base."""
+    """A missing published snapshot schedules only the referenced base."""
     config = _config(
         tmp_path,
         bases={"docs": tmp_path / "docs", "unused": tmp_path / "unused"},
@@ -930,8 +938,8 @@ async def test_snapshot_metadata_without_source_signature_is_unavailable_and_sch
 
 
 @pytest.mark.asyncio
-async def test_successful_publish_clears_dirty_advisory_state(tmp_path: Path) -> None:
-    """A successful publish clears dirty advisory state without relying on published metadata mutation."""
+async def test_successful_publish_clears_dirty_refresh_state(tmp_path: Path) -> None:
+    """A successful publish clears dirty refresh state."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("snapshot", encoding="utf-8")
@@ -947,9 +955,7 @@ async def test_successful_publish_clears_dirty_advisory_state(tmp_path: Path) ->
 
     (docs_path / "doc.md").write_text("snapshot updated", encoding="utf-8")
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    advisory = knowledge_registry.load_snapshot_advisory_state(
-        knowledge_registry.snapshot_advisory_path(key),
-    )
+    state = load_published_indexing_state(snapshot_metadata_path(key))
 
     unavailable: dict[str, KnowledgeAvailability] = {}
     knowledge = get_agent_knowledge(
@@ -960,35 +966,36 @@ async def test_successful_publish_clears_dirty_advisory_state(tmp_path: Path) ->
     )
 
     assert knowledge is not None
-    assert advisory.state == "none"
-    assert advisory.refresh_job == "idle"
+    assert state is not None
+    assert knowledge_registry.snapshot_refresh_state(state) == "none"
+    assert state.refresh_job == "idle"
     assert unavailable == {}
 
 
 @pytest.mark.asyncio
-async def test_refreshing_advisory_cancellation_clears_active_refresh_count(
+async def test_refreshing_state_cancellation_clears_active_refresh_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation during the initial refreshing advisory write must not leak active status."""
+    """Cancellation during the initial refreshing state write must not leak active status."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     loop = asyncio.get_running_loop()
-    advisory_write_started = asyncio.Event()
-    release_advisory_write = Event()
+    refreshing_write_started = asyncio.Event()
+    release_refreshing_write = Event()
 
     def _blocked_refreshing_state(*_args: object, **_kwargs: object) -> None:
-        loop.call_soon_threadsafe(advisory_write_started.set)
-        assert release_advisory_write.wait(timeout=5)
+        loop.call_soon_threadsafe(refreshing_write_started.set)
+        assert release_refreshing_write.wait(timeout=5)
 
     monkeypatch.setattr(knowledge_refresh_runner, "save_snapshot_refreshing_state", _blocked_refreshing_state)
 
     refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
-    await advisory_write_started.wait()
+    await refreshing_write_started.wait()
     refresh_task.cancel()
-    release_advisory_write.set()
+    release_refreshing_write.set()
     with pytest.raises(asyncio.CancelledError):
         await refresh_task
 
@@ -1001,7 +1008,7 @@ async def test_cancelled_refresh_after_refreshing_write_keeps_existing_snapshot_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation after the refreshing advisory write must not clear a stale snapshot advisory."""
+    """Cancellation after the refreshing state write must not clear stale snapshot state."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "guide.md"
@@ -1037,19 +1044,18 @@ async def test_cancelled_refresh_after_refreshing_write_keeps_existing_snapshot_
     with pytest.raises(asyncio.CancelledError):
         await refresh_task
 
-    advisory = knowledge_registry.load_snapshot_advisory_state(
-        knowledge_registry.snapshot_advisory_path(key),
-    )
-    assert advisory.state == "stale"
-    assert advisory.refresh_job == "idle"
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    assert knowledge_registry.snapshot_refresh_state(state) == "stale"
+    assert state is not None
+    assert state.refresh_job == "idle"
 
 
 @pytest.mark.asyncio
-async def test_cancelled_refresh_waiting_for_source_lock_clears_running_advisory(
+async def test_cancelled_refresh_waiting_for_source_lock_clears_running_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation while queued behind another refresh must not leave advisory running."""
+    """Cancellation while queued behind another refresh must not leave refresh state running."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("locked refresh", encoding="utf-8")
@@ -1088,8 +1094,9 @@ async def test_cancelled_refresh_waiting_for_source_lock_clears_running_advisory
         await second_task
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
-    assert advisory.refresh_job != "running"
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    assert state is not None
+    assert state.refresh_job != "running"
 
     release_first.set()
     await first_task
@@ -1183,8 +1190,8 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     assert waiter_entered.is_set()
 
 
-def test_mark_dirty_updates_advisory_state_without_changing_collection(tmp_path: Path) -> None:
-    """Source mutation records advisory dirtiness without mutating published metadata or vectors."""
+def test_mark_dirty_updates_refresh_state_without_changing_collection(tmp_path: Path) -> None:
+    """Source mutation records dirtiness without mutating published collection data."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("published old", encoding="utf-8")
@@ -1215,15 +1222,14 @@ def test_mark_dirty_updates_advisory_state_without_changing_collection(tmp_path:
         runtime_paths=runtime_paths,
     )
     state = load_published_indexing_state(metadata_path)
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
 
     assert marked_base_ids == ("docs",)
     assert _VectorDb.collections[default_collection] == [
         {"content": "published old", "metadata": {"source_path": "guide.md"}},
     ]
     assert state is not None
-    assert advisory.state == "stale"
-    assert advisory.refresh_job == "pending"
+    assert knowledge_registry.snapshot_refresh_state(state) == "stale"
+    assert state.refresh_job == "pending"
 
 
 @pytest.mark.asyncio
@@ -1249,14 +1255,11 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
     )
     beta_key = resolve_snapshot_key("beta", config=config, runtime_paths=runtime_paths)
     beta_state = load_published_indexing_state(snapshot_metadata_path(beta_key))
-    beta_advisory = knowledge_registry.load_snapshot_advisory_state(
-        knowledge_registry.snapshot_advisory_path(beta_key),
-    )
     refreshed_beta_lookup = get_published_snapshot("beta", config=config, runtime_paths=runtime_paths)
 
     assert marked_base_ids == ("alpha", "beta")
     assert beta_state is not None
-    assert beta_advisory.state == "stale"
+    assert knowledge_registry.snapshot_refresh_state(beta_state) == "stale"
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
 
 
@@ -1265,7 +1268,7 @@ async def test_async_mark_dirty_cancellation_waits_for_state_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation during advisory writes must wait for the sidecar commit before propagating."""
+    """Cancellation during dirty writes must wait for the metadata commit before propagating."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("cached old", encoding="utf-8")
@@ -1304,11 +1307,10 @@ async def test_async_mark_dirty_cancellation_waits_for_state_commit(
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(snapshot_metadata_path(key))
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
     refreshed_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert state is not None
-    assert advisory.state == "stale"
+    assert knowledge_registry.snapshot_refresh_state(state) == "stale"
     assert refreshed_lookup.availability is KnowledgeAvailability.STALE
 
 
@@ -1359,24 +1361,20 @@ async def test_async_mark_dirty_cancellation_finishes_same_source_aliases(
 
     alpha_key = resolve_snapshot_key("alpha", config=config, runtime_paths=runtime_paths)
     beta_key = resolve_snapshot_key("beta", config=config, runtime_paths=runtime_paths)
-    alpha_advisory = knowledge_registry.load_snapshot_advisory_state(
-        knowledge_registry.snapshot_advisory_path(alpha_key),
-    )
-    beta_advisory = knowledge_registry.load_snapshot_advisory_state(
-        knowledge_registry.snapshot_advisory_path(beta_key),
-    )
+    alpha_state = load_published_indexing_state(snapshot_metadata_path(alpha_key))
+    beta_state = load_published_indexing_state(snapshot_metadata_path(beta_key))
 
     assert tuple(written_base_ids) == ("alpha", "beta")
-    assert alpha_advisory.state == "stale"
-    assert beta_advisory.state == "stale"
+    assert knowledge_registry.snapshot_refresh_state(alpha_state) == "stale"
+    assert knowledge_registry.snapshot_refresh_state(beta_state) == "stale"
 
 
 @pytest.mark.asyncio
-async def test_async_mark_dirty_recached_snapshot_reports_advisory_after_write(
+async def test_async_mark_dirty_recached_snapshot_reports_refresh_state_after_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Readers may keep last-good handles while advisory state changes to stale after commit."""
+    """Readers may keep last-good handles while refresh state changes to stale after commit."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("recache old", encoding="utf-8")
@@ -1438,9 +1436,6 @@ async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_c
     alpha_lookup = get_published_snapshot("alpha", config=config, runtime_paths=runtime_paths)
     beta_key = resolve_snapshot_key("beta", config=config, runtime_paths=runtime_paths)
     beta_state = load_published_indexing_state(snapshot_metadata_path(beta_key))
-    beta_advisory = knowledge_registry.load_snapshot_advisory_state(
-        knowledge_registry.snapshot_advisory_path(beta_key),
-    )
     refreshed_beta_lookup = get_published_snapshot("beta", config=config, runtime_paths=runtime_paths)
 
     assert alpha_lookup.snapshot is not None
@@ -1448,7 +1443,7 @@ async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_c
         "shared local new",
     ]
     assert beta_state is not None
-    assert beta_advisory.state == "stale"
+    assert knowledge_registry.snapshot_refresh_state(beta_state) == "stale"
     assert refreshed_beta_lookup.snapshot is not None
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
     assert [
@@ -1644,17 +1639,17 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
     owner.schedule_refresh.assert_called_once()
 
 
-def test_missing_advisory_state_file_does_not_block_published_snapshot(tmp_path: Path) -> None:
+def test_metadata_state_alone_serves_published_snapshot(tmp_path: Path) -> None:
     """The simplified metadata model keeps active state in the metadata file."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("missing advisory snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("metadata snapshot", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    collection = "missing_advisory_collection"
+    collection = "metadata_collection"
     _VectorDb.collections[collection] = [
-        {"content": "missing advisory snapshot", "metadata": {"source_path": "doc.md"}},
+        {"content": "metadata snapshot", "metadata": {"source_path": "doc.md"}},
     ]
     metadata_path = snapshot_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1670,13 +1665,9 @@ def test_missing_advisory_state_file_does_not_block_published_snapshot(tmp_path:
         ),
         encoding="utf-8",
     )
-    advisory_path = knowledge_registry.snapshot_advisory_path(key)
-    assert not advisory_path.exists()
-
-    snapshot_state = knowledge_registry.load_knowledge_snapshot_state(key)
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
-    assert snapshot_state.advisory.state == "none"
+    assert _refresh_state_for_key(key) == "none"
     assert lookup.snapshot is not None
     assert lookup.availability is KnowledgeAvailability.READY
 
@@ -1736,15 +1727,8 @@ async def test_git_ready_snapshot_schedules_refresh_after_poll_interval(
     metadata_path = snapshot_metadata_path(key)
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     payload["last_published_at"] = "2000-01-01T00:00:00+00:00"
+    payload["last_refresh_at"] = "2000-01-01T00:00:00+00:00"
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    knowledge_registry.save_snapshot_advisory_state(
-        knowledge_registry.snapshot_advisory_path(key),
-        knowledge_registry.KnowledgeAdvisoryState(
-            state="none",
-            refresh_job="idle",
-            last_refresh_at="2000-01-01T00:00:00+00:00",
-        ),
-    )
     clear_published_snapshots()
     owner = MagicMock()
     owner.schedule_initial_load = MagicMock()
@@ -1840,15 +1824,8 @@ async def test_private_git_ready_refresh_on_access_honors_poll_interval(
     metadata_path = snapshot_metadata_path(key)
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     payload["last_published_at"] = "2000-01-01T00:00:00+00:00"
+    payload["last_refresh_at"] = "2000-01-01T00:00:00+00:00"
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    knowledge_registry.save_snapshot_advisory_state(
-        knowledge_registry.snapshot_advisory_path(key),
-        knowledge_registry.KnowledgeAdvisoryState(
-            state="none",
-            refresh_job="idle",
-            last_refresh_at="2000-01-01T00:00:00+00:00",
-        ),
-    )
     clear_published_snapshots()
     owner = MagicMock()
     owner.schedule_initial_load = MagicMock()
@@ -2088,13 +2065,12 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(snapshot_metadata_path(key))
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
     assert state is not None
     assert state.collection is not None
     assert "_candidate_" in state.collection
     assert state.collection in _VectorDb.collections
-    assert advisory.state == "none"
-    assert advisory.refresh_job == "idle"
+    assert knowledge_registry.snapshot_refresh_state(state) == "none"
+    assert state.refresh_job == "idle"
 
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.snapshot is not None
@@ -2905,11 +2881,8 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
     assert preserved_state is not None
     assert preserved_state.settings == old_state.settings
     assert preserved_state.collection == old_state.collection
-    advisory = knowledge_registry.load_snapshot_advisory_state(
-        knowledge_registry.snapshot_advisory_path(changed_key),
-    )
-    assert advisory.state == "refresh_failed"
-    assert advisory.last_error == "candidate failed"
+    assert knowledge_registry.snapshot_refresh_state(preserved_state) == "refresh_failed"
+    assert preserved_state.last_error == "candidate failed"
 
     lookup = get_published_snapshot("docs", config=changed_config, runtime_paths=runtime_paths)
     assert lookup.snapshot is not None
@@ -3033,7 +3006,6 @@ async def test_first_time_partial_refresh_does_not_publish_ready_snapshot(
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(snapshot_metadata_path(key))
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert result.indexed_count == 1
@@ -3041,8 +3013,8 @@ async def test_first_time_partial_refresh_does_not_publish_ready_snapshot(
     assert state is not None
     assert state.status == "indexing"
     assert state.collection is None
-    assert advisory.state == "refresh_failed"
-    assert advisory.last_error == "Indexed 1 of 2 managed knowledge files"
+    assert knowledge_registry.snapshot_refresh_state(state) == "refresh_failed"
+    assert state.last_error == "Indexed 1 of 2 managed knowledge files"
     assert lookup.snapshot is None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
     assert not any("_candidate_" in collection for collection in _VectorDb.collections)
@@ -3078,7 +3050,6 @@ async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(snapshot_metadata_path(key))
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert result.indexed_count == 2
@@ -3086,7 +3057,7 @@ async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
     assert result.availability is KnowledgeAvailability.READY
     assert state is not None
     assert state.indexed_count == 2
-    assert advisory.state == "none"
+    assert knowledge_registry.snapshot_refresh_state(state) == "none"
     assert lookup.snapshot is not None
     assert [document.content for document in lookup.snapshot.knowledge.search("useful", max_results=5)] == [
         "useful vectors",
@@ -3197,7 +3168,6 @@ async def test_refresh_setup_failure_records_failed_availability(tmp_path: Path)
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(snapshot_metadata_path(key))
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert state is not None
@@ -3206,9 +3176,7 @@ async def test_refresh_setup_failure_records_failed_availability(tmp_path: Path)
     assert state.refresh_job == "failed"
     assert state.last_error is not None
     assert "must be a directory" in state.last_error
-    assert advisory.state == "refresh_failed"
-    assert advisory.last_error is not None
-    assert "must be a directory" in advisory.last_error
+    assert knowledge_registry.snapshot_refresh_state(state) == "refresh_failed"
     assert lookup.snapshot is None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
 
@@ -4198,7 +4166,6 @@ async def test_refresh_does_not_synthesize_missing_published_metadata(
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(snapshot_metadata_path(key))
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
 
     assert result.published is False
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
@@ -4206,7 +4173,7 @@ async def test_refresh_does_not_synthesize_missing_published_metadata(
     assert state.status == "failed"
     assert state.collection is None
     assert state.last_error == "Published snapshot metadata was missing after refresh"
-    assert advisory.state == "refresh_failed"
+    assert knowledge_registry.snapshot_refresh_state(state) == "refresh_failed"
 
 
 def test_published_metadata_write_uses_unique_temp_and_cleans_failed_replace(
@@ -4492,13 +4459,14 @@ async def test_unchanged_refresh_fails_when_publish_handle_rebuild_returns_none(
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
+    state = load_published_indexing_state(snapshot_metadata_path(key))
 
     assert result.published is False
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
     assert result.last_error == "Published snapshot collection was missing during unchanged refresh"
-    assert advisory.state == "refresh_failed"
-    assert advisory.refresh_job == "failed"
+    assert state is not None
+    assert knowledge_registry.snapshot_refresh_state(state) == "refresh_failed"
+    assert state.refresh_job == "failed"
 
 
 @pytest.mark.asyncio
@@ -4655,14 +4623,13 @@ async def test_git_sync_failure_preserves_last_good_snapshot_and_redacts_error(
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(snapshot_metadata_path(key))
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert state is not None
-    assert advisory.state == "refresh_failed"
-    assert advisory.last_error is not None
-    assert "ghp_secret" not in advisory.last_error
-    assert "x-oauth-basic" not in advisory.last_error
+    assert knowledge_registry.snapshot_refresh_state(state) == "refresh_failed"
+    assert state.last_error is not None
+    assert "ghp_secret" not in state.last_error
+    assert "x-oauth-basic" not in state.last_error
     assert lookup.snapshot is not None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
     assert [document.content for document in lookup.snapshot.knowledge.search("snapshot", max_results=5)] == [
@@ -4702,7 +4669,6 @@ async def test_cold_git_sync_failure_records_failed_availability_and_redacted_er
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(snapshot_metadata_path(key))
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert state is not None
@@ -4712,16 +4678,13 @@ async def test_cold_git_sync_failure_records_failed_availability_and_redacted_er
     assert state.last_error is not None
     assert "ghp_secret" not in state.last_error
     assert "x-oauth-basic" not in state.last_error
-    assert advisory.state == "refresh_failed"
-    assert advisory.last_error is not None
-    assert "ghp_secret" not in advisory.last_error
-    assert "x-oauth-basic" not in advisory.last_error
+    assert knowledge_registry.snapshot_refresh_state(state) == "refresh_failed"
     assert lookup.snapshot is None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
 
 
 @pytest.mark.asyncio
-async def test_git_failure_redacts_authorization_headers_from_raised_and_advisory_errors(
+async def test_git_failure_redacts_authorization_headers_from_raised_and_metadata_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4775,11 +4738,13 @@ async def test_git_failure_redacts_authorization_headers_from_raised_and_advisor
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
+    state = load_published_indexing_state(snapshot_metadata_path(key))
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
-    error_texts = [str(exc_info.value), advisory.last_error or "", lookup.advisory.last_error or ""]
+    assert state is not None
+    assert lookup.state is not None
+    error_texts = [str(exc_info.value), state.last_error or "", lookup.state.last_error or ""]
 
-    assert advisory.state == "refresh_failed"
+    assert knowledge_registry.snapshot_refresh_state(state) == "refresh_failed"
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
     for error_text in error_texts:
         assert "Authorization: Basic ***" in error_text
@@ -4830,13 +4795,10 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
     await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
     beta_key = resolve_snapshot_key("beta", config=config, runtime_paths=runtime_paths)
     beta_state = load_published_indexing_state(snapshot_metadata_path(beta_key))
-    beta_advisory = knowledge_registry.load_snapshot_advisory_state(
-        knowledge_registry.snapshot_advisory_path(beta_key),
-    )
     refreshed_beta_lookup = get_published_snapshot("beta", config=config, runtime_paths=runtime_paths)
 
     assert beta_state is not None
-    assert beta_advisory.state == "stale"
+    assert knowledge_registry.snapshot_refresh_state(beta_state) == "stale"
     assert refreshed_beta_lookup.snapshot is not None
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
     assert [document.content for document in refreshed_beta_lookup.snapshot.knowledge.search("git", max_results=5)] == [
@@ -5318,7 +5280,7 @@ async def test_git_updated_stale_registry_mark_uses_async_registry_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refresh runner should use the async advisory marker instead of sync disk I/O."""
+    """Refresh runner should mark stale metadata off the event loop."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("git updated", encoding="utf-8")

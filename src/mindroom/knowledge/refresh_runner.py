@@ -19,7 +19,6 @@ from mindroom.knowledge.registry import (
     PublishedIndexingState,
     indexing_settings_metadata_equal,
     indexing_settings_snapshot_compatible,
-    load_knowledge_snapshot_state,
     load_published_indexing_state,
     mark_snapshot_dirty_async,
     prune_private_snapshot_bookkeeping,
@@ -367,8 +366,7 @@ async def _refresh_result_from_persisted_state(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> KnowledgeRefreshResult:
-    snapshot_state = await asyncio.to_thread(load_knowledge_snapshot_state, key)
-    state = snapshot_state.published
+    state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
     if state is None:
         error = "Published snapshot metadata was missing after refresh"
         await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=error)
