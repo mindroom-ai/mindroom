@@ -38,7 +38,13 @@ from mindroom.knowledge import (
     refresh_knowledge_binding,
     snapshot_indexed_count,
 )
-from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature, list_knowledge_files
+from mindroom.knowledge.manager import (
+    KnowledgeManager,
+    git_checkout_present,
+    knowledge_source_signature,
+    list_git_tracked_knowledge_files,
+    list_knowledge_files,
+)
 from mindroom.knowledge.refresh_owner import KnowledgeRefreshSupersededError
 from mindroom.knowledge.registry import load_published_indexing_state, resolve_snapshot_key, snapshot_metadata_path
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -143,6 +149,13 @@ class _Knowledge:
 
     def search(self, query: str, max_results: int | None = None) -> list[Document]:
         return self.vector_db.search(query=query, limit=max_results or 5)
+
+
+class _AutoCreatingKnowledge(_Knowledge):
+    def __init__(self, vector_db: _VectorDb) -> None:
+        super().__init__(vector_db)
+        if not vector_db.exists():
+            vector_db.create()
 
 
 @pytest.fixture(autouse=True)
@@ -2023,6 +2036,55 @@ async def test_failed_git_refresh_cooldown_is_credentials_service_aware(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_failed_git_refresh_cooldown_is_embedded_userinfo_aware(tmp_path: Path) -> None:
+    """Changing embedded Git URL auth should bypass cooldown without storing the secret."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    git_config = KnowledgeGitConfig(
+        repo_url="https://git-user:old-secret@example.com/org/private.git",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_path = snapshot_metadata_path(key)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "settings": list(key.indexing_settings),
+                "status": "indexing",
+                "availability": KnowledgeAvailability.REFRESH_FAILED.value,
+                "last_error": "auth failed",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    changed_config = config.model_copy(deep=True)
+    changed_git_config = changed_config.knowledge_bases["docs"].git
+    assert changed_git_config is not None
+    changed_git_config.repo_url = "https://git-user:new-secret@example.com/org/private.git"
+    owner = MagicMock()
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+
+    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is None
+    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_owner=owner) is None
+
+    assert owner.schedule_refresh.call_count == 2
+    assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is config
+    assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is changed_config
+    cooldown_keys = repr(tuple(knowledge_utils._refresh_scheduled_at))
+    assert "old-secret" not in cooldown_keys
+    assert "new-secret" not in cooldown_keys
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("availability", [KnowledgeAvailability.STALE, KnowledgeAvailability.REFRESH_FAILED])
 async def test_stale_or_failed_snapshot_reports_chunking_config_mismatch_before_cooldown(
     tmp_path: Path,
@@ -3514,7 +3576,8 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unchanged Git poll must repair metadata that points at a missing collection."""
+    """An unchanged Git poll must not let Agno auto-create a missing published collection."""
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _AutoCreatingKnowledge)
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("git repaired", encoding="utf-8")
@@ -3553,11 +3616,17 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     state = load_published_indexing_state(snapshot_metadata_path(key))
     assert state is not None
     assert state.collection is not None
-    _VectorDb.collections.pop(state.collection, None)
+    missing_collection = state.collection
+    _VectorDb.collections.pop(missing_collection, None)
+    clear_published_snapshots()
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    repaired_state = load_published_indexing_state(snapshot_metadata_path(key))
 
     assert result.published is True
     assert reindex_count == 2
+    assert repaired_state is not None
+    assert repaired_state.collection != missing_collection
+    assert missing_collection not in _VectorDb.collections
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.snapshot is not None
     assert [document.content for document in lookup.snapshot.knowledge.search("git", max_results=5)] == [
@@ -4258,6 +4327,76 @@ async def test_existing_single_branch_checkout_switches_to_new_remote_branch(tmp
     assert [document.content for document in release_lookup.snapshot.knowledge.search("branch", max_results=5)] == [
         "release branch content",
     ]
+
+
+@pytest.mark.asyncio
+async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_status(tmp_path: Path) -> None:
+    """Git worktree checkouts use a .git file and must still count as present repositories."""
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+
+    async def _git(cwd: Path, *args: str) -> None:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    await _git(remote_work, "init", "-b", "main")
+    await _git(remote_work, "config", "user.email", "tests@example.com")
+    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    (remote_work / "doc.md").write_text("worktree checkout content", encoding="utf-8")
+    await _git(remote_work, "add", "doc.md")
+    await _git(remote_work, "commit", "-m", "main")
+    remote_bare = tmp_path / "remote.git"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    seed_checkout = tmp_path / "seed-checkout"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", str(remote_bare), str(seed_checkout)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    docs_path = tmp_path / "worktree-checkout"
+    await _git(seed_checkout, "worktree", "add", "--detach", str(docs_path), "HEAD")
+    assert (docs_path / ".git").is_file()
+
+    git_config = KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    resolved_git_config = manager._git_config()
+    assert resolved_git_config is not None
+
+    cloned = await manager._ensure_git_repository(resolved_git_config)
+
+    assert cloned is False
+    assert git_checkout_present(docs_path)
+    assert manager.get_status()["git"]["repo_present"] is True
+    assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
+
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    client = TestClient(main.app)
+    response = client.get("/api/knowledge/bases/docs/status")
+
+    assert response.status_code == 200
+    assert response.json()["git"]["repo_present"] is True
 
 
 @pytest.mark.asyncio

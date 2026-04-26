@@ -35,6 +35,7 @@ from mindroom.knowledge import (
 from mindroom.knowledge import (
     list_knowledge_files as list_managed_knowledge_files,
 )
+from mindroom.knowledge.manager import git_checkout_present
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -302,7 +303,7 @@ def _git_status(
         "lfs": git_config.lfs,
         "startup_behavior": git_config.startup_behavior,
         "syncing": _is_refreshing(config, base_id, runtime_paths, request=request),
-        "repo_present": (root / ".git").is_dir(),
+        "repo_present": git_checkout_present(root, timeout_seconds=_DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS),
         "initial_sync_complete": (
             state is not None and state.status == "complete" and state.published_revision is not None
         ),

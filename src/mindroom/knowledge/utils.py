@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import secrets
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,6 +15,7 @@ from agno.knowledge.knowledge import Knowledge
 
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.redaction import embedded_http_userinfo
 from mindroom.knowledge.registry import (
     KnowledgeRefreshKey,
     KnowledgeSnapshotLookup,
@@ -38,6 +42,7 @@ logger = get_logger(__name__)
 _REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
 _refresh_scheduled_at: dict[tuple[KnowledgeRefreshKey, KnowledgeAvailability, tuple[str, ...] | None], float] = {}
+_EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY = secrets.token_bytes(32)
 
 
 @dataclass(frozen=True)
@@ -199,6 +204,7 @@ def _failed_refresh_retry_fingerprint(
         "git-refresh",
         f"credentials_service:{git_config.credentials_service or ''}",
         f"sync_timeout_seconds:{git_config.sync_timeout_seconds}",
+        f"embedded_userinfo:{_embedded_userinfo_fingerprint(git_config.repo_url)}",
     ]
     if git_config.credentials_service is None:
         return tuple(fingerprint)
@@ -218,6 +224,15 @@ def _failed_refresh_retry_fingerprint(
             ),
         )
     return tuple(fingerprint)
+
+
+def _embedded_userinfo_fingerprint(repo_url: str) -> str:
+    userinfo = embedded_http_userinfo(repo_url)
+    if userinfo is None:
+        return ""
+    username, secret = userinfo
+    payload = f"{username}\0{secret}".encode()
+    return hmac.new(_EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY, payload, hashlib.sha256).hexdigest()
 
 
 def _refresh_retry_settings(

@@ -17,8 +17,9 @@ from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, runtime_checkable
-from urllib.parse import quote, unquote, urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 
+from agno.knowledge.embedder.base import Embedder
 from agno.knowledge.embedder.ollama import OllamaEmbedder
 from agno.knowledge.knowledge import Knowledge
 from agno.knowledge.reader import ReaderFactory
@@ -37,6 +38,7 @@ from mindroom.embeddings import (
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.redaction import (
     credential_free_url_identity,
+    embedded_http_userinfo,
     redact_credentials_in_text,
     redact_url_credentials,
 )
@@ -45,7 +47,6 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
-    from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
 
     from mindroom.config.knowledge import KnowledgeGitConfig
@@ -63,6 +64,7 @@ _FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
 _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 32
 _RETAINED_COLLECTION_COUNT = 3
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
+_GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS = 5.0
 _INDEXING_STATUS_RESETTING = "resetting"
 _INDEXING_STATUS_INDEXING = "indexing"
 _INDEXING_STATUS_COMPLETE = "complete"
@@ -169,6 +171,30 @@ class _NamedCollection(Protocol):
     name: str
 
 
+class _CollectionExistenceEmbedder(Embedder):
+    """Minimal embedder for collection probes that must never embed content."""
+
+    def get_embedding(self, text: str) -> list[float]:
+        _ = text
+        msg = "Knowledge collection existence checks must not embed content"
+        raise NotImplementedError(msg)
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
+        _ = text
+        msg = "Knowledge collection existence checks must not embed content"
+        raise NotImplementedError(msg)
+
+    async def async_get_embedding(self, text: str) -> list[float]:
+        _ = text
+        msg = "Knowledge collection existence checks must not embed content"
+        raise NotImplementedError(msg)
+
+    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
+        _ = text
+        msg = "Knowledge collection existence checks must not embed content"
+        raise NotImplementedError(msg)
+
+
 @dataclass(frozen=True)
 class _PersistedIndexingState:
     settings: tuple[str, ...]
@@ -204,6 +230,47 @@ def _ensure_knowledge_directory_ready(knowledge_path: Path) -> None:
         msg = f"Knowledge path {knowledge_path} must be a directory"
         raise ValueError(msg)
     knowledge_path.mkdir(parents=True, exist_ok=True)
+
+
+def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) -> bool:
+    """Return whether root itself is a Git worktree checkout."""
+    if not root.is_dir():
+        return False
+    effective_timeout_seconds = _GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    if effective_timeout_seconds <= 0:
+        effective_timeout: float | None = None
+    else:
+        effective_timeout = effective_timeout_seconds
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree", "--show-toplevel"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=effective_timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 2 or lines[0] != "true":
+        return False
+    try:
+        return Path(lines[1]).resolve() == root.resolve()
+    except OSError:
+        return False
+
+
+def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
+    """Check collection existence without constructing Agno Knowledge."""
+    vector_db = ChromaDb(
+        collection=collection_name,
+        path=str(storage_path),
+        persistent_client=True,
+        embedder=_CollectionExistenceEmbedder(),
+    )
+    return vector_db.exists()
 
 
 def _safe_identifier(value: str) -> str:
@@ -358,15 +425,6 @@ def _authenticated_repo_url(
     return urlunparse(parsed._replace(netloc=auth_netloc))
 
 
-def _embedded_http_userinfo(repo_url: str) -> tuple[str, str] | None:
-    parsed = urlparse(repo_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or "@" not in parsed.netloc:
-        return None
-    if not parsed.username:
-        return None
-    return unquote(parsed.username), unquote(parsed.password or "")
-
-
 def _credentials_service_http_userinfo(
     credentials_service: str | None,
     runtime_paths: RuntimePaths,
@@ -410,7 +468,7 @@ def _git_auth_env(
     clean_url = _credential_free_repo_url(repo_url)
     parsed_clean_url = urlparse(clean_url)
 
-    embedded_userinfo = _embedded_http_userinfo(repo_url)
+    embedded_userinfo = embedded_http_userinfo(repo_url)
     if embedded_userinfo is not None:
         return _git_http_basic_auth_env(clean_url, *embedded_userinfo)
 
@@ -652,7 +710,7 @@ def list_git_tracked_knowledge_files(
 ) -> list[Path]:
     """List Git-tracked semantic files using the same source set as indexing."""
     root = knowledge_root.resolve()
-    if not (root / ".git").is_dir():
+    if not git_checkout_present(root, timeout_seconds=timeout_seconds):
         return []
     return _semantic_file_paths_from_relative_paths(
         config,
@@ -788,6 +846,7 @@ class KnowledgeManager:
     _git_lfs_repository_ready: bool = field(default=False, init=False)
     _git_tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
     _cached_persisted_indexing_state: _PersistedIndexingState | None = field(default=None, init=False, repr=False)
+    _persisted_collection_missing_on_init: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
@@ -810,12 +869,20 @@ class KnowledgeManager:
         self._index_failures_path = self._base_storage_path / "index_failures.json"
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
-        self._git_repo_present = (self.knowledge_path / ".git").is_dir()
+        self._git_repo_present = base_config.git is not None and git_checkout_present(
+            self.knowledge_path,
+            timeout_seconds=float(base_config.git.sync_timeout_seconds),
+        )
         persisted_state = self._load_persisted_indexing_state()
         self._cached_persisted_indexing_state = persisted_state
+        self._persisted_collection_missing_on_init = self._persisted_collection_missing(persisted_state)
         collection_name = (
             persisted_state.collection
-            if persisted_state is not None and persisted_state.collection is not None
+            if (
+                persisted_state is not None
+                and persisted_state.collection is not None
+                and not self._persisted_collection_missing_on_init
+            )
             else self._default_collection_name()
         )
         self._knowledge = self._build_knowledge(collection_name)
@@ -856,6 +923,21 @@ class KnowledgeManager:
             msg = f"Knowledge path for base '{self.base_id}' is not initialized"
             raise RuntimeError(msg)
         return knowledge_path
+
+    def _persisted_collection_missing(self, persisted_state: _PersistedIndexingState | None) -> bool:
+        if persisted_state is None or persisted_state.status != _INDEXING_STATUS_COMPLETE:
+            return False
+        collection_name = persisted_state.collection or self._default_collection_name()
+        try:
+            return not chroma_collection_exists(self._base_storage_path, collection_name)
+        except Exception:
+            logger.warning(
+                "Knowledge collection existence check failed during manager initialization",
+                base_id=self.base_id,
+                collection=collection_name,
+                exc_info=True,
+            )
+            return True
 
     def _load_persisted_indexing_state(self) -> _PersistedIndexingState | None:
         if not self._indexing_settings_path.exists():
@@ -1031,6 +1113,8 @@ class KnowledgeManager:
         return isinstance(vector_db, ChromaDb) and vector_db.exists()
 
     def _startup_index_mode(self) -> Literal["full_reindex", "resume", "incremental"]:
+        if self._persisted_collection_missing_on_init:
+            return "full_reindex"
         persisted_state = self._load_persisted_indexing_state()
         if persisted_state is None:
             # A missing checkpoint can be legacy state worth resuming, but a
@@ -1102,6 +1186,13 @@ class KnowledgeManager:
         if git_config is None:
             return None
         return float(git_config.sync_timeout_seconds)
+
+    async def _git_checkout_present(self) -> bool:
+        return await asyncio.to_thread(
+            git_checkout_present,
+            self._knowledge_source_path(),
+            timeout_seconds=self._git_sync_timeout_seconds(),
+        )
 
     def _skip_hidden_paths(self) -> bool:
         git_config = self._git_config()
@@ -1233,8 +1324,7 @@ class KnowledgeManager:
     async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
         runtime_paths = self.runtime_paths
         knowledge_root = self._knowledge_source_path()
-        git_dir = knowledge_root / ".git"
-        if git_dir.is_dir():
+        if await self._git_checkout_present():
             self._git_repo_present = True
             await self._ensure_git_lfs_repository_ready(knowledge_root)
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
@@ -1820,7 +1910,7 @@ class KnowledgeManager:
         """Ensure the Git checkout exists before direct file writes land in the knowledge folder."""
         if self._git_config() is None:
             return
-        if (self._knowledge_source_path() / ".git").is_dir():
+        if await self._git_checkout_present():
             self._git_repo_present = True
             return
         await self.sync_git_repository(index_changes=False)
@@ -1837,13 +1927,13 @@ class KnowledgeManager:
                 changed_files, removed_files, updated = await self._sync_git_repository_once(git_config)
             current_head = await self._git_rev_parse("HEAD")
         except Exception as exc:
-            self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
+            self._git_repo_present = await self._git_checkout_present()
             self._git_last_error = redact_credentials_in_text(str(exc))
             raise
         finally:
             self._git_syncing = False
 
-        self._git_repo_present = (self._knowledge_source_path() / ".git").is_dir()
+        self._git_repo_present = await self._git_checkout_present()
         self._git_last_successful_sync_at = datetime.now(tz=UTC)
         self._git_last_successful_commit = current_head
         self._git_last_error = None
@@ -1984,6 +2074,7 @@ class KnowledgeManager:
             has_published_snapshot = (
                 persisted_state is not None
                 and persisted_state.status == _INDEXING_STATUS_COMPLETE
+                and not self._persisted_collection_missing_on_init
                 and await asyncio.to_thread(self._has_existing_index)
             )
             candidate_knowledge = self._build_knowledge(self._candidate_collection_name())

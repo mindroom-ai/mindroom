@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 _URL_PATTERN = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
 
@@ -46,3 +46,13 @@ def credential_free_url_identity(value: str) -> str:
         normalized = value
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"repo-url-sha256:{digest}"
+
+
+def embedded_http_userinfo(value: str) -> tuple[str, str] | None:
+    """Return embedded HTTP(S) URL userinfo, if present."""
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or "@" not in parsed.netloc:
+        return None
+    if not parsed.username:
+        return None
+    return unquote(parsed.username), unquote(parsed.password or "")

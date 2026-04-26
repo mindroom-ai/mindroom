@@ -11,8 +11,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
-from agno.knowledge.embedder import Embedder
-
 import mindroom.knowledge.manager as manager_module
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.logging_config import get_logger
@@ -131,30 +129,6 @@ class _SnapshotVectorDb(Protocol):
     def exists(self) -> bool:
         """Return whether the collection exists."""
         ...
-
-
-class _SnapshotExistenceEmbedder(Embedder):
-    """Minimal embedder for Chroma collection probes that must never embed content."""
-
-    def get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "Snapshot collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "Snapshot collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    async def async_get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "Snapshot collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "Snapshot collection existence checks must not embed content"
-        raise NotImplementedError(msg)
 
 
 _published_snapshots: dict[KnowledgeSnapshotKey, PublishedKnowledgeSnapshot] = {}
@@ -550,8 +524,8 @@ def _snapshot_collection_exists(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> bool:
-    vector_db = _build_snapshot_vector_db(key, state, config=config, runtime_paths=runtime_paths)
-    return vector_db.exists()
+    _ = (config, runtime_paths)
+    return snapshot_collection_exists_for_state(key, state)
 
 
 def snapshot_collection_exists_for_state(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> bool:
@@ -560,16 +534,7 @@ def snapshot_collection_exists_for_state(key: KnowledgeSnapshotKey, state: Publi
         return False
     collection_name = state.collection or _default_collection_name(key)
     try:
-        vector_db = cast(
-            "_SnapshotVectorDb",
-            manager_module.ChromaDb(
-                collection=collection_name,
-                path=str(snapshot_base_storage_path(key)),
-                persistent_client=True,
-                embedder=_SnapshotExistenceEmbedder(),
-            ),
-        )
-        return vector_db.exists()
+        return manager_module.chroma_collection_exists(snapshot_base_storage_path(key), collection_name)
     except Exception:
         logger.warning(
             "Published knowledge snapshot collection existence check failed",

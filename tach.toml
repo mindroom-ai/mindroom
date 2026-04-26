@@ -244,6 +244,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.knowledge",
+    "mindroom.knowledge.manager",
 ]
 
 [[modules]]
@@ -1684,7 +1685,7 @@ depends_on = [
 path = "mindroom.knowledge.utils"
 depends_on = [
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.manager",
+    "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",
     "mindroom.runtime_protocols",

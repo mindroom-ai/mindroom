@@ -275,6 +275,7 @@ async def _maybe_publish_unchanged_snapshot(
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
 ) -> KnowledgeRefreshResult | None:
+    force_reindex = force_reindex or manager._needs_full_reindex_on_create()
     if manager._git_config() is not None:
         git_sync_result = await manager.sync_git_repository(index_changes=False)
         if force_reindex or git_sync_result.get("updated", False):
