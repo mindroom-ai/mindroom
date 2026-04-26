@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -2020,6 +2022,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     router_bot = MagicMock()
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.try_start = AsyncMock(return_value=True)
+    router_bot.stop = AsyncMock()
     router_bot.running = True
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
@@ -2051,6 +2054,11 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     async def _knowledge(*_args: object, **_kwargs: object) -> None:
         call_order.append("knowledge")
 
+    ready = asyncio.Event()
+
+    def _mark_ready() -> None:
+        ready.set()
+
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
@@ -2059,8 +2067,18 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
         patch.object(orchestrator, "_schedule_knowledge_refresh", side_effect=_knowledge),
         patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=_mark_ready),
     ):
-        await orchestrator.start()
+        runtime_task = asyncio.create_task(orchestrator.start())
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=1.0)
+            await orchestrator.stop()
+            await asyncio.wait_for(runtime_task, timeout=1.0)
+        finally:
+            if not runtime_task.done():
+                runtime_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await runtime_task
 
     assert call_order == ["wait", "setup", "cleanup", "resume", "knowledge"]
 
