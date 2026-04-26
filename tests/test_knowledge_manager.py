@@ -179,13 +179,11 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_published_snapshots()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_runner._refresh_locks.clear()
-    knowledge_refresh_runner._refresh_lock_accessed_at.clear()
     knowledge_refresh_runner._active_refresh_counts.clear()
     yield
     clear_published_snapshots()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_runner._refresh_locks.clear()
-    knowledge_refresh_runner._refresh_lock_accessed_at.clear()
     knowledge_refresh_runner._active_refresh_counts.clear()
     _VectorDb.collections = {}
 
@@ -812,7 +810,6 @@ async def test_dashboard_delete_rolls_back_tombstones_when_same_source_advisory_
     for base_id in ("research", "summary"):
         lookup = get_published_snapshot(base_id, config=config, runtime_paths=runtime_paths)
         assert lookup.snapshot is not None
-        assert lookup.availability is KnowledgeAvailability.READY
         assert [document.content for document in lookup.snapshot.knowledge.search("anything", max_results=5)] == [
             "restored public",
         ]
@@ -913,11 +910,13 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_ready_legacy_snapshot_without_source_signature_still_serves_last_good(tmp_path: Path) -> None:
-    """Legacy metadata gaps do not trigger request-path source scans or block last-good reads."""
+async def test_snapshot_metadata_without_source_signature_is_unavailable_and_schedules_refresh(
+    tmp_path: Path,
+) -> None:
+    """Stale-format published metadata is treated as corrupt instead of interpreted."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("legacy snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("stale-format snapshot", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -940,11 +939,10 @@ async def test_ready_legacy_snapshot_without_source_signature_still_serves_last_
         refresh_owner=owner,
     )
 
-    assert knowledge is not None
-    assert [document.content for document in knowledge.search("legacy", max_results=5)] == ["legacy snapshot"]
-    assert unavailable == {}
+    assert knowledge is None
+    assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     owner.schedule_initial_load.assert_not_called()
-    owner.schedule_refresh.assert_not_called()
+    owner.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1117,18 +1115,27 @@ def test_mark_dirty_uses_advisory_sidecar_without_mutating_published_metadata(tm
     """Source mutation records advisory dirtiness without mutating published metadata or vectors."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "guide.md").write_text("legacy delete", encoding="utf-8")
+    (docs_path / "guide.md").write_text("published old", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
     default_collection = manager._default_collection_name()
     _VectorDb.collections[default_collection] = [
-        {"content": "legacy delete", "metadata": {"source_path": "guide.md"}},
+        {"content": "published old", "metadata": {"source_path": "guide.md"}},
     ]
     metadata_path = snapshot_metadata_path(key)
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    metadata_path.write_text(json.dumps(list(key.indexing_settings)), encoding="utf-8")
+    knowledge_registry.save_published_indexing_state(
+        metadata_path,
+        knowledge_registry.PublishedIndexingState(
+            settings=key.indexing_settings,
+            status="complete",
+            collection=default_collection,
+            indexed_count=1,
+            source_signature="test-source-signature",
+        ),
+    )
+    knowledge_registry.save_snapshot_refresh_success_state(key)
 
     marked_base_ids = knowledge_registry.mark_snapshot_dirty(
         "docs",
@@ -1140,10 +1147,9 @@ def test_mark_dirty_uses_advisory_sidecar_without_mutating_published_metadata(tm
 
     assert marked_base_ids == ("docs",)
     assert _VectorDb.collections[default_collection] == [
-        {"content": "legacy delete", "metadata": {"source_path": "guide.md"}},
+        {"content": "published old", "metadata": {"source_path": "guide.md"}},
     ]
     assert state is not None
-    assert state.availability is None
     assert advisory.state == "stale"
     assert advisory.refresh_job == "pending"
 
@@ -1178,7 +1184,6 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
 
     assert marked_base_ids == ("alpha", "beta")
     assert beta_state is not None
-    assert beta_state.availability is None
     assert beta_advisory.state == "stale"
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
 
@@ -1231,7 +1236,6 @@ async def test_async_mark_dirty_cancellation_waits_for_sidecar_commit(
     refreshed_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert state is not None
-    assert state.availability is None
     assert advisory.state == "stale"
     assert refreshed_lookup.availability is KnowledgeAvailability.STALE
 
@@ -1372,7 +1376,6 @@ async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_c
         "shared local new",
     ]
     assert beta_state is not None
-    assert beta_state.availability is None
     assert beta_advisory.state == "stale"
     assert refreshed_beta_lookup.snapshot is not None
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
@@ -1466,11 +1469,11 @@ def test_config_allows_exact_duplicate_roots_with_compatible_source_semantics(tm
     assert sorted(config.knowledge_bases) == ["alpha", "beta"]
 
 
-def test_legacy_git_raw_url_metadata_is_compatible_with_redacted_identity(tmp_path: Path) -> None:
-    """Old metadata that stored raw Git URLs should remain compatible with credential-free identities."""
+def test_raw_git_url_snapshot_metadata_is_config_mismatch(tmp_path: Path) -> None:
+    """Raw Git URLs in persisted settings are stale-format metadata, not a compatible identity."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("legacy git", encoding="utf-8")
+    (docs_path / "doc.md").write_text("raw git metadata", encoding="utf-8")
     raw_repo_url = "https://token:secret@example.com/org/repo.git"
     git_config = KnowledgeGitConfig(repo_url=raw_repo_url)
     config = _config(
@@ -1481,32 +1484,32 @@ def test_legacy_git_raw_url_metadata_is_compatible_with_redacted_identity(tmp_pa
     )
     runtime_paths = runtime_paths_for(config)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    legacy_settings = list(key.indexing_settings)
-    legacy_settings[9] = raw_repo_url
-    collection = "legacy_git_collection"
+    stale_settings = list(key.indexing_settings)
+    stale_settings[knowledge_manager_module.INDEXING_SETTINGS_REPO_IDENTITY_INDEX] = raw_repo_url
+    collection = "raw_git_metadata_collection"
     _VectorDb.collections[collection] = [
-        {"content": "legacy git", "metadata": {"source_path": "doc.md"}},
+        {"content": "raw git metadata", "metadata": {"source_path": "doc.md"}},
     ]
     metadata_path = snapshot_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": legacy_settings,
+                "settings": stale_settings,
                 "status": "complete",
                 "collection": collection,
-                "availability": "ready",
-                "source_signature": "legacy-signature",
+                "indexed_count": 1,
+                "source_signature": "test-source-signature",
             },
         ),
         encoding="utf-8",
     )
+    knowledge_registry.save_snapshot_refresh_success_state(key)
 
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
-    assert lookup.snapshot is not None
-    assert lookup.availability is KnowledgeAvailability.READY
-    assert [document.content for document in lookup.snapshot.knowledge.search("git", max_results=5)] == ["legacy git"]
+    assert lookup.snapshot is None
+    assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
 
 
 def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_path: Path) -> None:
@@ -1534,10 +1537,13 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
                 "settings": list(key.indexing_settings),
                 "status": "complete",
                 "collection": collection,
+                "indexed_count": 1,
+                "source_signature": "test-source-signature",
             },
         ),
         encoding="utf-8",
     )
+    knowledge_registry.save_snapshot_refresh_success_state(key)
     changed_config = _config(
         tmp_path,
         bases={"docs": docs_path},
@@ -1566,17 +1572,17 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
     owner.schedule_refresh.assert_called_once()
 
 
-def test_legacy_refresh_failed_metadata_without_advisory_reports_failed(tmp_path: Path) -> None:
-    """Old refresh_failed metadata should remain failed until a sidecar state replaces it."""
+def test_missing_advisory_sidecar_makes_published_snapshot_unavailable(tmp_path: Path) -> None:
+    """Current-format published metadata still needs advisory metadata to be considered usable."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("legacy failed snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("missing advisory snapshot", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    collection = "legacy_refresh_failed_collection"
+    collection = "missing_advisory_collection"
     _VectorDb.collections[collection] = [
-        {"content": "legacy failed snapshot", "metadata": {"source_path": "doc.md"}},
+        {"content": "missing advisory snapshot", "metadata": {"source_path": "doc.md"}},
     ]
     metadata_path = snapshot_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1586,9 +1592,8 @@ def test_legacy_refresh_failed_metadata_without_advisory_reports_failed(tmp_path
                 "settings": list(key.indexing_settings),
                 "status": "complete",
                 "collection": collection,
-                "availability": "refresh_failed",
-                "last_error": "legacy refresh failed",
-                "source_signature": "legacy-signature",
+                "indexed_count": 1,
+                "source_signature": "test-source-signature",
             },
         ),
         encoding="utf-8",
@@ -1601,13 +1606,9 @@ def test_legacy_refresh_failed_metadata_without_advisory_reports_failed(tmp_path
 
     assert snapshot_state.advisory.state == "refresh_failed"
     assert snapshot_state.advisory.refresh_job == "failed"
-    assert snapshot_state.advisory.last_error == "legacy refresh failed"
-    assert lookup.snapshot is not None
+    assert snapshot_state.advisory.reason == "snapshot_advisory_unavailable"
+    assert lookup.snapshot is None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
-    assert lookup.advisory.last_error == "legacy refresh failed"
-    assert [document.content for document in lookup.snapshot.knowledge.search("legacy", max_results=5)] == [
-        "legacy failed snapshot",
-    ]
 
 
 def test_indexing_settings_layout_constants_match_settings_key(tmp_path: Path) -> None:
@@ -2272,32 +2273,32 @@ async def test_successful_refreshes_keep_bounded_retention_metadata(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_publish_cleans_legacy_default_collection_after_migration(tmp_path: Path) -> None:
-    """A migrated metadata record without collection should not leave the old default collection forever."""
+async def test_refresh_rebuilds_stale_list_metadata_without_serving_old_collection(tmp_path: Path) -> None:
+    """List-shaped metadata is stale format and forces a fresh publish."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
-    doc.write_text("legacy default old", encoding="utf-8")
+    doc.write_text("stale list old", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
     default_collection = manager._default_collection_name()
     _VectorDb.collections[default_collection] = [
-        {"content": "legacy default old", "metadata": {"source_path": "doc.md"}},
+        {"content": "stale list old", "metadata": {"source_path": "doc.md"}},
     ]
     metadata_path = snapshot_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.write_text(json.dumps(list(key.indexing_settings)), encoding="utf-8")
-    doc.write_text("legacy default new", encoding="utf-8")
+    doc.write_text("stale list new", encoding="utf-8")
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     assert default_collection not in _VectorDb.collections
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.snapshot is not None
-    assert [document.content for document in lookup.snapshot.knowledge.search("legacy", max_results=5)] == [
-        "legacy default new",
+    assert [document.content for document in lookup.snapshot.knowledge.search("stale", max_results=5)] == [
+        "stale list new",
     ]
 
 
@@ -2838,7 +2839,6 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
     assert preserved_state is not None
     assert preserved_state.settings == old_state.settings
     assert preserved_state.collection == old_state.collection
-    assert preserved_state.availability is None
     advisory = knowledge_registry.load_snapshot_advisory_state(
         knowledge_registry.snapshot_advisory_path(changed_key),
     )
@@ -2864,11 +2864,13 @@ def test_stale_metadata_without_collection_returns_unavailable_snapshot(tmp_path
                 "settings": list(key.indexing_settings),
                 "status": "complete",
                 "collection": "missing_collection",
-                "availability": "ready",
+                "indexed_count": 1,
+                "source_signature": "test-source-signature",
             },
         ),
         encoding="utf-8",
     )
+    knowledge_registry.save_snapshot_refresh_success_state(key)
 
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
@@ -2894,11 +2896,13 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
                 "settings": list(key.indexing_settings),
                 "status": "complete",
                 "collection": "broken_collection",
-                "availability": "ready",
+                "indexed_count": 1,
+                "source_signature": "test-source-signature",
             },
         ),
         encoding="utf-8",
     )
+    knowledge_registry.save_snapshot_refresh_success_state(key)
     owner = MagicMock()
     owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
@@ -3890,7 +3894,6 @@ def test_private_request_scoped_bookkeeping_is_bounded(tmp_path: Path) -> None:
                 settings=key.indexing_settings,
                 status="complete",
                 collection=collection,
-                availability="ready",
                 source_signature=f"sig-{index}",
             ),
             metadata_path=snapshot_metadata_path(key),
@@ -3931,7 +3934,6 @@ def test_non_weakrefable_snapshot_handle_does_not_leak_collection_lease(tmp_path
             settings=key.indexing_settings,
             status="complete",
             collection="non_weakref_collection",
-            availability="ready",
         ),
         metadata_path=snapshot_metadata_path(key),
     )
@@ -4090,7 +4092,6 @@ def test_published_metadata_write_uses_unique_temp_and_cleans_failed_replace(
                 settings=("settings",),
                 status="complete",
                 collection="collection",
-                availability="ready",
                 source_signature="signature",
             ),
         )
@@ -4516,7 +4517,6 @@ async def test_git_sync_failure_preserves_last_good_snapshot_and_redacts_error(
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
     assert state is not None
-    assert state.availability is None
     assert advisory.state == "refresh_failed"
     assert advisory.last_error is not None
     assert "ghp_secret" not in advisory.last_error
@@ -4688,74 +4688,12 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
     refreshed_beta_lookup = get_published_snapshot("beta", config=config, runtime_paths=runtime_paths)
 
     assert beta_state is not None
-    assert beta_state.availability is None
     assert beta_advisory.state == "stale"
     assert refreshed_beta_lookup.snapshot is not None
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
     assert [document.content for document in refreshed_beta_lookup.snapshot.knowledge.search("git", max_results=5)] == [
         "shared git old",
     ]
-
-
-@pytest.mark.asyncio
-async def test_git_noop_refresh_sanitizes_legacy_credential_metadata(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Republishing compatible legacy Git metadata should migrate away from raw credential URLs."""
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    (docs_path / "doc.md").write_text("legacy credential metadata", encoding="utf-8")
-    raw_repo_url = "https://token:secret-token@example.com/org/repo.git"
-    git_config = KnowledgeGitConfig(repo_url=raw_repo_url, branch="main")
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        git_configs={"docs": git_config},
-    )
-    runtime_paths = runtime_paths_for(config)
-    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    legacy_settings = list(key.indexing_settings)
-    legacy_settings[knowledge_manager_module.INDEXING_SETTINGS_REPO_IDENTITY_INDEX] = raw_repo_url
-    collection = "legacy_credential_collection"
-    _VectorDb.collections[collection] = [
-        {"content": "legacy credential metadata", "metadata": {"source_path": "doc.md"}},
-    ]
-    source_signature = knowledge_source_signature(config, "docs", docs_path, tracked_relative_paths={"doc.md"})
-    metadata_path = snapshot_metadata_path(key)
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    metadata_path.write_text(
-        json.dumps(
-            {
-                "settings": legacy_settings,
-                "status": "complete",
-                "collection": collection,
-                "availability": "ready",
-                "source_signature": source_signature,
-            },
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-
-    async def _sync_unchanged(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
-        self._git_last_successful_commit = "rev-same"
-        _set_git_tracked_files(self, "doc.md")
-        return {"updated": False, "changed_count": 0, "removed_count": 0}
-
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_unchanged)
-
-    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(metadata_path)
-    metadata_text = metadata_path.read_text(encoding="utf-8")
-
-    assert result.published is True
-    assert state is not None
-    assert state.settings == key.indexing_settings
-    assert "secret-token" not in metadata_text
-    assert raw_repo_url not in metadata_text
 
 
 @pytest.mark.asyncio

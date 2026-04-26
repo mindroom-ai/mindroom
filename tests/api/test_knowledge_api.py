@@ -86,16 +86,18 @@ def _write_snapshot_metadata(
         "settings": list(key.indexing_settings),
         "status": "complete",
         "collection": collection,
+        "indexed_count": 0 if indexed_count is None else indexed_count,
+        "source_signature": "test-source-signature",
     }
     if revision is not None:
         payload["published_revision"] = revision
     if published_at is not None:
         payload["last_published_at"] = published_at
-    if last_error is not None:
-        knowledge_registry.save_snapshot_refresh_failed_state(key, error=last_error)
-    if indexed_count is not None:
-        payload["indexed_count"] = indexed_count
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    if last_error is None:
+        knowledge_registry.save_snapshot_refresh_success_state(key)
+    else:
+        knowledge_registry.save_snapshot_refresh_failed_state(key, error=last_error)
 
 
 def _init_git_checkout(path: Path, *tracked_paths: str) -> None:
@@ -269,7 +271,7 @@ def test_status_collection_probe_runs_off_event_loop(tmp_path: Path, monkeypatch
 
 
 def test_status_rejects_config_mismatched_published_snapshot(tmp_path: Path) -> None:
-    """Dashboard availability should match runtime snapshot compatibility checks."""
+    """Dashboard availability should match runtime snapshot safety checks."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -440,14 +442,18 @@ def test_git_status_reads_disk_and_snapshot_metadata(tmp_path: Path) -> None:
     assert git_status["last_successful_sync_at"] == "2026-04-24T12:34:56+00:00"
 
 
-def test_git_status_surfaces_last_refresh_error_from_snapshot_metadata(tmp_path: Path) -> None:
-    """Git refresh failures should remain observable through status after the manager disappears."""
+def test_git_status_redacts_last_refresh_error_from_advisory(tmp_path: Path) -> None:
+    """Git refresh failures should be observable through status without leaking credentials."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, last_error="Git command failed: https://***@example.com/repo.git")
+    _write_snapshot_metadata(
+        config,
+        runtime_paths,
+        last_error="Git command failed: https://token:secret@example.com/repo.git?token=query-secret#frag-secret",
+    )
 
     response = client.get("/api/knowledge/bases/research/status")
 
@@ -455,6 +461,9 @@ def test_git_status_surfaces_last_refresh_error_from_snapshot_metadata(tmp_path:
     payload = response.json()
     assert payload["last_error"] == "Git command failed: https://***@example.com/repo.git"
     assert payload["git"]["last_error"] == "Git command failed: https://***@example.com/repo.git"
+    assert "secret" not in json.dumps(payload)
+    assert "query-secret" not in json.dumps(payload)
+    assert "frag-secret" not in json.dumps(payload)
 
 
 @pytest.mark.asyncio
@@ -502,30 +511,6 @@ async def test_git_status_probe_does_not_block_event_loop(
     assert status_task.done() is False
     payload = await status_task
     assert payload["git"]["repo_present"] is False
-
-
-def test_knowledge_status_redacts_legacy_snapshot_last_error(tmp_path: Path) -> None:
-    """Status responses must not trust persisted legacy refresh errors."""
-    client = _test_client(tmp_path)
-    runtime_paths = main._app_context(client.app).runtime_paths
-    docs = tmp_path / "docs"
-    config = _knowledge_config(docs, git=True)
-    _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(
-        config,
-        runtime_paths,
-        last_error="Git command failed: https://token:secret@example.com/repo.git?token=query-secret#frag-secret",
-    )
-
-    response = client.get("/api/knowledge/bases/research/status")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["last_error"] == "Git command failed: https://***@example.com/repo.git"
-    assert payload["git"]["last_error"] == "Git command failed: https://***@example.com/repo.git"
-    assert "secret" not in json.dumps(payload)
-    assert "query-secret" not in json.dumps(payload)
-    assert "frag-secret" not in json.dumps(payload)
 
 
 def test_api_lifespan_does_not_schedule_all_configured_knowledge_bases(tmp_path: Path) -> None:
@@ -1553,8 +1538,8 @@ def test_explicit_reindex_returns_structured_failure_when_refresh_raises(tmp_pat
     assert detail["last_error"] == "Git failed https://***@example.com/repo.git"
 
 
-def test_explicit_reindex_redacts_legacy_snapshot_last_error_on_failure(tmp_path: Path) -> None:
-    """Reindex failure responses must redact persisted legacy snapshot errors."""
+def test_explicit_reindex_redacts_advisory_last_error_on_failure(tmp_path: Path) -> None:
+    """Reindex failure responses must redact persisted advisory errors."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"

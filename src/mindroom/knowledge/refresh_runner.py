@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -21,6 +20,7 @@ from mindroom.knowledge.registry import (
     active_snapshot_collection_names,
     indexing_settings_metadata_equal,
     indexing_settings_snapshot_compatible,
+    load_knowledge_snapshot_state,
     load_published_indexing_state,
     mark_snapshot_dirty_async,
     prune_private_snapshot_bookkeeping,
@@ -60,30 +60,19 @@ class KnowledgeRefreshResult:
     last_error: str | None = None
 
 
-_RefreshLockKey = tuple[KnowledgeSourceKey, int]
-_refresh_locks: dict[_RefreshLockKey, asyncio.Lock] = {}
-_refresh_lock_accessed_at: dict[_RefreshLockKey, float] = {}
+_refresh_locks: dict[KnowledgeSourceKey, Lock] = {}
 _refresh_locks_guard = Lock()
 _active_refresh_counts: dict[KnowledgeRefreshKey, int] = {}
 _active_refresh_counts_guard = Lock()
 _MAX_REFRESH_LOCKS = 512
 
 
-def _running_loop_key() -> int:
-    try:
-        return id(asyncio.get_running_loop())
-    except RuntimeError:
-        return 0
-
-
-def _refresh_lock_for_key(key: KnowledgeSourceKey) -> asyncio.Lock:
-    lock_key = (key, _running_loop_key())
+def _refresh_lock_for_key(key: KnowledgeSourceKey) -> Lock:
     with _refresh_locks_guard:
-        _refresh_lock_accessed_at[lock_key] = time.monotonic()
-        lock = _refresh_locks.get(lock_key)
+        lock = _refresh_locks.get(key)
         if lock is None:
-            lock = asyncio.Lock()
-            _refresh_locks[lock_key] = lock
+            lock = Lock()
+            _refresh_locks[key] = lock
             _prune_refresh_locks_locked()
         return lock
 
@@ -92,16 +81,23 @@ def _prune_refresh_locks_locked() -> None:
     if len(_refresh_locks) <= _MAX_REFRESH_LOCKS:
         return
     excess = len(_refresh_locks) - _MAX_REFRESH_LOCKS
-    candidates = sorted(_refresh_lock_accessed_at, key=_refresh_lock_accessed_at.__getitem__)
-    for key in candidates:
+    for key, lock in tuple(_refresh_locks.items()):
         if excess <= 0:
             break
-        lock = _refresh_locks.get(key)
-        if lock is None or lock.locked():
+        if lock.locked():
             continue
         _refresh_locks.pop(key, None)
-        _refresh_lock_accessed_at.pop(key, None)
         excess -= 1
+
+
+@asynccontextmanager
+async def _acquire_refresh_lock(key: KnowledgeSourceKey) -> AsyncIterator[None]:
+    lock = _refresh_lock_for_key(key)
+    await asyncio.to_thread(lock.acquire)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _mark_refresh_active(key: KnowledgeRefreshKey) -> None:
@@ -172,7 +168,7 @@ async def knowledge_binding_mutation_lock(
         execution_identity=execution_identity,
         create=create,
     )
-    async with _refresh_lock_for_key(source_key_for_refresh_key(key)):
+    async with _acquire_refresh_lock(source_key_for_refresh_key(key)):
         yield
 
 
@@ -201,7 +197,7 @@ async def refresh_knowledge_binding(
         )
         try:
             await _save_refreshing_state(key)
-            async with _refresh_lock_for_key(source_key_for_snapshot_key(key)):
+            async with _acquire_refresh_lock(source_key_for_snapshot_key(key)):
                 return await _refresh_knowledge_binding_locked(
                     key,
                     config=config,
@@ -349,7 +345,8 @@ async def _refresh_result_from_persisted_state(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> KnowledgeRefreshResult:
-    state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
+    snapshot_state = await asyncio.to_thread(load_knowledge_snapshot_state, key)
+    state = snapshot_state.published
     if state is None:
         error = "Published snapshot metadata was missing after refresh"
         await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=error)

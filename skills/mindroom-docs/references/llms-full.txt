@@ -8676,7 +8676,7 @@ agents:
     knowledge_bases: [docs]
 ```
 
-Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom schedule a refresh when an assigned agent first needs a base with `watch: true`. Chat uses the last successfully published snapshot and continues without blocking when a base is missing, stale, or failed. The `watch` field is retained for config compatibility but no longer starts a realtime filesystem watcher. When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
+Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom schedule a refresh when an assigned agent first needs a base with `watch: true`. Chat uses the last successfully published snapshot and continues without blocking when a base is missing, stale, or failed. The `watch` field no longer starts a realtime filesystem watcher. When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
 
 ## Configuration
 
@@ -8811,7 +8811,7 @@ knowledge_bases:
 | `poll_interval_seconds` | int    | `300`      | Minimum age before a READY Git snapshot schedules advisory on-access refresh. Git polling loops are not started |
 | `credentials_service`   | string | `null`     | Service name in CredentialsManager for private repos                                                            |
 | `lfs`                   | bool   | `false`    | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom    |
-| `startup_behavior`      | string | `blocking` | Legacy/advisory setting. Startup no longer blocks on or schedules Git knowledge sync                            |
+| `startup_behavior`      | string | `blocking` | Advisory setting. Startup no longer blocks on or schedules Git knowledge sync                                   |
 | `sync_timeout_seconds`  | int    | `3600`     | Abort one Git command if it exceeds this timeout                                                                |
 | `skip_hidden`           | bool   | `true`     | Skip files/folders starting with `.`                                                                            |
 | `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                                                          |

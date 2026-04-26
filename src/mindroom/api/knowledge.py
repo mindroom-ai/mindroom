@@ -21,7 +21,6 @@ from mindroom.knowledge import (
     is_refresh_active_for_binding,
     knowledge_binding_mutation_lock,
     load_knowledge_snapshot_state,
-    load_published_indexing_state,
     mark_snapshot_dirty_async,
     mark_snapshot_file_deleted_async,
     mark_snapshot_files_deleted_async,
@@ -31,7 +30,6 @@ from mindroom.knowledge import (
     resolve_snapshot_key,
     snapshot_availability_for_state,
     snapshot_collection_exists_for_state,
-    snapshot_metadata_path,
 )
 from mindroom.knowledge import (
     list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files,
@@ -296,13 +294,17 @@ def _snapshot_status_sync(
             runtime_paths=runtime_paths,
             create=False,
         )
-        state = load_published_indexing_state(snapshot_metadata_path(key))
+        snapshot_state = load_knowledge_snapshot_state(key)
     except Exception:
         logger.warning("Could not resolve knowledge snapshot status", base_id=base_id, exc_info=True)
         return False, 0
+    state = snapshot_state.published
     if state is None:
         return False, 0
-    if snapshot_availability_for_state(key=key, state=state) is not KnowledgeAvailability.READY:
+    if (
+        snapshot_availability_for_state(key=key, state=state, advisory=snapshot_state.advisory)
+        is not KnowledgeAvailability.READY
+    ):
         return False, 0
     available = snapshot_collection_exists_for_state(key, state)
     return available, state.indexed_count or 0
@@ -346,7 +348,7 @@ def _snapshot_state(
             runtime_paths=runtime_paths,
             create=False,
         )
-        return load_published_indexing_state(snapshot_metadata_path(key))
+        return load_knowledge_snapshot_state(key).published
     except Exception:
         logger.warning("Could not resolve knowledge snapshot state", base_id=base_id, exc_info=True)
         return None

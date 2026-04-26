@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.embedder.base import Embedder
@@ -197,10 +197,8 @@ class _PersistedIndexingState:
     settings: tuple[str, ...]
     status: Literal["resetting", "indexing", "complete"]
     collection: str | None = None
-    availability: str | None = None
     last_published_at: str | None = None
     published_revision: str | None = None
-    last_error: str | None = None
     indexed_count: int | None = None
     source_signature: str | None = None
     retained_collections: tuple[str, ...] = ()
@@ -804,39 +802,6 @@ def _source_signature_from_file_signatures(file_signatures: Mapping[str, _FileSi
     return digest.hexdigest()
 
 
-def _indexing_settings_value_compatible(published_value: str, current_value: str, *, index: int) -> bool:
-    if index != INDEXING_SETTINGS_REPO_IDENTITY_INDEX:
-        return published_value == current_value
-    return _normalized_repo_identity_setting(published_value) == _normalized_repo_identity_setting(current_value)
-
-
-def _normalized_repo_identity_setting(value: str) -> str:
-    if not value or value.startswith("repo-url-sha256:"):
-        return value
-    return credential_free_url_identity(value)
-
-
-def _indexing_settings_metadata_equal(
-    published_settings: tuple[str, ...],
-    current_settings: tuple[str, ...],
-) -> bool:
-    if len(published_settings) != len(current_settings):
-        return False
-    return all(
-        _indexing_settings_value_compatible(published_value, current_value, index=index)
-        for index, (published_value, current_value) in enumerate(zip(published_settings, current_settings, strict=True))
-    )
-
-
-def _repersisted_indexing_settings(
-    persisted_settings: tuple[str, ...],
-    current_settings: tuple[str, ...],
-) -> tuple[str, ...]:
-    if _indexing_settings_metadata_equal(persisted_settings, current_settings):
-        return current_settings
-    return persisted_settings
-
-
 @dataclass
 class KnowledgeManager:
     """Manage indexing for one knowledge base folder."""
@@ -967,72 +932,48 @@ class KnowledgeManager:
         except (OSError, json.JSONDecodeError):
             return None
 
-        settings: tuple[str, ...] | None = None
-        status: Literal["resetting", "indexing", "complete"] | None = None
-        collection: str | None = None
-        availability: str | None = None
-        last_published_at: str | None = None
-        published_revision: str | None = None
-        last_error: str | None = None
-        indexed_count: int | None = None
-        source_signature: str | None = None
-        retained_collections: tuple[str, ...] = ()
-        if isinstance(payload, list):
-            if all(isinstance(item, str) for item in payload):
-                settings = tuple(payload)
-                status = _INDEXING_STATUS_COMPLETE
-        elif isinstance(payload, dict):
-            raw_settings = payload.get("settings")
-            raw_status = payload.get("status")
-            if (
-                isinstance(raw_settings, list)
-                and all(isinstance(item, str) for item in raw_settings)
-                and raw_status in _INDEXING_STATUSES
-            ):
-                settings = tuple(raw_settings)
-                status = raw_status
-                raw_collection = payload.get("collection")
-                collection = raw_collection if isinstance(raw_collection, str) and raw_collection else None
-                raw_availability = payload.get("availability")
-                availability = raw_availability if isinstance(raw_availability, str) and raw_availability else None
-                raw_last_published_at = payload.get("last_published_at")
-                last_published_at = (
-                    raw_last_published_at if isinstance(raw_last_published_at, str) and raw_last_published_at else None
-                )
-                raw_published_revision = payload.get("published_revision")
-                published_revision = (
-                    raw_published_revision
-                    if isinstance(raw_published_revision, str) and raw_published_revision
-                    else None
-                )
-                raw_last_error = payload.get("last_error")
-                last_error = raw_last_error if isinstance(raw_last_error, str) and raw_last_error else None
-                raw_indexed_count = payload.get("indexed_count")
-                indexed_count = _coerce_int(raw_indexed_count)
-                if indexed_count is not None and indexed_count < 0:
-                    indexed_count = None
-                raw_source_signature = payload.get("source_signature")
-                source_signature = (
-                    raw_source_signature if isinstance(raw_source_signature, str) and raw_source_signature else None
-                )
-                raw_retained_collections = payload.get("retained_collections")
-                if isinstance(raw_retained_collections, list) and all(
-                    isinstance(item, str) and item for item in raw_retained_collections
-                ):
-                    retained_collections = tuple(dict.fromkeys(raw_retained_collections))
-
-        if settings is None or status is None:
+        if not isinstance(payload, dict):
             return None
+        raw_settings = payload.get("settings")
+        raw_status = payload.get("status")
+        raw_collection = payload.get("collection")
+        raw_indexed_count = payload.get("indexed_count")
+        indexed_count = _coerce_int(raw_indexed_count)
+        raw_source_signature = payload.get("source_signature")
+        if (
+            not isinstance(raw_settings, list)
+            or not all(isinstance(item, str) for item in raw_settings)
+            or raw_status not in _INDEXING_STATUSES
+            or not isinstance(raw_collection, str)
+            or not raw_collection
+            or indexed_count is None
+            or indexed_count < 0
+            or not isinstance(raw_source_signature, str)
+            or not raw_source_signature
+        ):
+            return None
+        raw_last_published_at = payload.get("last_published_at")
+        last_published_at = (
+            raw_last_published_at if isinstance(raw_last_published_at, str) and raw_last_published_at else None
+        )
+        raw_published_revision = payload.get("published_revision")
+        published_revision = (
+            raw_published_revision if isinstance(raw_published_revision, str) and raw_published_revision else None
+        )
+        retained_collections: tuple[str, ...] = ()
+        raw_retained_collections = payload.get("retained_collections")
+        if isinstance(raw_retained_collections, list) and all(
+            isinstance(item, str) and item for item in raw_retained_collections
+        ):
+            retained_collections = tuple(dict.fromkeys(raw_retained_collections))
         return _PersistedIndexingState(
-            settings,
-            status,
-            collection=collection,
-            availability=availability,
+            tuple(raw_settings),
+            cast('Literal["resetting", "indexing", "complete"]', raw_status),
+            collection=raw_collection,
             last_published_at=last_published_at,
             published_revision=published_revision,
-            last_error=last_error,
             indexed_count=indexed_count,
-            source_signature=source_signature,
+            source_signature=raw_source_signature,
             retained_collections=retained_collections,
         )
 
@@ -1046,10 +987,8 @@ class KnowledgeManager:
         *,
         settings: tuple[str, ...] | None = None,
         collection: str | None = None,
-        availability: str | None = None,
         last_published_at: str | None = None,
         published_revision: str | None = None,
-        last_error: str | None = None,
         indexed_count: int | None = None,
         source_signature: str | None = None,
         retained_collections: tuple[str, ...] = (),
@@ -1084,10 +1023,8 @@ class KnowledgeManager:
             settings=persisted_settings,
             status=status,
             collection=collection,
-            availability=availability,
             last_published_at=last_published_at,
             published_revision=published_revision,
-            last_error=last_error,
             indexed_count=indexed_count,
             source_signature=source_signature,
             retained_collections=retained_collections,
@@ -1132,8 +1069,6 @@ class KnowledgeManager:
             return "full_reindex"
         persisted_state = self._load_persisted_indexing_state()
         if persisted_state is None:
-            # A missing checkpoint can be legacy state worth resuming, but a
-            # present unreadable checkpoint is unsafe once vectors already exist.
             return "full_reindex" if self._indexing_settings_path.exists() and self._has_existing_index() else "resume"
         if persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING:
             return "full_reindex"
@@ -1494,21 +1429,17 @@ class KnowledgeManager:
         for path, value in payload.items():
             if not isinstance(path, str):
                 continue
-            if not isinstance(value, list | tuple) or len(value) not in {2, 3, 4}:
+            if not isinstance(value, list | tuple) or len(value) != 4:
                 continue
             mtime_ns = _coerce_int(value[0])
             size = _coerce_int(value[1])
             if mtime_ns is None or size is None:
                 continue
-            source_digest = ""
-            failed_at_index = 2
-            if len(value) == 4:
-                raw_digest = value[2]
-                if not isinstance(raw_digest, str) or not raw_digest:
-                    continue
-                source_digest = raw_digest
-                failed_at_index = 3
-            failed_at_ns = _coerce_int(value[failed_at_index]) if len(value) > failed_at_index else 0
+            raw_digest = value[2]
+            if not isinstance(raw_digest, str) or not raw_digest:
+                continue
+            source_digest = raw_digest
+            failed_at_ns = _coerce_int(value[3])
             failed_signatures[path] = (mtime_ns, size, source_digest, max(failed_at_ns or 0, 0))
         return failed_signatures
 
@@ -1526,12 +1457,9 @@ class KnowledgeManager:
         current_signature: _FileSignature,
     ) -> bool:
         failed_mtime_ns, failed_size, failed_digest, failed_at_ns = failed_signature
-        if failed_digest and (failed_mtime_ns, failed_size, failed_digest) != current_signature:
-            return False
-        if not failed_digest and (failed_mtime_ns, failed_size) != current_signature[:2]:
+        if (failed_mtime_ns, failed_size, failed_digest) != current_signature:
             return False
         if failed_at_ns <= 0:
-            # Legacy entries without timestamps should be retried.
             return False
         elapsed_ns = time.time_ns() - failed_at_ns
         return elapsed_ns < _FAILED_SIGNATURE_RETRY_NS
@@ -1634,7 +1562,6 @@ class KnowledgeManager:
     def _cleanup_superseded_collections(
         self,
         *,
-        previous_state: _PersistedIndexingState | None,
         retained_collections: tuple[str, ...],
         protected_collections: tuple[str, ...],
     ) -> None:
@@ -1649,9 +1576,6 @@ class KnowledgeManager:
         protected_collection_names.update(protected_collections)
         protected_collection_names.add(self._current_collection_name())
         default_collection = self._default_collection_name()
-        legacy_collections = {default_collection}
-        if previous_state is not None and previous_state.collection:
-            legacy_collections.add(previous_state.collection)
         candidate_prefix = f"{self._default_collection_name()}_candidate_"
 
         try:
@@ -1665,7 +1589,7 @@ class KnowledgeManager:
             return
 
         for collection_name in collection_names:
-            same_base_collection = collection_name in legacy_collections or collection_name.startswith(candidate_prefix)
+            same_base_collection = collection_name == default_collection or collection_name.startswith(candidate_prefix)
             if collection_name in protected_collection_names or not same_base_collection:
                 continue
             try:
@@ -2159,7 +2083,6 @@ class KnowledgeManager:
                 )
                 await asyncio.to_thread(
                     self._cleanup_superseded_collections,
-                    previous_state=persisted_state,
                     retained_collections=retained_collections,
                     protected_collections=protected_collections,
                 )

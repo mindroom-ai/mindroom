@@ -63,12 +63,8 @@ class PublishedIndexingState:
     settings: tuple[str, ...]
     status: Literal["resetting", "indexing", "complete"]
     collection: str | None = None
-    # Legacy fields may be loaded from old metadata, but new writes keep
-    # published metadata limited to the immutable last-good pointer.
-    availability: str | None = None
     last_published_at: str | None = None
     published_revision: str | None = None
-    last_error: str | None = None
     indexed_count: int | None = None
     source_signature: str | None = None
     retained_collections: tuple[str, ...] = ()
@@ -91,14 +87,6 @@ class SnapshotDeleteTombstone:
     source_path: str
     collection: str
     deleted_at: str
-
-
-@dataclass(frozen=True)
-class _SidecarBackup:
-    """Exact pre-mutation bytes for a snapshot sidecar."""
-
-    path: Path
-    content: bytes | None
 
 
 @dataclass(frozen=True)
@@ -442,30 +430,39 @@ def _valid_refresh_job(value: object) -> bool:
 
 def load_snapshot_advisory_state(sidecar_path: Path) -> KnowledgeAdvisoryState:
     """Load advisory state; corrupt advisory data is treated as absent."""
+    advisory, _valid = _load_snapshot_advisory_state_checked(sidecar_path)
+    return advisory
+
+
+def _load_snapshot_advisory_state_checked(sidecar_path: Path) -> tuple[KnowledgeAdvisoryState, bool]:
+    """Load advisory state with a validity bit for published snapshot checks."""
     if not sidecar_path.exists():
-        return KnowledgeAdvisoryState()
+        return KnowledgeAdvisoryState(), False
     try:
         payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return KnowledgeAdvisoryState()
+        return KnowledgeAdvisoryState(), False
     if not isinstance(payload, dict):
-        return KnowledgeAdvisoryState()
+        return KnowledgeAdvisoryState(), False
 
     raw_state = payload.get("state")
     raw_refresh_job = payload.get("refresh_job")
-    state = raw_state if _valid_advisory_state(raw_state) else "none"
-    refresh_job = raw_refresh_job if _valid_refresh_job(raw_refresh_job) else "idle"
+    if not _valid_advisory_state(raw_state) or not _valid_refresh_job(raw_refresh_job):
+        return KnowledgeAdvisoryState(), False
     reason = payload.get("reason")
     last_error = payload.get("last_error")
     updated_at = payload.get("updated_at")
     last_refresh_at = payload.get("last_refresh_at")
-    return KnowledgeAdvisoryState(
-        state=cast('Literal["none", "stale", "refreshing", "refresh_failed"]', state),
-        refresh_job=cast('Literal["idle", "pending", "running", "failed"]', refresh_job),
-        reason=reason if isinstance(reason, str) and reason else None,
-        last_error=last_error if isinstance(last_error, str) and last_error else None,
-        updated_at=updated_at if isinstance(updated_at, str) and updated_at else None,
-        last_refresh_at=last_refresh_at if isinstance(last_refresh_at, str) and last_refresh_at else None,
+    return (
+        KnowledgeAdvisoryState(
+            state=cast('Literal["none", "stale", "refreshing", "refresh_failed"]', raw_state),
+            refresh_job=cast('Literal["idle", "pending", "running", "failed"]', raw_refresh_job),
+            reason=reason if isinstance(reason, str) and reason else None,
+            last_error=last_error if isinstance(last_error, str) and last_error else None,
+            updated_at=updated_at if isinstance(updated_at, str) and updated_at else None,
+            last_refresh_at=last_refresh_at if isinstance(last_refresh_at, str) and last_refresh_at else None,
+        ),
+        True,
     )
 
 
@@ -553,56 +550,32 @@ def save_snapshot_delete_tombstones(
         raise
 
 
-def _capture_sidecar(path: Path) -> _SidecarBackup:
-    return _SidecarBackup(
-        path=path,
-        content=path.read_bytes() if path.exists() else None,
-    )
-
-
-def _restore_sidecar(backup: _SidecarBackup) -> None:
-    if backup.content is None:
-        backup.path.unlink(missing_ok=True)
-        return
-    backup.path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = backup.path.with_name(f".{backup.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        tmp_path.write_bytes(backup.content)
-        tmp_path.replace(backup.path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
-        raise
-
-
-def _restore_sidecars(backups: tuple[_SidecarBackup, ...]) -> None:
-    for backup in backups:
-        try:
-            _restore_sidecar(backup)
-        except Exception:
-            logger.warning("Failed to roll back knowledge snapshot sidecar", path=str(backup.path), exc_info=True)
-
-
 def load_knowledge_snapshot_state(key: KnowledgeSnapshotKey) -> KnowledgeSnapshotState:
     """Load published plus advisory state for one resolved snapshot key."""
-    published = load_published_indexing_state(snapshot_metadata_path(key))
-    advisory_path = snapshot_advisory_path(key)
-    advisory = load_snapshot_advisory_state(advisory_path)
-    if not advisory_path.exists():
-        advisory = _advisory_from_legacy_published_state(published)
+    metadata_path = snapshot_metadata_path(key)
+    published = load_published_indexing_state(metadata_path)
+    advisory, advisory_valid = _load_snapshot_advisory_state_checked(snapshot_advisory_path(key))
+    if metadata_path.exists() and published is None:
+        return KnowledgeSnapshotState(
+            published=None,
+            advisory=KnowledgeAdvisoryState(
+                state="refresh_failed",
+                refresh_job="failed",
+                reason="snapshot_metadata_unavailable",
+            ),
+        )
+    if published is not None and not advisory_valid:
+        return KnowledgeSnapshotState(
+            published=None,
+            advisory=KnowledgeAdvisoryState(
+                state="refresh_failed",
+                refresh_job="failed",
+                reason="snapshot_advisory_unavailable",
+            ),
+        )
     return KnowledgeSnapshotState(
         published=published,
         advisory=advisory,
-    )
-
-
-def _advisory_from_legacy_published_state(state: PublishedIndexingState | None) -> KnowledgeAdvisoryState:
-    if state is None or state.availability != "refresh_failed":
-        return KnowledgeAdvisoryState()
-    return KnowledgeAdvisoryState(
-        state="refresh_failed",
-        refresh_job="failed",
-        last_error=state.last_error,
-        last_refresh_at=state.last_published_at,
     )
 
 
@@ -676,67 +649,47 @@ def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState
     except (OSError, json.JSONDecodeError):
         return None
 
-    settings: tuple[str, ...] | None = None
-    status: Literal["resetting", "indexing", "complete"] | None = None
-    collection: str | None = None
-    availability: str | None = None
-    last_published_at: str | None = None
-    published_revision: str | None = None
-    last_error: str | None = None
-    indexed_count: int | None = None
-    source_signature: str | None = None
-    retained_collections: tuple[str, ...] = ()
-    if isinstance(payload, list):
-        if all(isinstance(item, str) for item in payload):
-            settings = tuple(payload)
-            status = "complete"
-    elif isinstance(payload, dict):
-        raw_settings = payload.get("settings")
-        raw_status = payload.get("status")
-        if (
-            isinstance(raw_settings, list)
-            and all(isinstance(item, str) for item in raw_settings)
-            and raw_status in {"resetting", "indexing", "complete"}
-        ):
-            settings = tuple(raw_settings)
-            status = raw_status
-            raw_collection = payload.get("collection")
-            collection = raw_collection if isinstance(raw_collection, str) and raw_collection else None
-            raw_availability = payload.get("availability")
-            availability = raw_availability if isinstance(raw_availability, str) and raw_availability else None
-            raw_last_published_at = payload.get("last_published_at")
-            last_published_at = (
-                raw_last_published_at if isinstance(raw_last_published_at, str) and raw_last_published_at else None
-            )
-            raw_published_revision = payload.get("published_revision")
-            published_revision = (
-                raw_published_revision if isinstance(raw_published_revision, str) and raw_published_revision else None
-            )
-            raw_last_error = payload.get("last_error")
-            last_error = raw_last_error if isinstance(raw_last_error, str) and raw_last_error else None
-            indexed_count = _coerce_nonnegative_int(payload.get("indexed_count"))
-            raw_source_signature = payload.get("source_signature")
-            source_signature = (
-                raw_source_signature if isinstance(raw_source_signature, str) and raw_source_signature else None
-            )
-            raw_retained_collections = payload.get("retained_collections")
-            if isinstance(raw_retained_collections, list) and all(
-                isinstance(item, str) and item for item in raw_retained_collections
-            ):
-                retained_collections = tuple(dict.fromkeys(raw_retained_collections))
-
-    if settings is None or status is None:
+    if not isinstance(payload, dict):
         return None
+
+    raw_settings = payload.get("settings")
+    raw_status = payload.get("status")
+    raw_collection = payload.get("collection")
+    raw_source_signature = payload.get("source_signature")
+    indexed_count = _coerce_nonnegative_int(payload.get("indexed_count"))
+    if (
+        not isinstance(raw_settings, list)
+        or not all(isinstance(item, str) for item in raw_settings)
+        or raw_status not in {"resetting", "indexing", "complete"}
+        or not isinstance(raw_collection, str)
+        or not raw_collection
+        or indexed_count is None
+        or not isinstance(raw_source_signature, str)
+        or not raw_source_signature
+    ):
+        return None
+    raw_last_published_at = payload.get("last_published_at")
+    last_published_at = (
+        raw_last_published_at if isinstance(raw_last_published_at, str) and raw_last_published_at else None
+    )
+    raw_published_revision = payload.get("published_revision")
+    published_revision = (
+        raw_published_revision if isinstance(raw_published_revision, str) and raw_published_revision else None
+    )
+    retained_collections: tuple[str, ...] = ()
+    raw_retained_collections = payload.get("retained_collections")
+    if isinstance(raw_retained_collections, list) and all(
+        isinstance(item, str) and item for item in raw_retained_collections
+    ):
+        retained_collections = tuple(dict.fromkeys(raw_retained_collections))
     return PublishedIndexingState(
-        settings=settings,
-        status=status,
-        collection=collection,
-        availability=availability,
+        settings=tuple(raw_settings),
+        status=cast('Literal["resetting", "indexing", "complete"]', raw_status),
+        collection=raw_collection,
         last_published_at=last_published_at,
         published_revision=published_revision,
-        last_error=last_error,
         indexed_count=indexed_count,
-        source_signature=source_signature,
+        source_signature=raw_source_signature,
         retained_collections=retained_collections,
     )
 
@@ -769,12 +722,12 @@ def save_published_indexing_state(metadata_path: Path, state: PublishedIndexingS
         raise
 
 
-def _default_collection_name(key: KnowledgeSnapshotKey) -> str:
-    return manager_module._collection_name(key.base_id, Path(key.knowledge_path))
-
-
 def _state_collection_name(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> str:
-    return state.collection or _default_collection_name(key)
+    _ = key
+    if state.collection is None:
+        msg = "Published knowledge snapshot metadata is missing a collection name"
+        raise ValueError(msg)
+    return state.collection
 
 
 def _deleted_source_paths_for_state(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> frozenset[str]:
@@ -955,22 +908,7 @@ def indexing_settings_corpus_compatible(
     corpus_indexes = manager_module.INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES
     if len(published_settings) <= max(corpus_indexes) or len(current_settings) <= max(corpus_indexes):
         return published_settings == current_settings
-    return all(
-        _settings_values_compatible(published_settings[index], current_settings[index], index=index)
-        for index in corpus_indexes
-    )
-
-
-def _settings_values_compatible(published_value: str, current_value: str, *, index: int) -> bool:
-    if index != manager_module.INDEXING_SETTINGS_REPO_IDENTITY_INDEX:
-        return published_value == current_value
-    return _normalized_repo_identity_setting(published_value) == _normalized_repo_identity_setting(current_value)
-
-
-def _normalized_repo_identity_setting(value: str) -> str:
-    if not value or value.startswith("repo-url-sha256:"):
-        return value
-    return manager_module.credential_free_url_identity(value)
+    return all(published_settings[index] == current_settings[index] for index in corpus_indexes)
 
 
 def indexing_settings_metadata_equal(
@@ -978,12 +916,7 @@ def indexing_settings_metadata_equal(
     current_settings: tuple[str, ...],
 ) -> bool:
     """Return whether persisted metadata exactly matches current indexing settings."""
-    if len(published_settings) != len(current_settings):
-        return False
-    return all(
-        _settings_values_compatible(published_value, current_value, index=index)
-        for index, (published_value, current_value) in enumerate(zip(published_settings, current_settings, strict=True))
-    )
+    return published_settings == current_settings
 
 
 def indexing_settings_snapshot_compatible(
@@ -1063,7 +996,7 @@ def snapshot_availability_for_state(
     return _snapshot_availability(
         key=key,
         state=state,
-        advisory=advisory or _advisory_from_legacy_published_state(state),
+        advisory=advisory or KnowledgeAdvisoryState(),
     )
 
 
@@ -1257,11 +1190,36 @@ def _mark_snapshot_key_dirty_on_disk(matching_key: KnowledgeSnapshotKey, *, reas
     return True
 
 
-def _snapshot_key_mutation_sidecar_backups(matching_key: KnowledgeSnapshotKey) -> tuple[_SidecarBackup, ...]:
-    return (
-        _capture_sidecar(snapshot_delete_tombstones_path(matching_key)),
-        _capture_sidecar(snapshot_advisory_path(matching_key)),
+_WrittenDeleteTombstoneMarker = tuple[KnowledgeSnapshotKey, str, tuple[str, ...], str]
+
+
+def _remove_written_delete_tombstones(marker: _WrittenDeleteTombstoneMarker) -> None:
+    matching_key, collection, relative_paths, deleted_at = marker
+    sidecar_path = snapshot_delete_tombstones_path(matching_key)
+    deleted_paths = frozenset(relative_paths)
+    tombstones = tuple(
+        tombstone
+        for tombstone in load_snapshot_delete_tombstones(sidecar_path)
+        if not (
+            tombstone.collection == collection
+            and tombstone.deleted_at == deleted_at
+            and tombstone.source_path in deleted_paths
+        )
     )
+    save_snapshot_delete_tombstones(sidecar_path, tombstones)
+    _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
+
+
+def _remove_written_delete_tombstones_best_effort(markers: tuple[_WrittenDeleteTombstoneMarker, ...]) -> None:
+    for marker in reversed(markers):
+        try:
+            _remove_written_delete_tombstones(marker)
+        except Exception:
+            logger.warning(
+                "Failed to remove knowledge delete tombstone after aborted mutation",
+                base_id=marker[0].base_id,
+                exc_info=True,
+            )
 
 
 def _mark_snapshot_key_files_deleted_on_disk(
@@ -1269,30 +1227,34 @@ def _mark_snapshot_key_files_deleted_on_disk(
     *,
     relative_paths: tuple[str, ...],
     reason: str,
-) -> bool:
+) -> _WrittenDeleteTombstoneMarker | None:
     state = load_published_indexing_state(snapshot_metadata_path(matching_key))
+    written_marker: _WrittenDeleteTombstoneMarker | None = None
     if state is not None and state.status == "complete":
         collection = _state_collection_name(matching_key, state)
         sidecar_path = snapshot_delete_tombstones_path(matching_key)
-        deleted_paths = frozenset(relative_paths)
-        tombstones = [
-            tombstone
-            for tombstone in load_snapshot_delete_tombstones(sidecar_path)
-            if not (tombstone.collection == collection and tombstone.source_path in deleted_paths)
-        ]
         deleted_at = _utc_now()
-        tombstones.extend(
-            SnapshotDeleteTombstone(
-                source_path=relative_path,
-                collection=collection,
-                deleted_at=deleted_at,
-            )
-            for relative_path in relative_paths
+        tombstones = (
+            *load_snapshot_delete_tombstones(sidecar_path),
+            *(
+                SnapshotDeleteTombstone(
+                    source_path=relative_path,
+                    collection=collection,
+                    deleted_at=deleted_at,
+                )
+                for relative_path in relative_paths
+            ),
         )
-        save_snapshot_delete_tombstones(sidecar_path, tuple(tombstones))
+        save_snapshot_delete_tombstones(sidecar_path, tombstones)
+        written_marker = (matching_key, collection, relative_paths, deleted_at)
         _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
-    save_snapshot_dirty_state(matching_key, reason=reason)
-    return True
+    try:
+        save_snapshot_dirty_state(matching_key, reason=reason)
+    except Exception:
+        if written_marker is not None:
+            _remove_written_delete_tombstones_best_effort((written_marker,))
+        raise
+    return written_marker
 
 
 def mark_snapshot_dirty(
@@ -1345,18 +1307,18 @@ def mark_snapshot_files_deleted(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
-    backups = tuple(
-        backup for matching_key in matching_keys for backup in _snapshot_key_mutation_sidecar_backups(matching_key)
-    )
+    written_markers: list[_WrittenDeleteTombstoneMarker] = []
     try:
         for matching_key in matching_keys:
-            _mark_snapshot_key_files_deleted_on_disk(
+            written_marker = _mark_snapshot_key_files_deleted_on_disk(
                 matching_key,
                 relative_paths=unique_relative_paths,
                 reason=reason,
             )
+            if written_marker is not None:
+                written_markers.append(written_marker)
     except Exception:
-        _restore_sidecars(backups)
+        _remove_written_delete_tombstones_best_effort(tuple(written_markers))
         raise
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
