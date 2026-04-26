@@ -421,7 +421,6 @@ async def revalidate_thread_after_incremental_update_locked(
     *,
     room_id: str,
     thread_id: str,
-    runtime_started_at: float | None,
 ) -> bool:
     """Mark one thread cache fresh after a safe incremental update."""
     row = await load_thread_cache_state_row(
@@ -434,10 +433,8 @@ async def revalidate_thread_after_incremental_update_locked(
     validated_at, invalidated_at, invalidation_reason, room_invalidated_at, _room_invalidation_reason = row
     can_revalidate = (
         validated_at is not None
-        and (runtime_started_at is None or validated_at >= runtime_started_at)
         and invalidated_at is not None
         and invalidation_reason in _INCREMENTAL_THREAD_REVALIDATION_REASONS
-        and (runtime_started_at is None or invalidated_at >= runtime_started_at)
         and not (room_invalidated_at is not None and room_invalidated_at >= validated_at)
     )
     if not can_revalidate:

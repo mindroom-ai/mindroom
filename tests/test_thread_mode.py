@@ -1429,7 +1429,7 @@ class TestExtractedModuleLoggerRebinding:
             "$threadroot",
         )
         assert call_args.kwargs["event_cache"] is bot.event_cache
-        assert call_args.kwargs["runtime_started_at"] == bot._runtime_view.runtime_started_at
+        assert "runtime_started_at" not in call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_conversation_cache_reuses_fresh_durable_snapshot_before_full_history_hydration(

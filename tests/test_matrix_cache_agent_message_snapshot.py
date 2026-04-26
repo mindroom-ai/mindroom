@@ -440,10 +440,10 @@ async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_
 
 
 @pytest.mark.asyncio
-async def test_accessor_accepts_old_thread_cache_inside_trusted_boundary(
+async def test_accessor_accepts_old_thread_cache_without_stale_marker(
     tmp_path: Path,
 ) -> None:
-    """Threaded reads should trust old snapshots after certified sync catch-up."""
+    """Threaded reads should trust old snapshots unless a stale marker exists."""
     db_path = tmp_path / "event_cache.db"
     cache = _EventCache(db_path)
     await cache.initialize()
@@ -490,10 +490,10 @@ async def test_accessor_accepts_old_thread_cache_inside_trusted_boundary(
 
 
 @pytest.mark.asyncio
-async def test_accessor_rejects_thread_cache_from_prior_bot_run(
+async def test_accessor_reuses_thread_cache_from_prior_bot_run(
     tmp_path: Path,
 ) -> None:
-    """Threaded reads should reject snapshots validated before the current runtime."""
+    """Threaded reads should trust snapshots unless an explicit stale marker exists."""
     db_path = tmp_path / "event_cache.db"
     cache = _EventCache(db_path)
     await cache.initialize()
@@ -521,14 +521,22 @@ async def test_accessor_rejects_thread_cache_from_prior_bot_run(
     finally:
         await cache.close()
 
-    with pytest.raises(AgentMessageSnapshotUnavailable, match="validated_before_runtime_start"):
-        await _read_snapshot(
-            db_path,
-            room_id="!room:localhost",
-            thread_id="$thread-root",
-            sender="@agent:localhost",
-            runtime_started_at=1001.0,
-        )
+    snapshot = await _read_snapshot(
+        db_path,
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=1001.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={
+            "body": "Working...",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+        },
+        origin_server_ts=2000,
+    )
 
 
 @pytest.mark.asyncio

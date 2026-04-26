@@ -624,7 +624,7 @@ class AgentBot:
 
     @property
     def runtime_started_at(self) -> float:
-        """Return the current runtime freshness boundary for this bot."""
+        """Return when this bot runtime started."""
         return self._runtime_view.runtime_started_at
 
     @property
@@ -962,20 +962,15 @@ class AgentBot:
         self.logger.info(
             "matrix_sync_token_restored",
             certified=token_record.certified,
-            thread_cache_valid_after=token_record.thread_cache_valid_after,
         )
         return token_record.checkpoint if token_record.checkpoint is not None else token_record.token
 
     def _restore_saved_sync_token(self) -> None:
         """Restore Matrix sync continuity and initialize cache certification state."""
         assert self.client is not None
-        startup = start_from_loaded_token(
-            self._loaded_sync_token_for_certification(),
-            runtime_started_at=self._runtime_view.runtime_started_at,
-        )
+        startup = start_from_loaded_token(self._loaded_sync_token_for_certification())
         self._sync_trust_state = startup.state
-        self._sync_checkpoint = startup.checkpoint
-        self._runtime_view.thread_cache_read_boundary = startup.thread_cache_read_boundary
+        self._sync_checkpoint = None
         self.client.next_batch = startup.sync_token
         if startup.legacy_token:
             self.logger.warning("matrix_sync_token_uncertified_legacy")
@@ -989,7 +984,6 @@ class AgentBot:
                 self.storage_path,
                 self.agent_name,
                 checkpoint.token,
-                thread_cache_valid_after=checkpoint.thread_cache_valid_after,
             )
         except (OSError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
@@ -1004,7 +998,6 @@ class AgentBot:
     def _apply_sync_certification_decision(self, decision: SyncCertificationDecision) -> None:
         """Apply a certifier decision to runtime state and token storage."""
         self._sync_trust_state = decision.state
-        self._runtime_view.thread_cache_read_boundary = decision.thread_cache_read_boundary
         self._sync_checkpoint = decision.checkpoint_to_save
         if decision.reset_client_token and self.client is not None:
             self.client.next_batch = None
@@ -1028,17 +1021,13 @@ class AgentBot:
         *,
         cache_result: SyncCacheWriteResult,
         first_sync_response: bool,
-        now: float,
     ) -> SyncCertificationDecision:
         """Return the certifier decision for one sync response."""
         return certify_sync_response(
             self._sync_trust_state,
-            previous_checkpoint=self._sync_checkpoint,
             next_batch=response.next_batch,
             cache_result=cache_result,
             first_sync=first_sync_response,
-            now=now,
-            current_read_boundary=self._runtime_view.thread_cache_read_boundary,
         )
 
     def seconds_since_last_sync_activity(self) -> float | None:
@@ -1064,7 +1053,6 @@ class AgentBot:
                     _response,
                     cache_result=SyncCacheWriteResult(complete=False, errors=(exc,)),
                     first_sync_response=first_sync_response,
-                    now=time.time(),
                 )
                 self._apply_sync_certification_decision(decision)
                 raise
@@ -1072,7 +1060,6 @@ class AgentBot:
                 _response,
                 cache_result=cache_result,
                 first_sync_response=first_sync_response,
-                now=time.time(),
             )
             self._apply_sync_certification_decision(decision)
         self._first_sync_done = True
@@ -1089,7 +1076,7 @@ class AgentBot:
         logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
         if _response.status_code == "M_UNKNOWN_POS":
-            self._apply_sync_certification_decision(handle_unknown_pos(now=time.time()))
+            self._apply_sync_certification_decision(handle_unknown_pos())
             self.logger.warning(
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,

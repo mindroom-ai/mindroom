@@ -409,10 +409,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             self.runtime.runtime_paths,
         )
 
-    def _effective_thread_cache_runtime_started_at(self) -> float | None:
-        """Return the active restart freshness boundary for durable thread-cache reads."""
-        return self.runtime.thread_cache_read_boundary
-
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:
         """Memoize event lookups and thread reads for the lifetime of one inbound turn."""
@@ -569,7 +565,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
@@ -585,7 +580,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
@@ -601,7 +595,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
@@ -617,7 +610,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
@@ -634,7 +626,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
-            runtime_started_at=self._effective_thread_cache_runtime_started_at(),
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
