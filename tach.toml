@@ -1835,6 +1835,7 @@ expose = [
     "StandaloneKnowledgeRefreshOwner",
     "mark_snapshot_dirty",
     "mark_snapshot_dirty_async",
+    "mark_snapshot_file_deleted_async",
     "is_refresh_active_for_binding",
 ]
 from = ["mindroom.knowledge"]

@@ -698,6 +698,10 @@ export function Knowledge() {
       if (selectedFiles.length === 0 || !selectedBase) {
         return;
       }
+      if (isDirty) {
+        setDragActive(false);
+        return;
+      }
       if (selectedBaseIsGitBacked) {
         setError(
           "Git-backed knowledge bases sync from the repository. Update the repository and reindex instead.",
@@ -741,7 +745,7 @@ export function Knowledge() {
         setUploading(false);
       }
     },
-    [loadData, selectedBase, selectedBaseIsGitBacked, toast],
+    [isDirty, loadData, selectedBase, selectedBaseIsGitBacked, toast],
   );
 
   const handleDeleteFile = useCallback(
@@ -902,6 +906,9 @@ export function Knowledge() {
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragActive(false);
+    if (isDirty) {
+      return;
+    }
     const droppedFiles = Array.from(event.dataTransfer.files || []);
     void uploadFiles(droppedFiles);
   };
@@ -1727,10 +1734,16 @@ export function Knowledge() {
               <Card
                 className={cn(
                   "border-dashed transition-colors",
-                  dragActive ? "border-primary bg-primary/5" : "border-border",
+                  dragActive && !isDirty
+                    ? "border-primary bg-primary/5"
+                    : "border-border",
                 )}
                 onDragOver={(event) => {
                   event.preventDefault();
+                  if (isDirty) {
+                    setDragActive(false);
+                    return;
+                  }
                   setDragActive(true);
                 }}
                 onDragLeave={(event) => {

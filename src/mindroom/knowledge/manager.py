@@ -1439,6 +1439,10 @@ class KnowledgeManager:
         knowledge_root = self._knowledge_source_path()
         if self._git_config() is not None:
             if self._git_tracked_relative_paths is None:
+                if not git_checkout_present(knowledge_root, timeout_seconds=self._git_sync_timeout_seconds()):
+                    self._git_repo_present = False
+                    return []
+                self._git_repo_present = True
                 self._git_tracked_relative_paths = _git_tracked_relative_paths_from_checkout(
                     self.config,
                     self.base_id,

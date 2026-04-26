@@ -894,6 +894,51 @@ describe("Knowledge", () => {
     expect(screen.getByRole("button", { name: "Reindex" })).toBeInTheDocument();
   });
 
+  it("does not upload dropped files while settings are dirty", async () => {
+    mockStore(
+      {
+        docs: { path: "./knowledge_docs/docs", watch: true },
+      },
+      { isDirty: true },
+    );
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          folder_path: "./knowledge_docs/docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    const droppedFile = new File(["hello"], "guide.md", {
+      type: "text/markdown",
+    });
+    const uploadTarget = screen.getByText("Drop files here or upload manually");
+    fireEvent.dragOver(uploadTarget, {
+      dataTransfer: { files: [droppedFile] },
+    });
+    fireEvent.drop(uploadTarget, {
+      dataTransfer: { files: [droppedFile] },
+    });
+
+    const uploadCalls = vi
+      .mocked(global.fetch)
+      .mock.calls.filter(([input]) => String(input).includes("/upload"));
+    expect(uploadCalls).toHaveLength(0);
+  });
+
   it("surfaces structured reindex failure details", async () => {
     mockStore({
       git_docs: {

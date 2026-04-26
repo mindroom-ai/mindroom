@@ -23,6 +23,7 @@ from mindroom.knowledge import (
     load_knowledge_snapshot_state,
     load_published_indexing_state,
     mark_snapshot_dirty_async,
+    mark_snapshot_file_deleted_async,
     redact_credentials_in_text,
     redact_url_credentials,
     refresh_knowledge_binding,
@@ -225,6 +226,27 @@ async def _mark_dirty_after_committed_mutation(
         return await asyncio.shield(dirty_task), False
     except asyncio.CancelledError:
         return await dirty_task, True
+
+
+async def _mark_deleted_after_committed_mutation(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    relative_path: str,
+) -> tuple[tuple[str, ...], bool]:
+    deleted_task = asyncio.create_task(
+        mark_snapshot_file_deleted_async(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            relative_path=relative_path,
+        ),
+    )
+    try:
+        return await asyncio.shield(deleted_task), False
+    except asyncio.CancelledError:
+        return await deleted_task, True
 
 
 def _snapshot_status_sync(
@@ -700,11 +722,11 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         relative_path = target.relative_to(root.resolve()).as_posix()
         backup_path = _move_file_to_delete_backup(target)
         try:
-            affected_base_ids, cancelled_after_dirty = await _mark_dirty_after_committed_mutation(
+            affected_base_ids, cancelled_after_dirty = await _mark_deleted_after_committed_mutation(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
-                reason="dashboard_delete",
+                relative_path=relative_path,
             )
         except asyncio.CancelledError:
             _restore_deleted_file(target, backup_path)

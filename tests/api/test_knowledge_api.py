@@ -830,7 +830,7 @@ def test_upload_commit_failure_leaves_ready_snapshot_unchanged_and_skips_refresh
 
     with (
         patch("mindroom.api.knowledge._commit_staged_uploads", _fail_commit),
-        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", side_effect=AssertionError("no dirty")),
+        patch("mindroom.api.knowledge.mark_snapshot_file_deleted_async", side_effect=AssertionError("no dirty")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="commit failed"),
     ):
@@ -1053,7 +1053,7 @@ def test_delete_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", _fail_dirty_mark),
+        patch("mindroom.api.knowledge.mark_snapshot_file_deleted_async", _fail_dirty_mark),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="dirty mark failed"),
     ):
@@ -1086,7 +1086,7 @@ async def test_delete_cancellation_after_dirty_mark_removes_backup_and_schedules
         await release_dirty.wait()
         return ("research",)
 
-    monkeypatch.setattr(knowledge_api, "mark_snapshot_dirty_async", _slow_dirty_mark)
+    monkeypatch.setattr(knowledge_api, "mark_snapshot_file_deleted_async", _slow_dirty_mark)
 
     delete_task = asyncio.create_task(
         knowledge_api.delete_knowledge_file(

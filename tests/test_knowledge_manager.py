@@ -252,6 +252,26 @@ def _git_manager(
     return KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
 
+def test_cold_git_status_with_existing_non_checkout_dir_returns_empty_files(tmp_path: Path) -> None:
+    """Cold Git status should not run git ls-files before the checkout exists."""
+    knowledge_path = tmp_path / "knowledge"
+    knowledge_path.mkdir()
+    config = _config(
+        tmp_path,
+        bases={"docs": knowledge_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")},
+    )
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    status = manager.get_status()
+
+    assert manager.list_files() == []
+    assert status["file_count"] == 0
+    assert status["git"]["repo_present"] is False
+    assert not (knowledge_path / ".git").exists()
+
+
 @pytest.mark.asyncio
 async def test_git_manager_construction_does_not_probe_checkout_on_event_loop(
     tmp_path: Path,
@@ -591,6 +611,46 @@ async def test_stale_snapshot_metadata_schedules_refresh_without_source_scan(tmp
     owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
     assert owner.schedule_refresh.call_args.args == ("docs",)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_delete_tombstone_filters_last_good_after_refresh_failure(tmp_path: Path) -> None:
+    """A dashboard delete must hide old vectors for that source path until replacement publish."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("deleted secret", encoding="utf-8")
+    (docs_path / "keep.md").write_text("kept public", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    initial_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    assert initial_knowledge is not None
+    assert {document.content for document in initial_knowledge.search("anything", max_results=5)} == {
+        "deleted secret",
+        "kept public",
+    }
+
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    owner = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    owner.is_refreshing = MagicMock(return_value=False)
+    main.app.state.knowledge_refresh_owner = owner
+    try:
+        response = TestClient(main.app).delete("/api/knowledge/bases/docs/files/guide.md")
+    finally:
+        main.app.state.knowledge_refresh_owner = None
+    assert response.status_code == 200
+
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.save_snapshot_refresh_failed_state(key, error="refresh failed after delete")
+    filtered_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+
+    assert filtered_knowledge is not None
+    assert [document.content for document in filtered_knowledge.search("anything", max_results=5)] == [
+        "kept public",
+    ]
+    owner.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2730,8 +2790,8 @@ async def test_refresh_setup_failure_records_failed_availability(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_api_delete_marks_snapshot_stale_without_mutating_published_vectors(tmp_path: Path) -> None:
-    """DELETE success schedules refresh while retained published collections stay immutable."""
+async def test_api_delete_marks_snapshot_stale_and_filters_retained_vectors(tmp_path: Path) -> None:
+    """DELETE success schedules refresh and hides the deleted source from last-good search."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("delete me now", encoding="utf-8")
@@ -2761,7 +2821,7 @@ async def test_api_delete_marks_snapshot_stale_without_mutating_published_vector
     assert response.status_code == 200
     assert after_delete is not None
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    assert [document.content for document in after_delete.search("delete", max_results=5)] == ["delete me now"]
+    assert [document.content for document in after_delete.search("delete", max_results=5)] == []
     owner.schedule_refresh.assert_called_once()
 
 

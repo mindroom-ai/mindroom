@@ -10,7 +10,7 @@ import weakref
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import mindroom.knowledge.manager as manager_module
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -18,6 +18,7 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
 
 if TYPE_CHECKING:
+    from agno.knowledge.document import Document
     from agno.knowledge.knowledge import Knowledge
 
     from mindroom.config.main import Config
@@ -81,6 +82,15 @@ class PublishedKnowledgeSnapshot:
     knowledge: Knowledge
     state: PublishedIndexingState
     metadata_path: Path
+
+
+@dataclass(frozen=True)
+class SnapshotDeleteTombstone:
+    """Source-path deletion marker for one published collection."""
+
+    source_path: str
+    collection: str
+    deleted_at: str
 
 
 @dataclass(frozen=True)
@@ -153,6 +163,93 @@ class _SnapshotVectorDb(Protocol):
     def exists(self) -> bool:
         """Return whether the collection exists."""
         ...
+
+
+class _SearchableSnapshotVectorDb(_SnapshotVectorDb, Protocol):
+    """Vector DB surface used by published snapshot search handles."""
+
+    def create(self) -> None:
+        """Create the underlying collection."""
+        ...
+
+    def delete(self) -> bool:
+        """Delete the underlying collection."""
+        ...
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        """Search documents."""
+        ...
+
+    async def async_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        """Search documents asynchronously."""
+        ...
+
+
+@dataclass
+class _TombstoneFilteringVectorDb:
+    """Read-side filter that hides destructively deleted source paths."""
+
+    vector_db: _SearchableSnapshotVectorDb
+    deleted_source_paths: frozenset[str]
+
+    @property
+    def client(self) -> _SnapshotVectorClient | None:
+        return self.vector_db.client
+
+    @property
+    def collection_name(self) -> str:
+        return self.vector_db.collection_name
+
+    def exists(self) -> bool:
+        return self.vector_db.exists()
+
+    def create(self) -> None:
+        self.vector_db.create()
+
+    def delete(self) -> bool:
+        return self.vector_db.delete()
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        documents = self.vector_db.search(query=query, limit=limit, filters=filters)
+        return self._filter_documents(documents)
+
+    async def async_search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, Any] | list[Any] | None = None,
+    ) -> list[Document]:
+        documents = await self.vector_db.async_search(query=query, limit=limit, filters=filters)
+        return self._filter_documents(documents)
+
+    def _filter_documents(self, documents: list[Document]) -> list[Document]:
+        return [document for document in documents if not self._document_matches_tombstone(document)]
+
+    def _document_matches_tombstone(self, document: Document) -> bool:
+        metadata = document.meta_data
+        if metadata is None:
+            return False
+        source_path = metadata.get(manager_module._SOURCE_PATH_KEY)
+        return isinstance(source_path, str) and source_path in self.deleted_source_paths
 
 
 _published_snapshots: dict[KnowledgeSnapshotKey, PublishedKnowledgeSnapshot] = {}
@@ -290,6 +387,11 @@ def snapshot_advisory_path(key: KnowledgeSnapshotKey) -> Path:
     return snapshot_base_storage_path(key) / "snapshot_advisory.json"
 
 
+def snapshot_delete_tombstones_path(key: KnowledgeSnapshotKey) -> Path:
+    """Return destructive-delete tombstones for one resolved snapshot key."""
+    return snapshot_base_storage_path(key) / "snapshot_delete_tombstones.json"
+
+
 def _utc_now() -> str:
     return datetime.now(tz=UTC).isoformat()
 
@@ -360,6 +462,66 @@ def save_snapshot_advisory_state(sidecar_path: Path, state: KnowledgeAdvisorySta
     if state.last_refresh_at is not None:
         payload["last_refresh_at"] = state.last_refresh_at
     sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = sidecar_path.with_name(f".{sidecar_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(sidecar_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def load_snapshot_delete_tombstones(sidecar_path: Path) -> tuple[SnapshotDeleteTombstone, ...]:
+    """Load destructive-delete tombstones; corrupt data is treated as absent."""
+    if not sidecar_path.exists():
+        return ()
+    try:
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, list):
+        return ()
+
+    tombstones: list[SnapshotDeleteTombstone] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        source_path = item.get("source_path")
+        collection = item.get("collection")
+        deleted_at = item.get("deleted_at")
+        if not (
+            isinstance(source_path, str)
+            and source_path
+            and isinstance(collection, str)
+            and collection
+            and isinstance(deleted_at, str)
+            and deleted_at
+        ):
+            continue
+        tombstones.append(
+            SnapshotDeleteTombstone(
+                source_path=source_path,
+                collection=collection,
+                deleted_at=deleted_at,
+            ),
+        )
+    return tuple(tombstones)
+
+
+def save_snapshot_delete_tombstones(
+    sidecar_path: Path,
+    tombstones: tuple[SnapshotDeleteTombstone, ...],
+) -> None:
+    """Persist destructive-delete tombstones atomically."""
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = [
+        {
+            "source_path": tombstone.source_path,
+            "collection": tombstone.collection,
+            "deleted_at": tombstone.deleted_at,
+        }
+        for tombstone in tombstones
+    ]
     tmp_path = sidecar_path.with_name(f".{sidecar_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
@@ -544,12 +706,38 @@ def _default_collection_name(key: KnowledgeSnapshotKey) -> str:
     return manager_module._collection_name(key.base_id, Path(key.knowledge_path))
 
 
+def _state_collection_name(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> str:
+    return state.collection or _default_collection_name(key)
+
+
+def _deleted_source_paths_for_state(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> frozenset[str]:
+    collection = _state_collection_name(key, state)
+    tombstones = load_snapshot_delete_tombstones(snapshot_delete_tombstones_path(key))
+    return frozenset(tombstone.source_path for tombstone in tombstones if tombstone.collection == collection)
+
+
+def _apply_delete_tombstones(
+    key: KnowledgeSnapshotKey,
+    *,
+    state: PublishedIndexingState,
+    knowledge: Knowledge,
+) -> Knowledge:
+    deleted_source_paths = _deleted_source_paths_for_state(key, state)
+    if not deleted_source_paths or knowledge.vector_db is None:
+        return knowledge
+    knowledge.vector_db = _TombstoneFilteringVectorDb(
+        vector_db=cast("_SearchableSnapshotVectorDb", knowledge.vector_db),
+        deleted_source_paths=deleted_source_paths,
+    )
+    return knowledge
+
+
 def _remember_snapshot_handle(snapshot: PublishedKnowledgeSnapshot) -> None:
     _published_snapshot_handles[id(snapshot)] = snapshot
     knowledge_id = id(snapshot.knowledge)
     _published_knowledge_leases[knowledge_id] = _PublishedKnowledgeLease(
         key=snapshot.key,
-        collection=snapshot.state.collection or _default_collection_name(snapshot.key),
+        collection=_state_collection_name(snapshot.key, snapshot.state),
     )
     finalizer = _published_knowledge_finalizers.pop(knowledge_id, None)
     if finalizer is not None:
@@ -609,7 +797,7 @@ def active_snapshot_collection_names(refresh_key: KnowledgeRefreshKey) -> tuple[
     for snapshot in list(_published_snapshot_handles.values()):
         if not _same_physical_binding(snapshot.key, refresh_key):
             continue
-        names.append(snapshot.state.collection or _default_collection_name(snapshot.key))
+        names.append(_state_collection_name(snapshot.key, snapshot.state))
     for lease in list(_published_knowledge_leases.values()):
         if not _same_physical_binding(lease.key, refresh_key):
             continue
@@ -625,7 +813,8 @@ def _build_snapshot_knowledge(
     runtime_paths: RuntimePaths,
 ) -> Knowledge:
     vector_db = _build_snapshot_vector_db(key, state, config=config, runtime_paths=runtime_paths)
-    return manager_module.Knowledge(vector_db=vector_db)
+    knowledge = manager_module.Knowledge(vector_db=vector_db)
+    return _apply_delete_tombstones(key, state=state, knowledge=knowledge)
 
 
 def _build_snapshot_vector_db(
@@ -635,7 +824,7 @@ def _build_snapshot_vector_db(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _SnapshotVectorDb:
-    collection_name = state.collection or _default_collection_name(key)
+    collection_name = _state_collection_name(key, state)
     return cast(
         "_SnapshotVectorDb",
         manager_module.ChromaDb(
@@ -662,7 +851,7 @@ def snapshot_collection_exists_for_state(key: KnowledgeSnapshotKey, state: Publi
     """Return whether persisted metadata still points at an existing collection."""
     if state.status != "complete":
         return False
-    collection_name = state.collection or _default_collection_name(key)
+    collection_name = _state_collection_name(key, state)
     try:
         return manager_module.chroma_collection_exists(snapshot_base_storage_path(key), collection_name)
     except Exception:
@@ -906,6 +1095,7 @@ def publish_snapshot(
 ) -> PublishedKnowledgeSnapshot:
     """Publish a completed read handle into the process-local registry."""
     _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(key))
+    knowledge = _apply_delete_tombstones(key, state=state, knowledge=knowledge)
     snapshot = PublishedKnowledgeSnapshot(
         key=key,
         knowledge=knowledge,
@@ -945,9 +1135,7 @@ def snapshot_indexed_count(snapshot: PublishedKnowledgeSnapshot) -> int:
 
 def _state_collection_names(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> tuple[str, ...]:
     collections = [
-        collection
-        for collection in (state.collection or _default_collection_name(key), *state.retained_collections)
-        if collection
+        collection for collection in (_state_collection_name(key, state), *state.retained_collections) if collection
     ]
     return tuple(dict.fromkeys(collections))
 
@@ -997,6 +1185,29 @@ def _mark_snapshot_key_dirty_on_disk(matching_key: KnowledgeSnapshotKey, *, reas
     return True
 
 
+def _mark_snapshot_key_file_deleted_on_disk(matching_key: KnowledgeSnapshotKey, *, relative_path: str) -> bool:
+    state = load_published_indexing_state(snapshot_metadata_path(matching_key))
+    if state is not None and state.status == "complete":
+        collection = _state_collection_name(matching_key, state)
+        sidecar_path = snapshot_delete_tombstones_path(matching_key)
+        tombstones = [
+            tombstone
+            for tombstone in load_snapshot_delete_tombstones(sidecar_path)
+            if not (tombstone.collection == collection and tombstone.source_path == relative_path)
+        ]
+        tombstones.append(
+            SnapshotDeleteTombstone(
+                source_path=relative_path,
+                collection=collection,
+                deleted_at=_utc_now(),
+            ),
+        )
+        save_snapshot_delete_tombstones(sidecar_path, tuple(tombstones))
+        _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
+    save_snapshot_dirty_state(matching_key, reason="dashboard_delete")
+    return True
+
+
 def mark_snapshot_dirty(
     base_id: str,
     *,
@@ -1019,6 +1230,26 @@ def mark_snapshot_dirty(
     )
     for matching_key in matching_keys:
         _mark_snapshot_key_dirty_on_disk(matching_key, reason=reason)
+    return tuple(dict.fromkeys(key.base_id for key in matching_keys))
+
+
+def mark_snapshot_file_deleted(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    relative_path: str,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> tuple[str, ...]:
+    """Mark a destructive source delete without blocking last-good reads for other files."""
+    matching_keys = _snapshot_keys_for_shared_source(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    for matching_key in matching_keys:
+        _mark_snapshot_key_file_deleted_on_disk(matching_key, relative_path=relative_path)
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 
@@ -1055,6 +1286,40 @@ async def mark_snapshot_dirty_async(
             logger.warning(
                 "Knowledge advisory dirty marker write failed after cancellation",
                 base_id=base_id,
+                exc_info=True,
+            )
+        raise
+
+
+async def mark_snapshot_file_deleted_async(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    relative_path: str,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> tuple[str, ...]:
+    """Async destructive-delete marker that keeps advisory I/O off the event loop."""
+    write_task = asyncio.create_task(
+        asyncio.to_thread(
+            mark_snapshot_file_deleted,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            relative_path=relative_path,
+            execution_identity=execution_identity,
+        ),
+    )
+    try:
+        return await asyncio.shield(write_task)
+    except asyncio.CancelledError:
+        try:
+            await write_task
+        except Exception:
+            logger.warning(
+                "Knowledge delete tombstone write failed after cancellation",
+                base_id=base_id,
+                relative_path=relative_path,
                 exc_info=True,
             )
         raise
