@@ -337,7 +337,7 @@ memory:
 knowledge_bases:
   docs:
     path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
-    watch: false                   # Advisory; refresh is scheduled on access or by API actions, not by filesystem watchers
+    watch: false                   # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
     chunk_overlap: 0               # Default: 0 (overlapping characters between chunks)
     git:                           # Optional: Sync this folder from a Git repository

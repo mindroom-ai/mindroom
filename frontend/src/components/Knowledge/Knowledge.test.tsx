@@ -551,7 +551,7 @@ describe("Knowledge", () => {
     },
   );
 
-  it("describes watch false as advisory instead of manual-only", async () => {
+  it("describes watch false as requiring reindex for external edits", async () => {
     mockStore({
       docs: { path: "./knowledge_docs/docs", watch: false },
     });
@@ -576,9 +576,7 @@ describe("Knowledge", () => {
     render(<Knowledge />);
     await screen.findByText("Active: docs");
 
-    expect(
-      screen.getByText("No periodic refresh; access may refresh"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("External edits need reindex")).toBeInTheDocument();
     expect(screen.queryByText("Manual reindex only")).not.toBeInTheDocument();
   });
 

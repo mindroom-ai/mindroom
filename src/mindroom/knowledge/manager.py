@@ -427,6 +427,9 @@ def _git_auth_env(
     )
     if authenticated_url == clean_url:
         return None
+    parsed_authenticated_url = urlparse(authenticated_url)
+    if parsed_authenticated_url.netloc and "@" in parsed_authenticated_url.netloc:
+        return None
     return {
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": f"url.{authenticated_url}.insteadOf",

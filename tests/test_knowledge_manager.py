@@ -390,7 +390,7 @@ async def test_shared_local_watch_snapshot_refreshes_on_access_without_blocking_
 
 @pytest.mark.asyncio
 async def test_shared_local_watch_ready_refresh_on_access_is_throttled(tmp_path: Path) -> None:
-    """Local watch=true bases do not enqueue refresh work on every READY request."""
+    """A freshly refreshed local watch=true base stays READY during refresh-on-access cooldown."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -415,30 +415,6 @@ async def test_shared_local_watch_ready_refresh_on_access_is_throttled(tmp_path:
         )
         is not None
     )
-    doc.write_text("shared local new", encoding="utf-8")
-    assert (
-        get_agent_knowledge(
-            "helper",
-            config,
-            runtime_paths,
-            refresh_owner=owner,
-            on_unavailable_bases=unavailable.update,
-            on_unavailable_base_details=unavailable_details.update,
-        )
-        is not None
-    )
-    assert (
-        get_agent_knowledge(
-            "helper",
-            config,
-            runtime_paths,
-            refresh_owner=owner,
-            on_unavailable_bases=unavailable.update,
-            on_unavailable_base_details=unavailable_details.update,
-        )
-        is not None
-    )
-
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
     assert unavailable_details == {
         "docs": KnowledgeAvailabilityDetail(
@@ -446,6 +422,52 @@ async def test_shared_local_watch_ready_refresh_on_access_is_throttled(tmp_path:
             snapshot_attached=True,
         ),
     }
+
+    doc.write_text("shared local new", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    unavailable.clear()
+    unavailable_details.clear()
+
+    refreshed_knowledge = get_agent_knowledge(
+        "helper",
+        config,
+        runtime_paths,
+        refresh_owner=owner,
+        on_unavailable_bases=unavailable.update,
+        on_unavailable_base_details=unavailable_details.update,
+    )
+
+    assert refreshed_knowledge is not None
+    assert [document.content for document in refreshed_knowledge.search("shared", max_results=5)] == [
+        "shared local new",
+    ]
+    assert unavailable == {}
+    assert unavailable_details == {}
+    assert (
+        get_agent_knowledge(
+            "helper",
+            config,
+            runtime_paths,
+            refresh_owner=owner,
+            on_unavailable_bases=unavailable.update,
+            on_unavailable_base_details=unavailable_details.update,
+        )
+        is not None
+    )
+    assert (
+        get_agent_knowledge(
+            "helper",
+            config,
+            runtime_paths,
+            refresh_owner=owner,
+            on_unavailable_bases=unavailable.update,
+            on_unavailable_base_details=unavailable_details.update,
+        )
+        is not None
+    )
+    assert unavailable == {}
+    assert unavailable_details == {}
+
     owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
@@ -771,6 +793,53 @@ async def test_async_mark_stale_cancellation_evicts_ready_snapshot_cache(
     assert state is not None
     assert state.availability == KnowledgeAvailability.STALE.value
     assert refreshed_lookup.availability is KnowledgeAvailability.STALE
+
+
+@pytest.mark.asyncio
+async def test_async_mark_stale_evicts_ready_snapshot_recached_during_worker_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readers that re-cache READY during the stale write window must be evicted after commit."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("recache old", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    ready_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert ready_lookup.snapshot is not None
+    assert ready_lookup.availability is KnowledgeAvailability.READY
+
+    loop = asyncio.get_running_loop()
+    stale_write_started = asyncio.Event()
+    release_stale_write = Event()
+    original_mark = knowledge_registry._mark_snapshot_key_stale_on_disk
+
+    def _block_before_stale_write(matching_key: knowledge_registry.KnowledgeSnapshotKey) -> bool:
+        loop.call_soon_threadsafe(stale_write_started.set)
+        assert release_stale_write.wait(timeout=5)
+        return original_mark(matching_key)
+
+    monkeypatch.setattr(knowledge_registry, "_mark_snapshot_key_stale_on_disk", _block_before_stale_write)
+
+    mark_task = asyncio.create_task(
+        knowledge_registry.mark_published_snapshot_stale_async(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        ),
+    )
+    await stale_write_started.wait()
+    recached_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert recached_lookup.snapshot is not None
+    assert recached_lookup.availability is KnowledgeAvailability.READY
+
+    release_stale_write.set()
+    assert await mark_task == ("docs",)
+    final_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+
+    assert final_lookup.availability is KnowledgeAvailability.STALE
 
 
 @pytest.mark.asyncio
@@ -2632,6 +2701,76 @@ async def test_refresh_owner_superseded_manual_waiters_complete(
 
 
 @pytest.mark.asyncio
+async def test_refresh_owner_merges_shared_pending_refreshes_with_different_execution_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-base pending refreshes with identical output should merge waiters and force flags."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    owner = PerBindingKnowledgeRefreshOwner()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    seen: list[tuple[ToolExecutionIdentity | None, bool]] = []
+    identity_a = _identity("@alice:localhost")
+    identity_b = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="helper",
+        requester_id="@bob:localhost",
+        room_id="!room:localhost",
+        thread_id="thread-b",
+        resolved_thread_id="thread-b",
+        session_id="session-b",
+    )
+
+    async def _fake_refresh(base_id: str, **kwargs: object) -> object:
+        assert base_id == "docs"
+        refresh_config = kwargs["config"]
+        assert isinstance(refresh_config, Config)
+        force_reindex = bool(kwargs.get("force_reindex", False))
+        identity = kwargs.get("execution_identity")
+        assert identity is None or isinstance(identity, ToolExecutionIdentity)
+        seen.append((identity, force_reindex))
+        if len(seen) == 1:
+            first_started.set()
+            await release_first.wait()
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=resolve_snapshot_key("docs", config=refresh_config, runtime_paths=runtime_paths),
+            indexed_count=len(seen),
+            published=True,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+
+    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths, execution_identity=identity_a)
+    await first_started.wait()
+    manual_a = asyncio.create_task(
+        owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, execution_identity=identity_a),
+    )
+    manual_b = asyncio.create_task(
+        owner.refresh_now(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity_b,
+            force_reindex=True,
+        ),
+    )
+    await asyncio.sleep(0)
+
+    release_first.set()
+    result_a, result_b = await asyncio.wait_for(asyncio.gather(manual_a, manual_b), timeout=1)
+    await owner.shutdown()
+
+    assert len(seen) == 2
+    assert seen[1] == (identity_b, True)
+    assert result_a.indexed_count == 2
+    assert result_b.indexed_count == 2
+
+
+@pytest.mark.asyncio
 async def test_refresh_owner_schedule_supersedes_incompatible_manual_waiter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3898,6 +4037,72 @@ async def test_git_embedded_userinfo_url_is_not_reused_in_git_auth_env(
     assert "secret-token" not in str(clone_env)
 
 
+@pytest.mark.parametrize(
+    ("raw_url", "clean_url"),
+    [
+        ("ssh://git-user:secret-token@example.com/org/private.git", "ssh://example.com/org/private.git"),
+        ("git+https://git-user:secret-token@example.com/org/private.git", "git+https://example.com/org/private.git"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_git_unsupported_scheme_userinfo_is_not_copied_to_git_config_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_url: str,
+    clean_url: str,
+) -> None:
+    """Unsupported embedded userinfo must not be copied into transient Git config."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(repo_url=raw_url, branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    clone_calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    async def _fake_run_git(
+        self: KnowledgeManager,
+        args: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        _ = (self, cwd)
+        if args[0] == "clone":
+            clone_calls.append((list(args), env))
+            assert args[-2] == clean_url
+            target = Path(args[-1])
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "doc.md").write_text("unsupported scheme userinfo content", encoding="utf-8")
+            return ""
+        if args == ["remote", "set-url", "origin", clean_url]:
+            return ""
+        if args == ["ls-files", "-z"]:
+            return "doc.md\x00"
+        if args == ["rev-parse", "HEAD"]:
+            return "rev-unsupported-userinfo\n"
+        return ""
+
+    monkeypatch.setattr(KnowledgeManager, "_run_git", _fake_run_git)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_text = snapshot_metadata_path(key).read_text(encoding="utf-8")
+    clone_args, clone_env = clone_calls[0]
+    serialized_clone_call = json.dumps({"args": clone_args, "env": clone_env}, sort_keys=True)
+
+    assert result.published is True
+    assert clone_env is None
+    assert clean_url in clone_args
+    assert raw_url not in serialized_clone_call
+    assert "secret-token" not in serialized_clone_call
+    assert raw_url not in metadata_text
+    assert "secret-token" not in metadata_text
+
+
 @pytest.mark.asyncio
 async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_metadata(
     tmp_path: Path,
@@ -4083,11 +4288,11 @@ async def test_index_file_hashes_content_off_event_loop(
 
 
 @pytest.mark.asyncio
-async def test_git_updated_stale_registry_mark_stays_on_event_loop(
+async def test_git_updated_stale_registry_mark_uses_async_registry_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Registry globals must be marked stale on the event-loop thread."""
+    """Refresh runner should use the async stale marker instead of sync disk I/O."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("git updated", encoding="utf-8")
@@ -4108,12 +4313,12 @@ async def test_git_updated_stale_registry_mark_stays_on_event_loop(
         _set_git_tracked_files(self, "doc.md")
         return {"updated": True, "changed_count": 1, "removed_count": 0}
 
-    def _record_mark_thread(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+    async def _record_mark_thread(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         mark_threads.append(get_ident())
         return ("docs",)
 
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_updated)
-    monkeypatch.setattr(knowledge_refresh_runner, "mark_published_snapshot_stale", _record_mark_thread)
+    monkeypatch.setattr(knowledge_refresh_runner, "mark_published_snapshot_stale_async", _record_mark_thread)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 

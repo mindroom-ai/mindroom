@@ -23,7 +23,7 @@ from mindroom.knowledge.registry import (
     indexing_settings_metadata_equal,
     indexing_settings_snapshot_compatible,
     load_published_indexing_state,
-    mark_published_snapshot_stale,
+    mark_published_snapshot_stale_async,
     prune_private_snapshot_bookkeeping,
     publish_snapshot_from_state,
     refresh_key_for_snapshot_key,
@@ -279,7 +279,7 @@ async def _maybe_publish_unchanged_snapshot(
         git_sync_result = await manager.sync_git_repository(index_changes=False)
         if force_reindex or git_sync_result.get("updated", False):
             if git_sync_result.get("updated", False):
-                mark_published_snapshot_stale(
+                await mark_published_snapshot_stale_async(
                     key.base_id,
                     config=manager.config,
                     runtime_paths=manager.runtime_paths,
@@ -293,7 +293,7 @@ async def _maybe_publish_unchanged_snapshot(
             mark_git_initial_sync_complete=True,
         )
     if force_reindex:
-        mark_published_snapshot_stale(
+        await mark_published_snapshot_stale_async(
             key.base_id,
             config=manager.config,
             runtime_paths=manager.runtime_paths,
@@ -421,7 +421,7 @@ async def _publish_unchanged_snapshot(
     )
     if current_source_signature != state.source_signature:
         if mark_stale_on_source_change:
-            mark_published_snapshot_stale(
+            await mark_published_snapshot_stale_async(
                 key.base_id,
                 config=manager.config,
                 runtime_paths=manager.runtime_paths,

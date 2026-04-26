@@ -91,7 +91,7 @@ Per-agent overrides are configured from the **Agents** tab using the **Memory ba
 
 Manage file-backed RAG knowledge bases:
 
-- **Create/edit/delete knowledge bases** with `path` and legacy/advisory `watch` settings
+- **Create/edit/delete knowledge bases** with `path` and refresh-on-access `watch` settings
 - **Configure Git repository, branch, filtering, credentials service, and sync options**
 - **Upload and remove files** for non-Git-backed knowledge bases
 - **Reindex** a knowledge base on demand

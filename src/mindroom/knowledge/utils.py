@@ -312,7 +312,7 @@ def _schedule_refresh_for_availability(
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             )
-        return KnowledgeAvailability.STALE
+        return KnowledgeAvailability.STALE if schedule_due or owner_is_refreshing else KnowledgeAvailability.READY
 
     if availability is KnowledgeAvailability.INITIALIZING:
         if _refresh_schedule_due(refresh_key, availability, settings=lookup.key.indexing_settings):

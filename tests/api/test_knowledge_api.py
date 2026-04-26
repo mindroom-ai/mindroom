@@ -627,6 +627,47 @@ def test_upload_stale_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
     refresh.assert_not_awaited()
 
 
+def test_upload_commit_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
+    tmp_path: Path,
+) -> None:
+    """Failed upload commits must not pre-mark unchanged snapshots stale."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("old", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(config, runtime_paths, base_id="research")
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    def _fail_commit(*_args: object, **_kwargs: object) -> list[object]:
+        msg = "commit failed"
+        raise RuntimeError(msg)
+
+    with (
+        patch("mindroom.api.knowledge._commit_staged_uploads", _fail_commit),
+        patch("mindroom.api.knowledge.mark_published_snapshot_stale_async", side_effect=AssertionError("no stale")),
+        patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
+        pytest.raises(RuntimeError, match="commit failed"),
+    ):
+        client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", ("guide.md", b"new", "text/markdown"))],
+        )
+
+    metadata_path = snapshot_metadata_path(
+        resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths),
+    )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["availability"] == "ready"
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "old"
+    assert list(docs.glob("*.upload.*")) == []
+    assert owner.scheduled == []
+    refresh.assert_not_awaited()
+
+
 def test_git_backed_upload_is_rejected_before_creating_cold_checkout(tmp_path: Path) -> None:
     """Uploads must not create a non-Git directory where a later clone will fail."""
     client = _test_client(tmp_path)
@@ -836,6 +877,43 @@ def test_delete_stale_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
     ):
         client.delete("/api/knowledge/bases/research/files/guide.md")
 
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
+    assert owner.scheduled == []
+    refresh.assert_not_awaited()
+
+
+def test_delete_filesystem_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
+    tmp_path: Path,
+) -> None:
+    """Failed delete mutations must not pre-mark unchanged snapshots stale."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    _write_snapshot_metadata(config, runtime_paths, base_id="research")
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    def _fail_delete_stage(*_args: object, **_kwargs: object) -> object:
+        msg = "unlink failed"
+        raise RuntimeError(msg)
+
+    with (
+        patch("mindroom.api.knowledge._move_file_to_delete_backup", _fail_delete_stage),
+        patch("mindroom.api.knowledge.mark_published_snapshot_stale_async", side_effect=AssertionError("no stale")),
+        patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
+        pytest.raises(RuntimeError, match="unlink failed"),
+    ):
+        client.delete("/api/knowledge/bases/research/files/guide.md")
+
+    metadata_path = snapshot_metadata_path(
+        resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths),
+    )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["availability"] == "ready"
     assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
     assert owner.scheduled == []
     refresh.assert_not_awaited()

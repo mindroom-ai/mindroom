@@ -933,8 +933,10 @@ async def mark_published_snapshot_stale_async(
     """Async variant for request handlers that keeps disk I/O off the event loop.
 
     The caller still holds ``knowledge_binding_mutation_lock`` while this runs.
-    Metadata load/save happens in a worker thread, then process-local registry
-    eviction runs back on the event-loop thread so the globals remain single-threaded.
+    Process-local registry eviction runs before and after each worker-thread
+    stale write so readers cannot keep a READY snapshot cached across the disk
+    transition. If cancellation arrives while the worker may still commit, this
+    waits for the worker and evicts again before propagating cancellation.
     """
     matching_keys = _snapshot_keys_for_shared_source(
         base_id,
@@ -943,8 +945,23 @@ async def mark_published_snapshot_stale_async(
         execution_identity=execution_identity,
     )
     for matching_key in matching_keys:
-        _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
-        await asyncio.to_thread(_mark_snapshot_key_stale_on_disk, matching_key)
+        refresh_key = refresh_key_for_snapshot_key(matching_key)
+        _evict_published_snapshots_for_refresh_key(refresh_key)
+        write_task = asyncio.create_task(asyncio.to_thread(_mark_snapshot_key_stale_on_disk, matching_key))
+        try:
+            await asyncio.shield(write_task)
+        except asyncio.CancelledError:
+            try:
+                await write_task
+            except Exception:
+                logger.warning(
+                    "Published knowledge stale marker write failed after cancellation",
+                    base_id=matching_key.base_id,
+                    exc_info=True,
+                )
+            raise
+        finally:
+            _evict_published_snapshots_for_refresh_key(refresh_key)
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 

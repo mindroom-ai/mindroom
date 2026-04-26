@@ -59,6 +59,15 @@ class _StagedUpload:
 
 
 @dataclass(frozen=True)
+class _CommittedUpload:
+    """A committed upload plus enough state to roll it back."""
+
+    destination: Path
+    backup_path: Path | None
+    relative_path: str
+
+
+@dataclass(frozen=True)
 class _FileListInfo:
     files: list[dict[str, Any]]
     total_size: int
@@ -412,8 +421,8 @@ async def _stage_upload(upload: UploadFile, destination: Path, filename: str, ro
     )
 
 
-def _commit_staged_uploads(staged_uploads: list[_StagedUpload]) -> None:
-    backups: list[tuple[Path, Path | None]] = []
+def _commit_staged_uploads(staged_uploads: list[_StagedUpload]) -> list[_CommittedUpload]:
+    committed_uploads: list[_CommittedUpload] = []
     try:
         for staged in staged_uploads:
             backup_path: Path | None = None
@@ -422,19 +431,60 @@ def _commit_staged_uploads(staged_uploads: list[_StagedUpload]) -> None:
                     f".{staged.destination.name}.{uuid.uuid4().hex}.upload.bak",
                 )
                 staged.destination.replace(backup_path)
-            backups.append((staged.destination, backup_path))
+            committed_uploads.append(
+                _CommittedUpload(
+                    destination=staged.destination,
+                    backup_path=backup_path,
+                    relative_path=staged.relative_path,
+                ),
+            )
             staged.temp_path.replace(staged.destination)
     except Exception:
-        for destination, backup_path in reversed(backups):
+        for committed in reversed(committed_uploads):
+            destination = committed.destination
+            backup_path = committed.backup_path
             destination.unlink(missing_ok=True)
             if backup_path is not None and backup_path.exists():
                 backup_path.replace(destination)
         for staged in staged_uploads:
             staged.temp_path.unlink(missing_ok=True)
         raise
-    for _destination, backup_path in backups:
+    for staged in staged_uploads:
+        staged.temp_path.unlink(missing_ok=True)
+    return committed_uploads
+
+
+def _finalize_committed_uploads(committed_uploads: list[_CommittedUpload]) -> None:
+    for committed in committed_uploads:
+        backup_path = committed.backup_path
         if backup_path is not None:
-            backup_path.unlink(missing_ok=True)
+            try:
+                backup_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to remove committed upload backup", path=str(backup_path), exc_info=True)
+
+
+def _rollback_committed_uploads(committed_uploads: list[_CommittedUpload]) -> None:
+    for committed in reversed(committed_uploads):
+        committed.destination.unlink(missing_ok=True)
+        if committed.backup_path is not None and committed.backup_path.exists():
+            committed.backup_path.replace(committed.destination)
+
+
+def _delete_backup_path(target: Path) -> Path:
+    return target.with_name(f".{target.name}.{uuid.uuid4().hex}.delete.bak")
+
+
+def _move_file_to_delete_backup(target: Path) -> Path:
+    backup_path = _delete_backup_path(target)
+    target.replace(backup_path)
+    return backup_path
+
+
+def _restore_deleted_file(target: Path, backup_path: Path) -> None:
+    if backup_path.exists():
+        target.unlink(missing_ok=True)
+        backup_path.replace(target)
 
 
 @router.get("/bases")
@@ -534,18 +584,21 @@ async def upload_knowledge_files(
                 "count": 0,
             }
 
+        committed_uploads: list[_CommittedUpload] = []
         try:
+            committed_uploads = _commit_staged_uploads(staged_uploads)
             affected_base_ids = await mark_published_snapshot_stale_async(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
             )
-            _commit_staged_uploads(staged_uploads)
         except Exception:
+            _rollback_committed_uploads(committed_uploads)
             for staged in staged_uploads:
                 staged.temp_path.unlink(missing_ok=True)
             raise
-        uploaded = [staged.relative_path for staged in staged_uploads]
+        _finalize_committed_uploads(committed_uploads)
+        uploaded = [committed.relative_path for committed in committed_uploads]
 
     _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
 
@@ -570,13 +623,21 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         if not target.exists() or not target.is_file():
             raise HTTPException(status_code=404, detail="Knowledge file not found")
 
-        affected_base_ids = await mark_published_snapshot_stale_async(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
         relative_path = target.relative_to(root.resolve()).as_posix()
-        target.unlink()
+        backup_path = _move_file_to_delete_backup(target)
+        try:
+            affected_base_ids = await mark_published_snapshot_stale_async(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+        except Exception:
+            _restore_deleted_file(target, backup_path)
+            raise
+        try:
+            backup_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to remove deleted knowledge file backup", path=str(backup_path), exc_info=True)
 
     _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
 

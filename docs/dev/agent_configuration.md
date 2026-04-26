@@ -252,7 +252,7 @@ Knowledge bases provide file-backed RAG context to agents:
 knowledge_bases:
   engineering_docs:
     path: ./knowledge_docs  # Path to documents folder
-    watch: false  # Advisory; refresh is scheduled on access or by API actions, not by filesystem watchers
+    watch: false  # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000  # Characters per indexed chunk
     chunk_overlap: 0  # Overlap between adjacent chunks
     git:  # Optional: sync from a Git repository

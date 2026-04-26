@@ -46,7 +46,7 @@ agents:
     knowledge_bases: [docs]
 ```
 
-Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom schedule a refresh when an assigned agent first needs that base. Chat uses the last successfully published snapshot and continues without blocking when a base is missing, stale, or failed. The `watch` field is retained for config compatibility but no longer starts a realtime filesystem watcher. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
+Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom schedule a refresh when an assigned agent first needs a base with `watch: true`. Chat uses the last successfully published snapshot and continues without blocking when a base is missing, stale, or failed. The `watch` field is retained for config compatibility but no longer starts a realtime filesystem watcher. When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
 
 ## Configuration
 
@@ -56,18 +56,18 @@ Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/AP
 knowledge_bases:
   my_docs:
     path: ./knowledge_docs/my_docs   # Folder containing documents
-    watch: false                      # Advisory; refresh is scheduled on access or by API actions, not by filesystem watchers
+    watch: false                      # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000                  # Max characters per chunk
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
 
-| Field           | Type   | Default            | Description                                                                                                                                                |
-| --------------- | ------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)                                                                                            |
-| `watch`         | bool   | `true`             | Advisory flag retained for compatibility. Refresh is scheduled on access when knowledge is missing/stale/failed, or through explicit dashboard/API actions |
-| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                                          |
-| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                                        |
-| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                                      |
+| Field           | Type   | Default            | Description                                                                                                                                                                                                |
+| --------------- | ------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)                                                                                                                                            |
+| `watch`         | bool   | `true`             | When true, READY local snapshots schedule a background refresh on agent access. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
+| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                                                                                          |
+| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                                                                                        |
+| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                                                                                      |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits. If chunking is too large, indexing retries will fail with embedder 500 errors.
 
@@ -102,7 +102,7 @@ With this configuration, each requester's private knowledge path becomes `<their
 | --------------------------------- | ------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `private.knowledge.enabled`       | bool   | `true`  | Whether requester-local knowledge indexing is active for this agent                                                                                                         |
 | `private.knowledge.path`          | string | `null`  | Private-root-relative folder to index. Required when `private.knowledge.enabled` is `true`; set `enabled: false` to disable private knowledge                               |
-| `private.knowledge.watch`         | bool   | `true`  | Legacy/advisory flag. Private knowledge refresh is scheduled on access instead of keeping a watcher per requester root                                                      |
+| `private.knowledge.watch`         | bool   | `true`  | When true, requester-local private knowledge schedules background refresh on access. When false, direct external edits require explicit refresh                             |
 | `private.knowledge.chunk_size`    | int    | `5000`  | Maximum characters per indexed chunk                                                                                                                                        |
 | `private.knowledge.chunk_overlap` | int    | `0`     | Overlap characters between adjacent chunks. Must be smaller than `chunk_size`                                                                                               |
 | `private.knowledge.git`           | object | `null`  | Optional Git sync configuration for requester-local knowledge. Git-backed private knowledge must use a dedicated subtree outside requester-writable memory/template content |

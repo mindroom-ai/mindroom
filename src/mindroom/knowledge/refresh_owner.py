@@ -336,7 +336,6 @@ def _scheduled_refreshes_compatible(left: _ScheduledRefresh, right: _ScheduledRe
         left.base_id == right.base_id
         and left.config.authored_model_dump() == right.config.authored_model_dump()
         and left.runtime_paths == right.runtime_paths
-        and left.execution_identity == right.execution_identity
     )
 
 

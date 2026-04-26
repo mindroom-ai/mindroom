@@ -970,7 +970,7 @@ export function Knowledge() {
                               <p className="mt-1 text-xs text-muted-foreground">
                                 {baseConfig?.watch
                                   ? "Advisory refresh on access"
-                                  : "No periodic refresh; access may refresh"}
+                                  : "External edits need reindex"}
                               </p>
                             </>
                           )}

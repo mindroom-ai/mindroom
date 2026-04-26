@@ -75,7 +75,7 @@ class AgentPrivateKnowledgeConfig(BaseModel):
     )
     watch: bool = Field(
         default=True,
-        description="Advisory refresh flag retained for compatibility; private knowledge refresh is scheduled on access",
+        description="When true, requester-local private knowledge schedules background refresh on access; when false, direct external edits require explicit refresh",
     )
     chunk_size: int = Field(
         default=5000,

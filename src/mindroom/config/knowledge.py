@@ -54,7 +54,7 @@ class KnowledgeBaseConfig(BaseModel):
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(
         default=True,
-        description="Advisory refresh flag retained for compatibility; refresh is scheduled on access or explicit API actions, not by filesystem watchers",
+        description="When true, READY local snapshots schedule a background refresh on agent access; when false, direct external file edits require explicit reindex or dashboard/API mutations",
     )
     chunk_size: int = Field(
         default=5000,
