@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -439,10 +440,20 @@ def _reject_duplicate_upload_destination(relative_path: str) -> None:
     )
 
 
+def _upload_temp_path(destination: Path) -> Path:
+    return destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.upload.tmp")
+
+
 async def _write_upload(upload: UploadFile, destination: Path, filename: str, root: Path) -> str:
     _validate_upload_size_hint(upload, filename)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    await _stream_upload_to_destination(upload, destination, filename)
+    temp_path = _upload_temp_path(destination)
+    try:
+        await _stream_upload_to_destination(upload, temp_path, filename)
+        temp_path.replace(destination)
+    except (asyncio.CancelledError, Exception):
+        temp_path.unlink(missing_ok=True)
+        raise
     return destination.relative_to(root.resolve()).as_posix()
 
 

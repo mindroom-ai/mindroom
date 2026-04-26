@@ -837,11 +837,11 @@ def test_upload_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_upload_cancellation_during_write_keeps_best_effort_partial_file(
+async def test_upload_cancellation_during_write_removes_temp_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upload cancellation leaves any direct filesystem write as best effort."""
+    """Upload cancellation before replacement must not expose partial files."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
@@ -870,7 +870,49 @@ async def test_upload_cancellation_during_write_keeps_best_effort_partial_file(
             [UploadFile(file=BytesIO(b"new"), filename="guide.md")],
         )
 
-    assert (docs / "guide.md").read_text(encoding="utf-8") == "partial"
+    assert not (docs / "guide.md").exists()
+    assert list(docs.glob(".*.upload.tmp")) == []
+    assert owner.scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_replacement_upload_cancellation_preserves_existing_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelled replacement uploads keep the previous complete file."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("old", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    async def _cancel_stream(_upload: UploadFile, destination: Path, _filename: str) -> None:
+        destination.write_text("partial", encoding="utf-8")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(knowledge_api, "_stream_upload_to_destination", _cancel_stream)
+
+    with pytest.raises(asyncio.CancelledError):
+        await knowledge_api.upload_knowledge_files(
+            "research",
+            Request(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/api/knowledge/bases/research/upload",
+                    "headers": [],
+                    "app": client.app,
+                },
+            ),
+            [UploadFile(file=BytesIO(b"new"), filename="guide.md")],
+        )
+
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "old"
+    assert list(docs.glob(".*.upload.tmp")) == []
     assert owner.scheduled == []
 
 
