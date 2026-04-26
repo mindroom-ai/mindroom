@@ -198,9 +198,9 @@ def test_codex_responses_request_params_drop_unsupported_limits() -> None:
     assert "max_output_tokens" not in model.get_request_params()
 
 
-def test_codex_responses_request_params_include_prompt_cache_key() -> None:
+def test_codex_responses_request_params_include_prompt_cache_key(tmp_path: Path) -> None:
     """Codex should expose OpenAI's cache-routing key when configured."""
-    model = CodexResponses(id="gpt-5.5", prompt_cache_key="mindroom-code-agent")
+    model = CodexResponses(id="gpt-5.5", prompt_cache_key="mindroom-code-agent", codex_home=str(tmp_path))
 
     params = model.get_request_params()
 
@@ -208,15 +208,59 @@ def test_codex_responses_request_params_include_prompt_cache_key() -> None:
     assert params["extra_headers"] == {
         "session_id": "mindroom-code-agent",
         "x-client-request-id": "mindroom-code-agent",
-        "x-codex-window-id": "mindroom-code-agent:1",
+        "x-codex-window-id": "mindroom-code-agent:0",
     }
 
 
-def test_codex_responses_request_params_preserve_existing_extra_headers() -> None:
+def test_codex_responses_request_params_include_installation_metadata(tmp_path: Path) -> None:
+    """Codex should forward the local CLI installation id in Responses client_metadata."""
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "installation_id").write_text("install-123\n", encoding="utf-8")
+    model = CodexResponses(id="gpt-5.5", prompt_cache_key="mindroom-code-agent", codex_home=str(codex_home))
+
+    params = model.get_request_params()
+
+    assert params["extra_body"] == {
+        "client_metadata": {
+            "x-codex-installation-id": "install-123",
+        },
+    }
+
+
+def test_codex_responses_request_params_preserve_existing_extra_body(tmp_path: Path) -> None:
+    """Codex client metadata should merge into caller-supplied extra_body."""
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "installation_id").write_text("install-123\n", encoding="utf-8")
+    model = CodexResponses(
+        id="gpt-5.5",
+        prompt_cache_key="mindroom-code-agent",
+        codex_home=str(codex_home),
+        extra_body={
+            "debug": True,
+            "client_metadata": {
+                "x-codex-installation-id": "custom-install",
+                "x-test": "1",
+            },
+        },
+    )
+
+    assert model.get_request_params()["extra_body"] == {
+        "debug": True,
+        "client_metadata": {
+            "x-codex-installation-id": "custom-install",
+            "x-test": "1",
+        },
+    }
+
+
+def test_codex_responses_request_params_preserve_existing_extra_headers(tmp_path: Path) -> None:
     """Codex prompt-cache headers should not clobber caller-supplied headers."""
     model = CodexResponses(
         id="gpt-5.5",
         prompt_cache_key="mindroom-code-agent",
+        codex_home=str(tmp_path),
         extra_headers={"X-Test": "1", "x-codex-window-id": "custom-window"},
     )
 
@@ -262,7 +306,7 @@ def test_codex_model_loader_derives_prompt_cache_key_from_execution_identity(tmp
     assert params["extra_headers"] == {
         "session_id": "mindroom-7ac97f304c4001bd9939c88ddba8b0e2",
         "x-client-request-id": "mindroom-7ac97f304c4001bd9939c88ddba8b0e2",
-        "x-codex-window-id": "mindroom-7ac97f304c4001bd9939c88ddba8b0e2:1",
+        "x-codex-window-id": "mindroom-7ac97f304c4001bd9939c88ddba8b0e2:0",
     }
 
 

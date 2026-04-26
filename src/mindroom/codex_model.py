@@ -36,6 +36,8 @@ CODEX_MODEL_PREFIX = "openai-codex/"
 CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
 CODEX_UNSUPPORTED_REQUEST_PARAMS = {"max_output_tokens"}
 CODEX_PROMPT_CACHE_KEY_PREFIX = "mindroom"
+CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
+CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
 
 
 class CodexAuthError(ValueError):
@@ -93,12 +95,16 @@ def borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str 
 
 
 def _codex_auth_path(*, codex_home: str | Path | None) -> Path:
-    home = Path(codex_home) if codex_home is not None else Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    home = _codex_home_path(codex_home=codex_home)
     auth_path = home / "auth.json"
     if not auth_path.exists():
         msg = f"Codex auth file not found at {auth_path}. Run `codex login` first."
         raise CodexAuthError(msg)
     return auth_path
+
+
+def _codex_home_path(*, codex_home: str | Path | None) -> Path:
+    return Path(codex_home) if codex_home is not None else Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
 
 
 def _read_codex_auth(auth_path: Path) -> dict[str, Any]:
@@ -216,8 +222,44 @@ def _codex_prompt_cache_headers(prompt_cache_key: str) -> dict[str, str]:
     return {
         "session_id": prompt_cache_key,
         "x-client-request-id": prompt_cache_key,
-        "x-codex-window-id": f"{prompt_cache_key}:1",
+        CODEX_WINDOW_ID_HEADER: f"{prompt_cache_key}:0",
     }
+
+
+def _codex_installation_id(*, codex_home: str | Path | None) -> str | None:
+    installation_path = _codex_home_path(codex_home=codex_home) / "installation_id"
+    if not installation_path.is_file():
+        return None
+    installation_id = installation_path.read_text(encoding="utf-8").strip()
+    return installation_id or None
+
+
+def _codex_prompt_cache_extra_body(*, installation_id: str | None) -> dict[str, Any]:
+    if installation_id is None:
+        return {}
+    return {
+        "client_metadata": {
+            CODEX_INSTALLATION_ID_HEADER: installation_id,
+        },
+    }
+
+
+def _merge_codex_extra_body(request_params: dict[str, Any], codex_extra_body: dict[str, Any]) -> None:
+    if not codex_extra_body:
+        return
+
+    extra_body = dict(request_params.get("extra_body") or {})
+    codex_client_metadata = codex_extra_body.get("client_metadata")
+    existing_client_metadata = extra_body.get("client_metadata")
+    if isinstance(codex_client_metadata, dict) and isinstance(existing_client_metadata, dict):
+        merged_client_metadata = dict(existing_client_metadata)
+        for key, value in codex_client_metadata.items():
+            merged_client_metadata.setdefault(key, value)
+        extra_body["client_metadata"] = merged_client_metadata
+    elif existing_client_metadata is None:
+        extra_body["client_metadata"] = codex_client_metadata
+
+    request_params["extra_body"] = extra_body
 
 
 @dataclass
@@ -286,6 +328,12 @@ class CodexResponses(OpenAIResponses):
             for header_name, header_value in _codex_prompt_cache_headers(prompt_cache_key).items():
                 extra_headers.setdefault(header_name, header_value)
             request_params["extra_headers"] = extra_headers
+            _merge_codex_extra_body(
+                request_params,
+                _codex_prompt_cache_extra_body(
+                    installation_id=_codex_installation_id(codex_home=self.codex_home),
+                ),
+            )
         for param_name in CODEX_UNSUPPORTED_REQUEST_PARAMS:
             request_params.pop(param_name, None)
         return request_params
