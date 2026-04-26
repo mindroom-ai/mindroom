@@ -20,8 +20,6 @@ from mindroom.knowledge.registry import (
     KnowledgeRefreshKey,
     KnowledgeSnapshotLookup,
     get_published_snapshot,
-    mark_ready_snapshot_stale,
-    ready_snapshot_marked_stale,
     refresh_key_for_snapshot_key,
 )
 from mindroom.logging_config import get_logger
@@ -156,7 +154,9 @@ def _git_poll_due(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
     poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
     if poll_interval_seconds is None:
         return False
-    published_age_seconds = _published_snapshot_age_seconds(lookup.snapshot.state.last_published_at)
+    published_age_seconds = _published_snapshot_age_seconds(
+        lookup.advisory.last_refresh_at or lookup.snapshot.state.last_published_at,
+    )
     return published_age_seconds is None or published_age_seconds >= poll_interval_seconds
 
 
@@ -166,14 +166,8 @@ def _ready_snapshot_effective_availability(
 ) -> KnowledgeAvailability:
     """Return request-path availability for a ready snapshot without eager rescans."""
     availability = lookup.availability
-    if availability is KnowledgeAvailability.READY and lookup.snapshot is not None:
-        refresh_key = refresh_key_for_snapshot_key(lookup.key)
-        source_signature = lookup.snapshot.state.source_signature
-        if source_signature is None:
-            mark_ready_snapshot_stale(refresh_key, source_signature)
-            availability = KnowledgeAvailability.STALE
-        elif _git_poll_due(lookup, config) or ready_snapshot_marked_stale(refresh_key, source_signature):
-            availability = KnowledgeAvailability.STALE
+    if availability is KnowledgeAvailability.READY and lookup.snapshot is not None and _git_poll_due(lookup, config):
+        availability = KnowledgeAvailability.STALE
     return availability
 
 

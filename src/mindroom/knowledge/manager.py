@@ -73,9 +73,6 @@ _INDEXING_STATUSES = {
     _INDEXING_STATUS_INDEXING,
     _INDEXING_STATUS_COMPLETE,
 }
-_INDEXING_AVAILABILITY_INITIALIZING = "initializing"
-_INDEXING_AVAILABILITY_READY = "ready"
-_INDEXING_AVAILABILITY_REFRESH_FAILED = "refresh_failed"
 _TEXT_LIKE_EXTENSIONS = {
     ".md",
     ".markdown",
@@ -842,6 +839,7 @@ class KnowledgeManager:
     _git_last_successful_sync_at: datetime | None = field(default=None, init=False)
     _git_last_successful_commit: str | None = field(default=None, init=False)
     _git_last_error: str | None = field(default=None, init=False)
+    _last_refresh_error: str | None = field(default=None, init=False)
     _git_lfs_checked: bool = field(default=False, init=False)
     _git_lfs_repository_ready: bool = field(default=False, init=False)
     _git_tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
@@ -1041,14 +1039,10 @@ class KnowledgeManager:
         }
         if collection is not None:
             payload["collection"] = collection
-        if availability is not None:
-            payload["availability"] = availability
         if last_published_at is not None:
             payload["last_published_at"] = last_published_at
         if published_revision is not None:
             payload["published_revision"] = published_revision
-        if last_error is not None:
-            payload["last_error"] = last_error
         if indexed_count is not None:
             payload["indexed_count"] = indexed_count
         if source_signature is not None:
@@ -1087,7 +1081,6 @@ class KnowledgeManager:
         self._save_persisted_indexing_state(
             _INDEXING_STATUS_COMPLETE,
             collection=self._current_collection_name(),
-            availability=_INDEXING_AVAILABILITY_READY,
             last_published_at=datetime.now(tz=UTC).isoformat(),
             published_revision=self._git_last_successful_commit,
             indexed_count=indexed_count,
@@ -1121,8 +1114,6 @@ class KnowledgeManager:
             # present unreadable checkpoint is unsafe once vectors already exist.
             return "full_reindex" if self._indexing_settings_path.exists() and self._has_existing_index() else "resume"
         if persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING:
-            return "full_reindex"
-        if persisted_state.availability == _INDEXING_AVAILABILITY_REFRESH_FAILED:
             return "full_reindex"
         if persisted_state.status == _INDEXING_STATUS_INDEXING or not self._has_existing_index():
             return "resume"
@@ -1713,7 +1704,6 @@ class KnowledgeManager:
                 self._save_persisted_indexing_state,
                 _INDEXING_STATUS_COMPLETE,
                 collection=candidate_vector_db.collection_name,
-                availability=_INDEXING_AVAILABILITY_READY,
                 last_published_at=datetime.now(tz=UTC).isoformat(),
                 published_revision=self._git_last_successful_commit,
                 indexed_count=indexed_count,
@@ -2068,15 +2058,9 @@ class KnowledgeManager:
     async def reindex_all(self, *, protected_collections: tuple[str, ...] = ()) -> int:
         """Clear and rebuild the knowledge index from disk."""
         async with self._lock:
+            self._last_refresh_error = None
             files = await asyncio.to_thread(self.list_files)
             persisted_state = await asyncio.to_thread(self._load_persisted_indexing_state)
-            live_collection_name = self._current_collection_name()
-            has_published_snapshot = (
-                persisted_state is not None
-                and persisted_state.status == _INDEXING_STATUS_COMPLETE
-                and not self._persisted_collection_missing_on_init
-                and await asyncio.to_thread(self._has_existing_index)
-            )
             candidate_knowledge = self._build_knowledge(self._candidate_collection_name())
             candidate_vector_db = candidate_knowledge.vector_db
             if not isinstance(candidate_vector_db, ChromaDb):
@@ -2088,35 +2072,6 @@ class KnowledgeManager:
             candidate_indexed_files: set[str] = set()
             candidate_indexed_signatures: dict[str, _FileSignature | None] = {}
 
-            async def _save_refresh_failed_state(error: str) -> None:
-                if has_published_snapshot and persisted_state is not None:
-                    repersisted_settings = _repersisted_indexing_settings(
-                        persisted_state.settings,
-                        self._indexing_settings,
-                    )
-                    await asyncio.to_thread(
-                        self._save_persisted_indexing_state,
-                        _INDEXING_STATUS_COMPLETE,
-                        settings=repersisted_settings,
-                        collection=persisted_state.collection or live_collection_name,
-                        availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
-                        last_published_at=persisted_state.last_published_at,
-                        published_revision=persisted_state.published_revision,
-                        last_error=error,
-                        indexed_count=persisted_state.indexed_count,
-                        source_signature=persisted_state.source_signature,
-                        retained_collections=persisted_state.retained_collections,
-                    )
-                    return
-                await asyncio.to_thread(
-                    self._save_persisted_indexing_state,
-                    _INDEXING_STATUS_INDEXING,
-                    availability=_INDEXING_AVAILABILITY_REFRESH_FAILED,
-                    last_error=error,
-                    indexed_count=0,
-                    retained_collections=(),
-                )
-
             try:
                 indexed_count = await self._reindex_files_locked(
                     files,
@@ -2125,9 +2080,7 @@ class KnowledgeManager:
                     indexed_signatures=candidate_indexed_signatures,
                 )
                 if indexed_count != len(files):
-                    await _save_refresh_failed_state(
-                        f"Indexed {indexed_count} of {len(files)} managed knowledge files",
-                    )
+                    self._last_refresh_error = f"Indexed {indexed_count} of {len(files)} managed knowledge files"
                     return indexed_count
 
                 expected_paths = {self._relative_path(file_path) for file_path in files}
@@ -2137,9 +2090,8 @@ class KnowledgeManager:
                     if signature is not None
                 }
                 if set(candidate_signatures) != expected_paths:
-                    await _save_refresh_failed_state(
-                        "Indexed signatures covered "
-                        f"{len(candidate_signatures)} of {len(expected_paths)} managed files",
+                    self._last_refresh_error = (
+                        f"Indexed signatures covered {len(candidate_signatures)} of {len(expected_paths)} managed files"
                     )
                     return indexed_count
 
@@ -2152,7 +2104,7 @@ class KnowledgeManager:
                     tracked_relative_paths=self._git_tracked_relative_paths,
                 )
                 if live_source_signature != candidate_source_signature:
-                    await _save_refresh_failed_state("Knowledge source changed during refresh; refresh skipped")
+                    self._last_refresh_error = "Knowledge source changed during refresh; refresh skipped"
                     return indexed_count
 
                 retained_collections = self._retained_collections_after_publish(
@@ -2175,7 +2127,7 @@ class KnowledgeManager:
                     protected_collections=protected_collections,
                 )
             except Exception as exc:
-                await _save_refresh_failed_state(redact_credentials_in_text(str(exc)))
+                self._last_refresh_error = redact_credentials_in_text(str(exc))
                 raise
             else:
                 return indexed_count

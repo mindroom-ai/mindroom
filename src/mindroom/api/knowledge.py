@@ -15,12 +15,14 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.knowledge import (
+    KnowledgeAdvisoryState,
     KnowledgeAvailability,
     PublishedIndexingState,
     is_refresh_active_for_binding,
     knowledge_binding_mutation_lock,
+    load_knowledge_snapshot_state,
     load_published_indexing_state,
-    mark_published_snapshot_stale_async,
+    mark_snapshot_dirty_async,
     redact_credentials_in_text,
     redact_url_credentials,
     refresh_knowledge_binding,
@@ -221,15 +223,28 @@ def _snapshot_status_sync(
         return False, 0
     if state is None:
         return False, 0
-    availability = snapshot_availability_for_state(key=key, state=state)
-    available = state.status == "complete" and availability in {
-        KnowledgeAvailability.READY,
-        KnowledgeAvailability.REFRESH_FAILED,
-        KnowledgeAvailability.STALE,
-    }
+    available = state.status == "complete"
     if available:
         available = snapshot_collection_exists_for_state(key, state)
     return available, state.indexed_count or 0
+
+
+def _snapshot_advisory_state(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+) -> KnowledgeAdvisoryState | None:
+    try:
+        key = resolve_snapshot_key(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            create=False,
+        )
+        return load_knowledge_snapshot_state(key).advisory
+    except Exception:
+        logger.warning("Could not resolve knowledge advisory state", base_id=base_id, exc_info=True)
+        return None
 
 
 async def _snapshot_status(
@@ -297,6 +312,7 @@ def _git_status(
         return None
     root = _knowledge_root(config, base_id, runtime_paths)
     state = _snapshot_state(config, base_id, runtime_paths)
+    advisory = _snapshot_advisory_state(config, base_id, runtime_paths)
     return {
         "repo_url": redact_url_credentials(git_config.repo_url),
         "branch": git_config.branch,
@@ -309,7 +325,9 @@ def _git_status(
         ),
         "last_successful_sync_at": state.last_published_at if state is not None else None,
         "last_successful_commit": state.published_revision if state is not None else None,
-        "last_error": _redacted_last_error(state.last_error if state is not None else None),
+        "last_error": _redacted_last_error(
+            advisory.last_error if advisory is not None and advisory.last_error is not None else None,
+        ),
         "pending_startup_mode": None,
     }
 
@@ -499,6 +517,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         root = _knowledge_root(config, base_id, runtime_paths)
         file_info = await _list_file_info(config, base_id, root)
         snapshot_available, indexed_count = await _snapshot_status(config, base_id, runtime_paths)
+        advisory = _snapshot_advisory_state(config, base_id, runtime_paths)
         git_status = _git_status(config, base_id, runtime_paths, request=request)
         refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
@@ -510,8 +529,12 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
             "indexed_count": indexed_count,
             "manager_available": snapshot_available,
             "refreshing": refreshing,
+            "advisory_state": advisory.state if advisory is not None else "none",
+            "refresh_job": advisory.refresh_job if advisory is not None else "idle",
             "file_listing_degraded": file_info.degraded,
         }
+        if advisory is not None and advisory.last_error is not None:
+            base_entry["last_error"] = _redacted_last_error(advisory.last_error)
         if file_info.error is not None:
             base_entry["file_listing_error"] = file_info.error
         if git_status is not None:
@@ -588,10 +611,11 @@ async def upload_knowledge_files(
         committed_uploads: list[_CommittedUpload] = []
         try:
             committed_uploads = _commit_staged_uploads(staged_uploads)
-            affected_base_ids = await mark_published_snapshot_stale_async(
+            affected_base_ids = await mark_snapshot_dirty_async(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
+                reason="dashboard_upload",
             )
         except Exception:
             _rollback_committed_uploads(committed_uploads)
@@ -627,10 +651,11 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         relative_path = target.relative_to(root.resolve()).as_posix()
         backup_path = _move_file_to_delete_backup(target)
         try:
-            affected_base_ids = await mark_published_snapshot_stale_async(
+            affected_base_ids = await mark_snapshot_dirty_async(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
+                reason="dashboard_delete",
             )
         except Exception:
             _restore_deleted_file(target, backup_path)
@@ -655,7 +680,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
     snapshot_available, indexed_count = await _snapshot_status(config, base_id, runtime_paths)
-    state = _snapshot_state(config, base_id, runtime_paths)
+    advisory = _snapshot_advisory_state(config, base_id, runtime_paths)
     file_info = await _list_file_info(config, base_id, root)
     git_status = _git_status(config, base_id, runtime_paths, request=request)
     refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
@@ -668,7 +693,9 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "indexed_count": indexed_count,
         "manager_available": snapshot_available,
         "refreshing": refreshing,
-        "last_error": _redacted_last_error(state.last_error if state is not None else None),
+        "advisory_state": advisory.state if advisory is not None else "none",
+        "refresh_job": advisory.refresh_job if advisory is not None else "idle",
+        "last_error": _redacted_last_error(advisory.last_error if advisory is not None else None),
         "file_listing_degraded": file_info.degraded,
         "file_listing_error": file_info.error,
     }
@@ -701,13 +728,19 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
             )
     except Exception as exc:
         state = _snapshot_state(config, base_id, runtime_paths)
+        advisory = _snapshot_advisory_state(config, base_id, runtime_paths)
         availability = KnowledgeAvailability.REFRESH_FAILED
         if state is not None:
             try:
                 key = resolve_snapshot_key(base_id, config=config, runtime_paths=runtime_paths, create=False)
-                availability = snapshot_availability_for_state(key=key, state=state)
+                availability = snapshot_availability_for_state(
+                    key=key,
+                    state=state,
+                    advisory=advisory,
+                )
             except Exception:
                 logger.warning("Could not resolve failed reindex snapshot availability", base_id=base_id, exc_info=True)
+        last_error = advisory.last_error if advisory is not None and advisory.last_error is not None else str(exc)
         raise HTTPException(
             status_code=409,
             detail={
@@ -715,7 +748,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
                 "base_id": base_id,
                 "indexed_count": state.indexed_count or 0 if state is not None else 0,
                 "availability": availability.value,
-                "last_error": _redacted_last_error(state.last_error if state is not None else str(exc)),
+                "last_error": _redacted_last_error(last_error),
             },
         ) from exc
     if not (result.published and result.availability is KnowledgeAvailability.READY):

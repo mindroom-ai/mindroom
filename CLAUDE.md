@@ -285,6 +285,7 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 
 - Default to the smallest correct change.
 - Never add a production branch, wrapper, or fallback whose only purpose is to preserve an old test expectation.
+- Every 3 review rounds, if reviews still show many issues or new major bug classes, stop patching and reconsider the design before another patch round.
 - Use larger refactors when they provide clear immediate maintenance ROI, not hypothetical future value.
 - A larger refactor is justified only if it:
   - Removes active duplication in current code paths.

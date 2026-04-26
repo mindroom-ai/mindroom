@@ -85,15 +85,13 @@ def _write_snapshot_metadata(
         "settings": list(key.indexing_settings),
         "status": "complete",
         "collection": collection,
-        "availability": "ready",
     }
     if revision is not None:
         payload["published_revision"] = revision
     if published_at is not None:
         payload["last_published_at"] = published_at
     if last_error is not None:
-        payload["availability"] = "refresh_failed"
-        payload["last_error"] = last_error
+        knowledge_registry.save_snapshot_refresh_failed_state(key, error=last_error)
     if indexed_count is not None:
         payload["indexed_count"] = indexed_count
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
@@ -495,7 +493,7 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_empty_upload_parts_are_noop_without_stale_mark_or_refresh(tmp_path: Path) -> None:
+async def test_empty_upload_parts_are_noop_without_dirty_mark_or_refresh(tmp_path: Path) -> None:
     """Multipart parts without filenames should not mutate source availability."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
@@ -506,7 +504,7 @@ async def test_empty_upload_parts_are_noop_without_stale_mark_or_refresh(tmp_pat
     client.app.state.knowledge_refresh_owner = owner
 
     with (
-        patch("mindroom.api.knowledge.mark_published_snapshot_stale_async", side_effect=AssertionError("no mutation")),
+        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", side_effect=AssertionError("no mutation")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
     ):
         response = await knowledge_api.upload_knowledge_files(
@@ -555,11 +553,11 @@ def test_upload_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     refresh.assert_not_awaited()
 
 
-def test_upload_stale_metadata_write_runs_off_event_loop(
+def test_upload_dirty_advisory_write_runs_off_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upload stale-mark metadata I/O should be offloaded while the API mutation lock is held."""
+    """Upload dirty-advisory I/O should be offloaded while the API mutation lock is held."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -570,9 +568,9 @@ def test_upload_stale_metadata_write_runs_off_event_loop(
     owner = _RecordingRefreshOwner()
     client.app.state.knowledge_refresh_owner = owner
     saw_running_loop: bool | None = None
-    original_load = knowledge_registry.load_published_indexing_state
+    original_save = knowledge_registry.save_snapshot_advisory_state
 
-    def _offloaded_load(*args: object, **kwargs: object) -> object:
+    def _offloaded_save(*args: object, **kwargs: object) -> object:
         nonlocal saw_running_loop
         try:
             asyncio.get_running_loop()
@@ -580,9 +578,9 @@ def test_upload_stale_metadata_write_runs_off_event_loop(
             saw_running_loop = False
         else:
             saw_running_loop = True
-        return original_load(*args, **kwargs)
+        return original_save(*args, **kwargs)
 
-    monkeypatch.setattr(knowledge_registry, "load_published_indexing_state", _offloaded_load)
+    monkeypatch.setattr(knowledge_registry, "save_snapshot_advisory_state", _offloaded_save)
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -596,8 +594,8 @@ def test_upload_stale_metadata_write_runs_off_event_loop(
     refresh.assert_not_awaited()
 
 
-def test_upload_stale_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp_path: Path) -> None:
-    """Uploads fail closed when stale metadata cannot be committed."""
+def test_upload_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp_path: Path) -> None:
+    """Uploads fail closed when dirty advisory state cannot be committed."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -607,14 +605,14 @@ def test_upload_stale_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
     owner = _RecordingRefreshOwner()
     client.app.state.knowledge_refresh_owner = owner
 
-    async def _fail_stale_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
-        msg = "stale mark failed"
+    async def _fail_dirty_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        msg = "dirty mark failed"
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge.mark_published_snapshot_stale_async", _fail_stale_mark),
+        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", _fail_dirty_mark),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
-        pytest.raises(RuntimeError, match="stale mark failed"),
+        pytest.raises(RuntimeError, match="dirty mark failed"),
     ):
         client.post(
             "/api/knowledge/bases/research/upload",
@@ -648,7 +646,7 @@ def test_upload_commit_failure_leaves_ready_snapshot_unchanged_and_skips_refresh
 
     with (
         patch("mindroom.api.knowledge._commit_staged_uploads", _fail_commit),
-        patch("mindroom.api.knowledge.mark_published_snapshot_stale_async", side_effect=AssertionError("no stale")),
+        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", side_effect=AssertionError("no dirty")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="commit failed"),
     ):
@@ -661,7 +659,7 @@ def test_upload_commit_failure_leaves_ready_snapshot_unchanged_and_skips_refresh
         resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths),
     )
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert metadata["availability"] == "ready"
+    assert "availability" not in metadata
     assert (docs / "guide.md").read_text(encoding="utf-8") == "old"
     assert list(docs.glob("*.upload.*")) == []
     assert owner.scheduled == []
@@ -855,8 +853,8 @@ def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     refresh.assert_not_awaited()
 
 
-def test_delete_stale_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp_path: Path) -> None:
-    """Deletes fail closed when stale metadata cannot be committed."""
+def test_delete_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp_path: Path) -> None:
+    """Deletes fail closed when dirty advisory state cannot be committed."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -866,14 +864,14 @@ def test_delete_stale_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
     owner = _RecordingRefreshOwner()
     client.app.state.knowledge_refresh_owner = owner
 
-    async def _fail_stale_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
-        msg = "stale mark failed"
+    async def _fail_dirty_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        msg = "dirty mark failed"
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge.mark_published_snapshot_stale_async", _fail_stale_mark),
+        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", _fail_dirty_mark),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
-        pytest.raises(RuntimeError, match="stale mark failed"),
+        pytest.raises(RuntimeError, match="dirty mark failed"),
     ):
         client.delete("/api/knowledge/bases/research/files/guide.md")
 
@@ -903,7 +901,7 @@ def test_delete_filesystem_failure_leaves_ready_snapshot_unchanged_and_skips_ref
 
     with (
         patch("mindroom.api.knowledge._move_file_to_delete_backup", _fail_delete_stage),
-        patch("mindroom.api.knowledge.mark_published_snapshot_stale_async", side_effect=AssertionError("no stale")),
+        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", side_effect=AssertionError("no dirty")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="unlink failed"),
     ):
@@ -913,7 +911,7 @@ def test_delete_filesystem_failure_leaves_ready_snapshot_unchanged_and_skips_ref
         resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths),
     )
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert metadata["availability"] == "ready"
+    assert "availability" not in metadata
     assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
     assert owner.scheduled == []
     refresh.assert_not_awaited()

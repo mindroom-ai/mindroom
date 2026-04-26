@@ -7,7 +7,8 @@ import json
 import os
 import uuid
 import weakref
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
@@ -61,6 +62,8 @@ class PublishedIndexingState:
     settings: tuple[str, ...]
     status: Literal["resetting", "indexing", "complete"]
     collection: str | None = None
+    # Legacy fields may be loaded from old metadata, but new writes keep
+    # published metadata limited to the immutable last-good pointer.
     availability: str | None = None
     last_published_at: str | None = None
     published_revision: str | None = None
@@ -81,12 +84,33 @@ class PublishedKnowledgeSnapshot:
 
 
 @dataclass(frozen=True)
+class KnowledgeAdvisoryState:
+    """Sidecar state for dirty/refresh/failure notices about a published snapshot."""
+
+    state: Literal["none", "stale", "refreshing", "refresh_failed"] = "none"
+    refresh_job: Literal["idle", "pending", "running", "failed"] = "idle"
+    reason: str | None = None
+    last_error: str | None = None
+    updated_at: str | None = None
+    last_refresh_at: str | None = None
+
+
+@dataclass(frozen=True)
+class KnowledgeSnapshotState:
+    """Central state model for one knowledge binding."""
+
+    published: PublishedIndexingState | None
+    advisory: KnowledgeAdvisoryState
+
+
+@dataclass(frozen=True)
 class KnowledgeSnapshotLookup:
     """Result of a request-safe snapshot lookup."""
 
     key: KnowledgeSnapshotKey
     snapshot: PublishedKnowledgeSnapshot | None
     availability: KnowledgeAvailability
+    advisory: KnowledgeAdvisoryState
     refresh_on_access: bool = False
 
 
@@ -137,10 +161,8 @@ _published_snapshot_handles: weakref.WeakValueDictionary[int, PublishedKnowledge
 )
 _published_knowledge_leases: dict[int, _PublishedKnowledgeLease] = {}
 _published_knowledge_finalizers: dict[int, weakref.finalize] = {}
-_stale_ready_snapshots: set[tuple[KnowledgeRefreshKey, str | None]] = set()
 _PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
 _MAX_PRIVATE_PUBLISHED_SNAPSHOTS = 128
-_MAX_STALE_READY_SNAPSHOT_MARKERS = 512
 
 
 def _snapshot_key_from_binding(
@@ -263,6 +285,15 @@ def snapshot_metadata_path(key: KnowledgeSnapshotKey) -> Path:
     return snapshot_base_storage_path(key) / "indexing_settings.json"
 
 
+def snapshot_advisory_path(key: KnowledgeSnapshotKey) -> Path:
+    """Return the advisory sidecar path for one resolved snapshot key."""
+    return snapshot_base_storage_path(key) / "snapshot_advisory.json"
+
+
+def _utc_now() -> str:
+    return datetime.now(tz=UTC).isoformat()
+
+
 def _coerce_nonnegative_int(value: object) -> int | None:
     if isinstance(value, bool):
         return None
@@ -275,6 +306,136 @@ def _coerce_nonnegative_int(value: object) -> int | None:
         if stripped.isdigit():
             return int(stripped)
     return None
+
+
+def _valid_advisory_state(value: object) -> bool:
+    return value in {"none", "stale", "refreshing", "refresh_failed"}
+
+
+def _valid_refresh_job(value: object) -> bool:
+    return value in {"idle", "pending", "running", "failed"}
+
+
+def load_snapshot_advisory_state(sidecar_path: Path) -> KnowledgeAdvisoryState:
+    """Load advisory state; corrupt advisory data is treated as absent."""
+    if not sidecar_path.exists():
+        return KnowledgeAdvisoryState()
+    try:
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return KnowledgeAdvisoryState()
+    if not isinstance(payload, dict):
+        return KnowledgeAdvisoryState()
+
+    raw_state = payload.get("state")
+    raw_refresh_job = payload.get("refresh_job")
+    state = raw_state if _valid_advisory_state(raw_state) else "none"
+    refresh_job = raw_refresh_job if _valid_refresh_job(raw_refresh_job) else "idle"
+    reason = payload.get("reason")
+    last_error = payload.get("last_error")
+    updated_at = payload.get("updated_at")
+    last_refresh_at = payload.get("last_refresh_at")
+    return KnowledgeAdvisoryState(
+        state=cast('Literal["none", "stale", "refreshing", "refresh_failed"]', state),
+        refresh_job=cast('Literal["idle", "pending", "running", "failed"]', refresh_job),
+        reason=reason if isinstance(reason, str) and reason else None,
+        last_error=last_error if isinstance(last_error, str) and last_error else None,
+        updated_at=updated_at if isinstance(updated_at, str) and updated_at else None,
+        last_refresh_at=last_refresh_at if isinstance(last_refresh_at, str) and last_refresh_at else None,
+    )
+
+
+def save_snapshot_advisory_state(sidecar_path: Path, state: KnowledgeAdvisoryState) -> None:
+    """Persist advisory state atomically without touching the published pointer."""
+    payload: dict[str, object] = {
+        "state": state.state,
+        "refresh_job": state.refresh_job,
+    }
+    if state.reason is not None:
+        payload["reason"] = state.reason
+    if state.last_error is not None:
+        payload["last_error"] = state.last_error
+    if state.updated_at is not None:
+        payload["updated_at"] = state.updated_at
+    if state.last_refresh_at is not None:
+        payload["last_refresh_at"] = state.last_refresh_at
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = sidecar_path.with_name(f".{sidecar_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(sidecar_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def load_knowledge_snapshot_state(key: KnowledgeSnapshotKey) -> KnowledgeSnapshotState:
+    """Load published plus advisory state for one resolved snapshot key."""
+    return KnowledgeSnapshotState(
+        published=load_published_indexing_state(snapshot_metadata_path(key)),
+        advisory=load_snapshot_advisory_state(snapshot_advisory_path(key)),
+    )
+
+
+def save_snapshot_dirty_state(
+    key: KnowledgeSnapshotKey,
+    *,
+    reason: str,
+    refresh_job: Literal["idle", "pending", "running", "failed"] = "pending",
+) -> None:
+    """Mark source/advisory dirty without mutating the published snapshot pointer."""
+    save_snapshot_advisory_state(
+        snapshot_advisory_path(key),
+        KnowledgeAdvisoryState(
+            state="stale",
+            refresh_job=refresh_job,
+            reason=reason,
+            updated_at=_utc_now(),
+        ),
+    )
+
+
+def save_snapshot_refreshing_state(key: KnowledgeSnapshotKey, *, reason: str = "refreshing") -> None:
+    """Record that refresh work is currently building a private candidate."""
+    existing = load_snapshot_advisory_state(snapshot_advisory_path(key))
+    save_snapshot_advisory_state(
+        snapshot_advisory_path(key),
+        KnowledgeAdvisoryState(
+            state="refreshing",
+            refresh_job="running",
+            reason=existing.reason or reason,
+            last_error=existing.last_error,
+            updated_at=_utc_now(),
+            last_refresh_at=existing.last_refresh_at,
+        ),
+    )
+
+
+def save_snapshot_refresh_failed_state(key: KnowledgeSnapshotKey, *, error: str) -> None:
+    """Record a refresh failure while preserving any last-good published pointer."""
+    save_snapshot_advisory_state(
+        snapshot_advisory_path(key),
+        KnowledgeAdvisoryState(
+            state="refresh_failed",
+            refresh_job="failed",
+            last_error=error,
+            updated_at=_utc_now(),
+            last_refresh_at=_utc_now(),
+        ),
+    )
+
+
+def save_snapshot_refresh_success_state(key: KnowledgeSnapshotKey) -> None:
+    """Clear dirty/failure advisory state after a successful refresh."""
+    save_snapshot_advisory_state(
+        snapshot_advisory_path(key),
+        KnowledgeAdvisoryState(
+            state="none",
+            refresh_job="idle",
+            updated_at=_utc_now(),
+            last_refresh_at=_utc_now(),
+        ),
+    )
 
 
 def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState | None:
@@ -359,14 +520,10 @@ def save_published_indexing_state(metadata_path: Path, state: PublishedIndexingS
     }
     if state.collection is not None:
         payload["collection"] = state.collection
-    if state.availability is not None:
-        payload["availability"] = state.availability
     if state.last_published_at is not None:
         payload["last_published_at"] = state.last_published_at
     if state.published_revision is not None:
         payload["published_revision"] = state.published_revision
-    if state.last_error is not None:
-        payload["last_error"] = state.last_error
     if state.indexed_count is not None:
         payload["indexed_count"] = state.indexed_count
     if state.source_signature is not None:
@@ -433,21 +590,11 @@ def _snapshot_key_is_private(key: KnowledgeSnapshotKey) -> bool:
     return key.base_id.startswith(_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
 
 
-def _refresh_key_is_private(key: KnowledgeRefreshKey) -> bool:
-    return key.base_id.startswith(_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
-
-
 def prune_private_snapshot_bookkeeping() -> None:
     """Bound request-scoped snapshot bookkeeping without invalidating live handles."""
     private_snapshot_keys = [key for key in _published_snapshots if _snapshot_key_is_private(key)]
     for key in private_snapshot_keys[:-_MAX_PRIVATE_PUBLISHED_SNAPSHOTS]:
         _published_snapshots.pop(key, None)
-
-    if len(_stale_ready_snapshots) > _MAX_STALE_READY_SNAPSHOT_MARKERS:
-        private_stale_keys = [key for key in _stale_ready_snapshots if _refresh_key_is_private(key[0])]
-        stale_excess = len(_stale_ready_snapshots) - _MAX_STALE_READY_SNAPSHOT_MARKERS
-        for stale_key in private_stale_keys[:stale_excess]:
-            _stale_ready_snapshots.discard(stale_key)
 
 
 def _evict_published_snapshots_for_refresh_key(refresh_key: KnowledgeRefreshKey) -> None:
@@ -468,23 +615,6 @@ def active_snapshot_collection_names(refresh_key: KnowledgeRefreshKey) -> tuple[
             continue
         names.append(lease.collection)
     return tuple(dict.fromkeys(names))
-
-
-def mark_ready_snapshot_stale(refresh_key: KnowledgeRefreshKey, source_signature: str | None) -> None:
-    """Record a cheap stale marker for one READY snapshot source signature."""
-    _stale_ready_snapshots.add((refresh_key, source_signature))
-    prune_private_snapshot_bookkeeping()
-
-
-def ready_snapshot_marked_stale(refresh_key: KnowledgeRefreshKey, source_signature: str | None) -> bool:
-    """Return whether a READY snapshot source signature has a pending stale marker."""
-    return (refresh_key, source_signature) in _stale_ready_snapshots
-
-
-def clear_stale_ready_snapshot_markers(refresh_key: KnowledgeRefreshKey) -> None:
-    """Clear stale READY markers after a successful publish for one binding."""
-    stale_keys = {stale_key for stale_key in _stale_ready_snapshots if stale_key[0] == refresh_key}
-    _stale_ready_snapshots.difference_update(stale_keys)
 
 
 def _build_snapshot_knowledge(
@@ -640,24 +770,30 @@ def _snapshot_availability(
     *,
     key: KnowledgeSnapshotKey,
     state: PublishedIndexingState | None,
+    advisory: KnowledgeAdvisoryState,
 ) -> KnowledgeAvailability:
+    availability = KnowledgeAvailability.READY
     if state is None:
-        return KnowledgeAvailability.INITIALIZING
-
-    availability = KnowledgeAvailability.INITIALIZING
-    if state.status == "complete" and (
+        availability = (
+            KnowledgeAvailability.REFRESH_FAILED
+            if advisory.state == "refresh_failed"
+            else KnowledgeAvailability.INITIALIZING
+        )
+    elif state.status == "complete" and (
         not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings)
         or not indexing_settings_metadata_equal(state.settings, key.indexing_settings)
     ):
         availability = KnowledgeAvailability.CONFIG_MISMATCH
-    elif state.availability == KnowledgeAvailability.STALE.value:
-        availability = KnowledgeAvailability.STALE
-    elif state.availability == KnowledgeAvailability.REFRESH_FAILED.value:
-        availability = KnowledgeAvailability.REFRESH_FAILED
     elif state.status != "complete":
-        availability = KnowledgeAvailability.INITIALIZING
-    elif state.availability in {None, "", KnowledgeAvailability.READY.value}:
-        availability = KnowledgeAvailability.READY
+        availability = (
+            KnowledgeAvailability.REFRESH_FAILED
+            if advisory.state == "refresh_failed"
+            else KnowledgeAvailability.INITIALIZING
+        )
+    elif advisory.state in {"stale", "refreshing"}:
+        availability = KnowledgeAvailability.STALE
+    elif advisory.state == "refresh_failed":
+        availability = KnowledgeAvailability.REFRESH_FAILED
     return availability
 
 
@@ -665,9 +801,10 @@ def snapshot_availability_for_state(
     *,
     key: KnowledgeSnapshotKey,
     state: PublishedIndexingState | None,
+    advisory: KnowledgeAdvisoryState | None = None,
 ) -> KnowledgeAvailability:
     """Return the public availability value for persisted snapshot state."""
-    return _snapshot_availability(key=key, state=state)
+    return _snapshot_availability(key=key, state=state, advisory=advisory or KnowledgeAdvisoryState())
 
 
 def get_published_snapshot(
@@ -686,34 +823,38 @@ def get_published_snapshot(
         create=False,
     )
     try:
+        advisory = load_snapshot_advisory_state(snapshot_advisory_path(key))
         snapshot = _published_snapshots.get(key)
         if snapshot is not None:
             if not _cached_snapshot_still_queryable(snapshot):
                 _published_snapshots.pop(key, None)
-                availability = _snapshot_availability(key=key, state=snapshot.state)
+                availability = _snapshot_availability(key=key, state=snapshot.state, advisory=advisory)
                 if availability is KnowledgeAvailability.READY:
                     availability = KnowledgeAvailability.REFRESH_FAILED
                 return KnowledgeSnapshotLookup(
                     key=key,
                     snapshot=None,
                     availability=availability,
+                    advisory=advisory,
                     refresh_on_access=binding.incremental_sync_on_access,
                 )
             return KnowledgeSnapshotLookup(
                 key=key,
                 snapshot=snapshot,
-                availability=_snapshot_availability(key=key, state=snapshot.state),
+                availability=_snapshot_availability(key=key, state=snapshot.state, advisory=advisory),
+                advisory=advisory,
                 refresh_on_access=binding.incremental_sync_on_access,
             )
 
         metadata_path = snapshot_metadata_path(key)
         state = load_published_indexing_state(metadata_path)
-        availability = _snapshot_availability(key=key, state=state)
+        availability = _snapshot_availability(key=key, state=state, advisory=advisory)
         if state is None or state.status != "complete":
             return KnowledgeSnapshotLookup(
                 key=key,
                 snapshot=None,
                 availability=availability,
+                advisory=advisory,
                 refresh_on_access=binding.incremental_sync_on_access,
             )
 
@@ -725,6 +866,7 @@ def get_published_snapshot(
                 key=key,
                 snapshot=None,
                 availability=availability,
+                advisory=advisory,
                 refresh_on_access=binding.incremental_sync_on_access,
             )
 
@@ -740,6 +882,7 @@ def get_published_snapshot(
             key=key,
             snapshot=snapshot,
             availability=availability,
+            advisory=advisory,
             refresh_on_access=binding.incremental_sync_on_access,
         )
     except Exception:
@@ -749,6 +892,7 @@ def get_published_snapshot(
             key=key,
             snapshot=None,
             availability=KnowledgeAvailability.REFRESH_FAILED,
+            advisory=KnowledgeAdvisoryState(state="refresh_failed", refresh_job="failed"),
             refresh_on_access=binding.incremental_sync_on_access,
         )
 
@@ -837,7 +981,7 @@ def _snapshot_keys_for_shared_source(
             )
         except Exception:
             logger.warning(
-                "Could not resolve related knowledge snapshot while marking stale",
+                "Could not resolve related knowledge snapshot while marking dirty",
                 base_id=base_id,
                 related_base_id=candidate_base_id,
                 exc_info=True,
@@ -848,32 +992,23 @@ def _snapshot_keys_for_shared_source(
     return tuple(matching_keys)
 
 
-def _mark_snapshot_key_stale_on_disk(matching_key: KnowledgeSnapshotKey) -> bool:
-    metadata_path = snapshot_metadata_path(matching_key)
-    state = load_published_indexing_state(metadata_path)
-    if state is None:
-        return False
-
-    updated_state = replace(
-        state,
-        availability=KnowledgeAvailability.STALE.value,
-        source_signature=None,
-    )
-    save_published_indexing_state(metadata_path, updated_state)
+def _mark_snapshot_key_dirty_on_disk(matching_key: KnowledgeSnapshotKey, *, reason: str) -> bool:
+    save_snapshot_dirty_state(matching_key, reason=reason)
     return True
 
 
-def mark_published_snapshot_stale(
+def mark_snapshot_dirty(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
+    reason: str = "source_mutated",
 ) -> tuple[str, ...]:
-    """Mark metadata stale after a direct source mutation.
+    """Mark advisory state dirty after a direct source mutation.
 
     Callers that mutate files must hold ``knowledge_binding_mutation_lock`` so
-    stale writes stay serialized with refresh publishes for the same binding.
+    advisory writes stay serialized with refresh publishes for the same binding.
     Returns the configured base IDs sharing the mutated physical source.
     """
     matching_keys = _snapshot_keys_for_shared_source(
@@ -883,25 +1018,23 @@ def mark_published_snapshot_stale(
         execution_identity=execution_identity,
     )
     for matching_key in matching_keys:
-        if _mark_snapshot_key_stale_on_disk(matching_key):
-            _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
+        _mark_snapshot_key_dirty_on_disk(matching_key, reason=reason)
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 
-async def mark_published_snapshot_stale_async(
+async def mark_snapshot_dirty_async(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
+    reason: str = "source_mutated",
 ) -> tuple[str, ...]:
-    """Async variant for request handlers that keeps disk I/O off the event loop.
+    """Async variant for request handlers that keeps advisory I/O off the event loop.
 
     The caller still holds ``knowledge_binding_mutation_lock`` while this runs.
-    Process-local registry eviction runs before and after each worker-thread
-    stale write so readers cannot keep a READY snapshot cached across the disk
-    transition. If cancellation arrives while the worker may still commit, this
-    waits for the worker and evicts again before propagating cancellation.
+    If cancellation arrives while the worker may still commit, this waits for
+    the worker before propagating cancellation.
     """
     matching_keys = _snapshot_keys_for_shared_source(
         base_id,
@@ -910,9 +1043,9 @@ async def mark_published_snapshot_stale_async(
         execution_identity=execution_identity,
     )
     for matching_key in matching_keys:
-        refresh_key = refresh_key_for_snapshot_key(matching_key)
-        _evict_published_snapshots_for_refresh_key(refresh_key)
-        write_task = asyncio.create_task(asyncio.to_thread(_mark_snapshot_key_stale_on_disk, matching_key))
+        write_task = asyncio.create_task(
+            asyncio.to_thread(_mark_snapshot_key_dirty_on_disk, matching_key, reason=reason),
+        )
         try:
             await asyncio.shield(write_task)
         except asyncio.CancelledError:
@@ -920,13 +1053,11 @@ async def mark_published_snapshot_stale_async(
                 await write_task
             except Exception:
                 logger.warning(
-                    "Published knowledge stale marker write failed after cancellation",
+                    "Knowledge advisory dirty marker write failed after cancellation",
                     base_id=matching_key.base_id,
                     exc_info=True,
                 )
             raise
-        finally:
-            _evict_published_snapshots_for_refresh_key(refresh_key)
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 
@@ -938,4 +1069,3 @@ def clear_published_snapshots() -> None:
         finalizer.detach()
     _published_knowledge_finalizers.clear()
     _published_knowledge_leases.clear()
-    _stale_ready_snapshots.clear()
