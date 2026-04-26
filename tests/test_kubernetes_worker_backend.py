@@ -282,6 +282,8 @@ def _backend(
     runtime_paths: RuntimePaths | None = None,
     tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
     worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+    resource_requests: dict[str, str] | None = None,
+    resource_limits: dict[str, str] | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = _KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -305,6 +307,8 @@ def _backend(
         extra_env={},
         extra_labels={"mindroom.ai/tenant": "test"},
         owner_deployment_name=owner_deployment_name,
+        resource_requests=resource_requests if resource_requests is not None else {"memory": "256Mi", "cpu": "100m"},
+        resource_limits=resource_limits if resource_limits is not None else {"memory": "1Gi", "cpu": "500m"},
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -735,6 +739,79 @@ def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path
         proxy_url=None,
         proxy_token=runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_TOKEN"),
     )
+
+
+def test_kubernetes_backend_config_resource_envs_override_defaults(tmp_path: Path) -> None:
+    """Resource request/limit env vars override the built-in defaults."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_WORKER_BACKEND=kubernetes\n"
+            "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+            "MINDROOM_KUBERNETES_WORKER_MEMORY_REQUEST=2Gi\n"
+            "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT=8Gi\n"
+            "MINDROOM_KUBERNETES_WORKER_CPU_REQUEST=500m\n"
+            "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT=2\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+
+    config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config.resource_requests == {"memory": "2Gi", "cpu": "500m"}
+    assert config.resource_limits == {"memory": "8Gi", "cpu": "2"}
+
+
+def test_kubernetes_backend_config_resources_default_when_env_unset(tmp_path: Path) -> None:
+    """Resource defaults kick in when no override env vars are present."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_WORKER_BACKEND=kubernetes\n"
+            "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+
+    config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config.resource_requests == {"memory": "256Mi", "cpu": "100m"}
+    assert config.resource_limits == {"memory": "1Gi", "cpu": "500m"}
+
+
+def test_kubernetes_backend_renders_configured_resources_on_worker_container(tmp_path: Path) -> None:
+    """Configured resource requests/limits land on the rendered worker container."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        resource_requests={"memory": "2Gi", "cpu": "500m"},
+        resource_limits={"memory": "8Gi", "cpu": "2"},
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    container = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]
+    assert container["resources"]["requests"] == {"memory": "2Gi", "cpu": "500m"}
+    assert container["resources"]["limits"] == {"memory": "8Gi", "cpu": "2"}
 
 
 def test_kubernetes_backend_rejects_unknown_worker_keys_for_scoped_mounts() -> None:

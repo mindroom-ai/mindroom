@@ -29,8 +29,6 @@ if TYPE_CHECKING:
     from .kubernetes_config import _KubernetesWorkerBackendConfig
 
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
-_DEFAULT_RESOURCE_REQUESTS = {"memory": "256Mi", "cpu": "100m"}
-_DEFAULT_RESOURCE_LIMITS = {"memory": "1Gi", "cpu": "500m"}
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
 _HOSTNAME_ENV = "HOSTNAME"
@@ -567,8 +565,8 @@ class KubernetesResourceManager:
                         "failureThreshold": 6,
                     },
                     "resources": {
-                        "requests": dict(_DEFAULT_RESOURCE_REQUESTS),
-                        "limits": dict(_DEFAULT_RESOURCE_LIMITS),
+                        "requests": dict(self.config.resource_requests),
+                        "limits": dict(self.config.resource_limits),
                     },
                     "securityContext": {
                         "allowPrivilegeEscalation": False,
