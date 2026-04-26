@@ -17,6 +17,8 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import ResolvedKnowledgeBinding, resolve_knowledge_binding
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -393,9 +395,10 @@ async def initialize_shared_knowledge_managers(
     start_watchers: bool = False,
     reindex_on_create: bool = True,
     reconcile_existing_runtime: bool = False,
+    base_ids: Iterable[str] | None = None,
 ) -> dict[str, KnowledgeManager]:
     """Initialize process-global shared knowledge managers for configured shared bases only."""
-    configured_base_ids = set(config.knowledge_bases)
+    configured_base_ids = set(config.knowledge_bases) if base_ids is None else set(base_ids)
     managers: dict[str, KnowledgeManager] = {}
 
     for base_id in sorted(configured_base_ids):
@@ -415,6 +418,16 @@ async def initialize_shared_knowledge_managers(
         await _stop_and_remove_shared_manager(base_id)
 
     return managers
+
+
+def referenced_shared_knowledge_base_ids(config: Config) -> set[str]:
+    """Return configured shared knowledge bases referenced by active agents."""
+    referenced_base_ids: set[str] = set()
+    for agent_name in config.agents:
+        for base_id in config.get_agent_knowledge_base_ids(agent_name):
+            if base_id in config.knowledge_bases and config.get_private_knowledge_base_agent(base_id) is None:
+                referenced_base_ids.add(base_id)
+    return referenced_base_ids
 
 
 async def ensure_shared_knowledge_manager(

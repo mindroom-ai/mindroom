@@ -16,6 +16,7 @@ from mindroom.authorization import (
     get_effective_sender_id_for_reply_permissions,
     is_authorized_sender,
 )
+from mindroom.background_tasks import create_background_task
 from mindroom.coalescing import (
     CoalescedBatch,
     CoalescingGate,
@@ -76,6 +77,7 @@ from mindroom.timing import (
     attach_dispatch_pipeline_timing,
     create_dispatch_pipeline_timing,
     emit_elapsed_timing,
+    emit_timing_event,
     event_timing_scope,
     get_dispatch_pipeline_timing,
 )
@@ -415,11 +417,48 @@ class TurnController:
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> None:
-        """Persist one ingress cache mutation while recording its contribution to ingress latency."""
+        """Schedule one advisory ingress cache mutation without delaying dispatch."""
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_cache_append_start")
-        await self.deps.conversation_cache.append_live_event(room_id, event, event_info=event_info)
+        scheduled_at = time.perf_counter()
+
+        async def append_live_event() -> None:
+            outcome = "ok"
+            append_started_at = time.perf_counter()
+            try:
+                await self.deps.conversation_cache.append_live_event(room_id, event, event_info=event_info)
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except Exception as exc:
+                outcome = "error"
+                self.deps.logger.warning(
+                    "Live Matrix event cache append failed; continuing without advisory cache update",
+                    room_id=room_id,
+                    event_id=event.event_id,
+                    error=str(exc),
+                )
+            finally:
+                finished_at = time.perf_counter()
+                emit_timing_event(
+                    "Live event cache append background timing",
+                    room_id=room_id,
+                    event_id=event.event_id,
+                    schedule_wait_ms=round((append_started_at - scheduled_at) * 1000, 1),
+                    append_ms=round((finished_at - append_started_at) * 1000, 1),
+                    total_ms=round((finished_at - scheduled_at) * 1000, 1),
+                    outcome=outcome,
+                    timing_scope=event_timing_scope(event.event_id),
+                )
+
+        create_background_task(
+            append_live_event(),
+            name=f"matrix_cache_append_live_event:{event_timing_scope(event.event_id)}",
+            owner=self.deps.runtime,
+            log_exceptions=False,
+        )
         if dispatch_timing is not None:
+            dispatch_timing.note(ingress_cache_append_mode="background")
             dispatch_timing.mark("ingress_cache_append_ready")
 
     async def _resolve_text_event_with_ingress_timing(

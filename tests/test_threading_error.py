@@ -3833,6 +3833,7 @@ class TestThreadingBehavior:
 
         try:
             await bot._turn_controller.handle_media_event(room, audio_event)
+            await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
             await bot.event_cache_write_coordinator.wait_for_room_idle(room_id)
 
             assert await real_event_cache.get_thread_id_for_event(room_id, audio_event_id) == thread_root_id
