@@ -188,6 +188,18 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     _VectorDb.collections = {}
 
 
+async def _wait_for_refresh_lock_borrowers(
+    key: knowledge_registry.KnowledgeSourceKey,
+    expected: int,
+) -> None:
+    for _ in range(50):
+        entry = knowledge_refresh_runner._refresh_locks.get(key)
+        if entry is not None and entry.borrowers == expected:
+            return
+        await asyncio.sleep(0)
+    pytest.fail(f"refresh lock for {key} did not reach {expected} borrowers")
+
+
 def _config(
     tmp_path: Path,
     *,
@@ -1109,6 +1121,94 @@ async def test_cancelled_refresh_waiting_for_source_lock_clears_running_advisory
 
     release_first.set()
     await first_task
+
+
+@pytest.mark.asyncio
+async def test_cancelled_source_lock_waiter_does_not_wedge_later_mutation(tmp_path: Path) -> None:
+    """A cancelled queued waiter must not acquire and leak the source lock."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    refresh_key = knowledge_registry.resolve_refresh_key("docs", config=config, runtime_paths=runtime_paths)
+    source_key = knowledge_registry.source_key_for_refresh_key(refresh_key)
+    holder_entered = asyncio.Event()
+    release_holder = asyncio.Event()
+    waiter_entered = asyncio.Event()
+
+    async def _hold_lock() -> None:
+        async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
+            holder_entered.set()
+            await release_holder.wait()
+
+    async def _queued_waiter() -> None:
+        async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
+            waiter_entered.set()
+
+    holder_task = asyncio.create_task(_hold_lock())
+    await holder_entered.wait()
+    waiter_task = asyncio.create_task(_queued_waiter())
+    await _wait_for_refresh_lock_borrowers(source_key, 2)
+
+    waiter_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter_task
+
+    release_holder.set()
+    await holder_task
+
+    async with asyncio.timeout(1):
+        async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
+            pass
+    assert not waiter_entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pruning must not drop a lock entry with an active queued waiter."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    refresh_key = knowledge_registry.resolve_refresh_key("docs", config=config, runtime_paths=runtime_paths)
+    source_key = knowledge_registry.source_key_for_refresh_key(refresh_key)
+    holder_entered = asyncio.Event()
+    release_holder = asyncio.Event()
+    waiter_entered = asyncio.Event()
+    monkeypatch.setattr(knowledge_refresh_runner, "_MAX_REFRESH_LOCKS", 1)
+
+    async def _hold_lock() -> None:
+        async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
+            holder_entered.set()
+            await release_holder.wait()
+
+    async def _queued_waiter() -> None:
+        async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
+            waiter_entered.set()
+
+    holder_task = asyncio.create_task(_hold_lock())
+    await holder_entered.wait()
+    waiter_task = asyncio.create_task(_queued_waiter())
+    await _wait_for_refresh_lock_borrowers(source_key, 2)
+    original_entry = knowledge_refresh_runner._refresh_locks[source_key]
+
+    for index in range(5):
+        knowledge_refresh_runner._refresh_lock_for_key(
+            knowledge_registry.KnowledgeSourceKey(
+                storage_root=str(tmp_path / f"other-{index}"),
+                knowledge_path=str(tmp_path / f"other-{index}" / "docs"),
+            ),
+        )
+
+    assert knowledge_refresh_runner._refresh_locks.get(source_key) is original_entry
+
+    release_holder.set()
+    async with asyncio.timeout(1):
+        await asyncio.gather(holder_task, waiter_task)
+    assert waiter_entered.is_set()
 
 
 def test_mark_dirty_uses_advisory_sidecar_without_mutating_published_metadata(tmp_path: Path) -> None:
@@ -3904,7 +4004,7 @@ def test_private_request_scoped_bookkeeping_is_bounded(tmp_path: Path) -> None:
             settings=key.indexing_settings,
             cooldown_seconds=300,
         )
-        knowledge_refresh_runner._refresh_lock_for_key(refresh_key)
+        knowledge_refresh_runner._refresh_lock_for_key(knowledge_registry.source_key_for_refresh_key(refresh_key))
 
     private_snapshot_count = sum(
         key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
@@ -3913,6 +4013,72 @@ def test_private_request_scoped_bookkeeping_is_bounded(tmp_path: Path) -> None:
     assert private_snapshot_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_SNAPSHOTS
     assert len(knowledge_utils._refresh_scheduled_at) <= knowledge_utils._MAX_REFRESH_SCHEDULED_COOLDOWNS
     assert len(knowledge_refresh_runner._refresh_locks) <= knowledge_refresh_runner._MAX_REFRESH_LOCKS
+
+
+def test_private_snapshot_read_path_cache_insertion_is_bounded(tmp_path: Path) -> None:
+    """Loading persisted private snapshots through the read path should prune old cache entries."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        knowledge=AgentPrivateKnowledgeConfig(path="knowledge"),
+                    ),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths,
+    )
+    base_id = config.get_agent_private_knowledge_base_id("helper")
+    assert base_id is not None
+    count = knowledge_registry._MAX_PRIVATE_PUBLISHED_SNAPSHOTS + 10
+
+    for index in range(count):
+        identity = _identity(f"@user{index}:localhost")
+        key = resolve_snapshot_key(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            create=True,
+        )
+        collection = f"private_read_collection_{index}"
+        _VectorDb.collections[collection] = [
+            {"content": f"private read {index}", "metadata": {"source_path": "note.md"}},
+        ]
+        knowledge_registry.save_published_indexing_state(
+            snapshot_metadata_path(key),
+            knowledge_registry.PublishedIndexingState(
+                settings=key.indexing_settings,
+                status="complete",
+                collection=collection,
+                indexed_count=1,
+                source_signature=f"sig-{index}",
+            ),
+        )
+        knowledge_registry.save_snapshot_refresh_success_state(key)
+
+    clear_published_snapshots()
+
+    for index in range(count):
+        lookup = get_published_snapshot(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=_identity(f"@user{index}:localhost"),
+        )
+        assert lookup.snapshot is not None
+
+    private_snapshot_count = sum(
+        key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+        for key in knowledge_registry._published_snapshots
+    )
+    assert private_snapshot_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_SNAPSHOTS
 
 
 def test_non_weakrefable_snapshot_handle_does_not_leak_collection_lease(tmp_path: Path) -> None:

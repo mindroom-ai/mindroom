@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from threading import Lock
 from typing import TYPE_CHECKING
@@ -60,31 +60,60 @@ class KnowledgeRefreshResult:
     last_error: str | None = None
 
 
-_refresh_locks: dict[KnowledgeSourceKey, Lock] = {}
 _refresh_locks_guard = Lock()
 _active_refresh_counts: dict[KnowledgeRefreshKey, int] = {}
 _active_refresh_counts_guard = Lock()
 _MAX_REFRESH_LOCKS = 512
 
 
-def _refresh_lock_for_key(key: KnowledgeSourceKey) -> Lock:
+@dataclass
+class _RefreshLockEntry:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    borrowers: int = 0
+
+
+_refresh_locks: dict[KnowledgeSourceKey, _RefreshLockEntry] = {}
+
+
+def _refresh_lock_for_key(key: KnowledgeSourceKey) -> _RefreshLockEntry:
     with _refresh_locks_guard:
-        lock = _refresh_locks.get(key)
-        if lock is None:
-            lock = Lock()
-            _refresh_locks[key] = lock
+        entry = _refresh_locks.get(key)
+        if entry is None:
+            _prune_refresh_locks_locked(reserve_slots=1)
+            entry = _RefreshLockEntry()
+            _refresh_locks[key] = entry
+        return entry
+
+
+def _borrow_refresh_lock_for_key(key: KnowledgeSourceKey) -> _RefreshLockEntry:
+    with _refresh_locks_guard:
+        entry = _refresh_locks.get(key)
+        if entry is None:
+            _prune_refresh_locks_locked(reserve_slots=1)
+            entry = _RefreshLockEntry()
+            _refresh_locks[key] = entry
+        entry.borrowers += 1
+        return entry
+
+
+def _release_refresh_lock_for_key(key: KnowledgeSourceKey, entry: _RefreshLockEntry) -> None:
+    with _refresh_locks_guard:
+        if entry.borrowers <= 0:
+            return
+        entry.borrowers -= 1
+        if _refresh_locks.get(key) is entry:
             _prune_refresh_locks_locked()
-        return lock
 
 
-def _prune_refresh_locks_locked() -> None:
-    if len(_refresh_locks) <= _MAX_REFRESH_LOCKS:
+def _prune_refresh_locks_locked(*, reserve_slots: int = 0) -> None:
+    target_size = max(_MAX_REFRESH_LOCKS - reserve_slots, 0)
+    if len(_refresh_locks) <= target_size:
         return
-    excess = len(_refresh_locks) - _MAX_REFRESH_LOCKS
-    for key, lock in tuple(_refresh_locks.items()):
+    excess = len(_refresh_locks) - target_size
+    for key, entry in tuple(_refresh_locks.items()):
         if excess <= 0:
             break
-        if lock.locked():
+        if entry.borrowers > 0 or entry.lock.locked():
             continue
         _refresh_locks.pop(key, None)
         excess -= 1
@@ -92,12 +121,16 @@ def _prune_refresh_locks_locked() -> None:
 
 @asynccontextmanager
 async def _acquire_refresh_lock(key: KnowledgeSourceKey) -> AsyncIterator[None]:
-    lock = _refresh_lock_for_key(key)
-    await asyncio.to_thread(lock.acquire)
+    entry = _borrow_refresh_lock_for_key(key)
+    acquired = False
     try:
+        await entry.lock.acquire()
+        acquired = True
         yield
     finally:
-        lock.release()
+        if acquired:
+            entry.lock.release()
+        _release_refresh_lock_for_key(key, entry)
 
 
 def _mark_refresh_active(key: KnowledgeRefreshKey) -> None:
@@ -160,7 +193,7 @@ async def knowledge_binding_mutation_lock(
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
 ) -> AsyncIterator[None]:
-    """Serialize direct source mutations with refresh publishes for one binding."""
+    """Serialize source mutations with refresh publishes in this runtime event loop."""
     key = resolve_refresh_key(
         base_id,
         config=config,

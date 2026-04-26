@@ -805,6 +805,12 @@ def prune_private_snapshot_bookkeeping() -> None:
         _published_snapshots.pop(key, None)
 
 
+def _cache_published_snapshot(snapshot: PublishedKnowledgeSnapshot) -> None:
+    _published_snapshots[snapshot.key] = snapshot
+    _remember_snapshot_handle(snapshot)
+    prune_private_snapshot_bookkeeping()
+
+
 def _evict_published_snapshots_for_refresh_key(refresh_key: KnowledgeRefreshKey) -> None:
     for cached_key in tuple(_published_snapshots):
         if _same_physical_binding(cached_key, refresh_key):
@@ -1070,8 +1076,7 @@ def get_published_snapshot(
             state=state,
             metadata_path=metadata_path,
         )
-        _published_snapshots[key] = snapshot
-        _remember_snapshot_handle(snapshot)
+        _cache_published_snapshot(snapshot)
         return KnowledgeSnapshotLookup(
             key=key,
             snapshot=snapshot,
@@ -1107,9 +1112,7 @@ def publish_snapshot(
         state=state,
         metadata_path=metadata_path or snapshot_metadata_path(key),
     )
-    _published_snapshots[key] = snapshot
-    _remember_snapshot_handle(snapshot)
-    prune_private_snapshot_bookkeeping()
+    _cache_published_snapshot(snapshot)
     return snapshot
 
 
@@ -1268,7 +1271,7 @@ def mark_snapshot_dirty(
     """Mark advisory state dirty after a direct source mutation.
 
     Callers that mutate files must hold ``knowledge_binding_mutation_lock`` so
-    advisory writes stay serialized with refresh publishes for the same binding.
+    this runtime serializes advisory writes with refresh publishes for the same binding.
     Returns the configured base IDs sharing the mutated physical source.
     """
     matching_keys = _snapshot_keys_for_shared_source(
@@ -1353,7 +1356,7 @@ async def mark_snapshot_dirty_async(
 ) -> tuple[str, ...]:
     """Async variant for request handlers that keeps advisory I/O off the event loop.
 
-    The caller still holds ``knowledge_binding_mutation_lock`` while this runs.
+    The caller still holds this runtime's ``knowledge_binding_mutation_lock`` while this runs.
     If cancellation arrives while the worker may still commit, this waits for
     every same-source advisory write before propagating cancellation.
     """
