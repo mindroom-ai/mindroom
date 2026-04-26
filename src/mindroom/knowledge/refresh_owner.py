@@ -96,6 +96,7 @@ class PerBindingKnowledgeRefreshOwner:
     """Own fire-and-forget refresh tasks without global manager coordination."""
 
     _tasks: dict[KnowledgeRefreshKey, asyncio.Task[None]] = field(default_factory=dict, init=False)
+    _active: dict[KnowledgeRefreshKey, _ScheduledRefresh] = field(default_factory=dict, init=False)
     _pending: dict[KnowledgeRefreshKey, _ScheduledRefresh] = field(default_factory=dict, init=False)
     _shutting_down: bool = field(default=False, init=False)
 
@@ -201,6 +202,10 @@ class PerBindingKnowledgeRefreshOwner:
         self._pending.clear()
         for request in pending:
             _complete_request_exception(request, asyncio.CancelledError())
+        active = list(self._active.values())
+        self._active.clear()
+        for request in active:
+            _complete_request_exception(request, asyncio.CancelledError())
         tasks = list(self._tasks.values())
         self._tasks.clear()
         for task in tasks:
@@ -283,6 +288,7 @@ class PerBindingKnowledgeRefreshOwner:
         if loop is None:
             return
         mark_refresh_active(key)
+        self._active[key] = request
         task = loop.create_task(
             self._run_refresh(key, request=request),
             name=f"knowledge_refresh:{request.base_id}",
@@ -292,12 +298,15 @@ class PerBindingKnowledgeRefreshOwner:
 
     def _handle_done(self, key: KnowledgeRefreshKey, task: asyncio.Task[None]) -> None:
         mark_refresh_inactive(key)
+        active_request: _ScheduledRefresh | None = None
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
+            active_request = self._active.pop(key, None)
         try:
             task.result()
         except asyncio.CancelledError:
-            pass
+            if active_request is not None:
+                _complete_request_exception(active_request, asyncio.CancelledError())
         except Exception:
             logger.exception("Background knowledge refresh failed", base_id=key.base_id)
         if self._shutting_down:

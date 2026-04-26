@@ -378,6 +378,10 @@ def _credential_free_repo_url(repo_url: str) -> str:
     parsed = urlparse(repo_url)
     if not parsed.scheme or not parsed.netloc:
         return repo_url
+    if parsed.scheme == "ssh" and "@" in parsed.netloc and parsed.password is None:
+        userinfo, host = parsed.netloc.rsplit("@", 1)
+        if userinfo and ":" not in userinfo:
+            return urlunparse(parsed._replace(netloc=f"{userinfo}@{host}", query="", fragment=""))
     hostname = parsed.netloc.rsplit("@", 1)[-1]
     return urlunparse(parsed._replace(netloc=hostname, query="", fragment=""))
 

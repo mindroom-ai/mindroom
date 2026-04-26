@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import time
 from contextlib import suppress
 from io import BytesIO
 from types import SimpleNamespace
@@ -407,6 +408,53 @@ def test_git_status_surfaces_last_refresh_error_from_snapshot_metadata(tmp_path:
     payload = response.json()
     assert payload["last_error"] == "Git command failed: https://***@example.com/repo.git"
     assert payload["git"]["last_error"] == "Git command failed: https://***@example.com/repo.git"
+
+
+@pytest.mark.asyncio
+async def test_git_status_probe_does_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow Git checkout probes should run off the API event loop."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(docs, git=True)
+    _publish_committed_runtime_config(client.app, config)
+    loop = asyncio.get_running_loop()
+    probe_started = asyncio.Event()
+
+    def _slow_git_checkout_present(*_args: object, **_kwargs: object) -> bool:
+        loop.call_soon_threadsafe(probe_started.set)
+        time.sleep(0.2)
+        return False
+
+    async def _empty_file_info(*_args: object, **_kwargs: object) -> knowledge_api._FileListInfo:
+        return knowledge_api._FileListInfo(files=[], total_size=0)
+
+    monkeypatch.setattr(knowledge_api, "git_checkout_present", _slow_git_checkout_present)
+    monkeypatch.setattr(knowledge_api, "_list_file_info", _empty_file_info)
+
+    status_task = asyncio.create_task(
+        knowledge_api.knowledge_status(
+            "research",
+            Request(
+                {
+                    "type": "http",
+                    "method": "GET",
+                    "path": "/api/knowledge/bases/research/status",
+                    "headers": [],
+                    "app": client.app,
+                },
+            ),
+        ),
+    )
+    await asyncio.wait_for(probe_started.wait(), timeout=0.1)
+    await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
+
+    assert status_task.done() is False
+    payload = await status_task
+    assert payload["git"]["repo_present"] is False
 
 
 def test_knowledge_status_redacts_legacy_snapshot_last_error(tmp_path: Path) -> None:

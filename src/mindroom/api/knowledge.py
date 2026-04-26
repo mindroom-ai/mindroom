@@ -300,7 +300,7 @@ def _is_refreshing(
     )
 
 
-def _git_status(
+async def _git_status(
     config: Config,
     base_id: str,
     runtime_paths: constants.RuntimePaths,
@@ -313,13 +313,18 @@ def _git_status(
     root = _knowledge_root(config, base_id, runtime_paths)
     state = _snapshot_state(config, base_id, runtime_paths)
     advisory = _snapshot_advisory_state(config, base_id, runtime_paths)
+    repo_present = await asyncio.to_thread(
+        git_checkout_present,
+        root,
+        timeout_seconds=_DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS,
+    )
     return {
         "repo_url": redact_url_credentials(git_config.repo_url),
         "branch": git_config.branch,
         "lfs": git_config.lfs,
         "startup_behavior": git_config.startup_behavior,
         "syncing": _is_refreshing(config, base_id, runtime_paths, request=request),
-        "repo_present": git_checkout_present(root, timeout_seconds=_DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS),
+        "repo_present": repo_present,
         "initial_sync_complete": (
             state is not None and state.status == "complete" and state.published_revision is not None
         ),
@@ -518,7 +523,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         file_info = await _list_file_info(config, base_id, root)
         snapshot_available, indexed_count = await _snapshot_status(config, base_id, runtime_paths)
         advisory = _snapshot_advisory_state(config, base_id, runtime_paths)
-        git_status = _git_status(config, base_id, runtime_paths, request=request)
+        git_status = await _git_status(config, base_id, runtime_paths, request=request)
         refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
         base_entry = {
@@ -682,7 +687,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     snapshot_available, indexed_count = await _snapshot_status(config, base_id, runtime_paths)
     advisory = _snapshot_advisory_state(config, base_id, runtime_paths)
     file_info = await _list_file_info(config, base_id, root)
-    git_status = _git_status(config, base_id, runtime_paths, request=request)
+    git_status = await _git_status(config, base_id, runtime_paths, request=request)
     refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
     payload = {

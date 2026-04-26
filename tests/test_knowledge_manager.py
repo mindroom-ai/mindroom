@@ -17,6 +17,7 @@ from agno.knowledge.document.base import Document
 from fastapi.testclient import TestClient
 
 import mindroom.knowledge.manager as knowledge_manager_module
+import mindroom.knowledge.refresh_owner as knowledge_refresh_owner
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
@@ -693,6 +694,37 @@ async def test_successful_publish_clears_dirty_advisory_state(tmp_path: Path) ->
     assert unavailable == {}
 
 
+@pytest.mark.asyncio
+async def test_refreshing_advisory_cancellation_clears_active_refresh_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during the initial refreshing advisory write must not leak active status."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    loop = asyncio.get_running_loop()
+    advisory_write_started = asyncio.Event()
+    release_advisory_write = Event()
+
+    def _blocked_refreshing_state(*_args: object, **_kwargs: object) -> None:
+        loop.call_soon_threadsafe(advisory_write_started.set)
+        assert release_advisory_write.wait(timeout=5)
+
+    monkeypatch.setattr(knowledge_refresh_runner, "save_snapshot_refreshing_state", _blocked_refreshing_state)
+
+    refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
+    await advisory_write_started.wait()
+    refresh_task.cancel()
+    release_advisory_write.set()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_task
+
+    refresh_key = knowledge_registry.resolve_refresh_key("docs", config=config, runtime_paths=runtime_paths)
+    assert knowledge_refresh_runner.is_refresh_active(refresh_key) is False
+
+
 def test_mark_dirty_uses_advisory_sidecar_without_mutating_published_metadata(tmp_path: Path) -> None:
     """Source mutation records advisory dirtiness without mutating published metadata or vectors."""
     docs_path = tmp_path / "docs"
@@ -814,6 +846,65 @@ async def test_async_mark_dirty_cancellation_waits_for_sidecar_commit(
     assert state.availability is None
     assert advisory.state == "stale"
     assert refreshed_lookup.availability is KnowledgeAvailability.STALE
+
+
+@pytest.mark.asyncio
+async def test_async_mark_dirty_cancellation_finishes_same_source_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after one alias write must still mark every same-source alias stale."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "guide.md"
+    doc.write_text("shared cached old", encoding="utf-8")
+    config = _config(tmp_path, bases={"alpha": docs_path, "beta": docs_path}, agent_bases=["alpha", "beta"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
+    doc.write_text("shared cached new", encoding="utf-8")
+
+    loop = asyncio.get_running_loop()
+    first_alias_written = asyncio.Event()
+    release_remaining_writes = Event()
+    original_mark = knowledge_registry._mark_snapshot_key_dirty_on_disk
+    written_base_ids: list[str] = []
+
+    def _block_after_first_alias(matching_key: knowledge_registry.KnowledgeSnapshotKey, *, reason: str) -> bool:
+        result = original_mark(matching_key, reason=reason)
+        written_base_ids.append(matching_key.base_id)
+        if len(written_base_ids) == 1:
+            loop.call_soon_threadsafe(first_alias_written.set)
+            assert release_remaining_writes.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(knowledge_registry, "_mark_snapshot_key_dirty_on_disk", _block_after_first_alias)
+
+    mark_task = asyncio.create_task(
+        knowledge_registry.mark_snapshot_dirty_async(
+            "alpha",
+            config=config,
+            runtime_paths=runtime_paths,
+        ),
+    )
+    await first_alias_written.wait()
+    mark_task.cancel()
+    release_remaining_writes.set()
+    with pytest.raises(asyncio.CancelledError):
+        await mark_task
+
+    alpha_key = resolve_snapshot_key("alpha", config=config, runtime_paths=runtime_paths)
+    beta_key = resolve_snapshot_key("beta", config=config, runtime_paths=runtime_paths)
+    alpha_advisory = knowledge_registry.load_snapshot_advisory_state(
+        knowledge_registry.snapshot_advisory_path(alpha_key),
+    )
+    beta_advisory = knowledge_registry.load_snapshot_advisory_state(
+        knowledge_registry.snapshot_advisory_path(beta_key),
+    )
+
+    assert tuple(written_base_ids) == ("alpha", "beta")
+    assert alpha_advisory.state == "stale"
+    assert beta_advisory.state == "stale"
 
 
 @pytest.mark.asyncio
@@ -1414,10 +1505,13 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(snapshot_metadata_path(key))
+    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
     assert state is not None
     assert state.collection is not None
     assert "_candidate_" in state.collection
     assert state.collection in _VectorDb.collections
+    assert advisory.state == "none"
+    assert advisory.refresh_job == "idle"
 
     clear_published_snapshots()
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
@@ -2678,8 +2772,8 @@ async def test_refresh_owner_runs_one_pending_refresh_after_active_task(
     second_started = asyncio.Event()
     release_first = asyncio.Event()
 
-    async def _fake_refresh(base_id: str, **_kwargs: object) -> object:
-        _ = base_id
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> object:
+        _ = _base_id
         nonlocal started_count
         started_count += 1
         if started_count == 1:
@@ -2755,6 +2849,44 @@ async def test_refresh_owner_superseded_manual_waiters_complete(
     assert started_count == 2
     assert result_b.indexed_count == 2
     assert result_c.indexed_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_owner_shutdown_completes_active_manual_waiter_before_refresh_advances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Immediate shutdown of an awaited owner refresh must not leave the waiter pending."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    owner = PerBindingKnowledgeRefreshOwner()
+    refresh_called = False
+
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> object:
+        nonlocal refresh_called
+        refresh_called = True
+        await asyncio.Event().wait()
+        return object()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+
+    loop = asyncio.get_running_loop()
+    completion: asyncio.Future[object] = loop.create_future()
+    key = knowledge_registry.resolve_refresh_key("docs", config=config, runtime_paths=runtime_paths)
+    request = knowledge_refresh_owner._ScheduledRefresh(
+        base_id="docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+        completions=[completion],
+    )
+    owner._start_task(key, request, loop=loop)
+    await owner.shutdown()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(completion, timeout=1)
+    assert refresh_called is False
 
 
 @pytest.mark.asyncio
@@ -3484,7 +3616,7 @@ async def test_git_noop_refresh_skips_full_reindex_when_snapshot_is_complete(
     runtime_paths = runtime_paths_for(config)
     sync_results = [
         {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
-        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-b"},
     ]
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
@@ -3508,10 +3640,21 @@ async def test_git_noop_refresh_skips_full_reindex_when_snapshot_is_complete(
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state_before_noop = load_published_indexing_state(snapshot_metadata_path(key))
+    assert state_before_noop is not None
+    assert state_before_noop.published_revision == "rev-a"
+    await asyncio.sleep(0.001)
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    state_after_noop = load_published_indexing_state(snapshot_metadata_path(key))
 
     assert result.published is True
     assert result.indexed_count == 1
+    assert state_after_noop is not None
+    assert state_after_noop.collection == state_before_noop.collection
+    assert state_after_noop.published_revision == "rev-b"
+    assert state_after_noop.last_published_at is not None
+    assert state_after_noop.last_published_at != state_before_noop.last_published_at
     assert reindex_count == 1
 
 
@@ -4872,6 +5015,32 @@ def test_redact_url_credentials_hides_entire_http_userinfo() -> None:
             "https://user:password@example.com/repo.git?token=secret#frag-secret",
         )
         == "https://example.com/repo.git"
+    )
+
+
+def test_credential_free_repo_url_preserves_passwordless_ssh_username() -> None:
+    """Passwordless SSH transport usernames are part of the clone identity."""
+    assert (
+        knowledge_manager_module._credential_free_repo_url(
+            "ssh://git@example.com/org/repo.git?token=secret#frag-secret",
+        )
+        == "ssh://git@example.com/org/repo.git"
+    )
+
+
+def test_credential_free_repo_url_strips_secret_bearing_userinfo() -> None:
+    """Persistent clone URLs must not retain passwords, HTTP userinfo, query strings, or fragments."""
+    assert (
+        knowledge_manager_module._credential_free_repo_url(
+            "ssh://git:secret@example.com/org/repo.git?token=secret#frag-secret",
+        )
+        == "ssh://example.com/org/repo.git"
+    )
+    assert (
+        knowledge_manager_module._credential_free_repo_url(
+            "https://user@example.com/org/repo.git?token=secret#frag-secret",
+        )
+        == "https://example.com/org/repo.git"
     )
 
 

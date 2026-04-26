@@ -1034,31 +1034,30 @@ async def mark_snapshot_dirty_async(
 
     The caller still holds ``knowledge_binding_mutation_lock`` while this runs.
     If cancellation arrives while the worker may still commit, this waits for
-    the worker before propagating cancellation.
+    every same-source advisory write before propagating cancellation.
     """
-    matching_keys = _snapshot_keys_for_shared_source(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
+    write_task = asyncio.create_task(
+        asyncio.to_thread(
+            mark_snapshot_dirty,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            reason=reason,
+        ),
     )
-    for matching_key in matching_keys:
-        write_task = asyncio.create_task(
-            asyncio.to_thread(_mark_snapshot_key_dirty_on_disk, matching_key, reason=reason),
-        )
+    try:
+        return await asyncio.shield(write_task)
+    except asyncio.CancelledError:
         try:
-            await asyncio.shield(write_task)
-        except asyncio.CancelledError:
-            try:
-                await write_task
-            except Exception:
-                logger.warning(
-                    "Knowledge advisory dirty marker write failed after cancellation",
-                    base_id=matching_key.base_id,
-                    exc_info=True,
-                )
-            raise
-    return tuple(dict.fromkeys(key.base_id for key in matching_keys))
+            await write_task
+        except Exception:
+            logger.warning(
+                "Knowledge advisory dirty marker write failed after cancellation",
+                base_id=base_id,
+                exc_info=True,
+            )
+        raise
 
 
 def clear_published_snapshots() -> None:
