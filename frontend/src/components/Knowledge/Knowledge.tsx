@@ -1394,7 +1394,8 @@ export function Knowledge() {
                         }}
                       />
                       <p className="text-xs text-muted-foreground">
-                        Check for updates every X seconds.
+                        Minimum snapshot age before checking for Git updates on
+                        access.
                       </p>
                     </div>
 

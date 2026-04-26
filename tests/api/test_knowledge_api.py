@@ -587,6 +587,87 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     refresh.assert_not_awaited()
 
 
+def test_upload_rejects_default_unsupported_extension_before_writing(tmp_path: Path) -> None:
+    """Uploads must match the same semantic filters used by listing and indexing."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", ("diagram.png", b"\x89PNG\r\n\x1a\n", "image/png"))],
+        )
+
+    assert response.status_code == 415
+    assert "not supported" in response.json()["detail"]
+    assert not docs.exists()
+    assert owner.scheduled == []
+    refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("base_config", "filename"),
+    [
+        (KnowledgeBaseConfig(path="", watch=False, include_extensions=[".md"]), "notes.txt"),
+        (KnowledgeBaseConfig(path="", watch=False, exclude_extensions=[".md"]), "guide.md"),
+    ],
+)
+def test_upload_rejects_configured_extension_filter_exclusions(
+    tmp_path: Path,
+    base_config: KnowledgeBaseConfig,
+    filename: str,
+) -> None:
+    """Configured include/exclude extension filters must reject uploads before bytes are staged."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    base_config.path = str(docs)
+    config = Config(agents={}, models={}, knowledge_bases={"research": base_config})
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", (filename, b"hello", "text/plain"))],
+        )
+
+    assert response.status_code == 415
+    assert "managed file filters" in response.json()["detail"]
+    assert not docs.exists()
+    assert owner.scheduled == []
+    refresh.assert_not_awaited()
+
+
+def test_upload_rejects_duplicate_normalized_multipart_filenames(tmp_path: Path) -> None:
+    """A batch must not contain two parts that normalize to the same destination path."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[
+                ("files", ("guide.md", b"first", "text/markdown")),
+                ("files", ("nested/guide.md", b"second", "text/markdown")),
+            ],
+        )
+
+    assert response.status_code == 409
+    assert "duplicate destination 'guide.md'" in response.json()["detail"]
+    assert not (docs / "guide.md").exists()
+    assert owner.scheduled == []
+    refresh.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_empty_upload_parts_are_noop_without_dirty_mark_or_refresh(tmp_path: Path) -> None:
     """Multipart parts without filenames should not mutate source availability."""

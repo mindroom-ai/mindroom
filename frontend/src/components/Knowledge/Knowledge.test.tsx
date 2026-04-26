@@ -1137,6 +1137,12 @@ describe("Knowledge", () => {
     render(<Knowledge />);
     await screen.findByText("Active: docs");
 
+    expect(
+      screen.getByText(
+        "Minimum snapshot age before checking for Git updates on access.",
+      ),
+    ).toBeInTheDocument();
+
     fireEvent.change(screen.getByLabelText("Replacement Repository URL"), {
       target: { value: "  https://github.com/org/repo-updated  " },
     });

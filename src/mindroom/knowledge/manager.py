@@ -2019,6 +2019,17 @@ class KnowledgeManager:
             knowledge=target_knowledge,
         )
         if not has_vectors:
+            if source_size == 0:
+                if indexed_files is not None and indexed_signatures is not None:
+                    indexed_files.add(relative_path)
+                    indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
+                else:
+                    async with self._state_lock:
+                        self._indexed_files.add(relative_path)
+                        self._indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
+                logger.info("Scanned empty knowledge file with no vectors", base_id=self.base_id, path=relative_path)
+                return True
+
             logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
             if indexed_files is not None and indexed_signatures is not None:
                 indexed_files.discard(relative_path)

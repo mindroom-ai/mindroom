@@ -2920,6 +2920,51 @@ async def test_first_time_partial_refresh_does_not_publish_ready_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty managed files should count as scanned without blocking cold snapshot publication."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "useful.md").write_text("useful vectors", encoding="utf-8")
+    (docs_path / "empty.md").write_text("", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    class _SkipEmptyKnowledge(_Knowledge):
+        async def ainsert(
+            self,
+            *,
+            path: str,
+            metadata: dict[str, object],
+            upsert: bool,
+            reader: object | None = None,
+        ) -> None:
+            if Path(path).read_text(encoding="utf-8"):
+                await super().ainsert(path=path, metadata=metadata, upsert=upsert, reader=reader)
+
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _SkipEmptyKnowledge)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
+    lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.indexed_count == 2
+    assert result.published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert state is not None
+    assert state.indexed_count == 2
+    assert advisory.state == "none"
+    assert lookup.snapshot is not None
+    assert [document.content for document in lookup.snapshot.knowledge.search("useful", max_results=5)] == [
+        "useful vectors",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_embedder_changing_partial_refresh_does_not_publish_old_snapshot_under_new_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

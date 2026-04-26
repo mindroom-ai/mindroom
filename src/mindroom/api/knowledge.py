@@ -39,7 +39,7 @@ from mindroom.knowledge import (
 from mindroom.knowledge import (
     list_knowledge_files as list_managed_knowledge_files,
 )
-from mindroom.knowledge.manager import git_checkout_present
+from mindroom.knowledge.manager import git_checkout_present, include_semantic_knowledge_relative_path
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -508,6 +508,25 @@ def _reject_non_file_upload_destination(destination: Path, relative_path: str) -
         )
 
 
+def _reject_unsupported_upload_path(config: Config, base_id: str, relative_path: str) -> None:
+    if include_semantic_knowledge_relative_path(config, base_id, relative_path):
+        return
+    raise HTTPException(
+        status_code=415,
+        detail=(
+            f"File '{relative_path}' is not supported by knowledge base '{base_id}' "
+            "because it is excluded by the managed file filters"
+        ),
+    )
+
+
+def _reject_duplicate_upload_destination(relative_path: str) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail=f"Upload batch contains duplicate destination '{relative_path}'",
+    )
+
+
 async def _stage_upload(upload: UploadFile, destination: Path, filename: str, root: Path) -> _StagedUpload:
     _validate_upload_size_hint(upload, filename)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -587,24 +606,33 @@ async def _stage_uploads(
 ) -> list[_StagedUpload]:
     staged_uploads: list[_StagedUpload] = []
     try:
+        upload_targets: list[tuple[UploadFile, Path, str]] = []
+        seen_relative_paths: set[str] = set()
+        resolved_root = root.resolve()
         for upload in files:
             filename = Path(upload.filename or "").name
             if not filename:
-                await upload.close()
                 continue
 
-            try:
-                destination = _resolve_within_root(root, filename)
-                _reject_git_file_mutation(config, base_id, runtime_paths, destination)
-                relative_path = destination.relative_to(root.resolve()).as_posix()
-                _reject_non_file_upload_destination(destination, relative_path)
-                staged_uploads.append(await _stage_upload(upload, destination, filename, root))
-            finally:
-                await upload.close()
+            destination = _resolve_within_root(root, filename)
+            _reject_git_file_mutation(config, base_id, runtime_paths, destination)
+            relative_path = destination.relative_to(resolved_root).as_posix()
+            _reject_unsupported_upload_path(config, base_id, relative_path)
+            if relative_path in seen_relative_paths:
+                _reject_duplicate_upload_destination(relative_path)
+            seen_relative_paths.add(relative_path)
+            _reject_non_file_upload_destination(destination, relative_path)
+            upload_targets.append((upload, destination, filename))
+
+        for upload, destination, filename in upload_targets:
+            staged_uploads.append(await _stage_upload(upload, destination, filename, root))
     except (asyncio.CancelledError, Exception):
         for staged in staged_uploads:
             staged.temp_path.unlink(missing_ok=True)
         raise
+    finally:
+        for upload in files:
+            await upload.close()
     return staged_uploads
 
 
