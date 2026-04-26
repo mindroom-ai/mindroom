@@ -25,6 +25,10 @@ _DEFAULT_CONFIG_PATH = "/app/config.yaml"
 _DEFAULT_STORAGE_MOUNT_PATH = "/app/worker"
 _DEFAULT_SERVICE_ACCOUNT_NAME = "default"
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
+_DEFAULT_MEMORY_REQUEST = "256Mi"
+_DEFAULT_MEMORY_LIMIT = "1Gi"
+_DEFAULT_CPU_REQUEST = "100m"
+_DEFAULT_CPU_LIMIT = "500m"
 
 _WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _NAMESPACE_ENV = "MINDROOM_KUBERNETES_WORKER_NAMESPACE"
@@ -48,6 +52,10 @@ _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV = "MINDROOM_KUBERNETES_WORKER_COLOCATE_WIT
 _EXTRA_ENV_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_LABELS_JSON"
 _OWNER_DEPLOYMENT_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME"
+_MEMORY_REQUEST_ENV = "MINDROOM_KUBERNETES_WORKER_MEMORY_REQUEST"
+_MEMORY_LIMIT_ENV = "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT"
+_CPU_REQUEST_ENV = "MINDROOM_KUBERNETES_WORKER_CPU_REQUEST"
+_CPU_LIMIT_ENV = "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT"
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 
 
@@ -126,6 +134,8 @@ class _KubernetesWorkerBackendConfig:
     extra_env: dict[str, str]
     extra_labels: dict[str, str]
     owner_deployment_name: str | None
+    resource_requests: dict[str, str]
+    resource_limits: dict[str, str]
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _KubernetesWorkerBackendConfig:
@@ -144,6 +154,14 @@ class _KubernetesWorkerBackendConfig:
 
         config_map_name = _read_env(env, _CONFIG_MAP_NAME_ENV) or None
         token_secret_name = _read_env(env, _TOKEN_SECRET_NAME_ENV) or None
+        resource_requests = {
+            "memory": _read_env(env, _MEMORY_REQUEST_ENV, _DEFAULT_MEMORY_REQUEST) or _DEFAULT_MEMORY_REQUEST,
+            "cpu": _read_env(env, _CPU_REQUEST_ENV, _DEFAULT_CPU_REQUEST) or _DEFAULT_CPU_REQUEST,
+        }
+        resource_limits = {
+            "memory": _read_env(env, _MEMORY_LIMIT_ENV, _DEFAULT_MEMORY_LIMIT) or _DEFAULT_MEMORY_LIMIT,
+            "cpu": _read_env(env, _CPU_LIMIT_ENV, _DEFAULT_CPU_LIMIT) or _DEFAULT_CPU_LIMIT,
+        }
         return cls(
             namespace=namespace,
             image=image,
@@ -170,6 +188,8 @@ class _KubernetesWorkerBackendConfig:
             extra_env=_read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
             extra_labels=_read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
             owner_deployment_name=_read_env(env, _OWNER_DEPLOYMENT_NAME_ENV) or None,
+            resource_requests=resource_requests,
+            resource_limits=resource_limits,
         )
 
 
@@ -183,6 +203,8 @@ def kubernetes_backend_config_signature(
     config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
+    resource_requests_json = json.dumps(config.resource_requests, sort_keys=True, separators=(",", ":"))
+    resource_limits_json = json.dumps(config.resource_limits, sort_keys=True, separators=(",", ":"))
     return (
         "kubernetes",
         config.namespace,
@@ -206,6 +228,8 @@ def kubernetes_backend_config_signature(
         extra_env_json,
         extra_labels_json,
         config.owner_deployment_name or "",
+        resource_requests_json,
+        resource_limits_json,
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )
