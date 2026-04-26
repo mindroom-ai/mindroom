@@ -138,6 +138,10 @@ function redactUrlCredentials(value: string): string {
   }
 }
 
+function gitRepoUrlInputValue(value: string): string {
+  return redactUrlCredentials(value);
+}
+
 function formatStartupMode(value: "resume" | "incremental"): string {
   switch (value) {
     case "resume":
@@ -1272,7 +1276,7 @@ export function Knowledge() {
                       </label>
                       <Input
                         id="knowledge-git-repo-url"
-                        value={settings.git.repo_url}
+                        value={gitRepoUrlInputValue(settings.git.repo_url)}
                         onChange={(event) =>
                           updateGitSettings({ repo_url: event.target.value })
                         }

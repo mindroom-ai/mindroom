@@ -119,11 +119,12 @@ async def _list_file_info(
 ) -> _FileListInfo:
     files: list[dict[str, Any]] = []
     total_size = 0
+    resolved_root = root.resolve()
 
-    if not root.is_dir():
+    if not resolved_root.is_dir():
         return _FileListInfo(files=files, total_size=total_size)
 
-    managed_paths, error = await _list_managed_file_paths(config, base_id, root)
+    managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root)
     if error is not None:
         return _FileListInfo(files=[], total_size=0, degraded=True, error=error)
     paths = (
@@ -132,7 +133,7 @@ async def _list_file_info(
     for file_path in paths:
         try:
             stat = file_path.stat()
-            relative_path = file_path.relative_to(root).as_posix()
+            relative_path = file_path.relative_to(resolved_root).as_posix()
         except (OSError, ValueError):
             continue
         total_size += stat.st_size
@@ -205,6 +206,27 @@ def _schedule_refreshes(
         _schedule_refresh(config, base_id, runtime_paths, request=request)
 
 
+async def _mark_dirty_after_committed_mutation(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    reason: str,
+) -> tuple[tuple[str, ...], bool]:
+    dirty_task = asyncio.create_task(
+        mark_snapshot_dirty_async(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            reason=reason,
+        ),
+    )
+    try:
+        return await asyncio.shield(dirty_task), False
+    except asyncio.CancelledError:
+        return await dirty_task, True
+
+
 def _snapshot_status_sync(
     config: Config,
     base_id: str,
@@ -223,9 +245,9 @@ def _snapshot_status_sync(
         return False, 0
     if state is None:
         return False, 0
-    available = state.status == "complete"
-    if available:
-        available = snapshot_collection_exists_for_state(key, state)
+    if snapshot_availability_for_state(key=key, state=state) is not KnowledgeAvailability.READY:
+        return False, 0
+    available = snapshot_collection_exists_for_state(key, state)
     return available, state.indexed_count or 0
 
 
@@ -435,6 +457,9 @@ async def _stage_upload(upload: UploadFile, destination: Path, filename: str, ro
     temp_path = _upload_temp_path(destination)
     try:
         await _stream_upload_to_destination(upload, temp_path, filename)
+    except asyncio.CancelledError:
+        temp_path.unlink(missing_ok=True)
+        raise
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
@@ -463,7 +488,7 @@ def _commit_staged_uploads(staged_uploads: list[_StagedUpload]) -> list[_Committ
                 ),
             )
             staged.temp_path.replace(staged.destination)
-    except Exception:
+    except (asyncio.CancelledError, Exception):
         for committed in reversed(committed_uploads):
             destination = committed.destination
             backup_path = committed.backup_path
@@ -493,6 +518,37 @@ def _rollback_committed_uploads(committed_uploads: list[_CommittedUpload]) -> No
         committed.destination.unlink(missing_ok=True)
         if committed.backup_path is not None and committed.backup_path.exists():
             committed.backup_path.replace(committed.destination)
+
+
+async def _stage_uploads(
+    files: list[UploadFile],
+    *,
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+    root: Path,
+) -> list[_StagedUpload]:
+    staged_uploads: list[_StagedUpload] = []
+    try:
+        for upload in files:
+            filename = Path(upload.filename or "").name
+            if not filename:
+                await upload.close()
+                continue
+
+            try:
+                destination = _resolve_within_root(root, filename)
+                _reject_git_file_mutation(config, base_id, runtime_paths, destination)
+                relative_path = destination.relative_to(root.resolve()).as_posix()
+                _reject_non_file_upload_destination(destination, relative_path)
+                staged_uploads.append(await _stage_upload(upload, destination, filename, root))
+            finally:
+                await upload.close()
+    except (asyncio.CancelledError, Exception):
+        for staged in staged_uploads:
+            staged.temp_path.unlink(missing_ok=True)
+        raise
+    return staged_uploads
 
 
 def _delete_backup_path(target: Path) -> Path:
@@ -581,30 +637,17 @@ async def upload_knowledge_files(
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
     uploaded: list[str] = []
-    staged_uploads: list[_StagedUpload] = []
 
     async with knowledge_binding_mutation_lock(base_id, config=config, runtime_paths=runtime_paths):
         root = _knowledge_root(config, base_id, runtime_paths)
 
-        try:
-            for upload in files:
-                filename = Path(upload.filename or "").name
-                if not filename:
-                    await upload.close()
-                    continue
-
-                try:
-                    destination = _resolve_within_root(root, filename)
-                    _reject_git_file_mutation(config, base_id, runtime_paths, destination)
-                    relative_path = destination.relative_to(root.resolve()).as_posix()
-                    _reject_non_file_upload_destination(destination, relative_path)
-                    staged_uploads.append(await _stage_upload(upload, destination, filename, root))
-                finally:
-                    await upload.close()
-        except Exception:
-            for staged in staged_uploads:
-                staged.temp_path.unlink(missing_ok=True)
-            raise
+        staged_uploads = await _stage_uploads(
+            files,
+            config=config,
+            base_id=base_id,
+            runtime_paths=runtime_paths,
+            root=root,
+        )
 
         if not staged_uploads:
             return {
@@ -616,21 +659,22 @@ async def upload_knowledge_files(
         committed_uploads: list[_CommittedUpload] = []
         try:
             committed_uploads = _commit_staged_uploads(staged_uploads)
-            affected_base_ids = await mark_snapshot_dirty_async(
+            affected_base_ids, cancelled_after_dirty = await _mark_dirty_after_committed_mutation(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
                 reason="dashboard_upload",
             )
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             _rollback_committed_uploads(committed_uploads)
             for staged in staged_uploads:
                 staged.temp_path.unlink(missing_ok=True)
             raise
         _finalize_committed_uploads(committed_uploads)
         uploaded = [committed.relative_path for committed in committed_uploads]
-
-    _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
+        _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
+        if cancelled_after_dirty:
+            raise asyncio.CancelledError
 
     return {
         "base_id": base_id,
@@ -656,12 +700,15 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         relative_path = target.relative_to(root.resolve()).as_posix()
         backup_path = _move_file_to_delete_backup(target)
         try:
-            affected_base_ids = await mark_snapshot_dirty_async(
+            affected_base_ids, cancelled_after_dirty = await _mark_dirty_after_committed_mutation(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
                 reason="dashboard_delete",
             )
+        except asyncio.CancelledError:
+            _restore_deleted_file(target, backup_path)
+            raise
         except Exception:
             _restore_deleted_file(target, backup_path)
             raise
@@ -669,8 +716,9 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
             backup_path.unlink(missing_ok=True)
         except OSError:
             logger.warning("Failed to remove deleted knowledge file backup", path=str(backup_path), exc_info=True)
-
-    _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
+        _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
+        if cancelled_after_dirty:
+            raise asyncio.CancelledError
 
     return {
         "success": True,

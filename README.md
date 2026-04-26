@@ -325,7 +325,7 @@ export ANTHROPIC_API_KEY=your-key-here
 knowledge_bases:
   engineering_docs:
     path: ./knowledge_docs
-    watch: false  # Advisory; refresh runs on access or explicit API/dashboard actions.
+    watch: false  # Direct external edits require reindex; API/dashboard mutations still schedule refresh.
 
 agents:
   assistant:

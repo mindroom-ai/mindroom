@@ -725,6 +725,57 @@ async def test_refreshing_advisory_cancellation_clears_active_refresh_count(
     assert knowledge_refresh_runner.is_refresh_active(refresh_key) is False
 
 
+@pytest.mark.asyncio
+async def test_cancelled_refresh_waiting_for_source_lock_clears_running_advisory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation while queued behind another refresh must not leave advisory running."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("locked refresh", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    loop = asyncio.get_running_loop()
+    refreshing_write_count = 0
+    second_refreshing_saved = asyncio.Event()
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    original_save_refreshing = knowledge_refresh_runner.save_snapshot_refreshing_state
+    original_reindex = KnowledgeManager.reindex_all
+
+    def _track_refreshing_state(*args: object, **kwargs: object) -> None:
+        nonlocal refreshing_write_count
+        original_save_refreshing(*args, **kwargs)
+        refreshing_write_count += 1
+        if refreshing_write_count == 2:
+            loop.call_soon_threadsafe(second_refreshing_saved.set)
+
+    async def _blocked_reindex(self: KnowledgeManager, *, protected_collections: tuple[str, ...] = ()) -> int:
+        first_entered.set()
+        await release_first.wait()
+        return await original_reindex(self, protected_collections=protected_collections)
+
+    monkeypatch.setattr(knowledge_refresh_runner, "save_snapshot_refreshing_state", _track_refreshing_state)
+    monkeypatch.setattr(KnowledgeManager, "reindex_all", _blocked_reindex)
+
+    first_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
+    await first_entered.wait()
+    second_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
+    await second_refreshing_saved.wait()
+
+    second_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
+    assert advisory.refresh_job != "running"
+
+    release_first.set()
+    await first_task
+
+
 def test_mark_dirty_uses_advisory_sidecar_without_mutating_published_metadata(tmp_path: Path) -> None:
     """Source mutation records advisory dirtiness without mutating published metadata or vectors."""
     docs_path = tmp_path / "docs"
@@ -3771,6 +3822,32 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     assert [document.content for document in lookup.snapshot.knowledge.search("git", max_results=5)] == [
         "git repaired",
     ]
+
+
+@pytest.mark.asyncio
+async def test_unchanged_refresh_fails_when_publish_handle_rebuild_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-op path must not claim success without a usable published read handle."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("unchanged snapshot", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    monkeypatch.setattr(knowledge_refresh_runner, "publish_snapshot_from_state", lambda *_args, **_kwargs: None)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    advisory = knowledge_registry.load_snapshot_advisory_state(knowledge_registry.snapshot_advisory_path(key))
+
+    assert result.published is False
+    assert result.availability is KnowledgeAvailability.REFRESH_FAILED
+    assert result.last_error == "Published snapshot collection was missing during unchanged refresh"
+    assert advisory.state == "refresh_failed"
+    assert advisory.refresh_job == "failed"
 
 
 @pytest.mark.asyncio

@@ -194,23 +194,21 @@ async def refresh_knowledge_binding(
     )
     refresh_key = refresh_key_for_snapshot_key(key)
     _mark_refresh_active(refresh_key)
+    initial_state: PublishedIndexingState | None = None
     try:
         await _save_refreshing_state(key)
+        initial_state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
         async with _refresh_lock_for_key(source_key_for_snapshot_key(key)):
-            initial_state: PublishedIndexingState | None = None
-            try:
-                initial_state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
-                return await _refresh_knowledge_binding_locked(
-                    key,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                    force_reindex=force_reindex,
-                    initial_state=initial_state,
-                )
-            except asyncio.CancelledError:
-                await _reconcile_cancelled_refresh(key, initial_state=initial_state)
-                raise
+            return await _refresh_knowledge_binding_locked(
+                key,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                force_reindex=force_reindex,
+            )
+    except asyncio.CancelledError:
+        await _reconcile_cancelled_refresh(key, initial_state=initial_state)
+        raise
     finally:
         _mark_refresh_inactive(refresh_key)
         prune_private_snapshot_bookkeeping()
@@ -238,7 +236,6 @@ async def _refresh_knowledge_binding_locked(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     force_reindex: bool = False,
-    initial_state: PublishedIndexingState | None = None,
 ) -> KnowledgeRefreshResult:
     base_id = key.base_id
     manager: KnowledgeManager | None = None
@@ -267,11 +264,7 @@ async def _refresh_knowledge_binding_locked(
         )
         if unchanged_result is not None:
             return unchanged_result
-        try:
-            indexed_count = await _reindex_manager_snapshot(manager, key)
-        except asyncio.CancelledError:
-            await _reconcile_cancelled_refresh(key, initial_state=initial_state)
-            raise
+        indexed_count = await _reindex_manager_snapshot(manager, key)
         if manager._last_refresh_error is not None:
             error = redact_credentials_in_text(manager._last_refresh_error)
             await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=error)
@@ -453,20 +446,33 @@ async def _publish_unchanged_snapshot(
     updated_state = state
     if mark_git_initial_sync_complete:
         manager._mark_git_initial_sync_complete()
+    if state.settings != key.indexing_settings:
+        updated_state = replace(updated_state, settings=key.indexing_settings)
     if published_revision is not None:
         updated_state = replace(
-            state,
+            updated_state,
             last_published_at=datetime.now(tz=UTC).isoformat(),
             published_revision=published_revision,
         )
+    if updated_state != state:
         await asyncio.to_thread(save_published_indexing_state, snapshot_metadata_path(key), updated_state)
-    publish_snapshot_from_state(
+    snapshot = publish_snapshot_from_state(
         key,
         state=updated_state,
         config=manager.config,
         runtime_paths=manager.runtime_paths,
         metadata_path=snapshot_metadata_path(key),
     )
+    if snapshot is None:
+        error = "Published snapshot collection was missing during unchanged refresh"
+        await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=error)
+        return KnowledgeRefreshResult(
+            key=key,
+            indexed_count=updated_state.indexed_count or 0,
+            published=False,
+            availability=KnowledgeAvailability.REFRESH_FAILED,
+            last_error=error,
+        )
     await asyncio.to_thread(save_snapshot_refresh_success_state, key)
     return KnowledgeRefreshResult(
         key=key,

@@ -266,6 +266,30 @@ def test_status_collection_probe_runs_off_event_loop(tmp_path: Path, monkeypatch
     assert saw_running_loop is False
 
 
+def test_status_rejects_config_mismatched_published_snapshot(tmp_path: Path) -> None:
+    """Dashboard availability should match runtime snapshot compatibility checks."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(docs)
+    _write_snapshot_metadata(config, runtime_paths, indexed_count=9)
+    changed_config = _knowledge_config(docs)
+    changed_config.knowledge_bases["research"].chunk_size = 1024
+    _publish_committed_runtime_config(client.app, changed_config)
+
+    with patch(
+        "mindroom.api.knowledge.snapshot_collection_exists_for_state",
+        side_effect=AssertionError("config-mismatched snapshots should not probe collection availability"),
+    ):
+        response = client.get("/api/knowledge/bases/research/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["manager_available"] is False
+    assert payload["indexed_count"] == 0
+
+
 def test_knowledge_files_use_managed_file_filters(tmp_path: Path) -> None:
     """File list and status counts should match the refresh/indexer file filters."""
     client = _test_client(tmp_path)
@@ -310,6 +334,27 @@ def test_knowledge_files_use_managed_file_filters(tmp_path: Path) -> None:
     assert status_response.status_code == 200
     assert files_response.json()["file_count"] == 1
     assert [entry["path"] for entry in files_response.json()["files"]] == ["content/guide.md"]
+    assert status_response.json()["file_count"] == 1
+
+
+def test_knowledge_files_under_symlinked_root_are_listed(tmp_path: Path) -> None:
+    """API file listing should use the same resolved root as managed path discovery."""
+    client = _test_client(tmp_path)
+    actual_docs = tmp_path / "actual-docs"
+    actual_docs.mkdir()
+    (actual_docs / "guide.md").write_text("linked root", encoding="utf-8")
+    docs_link = tmp_path / "docs-link"
+    docs_link.symlink_to(actual_docs, target_is_directory=True)
+    config = _knowledge_config(docs_link)
+    _publish_committed_runtime_config(client.app, config)
+
+    files_response = client.get("/api/knowledge/bases/research/files")
+    status_response = client.get("/api/knowledge/bases/research/status")
+
+    assert files_response.status_code == 200
+    assert status_response.status_code == 200
+    assert files_response.json()["file_count"] == 1
+    assert [entry["path"] for entry in files_response.json()["files"]] == ["guide.md"]
     assert status_response.json()["file_count"] == 1
 
 
@@ -673,6 +718,97 @@ def test_upload_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
     refresh.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_upload_cancellation_during_staging_removes_temp_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upload cancellation before commit should remove staged temp files."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    async def _cancel_stream(_upload: UploadFile, destination: Path, _filename: str) -> None:
+        destination.write_text("partial", encoding="utf-8")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(knowledge_api, "_stream_upload_to_destination", _cancel_stream)
+
+    with pytest.raises(asyncio.CancelledError):
+        await knowledge_api.upload_knowledge_files(
+            "research",
+            Request(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/api/knowledge/bases/research/upload",
+                    "headers": [],
+                    "app": client.app,
+                },
+            ),
+            [UploadFile(file=BytesIO(b"new"), filename="guide.md")],
+        )
+
+    assert not (docs / "guide.md").exists()
+    assert list(docs.glob(".*.upload.tmp")) == []
+    assert owner.scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_upload_cancellation_after_dirty_mark_finalizes_backup_and_schedules_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upload cancellation after dirty state commits should keep mutation cleanup and refresh scheduling."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("old", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+    dirty_started = asyncio.Event()
+    release_dirty = asyncio.Event()
+
+    async def _slow_dirty_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        dirty_started.set()
+        await release_dirty.wait()
+        return ("research",)
+
+    monkeypatch.setattr(knowledge_api, "mark_snapshot_dirty_async", _slow_dirty_mark)
+
+    upload_task = asyncio.create_task(
+        knowledge_api.upload_knowledge_files(
+            "research",
+            Request(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/api/knowledge/bases/research/upload",
+                    "headers": [],
+                    "app": client.app,
+                },
+            ),
+            [UploadFile(file=BytesIO(b"new"), filename="guide.md")],
+        ),
+    )
+    await dirty_started.wait()
+    upload_task.cancel()
+    release_dirty.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await upload_task
+
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "new"
+    assert list(docs.glob(".*.upload.tmp")) == []
+    assert list(docs.glob(".*.upload.bak")) == []
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+
+
 def test_upload_commit_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
     tmp_path: Path,
 ) -> None:
@@ -926,6 +1062,57 @@ def test_delete_dirty_mark_failure_leaves_source_unchanged_and_skips_refresh(tmp
     assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
     assert owner.scheduled == []
     refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_cancellation_after_dirty_mark_removes_backup_and_schedules_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delete cancellation after dirty state commits should finalize backup cleanup and schedule refresh."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+    dirty_started = asyncio.Event()
+    release_dirty = asyncio.Event()
+
+    async def _slow_dirty_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        dirty_started.set()
+        await release_dirty.wait()
+        return ("research",)
+
+    monkeypatch.setattr(knowledge_api, "mark_snapshot_dirty_async", _slow_dirty_mark)
+
+    delete_task = asyncio.create_task(
+        knowledge_api.delete_knowledge_file(
+            "research",
+            "guide.md",
+            Request(
+                {
+                    "type": "http",
+                    "method": "DELETE",
+                    "path": "/api/knowledge/bases/research/files/guide.md",
+                    "headers": [],
+                    "app": client.app,
+                },
+            ),
+        ),
+    )
+    await dirty_started.wait()
+    delete_task.cancel()
+    release_dirty.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await delete_task
+
+    assert not (docs / "guide.md").exists()
+    assert list(docs.glob(".*.delete.bak")) == []
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
 
 
 def test_delete_filesystem_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(

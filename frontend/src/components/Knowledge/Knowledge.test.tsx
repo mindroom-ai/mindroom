@@ -481,6 +481,61 @@ describe("Knowledge", () => {
     expect(gitCard).toHaveTextContent("Branch: release");
   });
 
+  it("does not render stored git URL credentials in the settings input", async () => {
+    mockStore({
+      git_docs: {
+        path: "./knowledge_docs/git_docs",
+        watch: true,
+        git: {
+          repo_url:
+            "https://token:secret@github.com/org/git-docs?token=query-secret#fragment-secret",
+          branch: "release",
+        },
+      },
+    });
+    setKnowledgeApiMock({
+      git_docs: {
+        status: {
+          base_id: "git_docs",
+          folder_path: "./knowledge_docs/git_docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+          git: {
+            repo_url: "https://***@github.com/org/git-docs",
+            branch: "release",
+            lfs: false,
+            startup_behavior: "blocking",
+            syncing: false,
+            repo_present: true,
+            initial_sync_complete: true,
+            last_successful_sync_at: null,
+            last_successful_commit: null,
+            last_error: null,
+            pending_startup_mode: null,
+          },
+        },
+        files: {
+          base_id: "git_docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: git_docs");
+
+    const repoInput = screen.getByLabelText(
+      "Repository URL",
+    ) as HTMLInputElement;
+    expect(repoInput.value).toBe("https://***@github.com/org/git-docs");
+    expect(repoInput.value).not.toContain("secret");
+    expect(repoInput.value).not.toContain("query-secret");
+    expect(repoInput.value).not.toContain("fragment-secret");
+  });
+
   it.each([
     {
       repoUrl: "https://github.com/org/git-docs?token=query-secret",
