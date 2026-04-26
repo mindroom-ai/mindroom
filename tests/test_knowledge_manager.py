@@ -335,6 +335,27 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
     assert owner.schedule_refresh.call_count == 0
 
 
+def test_initializing_knowledge_skips_duplicate_initial_load_when_owner_is_active(tmp_path: Path) -> None:
+    """An active owner refresh is enough for initializing knowledge."""
+    config = _config(
+        tmp_path,
+        bases={"docs": tmp_path / "docs", "unused": tmp_path / "unused"},
+        agent_bases=["docs"],
+    )
+    runtime_paths = runtime_paths_for(config)
+    owner = MagicMock()
+    owner.is_refreshing = MagicMock(return_value=True)
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+
+    knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
+
+    assert knowledge is None
+    owner.is_refreshing.assert_called_once()
+    owner.schedule_initial_load.assert_not_called()
+    owner.schedule_refresh.assert_not_called()
+
+
 def test_real_refresh_owner_without_running_loop_does_not_mark_active(tmp_path: Path) -> None:
     """Synchronous callers should not leave a binding stuck refreshing when no event loop is running."""
     docs_path = tmp_path / "docs"
@@ -621,6 +642,42 @@ async def test_stale_snapshot_metadata_schedules_refresh_without_source_scan(tmp
     owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
     assert owner.schedule_refresh.call_args.args == ("docs",)
+
+
+@pytest.mark.asyncio
+async def test_stale_snapshot_skips_duplicate_refresh_when_owner_is_active(tmp_path: Path) -> None:
+    """A stale snapshot should not queue another refresh while the owner is already active."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("ready snapshot", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    doc.write_text("ready snapshot changed", encoding="utf-8")
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.save_snapshot_dirty_state(key, reason="test_dirty")
+    clear_published_snapshots()
+    owner = MagicMock()
+    owner.is_refreshing = MagicMock(return_value=True)
+    owner.schedule_initial_load = MagicMock()
+    owner.schedule_refresh = MagicMock()
+    unavailable: dict[str, KnowledgeAvailability] = {}
+
+    knowledge = get_agent_knowledge(
+        "helper",
+        config,
+        runtime_paths,
+        on_unavailable_bases=unavailable.update,
+        refresh_owner=owner,
+    )
+
+    assert knowledge is not None
+    assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["ready snapshot"]
+    assert unavailable == {"docs": KnowledgeAvailability.STALE}
+    owner.is_refreshing.assert_called_once()
+    owner.schedule_initial_load.assert_not_called()
+    owner.schedule_refresh.assert_not_called()
 
 
 @pytest.mark.asyncio

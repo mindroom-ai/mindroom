@@ -1095,6 +1095,62 @@ def test_delete_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     refresh.assert_not_awaited()
 
 
+def test_delete_rejects_default_unsupported_extension_without_mutation(tmp_path: Path) -> None:
+    """Deletes must be limited to the same managed semantic files exposed by listing."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    image = docs / "diagram.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.delete("/api/knowledge/bases/research/files/diagram.png")
+
+    assert response.status_code == 415
+    assert "managed file filters" in response.json()["detail"]
+    assert image.read_bytes() == b"\x89PNG\r\n\x1a\n"
+    assert owner.scheduled == []
+    refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("base_config", "filename"),
+    [
+        (KnowledgeBaseConfig(path="", watch=False, include_extensions=[".md"]), "notes.txt"),
+        (KnowledgeBaseConfig(path="", watch=False, exclude_extensions=[".md"]), "guide.md"),
+    ],
+)
+def test_delete_rejects_configured_extension_filter_exclusions(
+    tmp_path: Path,
+    base_config: KnowledgeBaseConfig,
+    filename: str,
+) -> None:
+    """Configured include/exclude filters must also bound dashboard deletes."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    target = docs / filename
+    target.write_text("hello", encoding="utf-8")
+    base_config.path = str(docs)
+    config = Config(agents={}, models={}, knowledge_bases={"research": base_config})
+    _publish_committed_runtime_config(client.app, config)
+    owner = _RecordingRefreshOwner()
+    client.app.state.knowledge_refresh_owner = owner
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.delete(f"/api/knowledge/bases/research/files/{filename}")
+
+    assert response.status_code == 415
+    assert "managed file filters" in response.json()["detail"]
+    assert target.read_text(encoding="utf-8") == "hello"
+    assert owner.scheduled == []
+    refresh.assert_not_awaited()
+
+
 def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path) -> None:
     """Deletes from a shared source folder refresh every configured base reading that source."""
     client = _test_client(tmp_path)

@@ -508,7 +508,7 @@ def _reject_non_file_upload_destination(destination: Path, relative_path: str) -
         )
 
 
-def _reject_unsupported_upload_path(config: Config, base_id: str, relative_path: str) -> None:
+def _reject_unmanaged_knowledge_file_path(config: Config, base_id: str, relative_path: str) -> None:
     if include_semantic_knowledge_relative_path(config, base_id, relative_path):
         return
     raise HTTPException(
@@ -617,7 +617,7 @@ async def _stage_uploads(
             destination = _resolve_within_root(root, filename)
             _reject_git_file_mutation(config, base_id, runtime_paths, destination)
             relative_path = destination.relative_to(resolved_root).as_posix()
-            _reject_unsupported_upload_path(config, base_id, relative_path)
+            _reject_unmanaged_knowledge_file_path(config, base_id, relative_path)
             if relative_path in seen_relative_paths:
                 _reject_duplicate_upload_destination(relative_path)
             seen_relative_paths.add(relative_path)
@@ -783,6 +783,7 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
             raise HTTPException(status_code=404, detail="Knowledge file not found")
 
         relative_path = target.relative_to(root.resolve()).as_posix()
+        _reject_unmanaged_knowledge_file_path(config, base_id, relative_path)
         backup_path = _move_file_to_delete_backup(target)
         try:
             affected_base_ids, cancelled_after_dirty = await _mark_deleted_after_committed_mutation(

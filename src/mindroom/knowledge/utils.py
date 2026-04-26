@@ -324,16 +324,31 @@ def _schedule_refresh_for_availability(
         return KnowledgeAvailability.STALE if schedule_due or owner_is_refreshing else KnowledgeAvailability.READY
 
     if availability is KnowledgeAvailability.INITIALIZING:
-        if _refresh_schedule_due(refresh_key, availability, settings=lookup.key.indexing_settings):
+        owner_is_refreshing = _refresh_owner_is_refreshing(
+            refresh_owner,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
+        if not owner_is_refreshing and _refresh_schedule_due(
+            refresh_key,
+            availability,
+            settings=lookup.key.indexing_settings,
+        ):
             refresh_owner.schedule_initial_load(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             )
-        return availability
-
-    if _refresh_schedule_due(
+    elif not _refresh_owner_is_refreshing(
+        refresh_owner,
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    ) and _refresh_schedule_due(
         refresh_key,
         availability,
         settings=_refresh_retry_settings(lookup, config, runtime_paths, availability),
