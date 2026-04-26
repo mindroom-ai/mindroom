@@ -1,8 +1,13 @@
 """Pydantic models for Matrix state."""
 
+import fcntl
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import yaml
 from pydantic import BaseModel, Field, field_serializer
@@ -56,9 +61,8 @@ class MatrixState(BaseModel):
         data = self.model_dump(mode="json")
 
         state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        with state_file.open("w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        with _matrix_state_file_lock(state_file):
+            _write_matrix_state_file_locked(state_file, data)
 
     def get_account(self, key: str) -> _MatrixAccount | None:
         """Get an account by key."""
@@ -155,15 +159,68 @@ def _migrate_accounts_to_current_schema(state: MatrixState, *, current_domain: s
 
 def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixState:
     """Load one Matrix state file from disk."""
+    with _matrix_state_file_lock(state_file):
+        return _load_matrix_state_file_locked(state_file, current_domain=current_domain)
+
+
+def _load_matrix_state_file_locked(state_file: Path, *, current_domain: str) -> MatrixState:
+    """Load one Matrix state file while the state file lock is held."""
     if not state_file.exists():
         return MatrixState()
-    with state_file.open() as f:
+    with state_file.open(encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     state = MatrixState.model_validate(data)
     migrated = _migrate_accounts_to_current_schema(state, current_domain=current_domain)
     normalized_data = state.model_dump(mode="json")
     if migrated or data != normalized_data:
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        with state_file.open("w") as f:
-            yaml.dump(normalized_data, f, default_flow_style=False, sort_keys=False)
+        _write_matrix_state_file_locked(state_file, normalized_data)
     return state
+
+
+@contextmanager
+def _matrix_state_file_lock(state_file: Path) -> Iterator[None]:
+    """Serialize Matrix state readers and writers across processes."""
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = state_file.with_name(f"{state_file.name}.lock")
+    with lock_file.open("a+", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def _write_matrix_state_file_locked(state_file: Path, data: dict[str, object]) -> None:
+    """Atomically persist Matrix state while the state file lock is held."""
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=state_file.parent,
+            prefix=f".{state_file.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            yaml.safe_dump(data, temp_file, default_flow_style=False, sort_keys=False)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        temp_path.replace(state_file)
+        _fsync_directory(state_file.parent)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
+def _fsync_directory(path: Path) -> None:
+    """Flush a directory entry after an atomic file replacement."""
+    try:
+        directory_fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
