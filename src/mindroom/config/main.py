@@ -333,12 +333,14 @@ def _credential_free_repo_url_for_config_validation(repo_url: str) -> str:
     parsed = urlparse(repo_url)
     if not parsed.scheme or not parsed.netloc:
         return repo_url
+    path = parsed.path.split(";", 1)[0]
     if parsed.scheme == "ssh" and "@" in parsed.netloc and parsed.password is None:
         userinfo, host = parsed.netloc.rsplit("@", 1)
         if userinfo and ":" not in userinfo:
             return urlunparse(
                 parsed._replace(
                     netloc=f"{userinfo}@{host}",
+                    path=path,
                     params="",
                     query="",
                     fragment="",
@@ -348,6 +350,7 @@ def _credential_free_repo_url_for_config_validation(repo_url: str) -> str:
     return urlunparse(
         parsed._replace(
             netloc=netloc,
+            path=path,
             params="",
             query="",
             fragment="",

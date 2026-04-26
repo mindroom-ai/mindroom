@@ -9,6 +9,10 @@ from urllib.parse import unquote, urlparse, urlunparse
 _URL_PATTERN = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
 
 
+def _strip_path_params(path: str) -> str:
+    return path.split(";", 1)[0]
+
+
 def redact_url_credentials(value: str) -> str:
     """Redact URL credentials for any parsed URL scheme."""
     parsed = urlparse(value)
@@ -20,7 +24,15 @@ def redact_url_credentials(value: str) -> str:
         netloc = f"***@{host}"
     else:
         netloc = parsed.netloc
-    return urlunparse(parsed._replace(netloc=netloc, query="", fragment=""))
+    return urlunparse(
+        parsed._replace(
+            netloc=netloc,
+            path=_strip_path_params(parsed.path),
+            params="",
+            query="",
+            fragment="",
+        ),
+    )
 
 
 def redact_credentials_in_text(value: str) -> str:
@@ -37,6 +49,7 @@ def credential_free_url_identity(value: str) -> str:
             parsed._replace(
                 scheme=parsed.scheme.lower(),
                 netloc=host,
+                path=_strip_path_params(parsed.path),
                 params="",
                 query="",
                 fragment="",

@@ -1622,6 +1622,11 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    cached_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
+    assert cached_lookup.snapshot is not None
+    assert [document.content for document in cached_lookup.snapshot.knowledge.search("metadata", max_results=5)] == [
+        "stable metadata",
+    ]
     doc.write_text("candidate metadata", encoding="utf-8")
     loop = asyncio.get_running_loop()
     metadata_saved = asyncio.Event()
@@ -1658,7 +1663,6 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
     assert advisory.state == "none"
     assert advisory.refresh_job == "idle"
 
-    clear_published_snapshots()
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.snapshot is not None
     assert [document.content for document in lookup.snapshot.knowledge.search("metadata", max_results=5)] == [
@@ -5182,6 +5186,10 @@ def test_redact_url_credentials_hides_entire_http_userinfo() -> None:
         "https://example.com/repo.git"
     )
     assert (
+        redact_url_credentials("https://user:password@example.com/org/repo.git;token=secret?query=secret#frag-secret")
+        == "https://***@example.com/org/repo.git"
+    )
+    assert (
         knowledge_manager_module._credential_free_repo_url(
             "https://user:password@example.com/repo.git?token=secret#frag-secret",
         )
@@ -5193,7 +5201,7 @@ def test_credential_free_repo_url_preserves_passwordless_ssh_username() -> None:
     """Passwordless SSH transport usernames are part of the clone identity."""
     assert (
         knowledge_manager_module._credential_free_repo_url(
-            "ssh://git@example.com/org/repo.git?token=secret#frag-secret",
+            "ssh://git@example.com/org/repo.git;token=secret?query=secret#frag-secret",
         )
         == "ssh://git@example.com/org/repo.git"
     )
@@ -5203,13 +5211,13 @@ def test_credential_free_repo_url_strips_secret_bearing_userinfo() -> None:
     """Persistent clone URLs must not retain passwords, HTTP userinfo, query strings, or fragments."""
     assert (
         knowledge_manager_module._credential_free_repo_url(
-            "ssh://git:secret@example.com/org/repo.git?token=secret#frag-secret",
+            "ssh://git:secret@example.com/org/repo.git;token=secret?query=secret#frag-secret",
         )
         == "ssh://example.com/org/repo.git"
     )
     assert (
         knowledge_manager_module._credential_free_repo_url(
-            "https://user@example.com/org/repo.git?token=secret#frag-secret",
+            "https://user@example.com/org/repo.git;token=secret?query=secret#frag-secret",
         )
         == "https://example.com/org/repo.git"
     )
@@ -5223,3 +5231,6 @@ def test_git_url_identity_strips_non_http_userinfo() -> None:
     assert credential_free_url_identity(
         "git+https://user:old@example.com/org/repo.git",
     ) == credential_free_url_identity("git+https://user:new@example.com/org/repo.git")
+    assert credential_free_url_identity(
+        "ssh://user:old@example.com/org/repo.git;token=secret?query=secret#frag-secret",
+    ) == credential_free_url_identity("ssh://example.com/org/repo.git")

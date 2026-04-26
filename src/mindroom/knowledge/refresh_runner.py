@@ -210,7 +210,12 @@ async def refresh_knowledge_binding(
                     force_reindex=force_reindex,
                 )
         except asyncio.CancelledError:
-            await _reconcile_cancelled_refresh(key, initial_state=initial_state)
+            await _reconcile_cancelled_refresh(
+                key,
+                initial_state=initial_state,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
             raise
     finally:
         _mark_refresh_inactive(refresh_key)
@@ -505,6 +510,8 @@ async def _reconcile_cancelled_refresh(
     key: KnowledgeSnapshotKey,
     *,
     initial_state: PublishedIndexingState | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
     state_advanced = _published_state_fingerprint(state) != _published_state_fingerprint(initial_state)
@@ -516,8 +523,16 @@ async def _reconcile_cancelled_refresh(
         and snapshot_availability_for_state(key=key, state=state) is KnowledgeAvailability.READY
         and await asyncio.to_thread(snapshot_collection_exists_for_state, key, state)
     ):
-        await asyncio.to_thread(save_snapshot_refresh_success_state, key)
-        return
+        snapshot = publish_snapshot_from_state(
+            key,
+            state=state,
+            config=config,
+            runtime_paths=runtime_paths,
+            metadata_path=snapshot_metadata_path(key),
+        )
+        if snapshot is not None:
+            await asyncio.to_thread(save_snapshot_refresh_success_state, key)
+            return
     await asyncio.to_thread(save_snapshot_dirty_state, key, reason="refresh_cancelled", refresh_job="idle")
 
 
