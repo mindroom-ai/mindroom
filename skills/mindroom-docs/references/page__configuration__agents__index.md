@@ -306,6 +306,8 @@ Isolation depends on the worker backend:
 
 Use `user_agent` if you need per-agent filesystem isolation.
 
+For per-workspace env that an agent can edit (PATH, npm/pip cache locations, etc.), drop a `.mindroom/worker-env.sh` script in the agent workspace; MindRoom sources it before each worker-routed `shell`, `python`, `coding`, or `file` request. With `worker_scope: user`, the same runtime can move between several agent workspaces, and the hook is discovered from the current request's workspace — different agents get different overlays automatically. See [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
+
 ### Where Agent Data Lives
 
 Agents without `private` store all their data in one canonical directory: `agents/<name>/` (context files, workspace, memory, sessions, learning). Changing `worker_scope` changes how tool runtimes are isolated. It does **not** change where that non-private agent's data lives. All runtimes for the same non-private agent read and write the same storage directory. If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access. Agents that use `private` are different. They materialize one canonical state root per requester-scoped private instance under `private_instances/<scope-key>/<agent>/`. Workers mount those canonical private-instance roots. They do not own them.

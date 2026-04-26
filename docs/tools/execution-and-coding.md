@@ -181,6 +181,16 @@ kill_shell_command("shell:abcd1234")
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.
+- For per-workspace env that an agent can edit on the fly (PATH prefixes, `NPM_CONFIG_PREFIX`, `PIP_INDEX_URL`, etc.), drop a `.mindroom/worker-env.sh` script in the workspace and `export` the values you want — see "Workspace env hook" in `docs/deployment/sandbox-proxy.md`. Example:
+
+```bash
+mkdir -p .mindroom .local/bin .cache/npm
+cat > .mindroom/worker-env.sh <<'EOF'
+export NPM_CONFIG_PREFIX="$PWD/.local"
+export NPM_CONFIG_CACHE="$PWD/.cache/npm"
+export PATH="$PWD/.local/bin:$PATH"
+EOF
+```
 
 ## [`python`]
 
@@ -227,6 +237,7 @@ list_files()
 - `restrict_to_base_dir` only constrains the file helper paths, not what arbitrary Python code can do once executed.
 - `safe_globals` and `safe_locals` are exposed directly from the upstream constructor and are mainly useful for advanced programmatic wiring, not typical hand-written YAML.
 - If you need runtime-scoped environment isolation, rely on worker-routed execution instead of assuming in-process Python emulation is a security boundary.
+- Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`, `UV_CACHE_DIR`). Worker-routed `coding` and `file` subprocesses receive the same overlay as process env, though their documented behavior is file operations rather than env inspection. See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
 
 ## [`coding`]
 

@@ -1518,6 +1518,8 @@ Isolation depends on the worker backend:
 
 Use `user_agent` if you need per-agent filesystem isolation.
 
+For per-workspace env that an agent can edit (PATH, npm/pip cache locations, etc.), drop a `.mindroom/worker-env.sh` script in the agent workspace; MindRoom sources it before each worker-routed `shell`, `python`, `coding`, or `file` request. With `worker_scope: user`, the same runtime can move between several agent workspaces, and the hook is discovered from the current request's workspace — different agents get different overlays automatically. See [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
+
 ### Where Agent Data Lives
 
 Agents without `private` store all their data in one canonical directory: `agents/<name>/` (context files, workspace, memory, sessions, learning). Changing `worker_scope` changes how tool runtimes are isolated. It does **not** change where that non-private agent's data lives. All runtimes for the same non-private agent read and write the same storage directory. If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access. Agents that use `private` are different. They materialize one canonical state root per requester-scoped private instance under `private_instances/<scope-key>/<agent>/`. Workers mount those canonical private-instance roots. They do not own them.
@@ -2478,6 +2480,16 @@ kill_shell_command("shell:abcd1234")
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.
+- For per-workspace env that an agent can edit on the fly (PATH prefixes, `NPM_CONFIG_PREFIX`, `PIP_INDEX_URL`, etc.), drop a `.mindroom/worker-env.sh` script in the workspace and `export` the values you want — see "Workspace env hook" in `docs/deployment/sandbox-proxy.md`. Example:
+
+```
+mkdir -p .mindroom .local/bin .cache/npm
+cat > .mindroom/worker-env.sh <<'EOF'
+export NPM_CONFIG_PREFIX="$PWD/.local"
+export NPM_CONFIG_CACHE="$PWD/.cache/npm"
+export PATH="$PWD/.local/bin:$PATH"
+EOF
+```
 
 ## \[`python`\]
 
@@ -2520,6 +2532,7 @@ list_files()
 - `restrict_to_base_dir` only constrains the file helper paths, not what arbitrary Python code can do once executed.
 - `safe_globals` and `safe_locals` are exposed directly from the upstream constructor and are mainly useful for advanced programmatic wiring, not typical hand-written YAML.
 - If you need runtime-scoped environment isolation, rely on worker-routed execution instead of assuming in-process Python emulation is a security boundary.
+- Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`, `UV_CACHE_DIR`). Worker-routed `coding` and `file` subprocesses receive the same overlay as process env, though their documented behavior is file operations rather than env inspection. See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
 
 ## \[`coding`\]
 
@@ -12039,6 +12052,46 @@ If proxied shell commands need extra PATH entries such as wrapper directories, c
 
 Shell commands that exceed their timeout return a background handle. Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process. These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts. To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE=subprocess`.
 
+## Workspace env hook (`.mindroom/worker-env.sh`)
+
+Agents can drop a shell script at `<workspace>/.mindroom/worker-env.sh` to set custom env for worker-routed tool calls without changing config or redeploying.
+
+The runner sources this script with `bash` before each worker-routed `shell`, `python`, `coding`, or `file` request, then merges its exported env into the tool's execution environment.
+
+**Discovery:**
+
+- The hook lives at `<base_dir>/.mindroom/worker-env.sh` where `<base_dir>` is the resolved tool workspace.
+- For shared and unscoped agents that means `agents/<agent>/workspace/.mindroom/worker-env.sh`.
+- For private agents that means `private_instances/<scope>/<agent>/workspace/.mindroom/worker-env.sh`.
+- For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different agent workspaces.
+- For unkeyed static-sidecar proxy calls (no `worker_key`), the hook is discovered from `tool_init_overrides["base_dir"]` only when that value is an absolute path; relative strings are ignored on this path because there is no canonical workspace root to resolve them against.
+
+**Semantics:**
+
+- Edits take effect on the next worker-routed tool call. No pod restart, no config reload, no Helm change.
+- The script must `export FOO=bar` for values to overlay; bare `FOO=bar` does not persist (no `set -a`).
+- Filesystem side effects inside the worker sandbox are allowed because the hook is arbitrary agent-editable shell.
+- Shell aliases, functions, and `cd` do not persist — only exported env crosses the boundary.
+
+**Filtering:**
+
+The overlay reuses the same secret rules that protect `extra_env_passthrough`:
+
+- Names ending in `_API_KEY`, `_API_KEYS`, `_PASSWORD`, or `_SECRET` are dropped.
+- Runner control names (`MINDROOM_SANDBOX_*`, `MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) are dropped.
+- `CI_JOB_TOKEN` and bash bookkeeping (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are dropped.
+- Non-secret service tokens such as `GITEA_TOKEN` are kept.
+
+**Limits and failure handling:**
+
+- Script ≤ 64 KiB; stdout and stderr capture each ≤ 256 KiB; total overlay ≤ 128 KiB; per-value ≤ 32 KiB.
+- Hook execution times out after 10 seconds.
+- Symlinks that escape the workspace are rejected.
+- Any failure (non-zero exit, timeout, escape, missing `bash`) returns the tool call as `ok: false` with `failure_kind: "tool"` and an error mentioning `.mindroom/worker-env.sh`.
+- Hook failures do not poison the worker; only the requesting tool call fails.
+
+This hook works identically for the static sidecar and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request. It is not a true container startup hook — it does not change pod templates, recreate Deployments, or alter Helm values. For an example, see `docs/tools/execution-and-coding.md`.
+
 ## Credential leases
 
 Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.
@@ -12254,6 +12307,7 @@ Important behavior and constraints:
 - `google_vertex_adc` is intentionally unsupported for dedicated workers because workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep Vertex ADC usage in the primary runtime.
 - Dedicated worker runtime env stays deny-by-default for provider and arbitrary `.env` values, while basic runtime plumbing such as `PATH`, `VIRTUAL_ENV`, and linker vars is set separately.
 - This matches the broader sandbox-proxy contract for `python` and `shell`: proxied execution is intentionally stricter than direct local execution and does not inherit ordinary runtime `.env` or provider env by default.
+- For agent-editable per-workspace env (extra PATH entries, npm/pip cache dirs, etc.), use the request-time `.mindroom/worker-env.sh` overlay documented in [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh). The overlay is sourced inside the running worker per request, so it does not change the worker Deployment, the startup manifest, the pod-template hash, or any Helm value, and does not require a worker restart when edited.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements

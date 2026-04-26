@@ -245,26 +245,37 @@ def _request_private_agent_names(request: SandboxRunnerExecuteRequest) -> frozen
 def _request_runtime_overrides(
     request: SandboxRunnerExecuteRequest,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None,
+    *,
+    workspace_env_overlay: dict[str, str] | None = None,
 ) -> dict[str, object] | None:
     """Return runtime overrides for one runner-side tool rebuild."""
     runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(
         prepared_worker.runtime_overrides if prepared_worker is not None else None,
     )
-    if request.tool_name != "shell" or request.extra_env_passthrough is None:
+    if request.tool_name != "shell":
         return runtime_overrides
 
-    # Pre-resolve passthrough patterns against only the client's env snapshot
-    # to prevent cross-runtime secret leakage via glob patterns that match
-    # runner-only env vars.
-    resolved = constants.shell_extra_env_values(
-        extra_env_passthrough=request.extra_env_passthrough,
-        process_env=request.execution_env,
-    )
-    if not resolved:
+    resolved_keys: list[str] = []
+    if request.extra_env_passthrough is not None:
+        # Pre-resolve passthrough patterns against only the client's env snapshot
+        # to prevent cross-runtime secret leakage via glob patterns that match
+        # runner-only env vars.
+        resolved = constants.shell_extra_env_values(
+            extra_env_passthrough=request.extra_env_passthrough,
+            process_env=request.execution_env,
+        )
+        resolved_keys.extend(resolved.keys())
+    if workspace_env_overlay:
+        # Expose `.mindroom/worker-env.sh` overlay names through the same
+        # extra_env_passthrough channel so the shell tool reads them out of
+        # the effective runtime_paths.process_env snapshot we just built.
+        resolved_keys.extend(name for name in workspace_env_overlay if name not in resolved_keys)
+
+    if not resolved_keys:
         return runtime_overrides
 
     merged_runtime_overrides = dict(runtime_overrides or {})
-    merged_runtime_overrides["extra_env_passthrough"] = ",".join(resolved.keys())
+    merged_runtime_overrides["extra_env_passthrough"] = ",".join(resolved_keys)
     return merged_runtime_overrides
 
 
@@ -534,6 +545,86 @@ def _serialize_worker(worker: WorkerHandle) -> SandboxWorkerResponse:
     )
 
 
+def _workspace_env_overlay_for_request(
+    request: SandboxRunnerExecuteRequest,
+    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+    execution_env: dict[str, str],
+    *,
+    subprocess_env: dict[str, str] | None = None,
+    apply: bool,
+) -> tuple[dict[str, str], SandboxRunnerExecuteResponse | None]:
+    """Source `.mindroom/worker-env.sh` for one request.
+
+    Returns `(overlay, None)` on success (overlay is empty when no hook exists).
+    Returns `({}, tool_failure_response)` when the hook fails to source — the
+    caller should return that response directly. Skips silently when `apply` is
+    False, used by the in-subprocess re-execution path after the parent already
+    sourced the hook.
+    """
+    base_env = _workspace_env_overlay_base_env(
+        prepared,
+        execution_env,
+        subprocess_env=subprocess_env,
+    )
+    if not apply:
+        return {}, None
+
+    workspace: Path | None = None
+    if prepared is not None:
+        base_dir = prepared.runtime_overrides.get("base_dir")
+        if isinstance(base_dir, Path):
+            workspace = base_dir
+        elif isinstance(base_dir, str):
+            workspace = Path(base_dir)
+    elif isinstance(raw_base_dir := request.tool_init_overrides.get("base_dir"), str):
+        candidate = Path(raw_base_dir).expanduser()
+        if candidate.is_absolute():
+            workspace = candidate
+    if workspace is None:
+        return {}, None
+
+    try:
+        hook_path = sandbox_exec.resolve_workspace_env_hook_path(workspace)
+        if hook_path is None:
+            return {}, None
+        overlay = sandbox_exec.source_workspace_env_hook(
+            hook_path=hook_path,
+            base_env=base_env,
+            cwd=workspace,
+        )
+    except sandbox_exec.WorkspaceEnvHookError as exc:
+        return (
+            {},
+            SandboxRunnerExecuteResponse(
+                ok=False,
+                error=str(exc),
+                failure_kind="tool",
+            ),
+        )
+    return overlay, None
+
+
+def _workspace_env_overlay_base_env(
+    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+    execution_env: dict[str, str],
+    *,
+    subprocess_env: dict[str, str] | None,
+) -> dict[str, str]:
+    if subprocess_env is not None:
+        base_env = dict(subprocess_env)
+        base_env.update(execution_env)
+        return base_env
+
+    base_env = dict(execution_env)
+    # Seed PATH/HOME defaults so bash can locate `printenv` when sourcing the
+    # hook for inprocess unkeyed proxy calls (the subprocess path already gets
+    # these via worker_subprocess_env / generic_subprocess_env).
+    if prepared is None:
+        for key, value in sandbox_exec.generic_subprocess_env().items():
+            base_env.setdefault(key, value)
+    return base_env
+
+
 async def _execute_request_inprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
@@ -541,6 +632,7 @@ async def _execute_request_inprocess(
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
+    apply_workspace_env_hook: bool = True,
 ) -> SandboxRunnerExecuteResponse:
     execution_env = sandbox_exec.request_execution_env(request.tool_name, request.execution_env, runtime_paths)
     try:
@@ -562,7 +654,17 @@ async def _execute_request_inprocess(
         worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
         worker_execution_env.update(execution_env)
         execution_env = worker_execution_env
-    runtime_overrides = _request_runtime_overrides(request, prepared)
+    overlay, overlay_failure = _workspace_env_overlay_for_request(
+        request,
+        prepared,
+        execution_env,
+        apply=apply_workspace_env_hook,
+    )
+    if overlay_failure is not None:
+        return overlay_failure
+    if overlay:
+        execution_env.update(overlay)
+    runtime_overrides = _request_runtime_overrides(request, prepared, workspace_env_overlay=overlay)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
         execution_env,
@@ -667,6 +769,7 @@ def _execute_request_subprocess_sync(
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
+    apply_workspace_env_hook: bool = True,
 ) -> SandboxRunnerExecuteResponse:
     execution_env = sandbox_exec.request_execution_env(request.tool_name, request.execution_env, runtime_paths)
     try:
@@ -688,6 +791,17 @@ def _execute_request_subprocess_sync(
     python_executable, subprocess_env, cwd = sandbox_exec.resolve_subprocess_worker_context(
         prepared.paths if prepared is not None else None,
     )
+    overlay, overlay_failure = _workspace_env_overlay_for_request(
+        request,
+        prepared,
+        execution_env,
+        subprocess_env=subprocess_env,
+        apply=apply_workspace_env_hook,
+    )
+    if overlay_failure is not None:
+        return overlay_failure
+    if overlay:
+        execution_env.update(overlay)
     subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, execution_env)
     envelope = sandbox_protocol.serialize_subprocess_envelope(
         request=request.model_dump(mode="json"),
@@ -721,6 +835,7 @@ async def _execute_request_subprocess(
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
+    apply_workspace_env_hook: bool = True,
 ) -> SandboxRunnerExecuteResponse:
     return await asyncio.to_thread(
         _execute_request_subprocess_sync,
@@ -729,6 +844,7 @@ async def _execute_request_subprocess(
         config,
         prepared_worker,
         runner_token=runner_token,
+        apply_workspace_env_hook=apply_workspace_env_hook,
     )
 
 
@@ -776,7 +892,11 @@ def _run_subprocess_worker() -> int:
     captured_out = io.StringIO()
     captured_err = io.StringIO()
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
-        response = asyncio.run(_execute_request_inprocess(request, runtime_paths, config))
+        # The parent runner already sourced .mindroom/worker-env.sh once and
+        # folded the overlay into the subprocess process env.
+        response = asyncio.run(
+            _execute_request_inprocess(request, runtime_paths, config, apply_workspace_env_hook=False),
+        )
 
     # Flush captured tool output to real stdout/stderr (informational only).
     tool_stdout = captured_out.getvalue()
