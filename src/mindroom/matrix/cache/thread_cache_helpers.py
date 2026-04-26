@@ -29,8 +29,6 @@ def latest_visible_thread_event_id(history: Sequence[ResolvedVisibleMessage]) ->
 
 def thread_cache_rejection_reason(
     cache_state: ThreadCacheStateLike | None,
-    *,
-    runtime_started_at: float | None,
 ) -> str | None:
     """Return why one durable thread snapshot must be rejected, if at all."""
     rejection_reason: str | None = None
@@ -38,8 +36,6 @@ def thread_cache_rejection_reason(
         rejection_reason = "no_cache_state"
     elif cache_state.validated_at is None:
         rejection_reason = "cache_never_validated"
-    elif runtime_started_at is not None and cache_state.validated_at < runtime_started_at:
-        rejection_reason = "validated_before_runtime_start"
     elif cache_state.invalidated_at is not None and cache_state.invalidated_at >= cache_state.validated_at:
         rejection_reason = "thread_invalidated_after_validation"
     elif cache_state.room_invalidated_at is not None and cache_state.room_invalidated_at >= cache_state.validated_at:
@@ -49,14 +45,6 @@ def thread_cache_rejection_reason(
 
 def thread_cache_state_is_usable(
     cache_state: ThreadCacheStateLike | None,
-    *,
-    runtime_started_at: float | None,
 ) -> bool:
     """Return whether one durable thread snapshot is safe to reuse."""
-    return (
-        thread_cache_rejection_reason(
-            cache_state,
-            runtime_started_at=runtime_started_at,
-        )
-        is None
-    )
+    return thread_cache_rejection_reason(cache_state) is None

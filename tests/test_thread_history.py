@@ -2173,7 +2173,6 @@ class TestThreadHistoryCache:
         client: nio.AsyncClient,
         event_cache: _EventCache,
         runtime_started_at: float,
-        thread_cache_valid_after: float | None = None,
     ) -> tuple[MatrixConversationCache, _EventCacheWriteCoordinator]:
         runtime_paths = test_runtime_paths(tmp_path)
         config = bind_runtime_paths(
@@ -2191,9 +2190,6 @@ class TestThreadHistoryCache:
             event_cache_write_coordinator=coordinator,
         )
         runtime.runtime_started_at = runtime_started_at
-        runtime.thread_cache_read_boundary = (
-            runtime_started_at if thread_cache_valid_after is None else thread_cache_valid_after
-        )
         return MatrixConversationCache(logger=MagicMock(), runtime=runtime), coordinator
 
     @staticmethod
@@ -2578,12 +2574,11 @@ class TestThreadHistoryCache:
         assert history.diagnostics["homeserver_scan_pages"] == 1
 
     @pytest.mark.asyncio
-    async def test_restored_token_post_sync_reuses_pre_runtime_thread_cache(self, tmp_path: Path) -> None:
-        """Restored-token catch-up may reuse pre-runtime snapshots inside the token cache window."""
+    async def test_reuses_pre_runtime_thread_cache_after_restart(self, tmp_path: Path) -> None:
+        """Restarted runtimes may reuse pre-runtime snapshots unless a stale marker exists."""
         cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
         runtime_started_at = time.time()
-        thread_cache_valid_after = runtime_started_at - 20.0
 
         root_event = self._make_text_event(
             event_id="$thread_root",
@@ -2616,7 +2611,6 @@ class TestThreadHistoryCache:
             client=client,
             event_cache=cache,
             runtime_started_at=runtime_started_at,
-            thread_cache_valid_after=thread_cache_valid_after,
         )
 
         try:
@@ -2634,15 +2628,14 @@ class TestThreadHistoryCache:
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_restored_token_post_sync_reuses_old_thread_cache_inside_trusted_boundary(
+    async def test_reuses_older_pre_runtime_thread_cache_after_restart(
         self,
         tmp_path: Path,
     ) -> None:
-        """Certified sync catch-up should make cache age irrelevant inside the token cache window."""
+        """Thread cache reads should not reject old snapshots by process age."""
         cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
         runtime_started_at = time.time()
-        thread_cache_valid_after = runtime_started_at - 1000.0
 
         root_event = self._make_text_event(
             event_id="$thread_root",
@@ -2675,7 +2668,6 @@ class TestThreadHistoryCache:
             client=client,
             event_cache=cache,
             runtime_started_at=runtime_started_at,
-            thread_cache_valid_after=thread_cache_valid_after,
         )
 
         try:
@@ -2693,11 +2685,11 @@ class TestThreadHistoryCache:
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_untrusted_restart_rejects_pre_runtime_thread_cache(
+    async def test_thread_cache_reuse_ignores_runtime_age_without_invalidation(
         self,
         tmp_path: Path,
     ) -> None:
-        """Cold starts and pre-catch-up restarts must reject pre-runtime thread snapshots."""
+        """Thread cache trust should depend on explicit stale markers, not process age."""
         cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
         runtime_started_at = time.time()
@@ -2727,10 +2719,7 @@ class TestThreadHistoryCache:
         )
 
         client = MagicMock()
-        page = MagicMock(spec=nio.RoomMessagesResponse)
-        page.chunk = [reply_event, root_event]
-        page.end = None
-        client.room_messages = AsyncMock(return_value=page)
+        client.room_messages = AsyncMock(side_effect=AssertionError("should reuse cache by default"))
         conversation_cache, coordinator = self._conversation_cache_for_runtime(
             tmp_path=tmp_path,
             client=client,
@@ -2748,10 +2737,9 @@ class TestThreadHistoryCache:
             await cache.close()
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
-        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == ("validated_before_runtime_start")
-        assert history.diagnostics["cache_runtime_started_at"] == runtime_started_at
-        client.room_messages.assert_awaited_once()
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics
+        client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_cache_miss_persists_reference_descendant_in_causal_order(
@@ -3041,11 +3029,11 @@ class TestThreadHistoryCache:
         broken_cache.replace_thread_if_not_newer.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_incremental_thread_revalidation_does_not_bypass_runtime_or_room_staleness(
+    async def test_incremental_thread_revalidation_ignores_runtime_age_but_not_room_staleness(
         self,
         tmp_path: Path,
     ) -> None:
-        """Incremental append refresh must not bless pre-runtime or room-invalidated cache."""
+        """Incremental append refresh should trust old caches unless room state is stale."""
         cache = _EventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
@@ -3093,7 +3081,6 @@ class TestThreadHistoryCache:
         pre_runtime_revalidated = await cache.revalidate_thread_after_incremental_update(
             "!room:localhost",
             "$thread_root",
-            runtime_started_at=runtime_started_at,
         )
 
         await cache.replace_thread(
@@ -3112,7 +3099,6 @@ class TestThreadHistoryCache:
         room_stale_revalidated = await cache.revalidate_thread_after_incremental_update(
             "!room:localhost",
             "$thread_root",
-            runtime_started_at=runtime_started_at,
         )
 
         client = MagicMock()
@@ -3127,13 +3113,12 @@ class TestThreadHistoryCache:
                 "!room:localhost",
                 "$thread_root",
                 event_cache=cache,
-                runtime_started_at=runtime_started_at,
             )
         finally:
             await cache.close()
 
         assert pre_runtime_appended is True
-        assert pre_runtime_revalidated is False
+        assert pre_runtime_revalidated is True
         assert room_stale_appended is True
         assert room_stale_revalidated is False
         assert [message.event_id for message in history] == ["$thread_root", "$reply1", "$reply2"]

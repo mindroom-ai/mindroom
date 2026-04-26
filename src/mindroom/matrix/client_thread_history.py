@@ -400,14 +400,11 @@ def _cache_reject_diagnostics(
     *,
     cache_state: object,
     rejection_reason: str,
-    runtime_started_at: float | None,
 ) -> dict[str, str | int | float | bool]:
     diagnostics: dict[str, str | int | float | bool] = {
         THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: rejection_reason,
     }
     if not isinstance(cache_state, ThreadCacheState):
-        if runtime_started_at is not None:
-            diagnostics["cache_runtime_started_at"] = runtime_started_at
         return diagnostics
     if cache_state.validated_at is not None:
         diagnostics["cache_validated_at"] = cache_state.validated_at
@@ -420,8 +417,6 @@ def _cache_reject_diagnostics(
         diagnostics["room_cache_invalidated_at"] = cache_state.room_invalidated_at
     if cache_state.room_invalidation_reason is not None:
         diagnostics["room_cache_invalidation_reason"] = cache_state.room_invalidation_reason
-    if runtime_started_at is not None:
-        diagnostics["cache_runtime_started_at"] = runtime_started_at
     return diagnostics
 
 
@@ -432,20 +427,15 @@ async def _load_cached_thread_history_if_usable(
     thread_id: str,
     event_cache: ConversationEventCache,
     hydrate_sidecars: bool,
-    runtime_started_at: float | None,
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[ThreadHistoryResult | None, dict[str, str | int | float | bool] | None]:
     """Return a durable thread snapshot when the current runtime may safely trust it."""
     cache_state = await event_cache.get_thread_cache_state(room_id, thread_id)
-    rejection_reason = thread_cache_rejection_reason(
-        cache_state,
-        runtime_started_at=runtime_started_at,
-    )
+    rejection_reason = thread_cache_rejection_reason(cache_state)
     if rejection_reason is not None:
         cache_reject_diagnostics = _cache_reject_diagnostics(
             cache_state=cache_state,
             rejection_reason=rejection_reason,
-            runtime_started_at=runtime_started_at,
         )
         logger.info(
             "Thread cache rejected for read",
@@ -681,7 +671,6 @@ async def fetch_thread_history(
     thread_id: str,
     event_cache: ConversationEventCache,
     *,
-    runtime_started_at: float | None = None,
     cache_write_guard_started_at: float | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
@@ -694,7 +683,6 @@ async def fetch_thread_history(
             thread_id=thread_id,
             event_cache=event_cache,
             hydrate_sidecars=True,
-            runtime_started_at=runtime_started_at,
             trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
@@ -725,7 +713,6 @@ async def fetch_thread_snapshot(
     thread_id: str,
     event_cache: ConversationEventCache,
     *,
-    runtime_started_at: float | None = None,
     cache_write_guard_started_at: float | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
@@ -738,7 +725,6 @@ async def fetch_thread_snapshot(
             thread_id=thread_id,
             event_cache=event_cache,
             hydrate_sidecars=False,
-            runtime_started_at=runtime_started_at,
             trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
@@ -770,7 +756,6 @@ async def fetch_dispatch_thread_history(
     thread_id: str,
     event_cache: ConversationEventCache,
     *,
-    runtime_started_at: float | None = None,
     cache_write_guard_started_at: float | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
@@ -783,7 +768,6 @@ async def fetch_dispatch_thread_history(
             thread_id=thread_id,
             event_cache=event_cache,
             hydrate_sidecars=True,
-            runtime_started_at=runtime_started_at,
             trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
@@ -815,7 +799,6 @@ async def fetch_dispatch_thread_snapshot(
     thread_id: str,
     event_cache: ConversationEventCache,
     *,
-    runtime_started_at: float | None = None,
     cache_write_guard_started_at: float | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> ThreadHistoryResult:
@@ -828,7 +811,6 @@ async def fetch_dispatch_thread_snapshot(
             thread_id=thread_id,
             event_cache=event_cache,
             hydrate_sidecars=False,
-            runtime_started_at=runtime_started_at,
             trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:

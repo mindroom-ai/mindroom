@@ -60,7 +60,7 @@ from mindroom.matrix.client import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
-from mindroom.matrix.sync_certification import SyncCacheWriteResult
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint
 from mindroom.matrix.sync_tokens import load_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_membership import (
@@ -472,13 +472,7 @@ async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_rac
     assert thread_state.validated_at is not None
     assert thread_state.room_invalidated_at is not None
     assert thread_state.room_invalidated_at > thread_state.validated_at
-    assert (
-        matrix_cache.thread_cache_rejection_reason(
-            thread_state,
-            runtime_started_at=access.runtime.runtime_started_at,
-        )
-        is not None
-    )
+    assert matrix_cache.thread_cache_rejection_reason(thread_state) is not None
     client.room_messages.assert_awaited_once()
 
 
@@ -521,15 +515,12 @@ async def _close_bound_runtime_support(bot: AgentBot, support: OwnedRuntimeSuppo
 def _save_certified_sync_token(
     bot: AgentBot,
     token: str,
-    *,
-    thread_cache_valid_after: float = 1.0,
 ) -> None:
     """Persist one cache-bound certified sync token for bot lifecycle tests."""
     save_sync_token(
         bot.storage_path,
         bot.agent_name,
         token,
-        thread_cache_valid_after=thread_cache_valid_after,
     )
 
 
@@ -1956,11 +1947,10 @@ class TestThreadingBehavior:
         assert load_sync_token(bot.storage_path, bot.agent_name) == "s_after_delayed_cache"
 
     @pytest.mark.asyncio
-    async def test_restored_first_sync_success_uses_checkpoint_boundary(self, bot: AgentBot) -> None:
-        """Successful restored-token catch-up should carry forward the loaded cache boundary."""
-        _save_certified_sync_token(bot, "s_before_complete", thread_cache_valid_after=1.0)
+    async def test_restored_first_sync_success_updates_checkpoint(self, bot: AgentBot) -> None:
+        """Successful restored-token catch-up should save the new checkpoint token."""
+        _save_certified_sync_token(bot, "s_before_complete")
         bot._runtime_view.mark_runtime_started()
-        runtime_started_at = bot._runtime_view.runtime_started_at
         bot._restore_saved_sync_token()
         bot.client.next_batch = "s_after_complete"
 
@@ -1969,16 +1959,13 @@ class TestThreadingBehavior:
         token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
         assert token_record is not None
         assert token_record.token == "s_after_complete"  # noqa: S105
-        assert token_record.thread_cache_valid_after == 1.0
-        assert bot._runtime_view.thread_cache_read_boundary == 1.0
-        assert bot._runtime_view.thread_cache_read_boundary < runtime_started_at
+        assert token_record.checkpoint == SyncCheckpoint("s_after_complete")
 
     @pytest.mark.asyncio
-    async def test_limited_restored_first_sync_clears_token_and_advances_boundary(self, bot: AgentBot) -> None:
+    async def test_limited_restored_first_sync_clears_token(self, bot: AgentBot) -> None:
         """Limited restored-token catch-up must fail closed and force a cold retry token."""
-        _save_certified_sync_token(bot, "s_before_limited", thread_cache_valid_after=1.0)
+        _save_certified_sync_token(bot, "s_before_limited")
         bot._runtime_view.mark_runtime_started()
-        runtime_started_at = bot._runtime_view.runtime_started_at
         bot._restore_saved_sync_token()
         bot.client.next_batch = "s_after_limited"
         sync_response = self._sync_response(
@@ -1989,15 +1976,14 @@ class TestThreadingBehavior:
 
         assert bot.client.next_batch is None
         assert load_sync_token(bot.storage_path, bot.agent_name) is None
-        assert bot._runtime_view.thread_cache_read_boundary >= runtime_started_at
 
     @pytest.mark.asyncio
-    async def test_cache_failure_clears_token_then_later_success_saves_advanced_boundary(
+    async def test_cache_failure_clears_token_then_later_success_saves_checkpoint(
         self,
         bot: AgentBot,
     ) -> None:
-        """After cache uncertainty, later checkpoints are allowed only with the new boundary."""
-        _save_certified_sync_token(bot, "s_before_failure", thread_cache_valid_after=1.0)
+        """After cache uncertainty, later successful sync responses can save a checkpoint."""
+        _save_certified_sync_token(bot, "s_before_failure")
         bot._runtime_view.mark_runtime_started()
         bot._restore_saved_sync_token()
         bot._first_sync_done = True
@@ -2011,7 +1997,6 @@ class TestThreadingBehavior:
         ):
             await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
 
-        failed_boundary = bot._runtime_view.thread_cache_read_boundary
         assert load_sync_token(bot.storage_path, bot.agent_name) is None
 
         bot.client.next_batch = "s_after_recovery"
@@ -2025,12 +2010,12 @@ class TestThreadingBehavior:
         token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
         assert token_record is not None
         assert token_record.token == "s_after_recovery"  # noqa: S105
-        assert token_record.thread_cache_valid_after == failed_boundary
+        assert token_record.checkpoint == SyncCheckpoint("s_after_recovery")
 
     @pytest.mark.asyncio
     async def test_empty_joined_rooms_first_sync_certifies_checkpoint(self, bot: AgentBot) -> None:
         """A non-limited empty sync response can certify that there were no room deltas."""
-        _save_certified_sync_token(bot, "s_before_empty", thread_cache_valid_after=1.0)
+        _save_certified_sync_token(bot, "s_before_empty")
         bot._runtime_view.mark_runtime_started()
         bot._restore_saved_sync_token()
         bot.client.next_batch = "s_after_empty"
@@ -2040,7 +2025,7 @@ class TestThreadingBehavior:
         token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
         assert token_record is not None
         assert token_record.token == "s_after_empty"  # noqa: S105
-        assert token_record.thread_cache_valid_after == 1.0
+        assert token_record.checkpoint == SyncCheckpoint("s_after_empty")
 
     @pytest.mark.asyncio
     async def test_sync_error_keeps_watchdog_clock_on_latest_activity(self, bot: AgentBot) -> None:
@@ -5321,11 +5306,11 @@ class TestThreadingBehavior:
         assert [event["event_id"] for event in cached_history] == [thread_id, "$reply_new:localhost"]
 
     @pytest.mark.asyncio
-    async def test_prewarm_started_before_trust_revocation_does_not_seed_fresh_cache(
+    async def test_prewarm_result_remains_reusable_after_restart(
         self,
         bot: AgentBot,
     ) -> None:
-        """A prewarm fetch that began before trust revocation must not look fresh afterward."""
+        """A prewarm fetch should stay usable unless an explicit stale marker exists."""
         support = await _bind_owned_runtime_support(bot)
         room_id = "!test:localhost"
         thread_id = "$thread_root:localhost"
@@ -5388,7 +5373,6 @@ class TestThreadingBehavior:
             )
             await asyncio.wait_for(prewarm_fetch_started.wait(), timeout=1.0)
 
-            bot._runtime_view.thread_cache_read_boundary = time.time()
             allow_prewarm_fetch_finish.set()
             prewarm_history = await asyncio.wait_for(prewarm_task, timeout=1.0)
 
@@ -5398,17 +5382,17 @@ class TestThreadingBehavior:
             await _close_bound_runtime_support(bot, support)
 
         assert [message.body for message in prewarm_history] == ["Old root", "Old reply"]
-        assert [message.body for message in history] == ["Fresh root", "Fresh reply"]
-        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "validated_before_runtime_start"
-        assert bot.client.room_messages.await_count == 2
+        assert [message.body for message in history] == ["Old root", "Old reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics
+        bot.client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_dispatch_refill_started_before_trust_revocation_does_not_seed_fresh_cache(
+    async def test_dispatch_refill_result_remains_reusable_after_restart(
         self,
         bot: AgentBot,
     ) -> None:
-        """A normal dispatch refill that began before revocation must not seed a fresh row."""
+        """A normal dispatch refill should stay usable unless an explicit stale marker exists."""
         support = await _bind_owned_runtime_support(bot)
         room_id = "!test:localhost"
         thread_id = "$thread_root:localhost"
@@ -5468,7 +5452,6 @@ class TestThreadingBehavior:
             )
             await asyncio.wait_for(dispatch_fetch_started.wait(), timeout=1.0)
 
-            bot._runtime_view.thread_cache_read_boundary = time.time()
             allow_dispatch_fetch_finish.set()
             dispatch_history = await asyncio.wait_for(dispatch_task, timeout=1.0)
 
@@ -5478,17 +5461,17 @@ class TestThreadingBehavior:
             await _close_bound_runtime_support(bot, support)
 
         assert [message.body for message in dispatch_history] == ["Old root", "Old reply"]
-        assert [message.body for message in history] == ["Fresh root", "Fresh reply"]
-        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "validated_before_runtime_start"
-        assert bot.client.room_messages.await_count == 2
+        assert [message.body for message in history] == ["Old root", "Old reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics
+        bot.client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_guarded_refill_commit_after_trust_revocation_does_not_look_fresh(
+    async def test_guarded_refill_commit_remains_reusable_after_restart(
         self,
         bot: AgentBot,
     ) -> None:
-        """A guarded replacement that commits after revocation must still be rejected by strict reads."""
+        """A guarded replacement should stay usable unless an explicit stale marker exists."""
         support = await _bind_owned_runtime_support(bot)
         room_id = "!test:localhost"
         thread_id = "$thread_root:localhost"
@@ -5543,7 +5526,6 @@ class TestThreadingBehavior:
                 )
                 await asyncio.wait_for(write_entered.wait(), timeout=1.0)
 
-                bot._runtime_view.thread_cache_read_boundary = time.time()
                 allow_write_commit.set()
                 replaced = await asyncio.wait_for(write_task, timeout=1.0)
 
@@ -5558,10 +5540,10 @@ class TestThreadingBehavior:
             await _close_bound_runtime_support(bot, support)
 
         assert replaced is True
-        assert [message.body for message in history] == ["Fresh root", "Fresh reply"]
-        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "validated_before_runtime_start"
-        bot.client.room_messages.assert_awaited_once()
+        assert [message.body for message in history] == ["Old root", "Old reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics
+        bot.client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_lookup_miss_sync_plain_edit_invalidates_room_cache_state(
@@ -6128,13 +6110,7 @@ class TestThreadingBehavior:
         assert thread_state.validated_at is not None
         assert thread_state.room_invalidated_at is not None
         assert thread_state.room_invalidated_at > thread_state.validated_at
-        assert (
-            matrix_cache.thread_cache_rejection_reason(
-                thread_state,
-                runtime_started_at=access.runtime.runtime_started_at,
-            )
-            is not None
-        )
+        assert matrix_cache.thread_cache_rejection_reason(thread_state) is not None
         client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio

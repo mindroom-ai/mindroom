@@ -451,8 +451,6 @@ class ConversationEventCache(Protocol):
         self,
         room_id: str,
         thread_id: str,
-        *,
-        runtime_started_at: float | None,
     ) -> bool:
         """Refresh thread validation after a safe incremental update."""
 
@@ -800,8 +798,6 @@ class _EventCache:
         self,
         room_id: str,
         thread_id: str,
-        *,
-        runtime_started_at: float | None,
     ) -> bool:
         """Refresh one thread's validated timestamp after a safe incremental update."""
         return bool(
@@ -813,7 +809,6 @@ class _EventCache:
                     db,
                     room_id=room_id,
                     thread_id=thread_id,
-                    runtime_started_at=runtime_started_at,
                 ),
             ),
         )

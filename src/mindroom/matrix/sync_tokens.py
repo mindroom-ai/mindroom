@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -27,13 +26,6 @@ class SyncTokenRecord:
         """Return whether this token carries cache-trust certification."""
         return self.checkpoint is not None
 
-    @property
-    def thread_cache_valid_after(self) -> float | None:
-        """Return the certified thread-cache boundary when present."""
-        if self.checkpoint is None:
-            return None
-        return self.checkpoint.thread_cache_valid_after
-
 
 def _sync_token_path(storage_path: Path, agent_name: str) -> Path:
     """Return the on-disk path for one agent's sync token."""
@@ -43,16 +35,6 @@ def _sync_token_path(storage_path: Path, agent_name: str) -> Path:
 def _sync_token_certification_path(storage_path: Path, agent_name: str) -> Path:
     """Return the legacy marker path removed during cleanup."""
     return storage_path / "sync_tokens" / f"{agent_name}.token.certified"
-
-
-def _normalized_thread_cache_valid_after(value: object) -> float | None:
-    """Return a safe cache-validity boundary parsed from checkpoint metadata."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    boundary = float(value)
-    if not math.isfinite(boundary):
-        return None
-    return boundary
 
 
 def _normalized_token(value: object) -> str | None:
@@ -72,17 +54,15 @@ def _record_from_json(text: str) -> SyncTokenRecord | None:
     if not isinstance(payload, dict) or payload.get("version") != _SYNC_TOKEN_RECORD_VERSION:
         return None
     token = _normalized_token(payload.get("token"))
-    valid_after = _normalized_thread_cache_valid_after(payload.get("thread_cache_valid_after"))
-    if token is None or valid_after is None:
+    if token is None:
         return None
-    checkpoint = SyncCheckpoint(token=token, thread_cache_valid_after=valid_after)
+    checkpoint = SyncCheckpoint(token=token)
     return SyncTokenRecord(token=token, checkpoint=checkpoint)
 
 
 def _record_json(checkpoint: SyncCheckpoint) -> str:
     """Return the durable JSON token record for one certified checkpoint."""
     payload = {
-        "thread_cache_valid_after": checkpoint.thread_cache_valid_after,
         "token": checkpoint.token,
         "version": _SYNC_TOKEN_RECORD_VERSION,
     }
@@ -93,8 +73,6 @@ def save_sync_token(
     storage_path: Path,
     agent_name: str,
     token: str,
-    *,
-    thread_cache_valid_after: float,
 ) -> None:
     """Persist one cache-certified sync token checkpoint."""
     token_path = _sync_token_path(storage_path, agent_name)
@@ -102,11 +80,7 @@ def save_sync_token(
     if token_value is None:
         msg = "Certified sync tokens require a non-empty token"
         raise ValueError(msg)
-    valid_after = _normalized_thread_cache_valid_after(thread_cache_valid_after)
-    if valid_after is None:
-        msg = "Certified sync tokens require a finite thread-cache valid-after boundary"
-        raise ValueError(msg)
-    checkpoint = SyncCheckpoint(token=token_value, thread_cache_valid_after=valid_after)
+    checkpoint = SyncCheckpoint(token=token_value)
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(_record_json(checkpoint), encoding="utf-8")
     _sync_token_certification_path(storage_path, agent_name).unlink(missing_ok=True)
