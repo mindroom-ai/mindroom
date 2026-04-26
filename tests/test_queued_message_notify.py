@@ -666,7 +666,12 @@ async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(
             ),
         )
 
-    mock_fetch_thread_history.assert_awaited_once_with(bot.client, "!room:localhost", "$thread")
+    mock_fetch_thread_history.assert_awaited_once_with(
+        bot.client,
+        "!room:localhost",
+        "$thread",
+        caller_label="dispatch_post_lock_refresh",
+    )
     assert request.thread_history == fresh_history
 
 
