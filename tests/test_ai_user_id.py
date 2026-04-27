@@ -78,6 +78,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.knowledge import KnowledgeResolution
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_fallback import append_inline_media_fallback_prompt
@@ -115,6 +116,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Generator
     from pathlib import Path
+
+    from agno.knowledge.knowledge import Knowledge
 
 T = TypeVar("T")
 
@@ -289,11 +292,17 @@ def _make_bot(
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
     bot._send_response = AsyncMock(return_value="$response_id")
     bot._handle_interactive_question = AsyncMock()
     return bot
+
+
+def _knowledge_access_support(knowledge: object | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        for_agent=MagicMock(return_value=knowledge),
+        resolve_for_agent=MagicMock(return_value=KnowledgeResolution(knowledge=cast("Knowledge | None", knowledge))),
+    )
 
 
 def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
@@ -442,7 +451,7 @@ def _build_response_runner(
         delivery_gateway=delivery_gateway,
         conversation_cache=bot._conversation_resolver.deps.conversation_cache,
     )
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support = _knowledge_access_support()
 
     return ResponseRunner(
         ResponseRunnerDeps(
@@ -728,8 +737,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
     bot._send_response = AsyncMock(return_value="$response_id")
 
     storage = _SessionStorage()
@@ -831,8 +839,7 @@ async def test_process_and_respond_applies_session_started_agent_and_room_scopes
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
     bot._send_response = AsyncMock(return_value="$response_id")
 
     storage = _SessionStorage()
@@ -902,8 +909,7 @@ async def test_process_and_respond_does_not_emit_session_started_without_persist
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
     bot._send_response = AsyncMock(return_value="$response_id")
 
     storage = _SessionStorage()
@@ -1008,8 +1014,7 @@ async def test_session_started_hooks_continue_after_timeout(tmp_path: Path) -> N
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
     bot._send_response = AsyncMock(return_value="$response_id")
 
     storage = _SessionStorage()
@@ -1150,8 +1155,7 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
     bot._handle_interactive_question = AsyncMock()
 
     storage = _SessionStorage()
@@ -1387,8 +1391,7 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
     bot._send_response = AsyncMock(return_value="$response_id")
 
     storage = _SessionStorage()
@@ -1462,8 +1465,7 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
     bot._handle_interactive_question = AsyncMock()
 
     storage = _SessionStorage()
@@ -2292,8 +2294,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
 
     storage = _SessionStorage()
     sequence: list[str] = []
@@ -2553,8 +2554,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
 
     storage = _SessionStorage()
     started = asyncio.Event()
@@ -3077,8 +3077,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
 
     storage = _SessionStorage()
     sequence: list[str] = []
@@ -3165,8 +3164,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
     bot.storage_path = tmp_path
     bot.config = config
     bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+    bot._knowledge_access_support = _knowledge_access_support()
 
     storage = _SessionStorage()
     sequence: list[str] = []
@@ -3485,8 +3483,7 @@ class TestUserIdPassthrough:
         bot.storage_path = tmp_path
         bot.config = config
         bot.runtime_paths = runtime_paths
-        bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+        bot._knowledge_access_support = _knowledge_access_support()
         bot._send_response = AsyncMock(return_value="$response_id")
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
@@ -3533,8 +3530,7 @@ class TestUserIdPassthrough:
         bot.config = config
         bot.storage_path = tmp_path
         bot.runtime_paths = runtime_paths
-        bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
-        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+        bot._knowledge_access_support = _knowledge_access_support()
         bot._handle_interactive_question = AsyncMock()
         with (
             patch("mindroom.response_runner.stream_agent_response") as mock_stream,

@@ -309,7 +309,11 @@ def _replace_response_runner_runtime_deps(
 def _set_knowledge_for_agent(bot: AgentBot, knowledge_for_agent: MagicMock) -> MagicMock:
     """Replace the captured knowledge resolver on the real response coordinator."""
     bot._knowledge_access_support.for_agent = knowledge_for_agent
-    return knowledge_for_agent
+    resolve_for_agent = MagicMock(
+        return_value=KnowledgeResolution(knowledge=knowledge_for_agent.return_value),
+    )
+    bot._knowledge_access_support.resolve_for_agent = resolve_for_agent
+    return resolve_for_agent
 
 
 def _room_send_response(event_id: str) -> MagicMock:
@@ -1814,8 +1818,8 @@ class TestAgentBot:
                 )
 
         assert delivery.event_id == "$response"
-        bot._knowledge_access_support.for_agent.assert_called_once()
-        args, kwargs = bot._knowledge_access_support.for_agent.call_args
+        bot._knowledge_access_support.resolve_for_agent.assert_called_once()
+        args, kwargs = bot._knowledge_access_support.resolve_for_agent.call_args
         assert args == ("calculator",)
         assert kwargs["execution_identity"] is not None
 
@@ -4146,7 +4150,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         _install_runtime_cache_support(bot)
-        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+        bot._knowledge_access_support.resolve_for_agent = MagicMock(return_value=KnowledgeResolution(knowledge=None))
         thread_history = [
             _visible_message(
                 sender=f"@user{i}:localhost",
@@ -4258,7 +4262,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         _install_runtime_cache_support(bot)
-        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+        bot._knowledge_access_support.resolve_for_agent = MagicMock(return_value=KnowledgeResolution(knowledge=None))
         root_event_id = "$root_event"
         resolved_target = MessageTarget.resolve(
             room_id="!test:localhost",
