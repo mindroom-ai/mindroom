@@ -261,7 +261,7 @@ depends_on = [
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_runner",
-    "mindroom.knowledge.registry",
+    "mindroom.knowledge.status",
 ]
 
 [[modules]]
@@ -1678,6 +1678,13 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.redaction"
 depends_on = []
+
+[[modules]]
+path = "mindroom.knowledge.status"
+depends_on = [
+    "mindroom.knowledge.availability",
+    "mindroom.knowledge.registry",
+]
 
 [[modules]]
 path = "mindroom.knowledge.refresh_owner"

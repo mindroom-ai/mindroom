@@ -1,4 +1,9 @@
-"""Published knowledge collection lookup and lightweight refresh state."""
+"""Internal published knowledge collection registry.
+
+Code outside ``mindroom.knowledge`` should use package facades such as
+``mindroom.knowledge.status`` or ``mindroom.knowledge.utils`` instead of
+importing this module directly.
+"""
 
 from __future__ import annotations
 

@@ -1707,7 +1707,7 @@ def test_status_degrades_gracefully_when_snapshot_key_resolution_fails(tmp_path:
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
 
-    with patch("mindroom.api.knowledge.resolve_snapshot_key", side_effect=ValueError("bad binding")):
+    with patch("mindroom.api.knowledge.get_knowledge_snapshot_status", side_effect=ValueError("bad binding")):
         response = client.get("/api/knowledge/bases/research/status")
 
     assert response.status_code == 200
