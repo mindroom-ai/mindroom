@@ -621,8 +621,8 @@ async def test_execute_request_inprocess_ignores_null_tool_output_path(
     class _FakeToolkit:
         requires_connect = False
 
-    def _fake_entrypoint(**kwargs: object) -> dict[str, object]:
-        return {"kwargs": kwargs}
+    def _fake_entrypoint() -> dict[str, object]:
+        return {"called": True}
 
     def _unexpected_output_root_resolution(**_kwargs: object) -> Path | None:
         pytest.fail("null mindroom_output_path must not resolve a tool output workspace root")
@@ -650,7 +650,7 @@ async def test_execute_request_inprocess_ignores_null_tool_output_path(
     )
 
     assert response.ok is True
-    assert response.result == {"kwargs": {sandbox_runner_module.OUTPUT_PATH_ARGUMENT: None}}
+    assert response.result == {"called": True}
 
 
 def test_execute_request_subprocess_sync_marks_subprocess_timeouts_as_worker_failures(

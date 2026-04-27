@@ -667,6 +667,10 @@ async def _execute_request_inprocess(
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
     output_path = request.kwargs.get(OUTPUT_PATH_ARGUMENT)
+    kwargs = request.kwargs
+    if output_path is None and OUTPUT_PATH_ARGUMENT in kwargs:
+        kwargs = dict(kwargs)
+        kwargs.pop(OUTPUT_PATH_ARGUMENT, None)
     tool_output_workspace_root = (
         _runner_tool_output_workspace_root(
             config=config,
@@ -703,11 +707,11 @@ async def _execute_request_inprocess(
             if toolkit.requires_connect:
                 await _maybe_await(toolkit.connect())
                 try:
-                    result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
+                    result = await _maybe_await(entrypoint(*request.args, **kwargs))
                 finally:
                     await _maybe_await(toolkit.close())
             else:
-                result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
+                result = await _maybe_await(entrypoint(*request.args, **kwargs))
         except Exception as exc:
             logger.warning(
                 "sandbox_tool_execution_failed",
