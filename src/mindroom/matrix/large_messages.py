@@ -23,6 +23,7 @@ from mindroom.constants import (
     STREAM_WARMUP_SUFFIX_KEY,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.message_builder import markdown_to_html
 
 logger = get_logger(__name__)
 
@@ -78,6 +79,40 @@ def _copy_edit_wrapper_metadata(source_content: dict[str, Any], target_content: 
     )
 
 
+def _copy_inline_streaming_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
+    """Copy metadata that should remain inline on rich streaming previews."""
+    _copy_preview_metadata(source_content, target_content)
+
+
+def _room_is_encrypted(client: nio.AsyncClient, room_id: str | None) -> bool:
+    return bool(room_id and room_id in client.rooms and client.rooms[room_id].encrypted)
+
+
+def _add_sidecar_metadata(
+    target_content: dict[str, Any],
+    *,
+    room_encrypted: bool,
+    mxc_uri: str | None,
+    file_info: dict[str, Any] | None,
+    original_size: int,
+) -> None:
+    if mxc_uri is None or file_info is None:
+        return
+
+    if room_encrypted:
+        target_content["file"] = file_info
+    else:
+        target_content["url"] = mxc_uri
+
+    target_content["io.mindroom.long_text"] = {
+        "version": 2,
+        "encoding": "matrix_event_content_json",
+        "original_event_size": original_size,
+        "preview_size": len(target_content["body"]),
+        "is_complete_content": True,
+    }
+
+
 def _calculate_event_size(content: dict[str, Any]) -> int:
     """Calculate the approximate size of a Matrix event.
 
@@ -110,8 +145,13 @@ def _build_nonterminal_streaming_edit_preview(
     content: dict[str, Any],
     source_content: dict[str, Any],
     preview_text: str,
+    *,
+    room_encrypted: bool,
+    mxc_uri: str | None,
+    file_info: dict[str, Any] | None,
+    original_size: int,
 ) -> dict[str, Any] | None:
-    """Build an in-progress edit preview without uploading an obsolete sidecar."""
+    """Build an in-progress rich edit preview with a fresh full-content sidecar."""
     preview_limit = _NONTERMINAL_STREAM_PREVIEW_BYTES
     while True:
         preview = _create_preview(
@@ -119,14 +159,26 @@ def _build_nonterminal_streaming_edit_preview(
             preview_limit,
             continuation_indicator=_STREAMING_PREVIEW_TRUNCATION_INDICATOR,
         )
+        formatted_preview = markdown_to_html(preview)
         preview_content: dict[str, Any] = {
             "msgtype": source_content.get("msgtype", "m.text"),
             "body": preview,
+            "format": "org.matrix.custom.html",
+            "formatted_body": formatted_preview,
         }
-        _copy_preview_metadata(source_content, preview_content)
+        _copy_inline_streaming_preview_metadata(source_content, preview_content)
+        _add_sidecar_metadata(
+            preview_content,
+            room_encrypted=room_encrypted,
+            mxc_uri=mxc_uri,
+            file_info=file_info,
+            original_size=original_size,
+        )
         modified_content: dict[str, Any] = {
             "msgtype": "m.text",
             "body": f"* {preview}",
+            "format": "org.matrix.custom.html",
+            "formatted_body": formatted_preview,
             "m.new_content": preview_content,
             "m.relates_to": content.get("m.relates_to", {}),
         }
@@ -134,8 +186,9 @@ def _build_nonterminal_streaming_edit_preview(
         if _calculate_event_size(modified_content) <= _MATRIX_EVENT_HARD_LIMIT:
             return modified_content
         if preview_limit == 0:
-            return None
+            break
         preview_limit = max(0, preview_limit // 2)
+    return None
 
 
 def _prefix_by_bytes(text: str, max_bytes: int) -> str:
@@ -290,10 +343,7 @@ async def _build_file_content(
     size_limit: int,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
     """Upload full original content JSON and build preview ``m.file`` event."""
-    upload_text = json.dumps(full_content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    upload_mimetype = "application/json"
-
-    mxc_uri, file_info = await _upload_text_as_mxc(client, upload_text, room_id, mimetype=upload_mimetype)
+    mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, full_content)
 
     attachment_overhead = 5000  # Conservative estimate for attachment JSON structure
     available = size_limit - attachment_overhead
@@ -307,6 +357,16 @@ async def _build_file_content(
     }
 
     return mxc_uri, file_info, modified_content
+
+
+async def _upload_content_json_sidecar(
+    client: nio.AsyncClient,
+    room_id: str,
+    full_content: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Upload full original content JSON for supported-client hydration."""
+    upload_text = json.dumps(full_content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return await _upload_text_as_mxc(client, upload_text, room_id, mimetype="application/json")
 
 
 async def prepare_large_message(
@@ -341,7 +401,21 @@ async def prepare_large_message(
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     preview_text = source_content["body"]
     if is_edit and _is_nonterminal_stream_content(source_content):
-        modified_content = _build_nonterminal_streaming_edit_preview(content, source_content, preview_text)
+        logger.info(
+            "large_streaming_edit_sidecar_upload_started",
+            room_id=room_id,
+            original_size_bytes=current_size,
+        )
+        mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, content)
+        modified_content = _build_nonterminal_streaming_edit_preview(
+            content,
+            source_content,
+            preview_text,
+            room_encrypted=_room_is_encrypted(client, room_id),
+            mxc_uri=mxc_uri,
+            file_info=file_info,
+            original_size=current_size,
+        )
         if modified_content is not None:
             inner: dict[str, Any] = modified_content["m.new_content"]
             logger.info(
@@ -350,6 +424,7 @@ async def prepare_large_message(
                 original_size_bytes=current_size,
                 preview_length=len(inner["body"]),
                 final_size_bytes=_calculate_event_size(modified_content),
+                has_sidecar="io.mindroom.long_text" in inner,
             )
             return modified_content
 
@@ -369,19 +444,13 @@ async def prepare_large_message(
     )
 
     _copy_preview_metadata(source_content, modified_content)
-
-    if room_id and room_id in client.rooms and client.rooms[room_id].encrypted:
-        modified_content["file"] = file_info
-    else:
-        modified_content["url"] = mxc_uri
-
-    modified_content["io.mindroom.long_text"] = {
-        "version": 2,
-        "encoding": "matrix_event_content_json",
-        "original_event_size": current_size,
-        "preview_size": len(modified_content["body"]),
-        "is_complete_content": True,
-    }
+    _add_sidecar_metadata(
+        modified_content,
+        room_encrypted=_room_is_encrypted(client, room_id),
+        mxc_uri=mxc_uri,
+        file_info=file_info,
+        original_size=current_size,
+    )
 
     if "m.relates_to" in content:
         modified_content["m.relates_to"] = content["m.relates_to"]
