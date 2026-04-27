@@ -937,7 +937,7 @@ async def test_dashboard_delete_stale_write_failure_keeps_best_effort_source_cha
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Stale metadata failures do not roll back source deletes or last-good indexs."""
+    """Stale metadata failures schedule refresh instead of stranding source deletes."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("restored public", encoding="utf-8")
@@ -977,7 +977,8 @@ async def test_dashboard_delete_stale_write_failure_keeps_best_effort_source_cha
         assert [document.content for document in lookup.index.knowledge.search("anything", max_results=5)] == [
             "restored public",
         ]
-    scheduler.schedule_refresh.assert_not_called()
+    assert scheduler.schedule_refresh.call_count == 2
+    assert [call.args for call in scheduler.schedule_refresh.call_args_list] == [("research",), ("summary",)]
 
 
 @pytest.mark.asyncio

@@ -185,6 +185,21 @@ def _schedule_refreshes(
         _schedule_refresh(config, base_id, runtime_paths, request=request)
 
 
+def _same_source_base_ids(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+) -> tuple[str, ...]:
+    source_root = _knowledge_root(config, base_id, runtime_paths).resolve()
+    base_ids = [base_id]
+    for candidate_id in config.knowledge_bases:
+        if candidate_id == base_id:
+            continue
+        if _knowledge_root(config, candidate_id, runtime_paths).resolve() == source_root:
+            base_ids.append(candidate_id)
+    return tuple(base_ids)
+
+
 async def _mark_source_changed_after_committed_mutation(
     base_id: str,
     *,
@@ -204,6 +219,33 @@ async def _mark_source_changed_after_committed_mutation(
         return await asyncio.shield(source_changed_task), False
     except asyncio.CancelledError:
         return await source_changed_task, True
+
+
+async def _mark_committed_mutation_and_schedule_refresh(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    request: Request,
+    reason: str,
+) -> bool:
+    try:
+        affected_base_ids, cancelled_after_source_changed = await _mark_source_changed_after_committed_mutation(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            reason=reason,
+        )
+    except Exception:
+        _schedule_refreshes(
+            config,
+            _same_source_base_ids(config, base_id, runtime_paths),
+            runtime_paths,
+            request=request,
+        )
+        raise
+    _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
+    return cancelled_after_source_changed
 
 
 def _index_status_sync(
@@ -575,13 +617,13 @@ async def upload_knowledge_files(
                 "count": 0,
             }
 
-        affected_base_ids, cancelled_after_source_changed = await _mark_source_changed_after_committed_mutation(
+        cancelled_after_source_changed = await _mark_committed_mutation_and_schedule_refresh(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
+            request=request,
             reason="dashboard_upload",
         )
-        _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
         if cancelled_after_source_changed:
             raise asyncio.CancelledError
 
@@ -608,13 +650,13 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         relative_path = target.relative_to(root.resolve()).as_posix()
         _reject_unmanaged_knowledge_file_path(config, base_id, relative_path)
         target.unlink()
-        affected_base_ids, cancelled_after_source_changed = await _mark_source_changed_after_committed_mutation(
+        cancelled_after_source_changed = await _mark_committed_mutation_and_schedule_refresh(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
+            request=request,
             reason="dashboard_delete",
         )
-        _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
         if cancelled_after_source_changed:
             raise asyncio.CancelledError
 

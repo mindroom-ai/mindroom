@@ -803,14 +803,16 @@ def test_upload_source_change_mark_write_runs_off_event_loop(
     refresh.assert_not_awaited()
 
 
-def test_upload_source_change_mark_failure_keeps_source_change_and_skips_refresh(tmp_path: Path) -> None:
-    """Uploads fail when source-change state cannot be committed without rolling back the source write."""
+def test_upload_source_change_mark_failure_keeps_source_change_and_schedules_refresh(tmp_path: Path) -> None:
+    """Uploads schedule refresh when source-change state cannot be committed after the source write."""
     client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "guide.md").write_text("old", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
+    _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _RecordingRefreshScheduler()
     client.app.state.knowledge_refresh_scheduler = scheduler
 
@@ -829,7 +831,9 @@ def test_upload_source_change_mark_failure_keeps_source_change_and_skips_refresh
         )
 
     assert (docs / "guide.md").read_text(encoding="utf-8") == "new"
-    assert scheduler.scheduled == []
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
+        ("research", config),
+    ]
     refresh.assert_not_awaited()
 
 
@@ -1310,14 +1314,16 @@ def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     refresh.assert_not_awaited()
 
 
-def test_delete_source_change_mark_failure_keeps_source_change_and_skips_refresh(tmp_path: Path) -> None:
-    """Deletes fail when source-change state cannot be committed without rolling back the source write."""
+def test_delete_source_change_mark_failure_keeps_source_change_and_schedules_refresh(tmp_path: Path) -> None:
+    """Deletes schedule refresh when source-change state cannot be committed after the source write."""
     client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
+    _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _RecordingRefreshScheduler()
     client.app.state.knowledge_refresh_scheduler = scheduler
 
@@ -1333,7 +1339,9 @@ def test_delete_source_change_mark_failure_keeps_source_change_and_skips_refresh
         client.delete("/api/knowledge/bases/research/files/guide.md")
 
     assert not (docs / "guide.md").exists()
-    assert scheduler.scheduled == []
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
+        ("research", config),
+    ]
     refresh.assert_not_awaited()
 
 
