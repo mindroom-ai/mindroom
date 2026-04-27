@@ -314,18 +314,6 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
     return settings
 
 
-def _settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> tuple[str, ...]:
-    base_config = config.get_knowledge_base_config(base_id)
-    git_config = base_config.git
-    return (
-        *_indexing_settings_key(config, storage_path, base_id, knowledge_path),
-        str(base_config.watch),
-        str(git_config.poll_interval_seconds) if git_config is not None else "",
-        str(git_config.sync_timeout_seconds) if git_config is not None else "",
-        git_config.credentials_service or "" if git_config is not None else "",
-    )
-
-
 def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
     provider = config.memory.embedder.provider
     embedder_config = config.memory.embedder.config
@@ -805,7 +793,6 @@ class KnowledgeManager:
     runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
-    _settings: tuple[str, ...] = field(init=False)
     _indexing_settings: tuple[str, ...] = field(init=False)
     _base_storage_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
@@ -875,24 +862,12 @@ class KnowledgeManager:
         self.runtime_paths = runtime_paths
         self.storage_path = storage_path
         self.knowledge_path = knowledge_path.resolve()
-        self._settings = _settings_key(config, storage_path, self.base_id, self.knowledge_path)
         self._indexing_settings = _indexing_settings_key(
             config,
             storage_path,
             self.base_id,
             self.knowledge_path,
         )
-
-    def _refresh_settings(
-        self,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        storage_path: Path,
-        knowledge_path: Path,
-    ) -> None:
-        self._set_settings(config, runtime_paths, storage_path, knowledge_path)
-        if isinstance(self._knowledge.vector_db, ChromaDb):
-            self._knowledge.vector_db.embedder = _create_embedder(config, runtime_paths)
 
     def _knowledge_source_path(self) -> Path:
         knowledge_path = self.knowledge_path
@@ -962,10 +937,6 @@ class KnowledgeManager:
             source_signature=raw_source_signature,
         )
 
-    def _load_persisted_indexing_settings(self) -> tuple[str, ...] | None:
-        persisted_state = self._load_persisted_index_state()
-        return persisted_state.settings if persisted_state is not None else None
-
     def _save_persisted_index_state(
         self,
         status: Literal["resetting", "indexing", "complete"],
@@ -1011,21 +982,6 @@ class KnowledgeManager:
             source_signature=source_signature,
         )
 
-    def _save_persisted_indexing_settings(
-        self,
-        *,
-        indexed_count: int,
-        source_signature: str,
-    ) -> None:
-        self._save_persisted_index_state(
-            _INDEXING_STATUS_COMPLETE,
-            collection=self._current_collection_name(),
-            last_published_at=datetime.now(tz=UTC).isoformat(),
-            published_revision=self._git_last_successful_commit,
-            indexed_count=indexed_count,
-            source_signature=source_signature,
-        )
-
     def _load_git_lfs_hydrated_head(self) -> str | None:
         try:
             hydrated_head = self._git_lfs_hydrated_head_path.read_text(encoding="utf-8").strip()
@@ -1057,29 +1013,6 @@ class KnowledgeManager:
 
     def _needs_full_reindex_on_create(self) -> bool:
         return self._startup_index_mode() == "full_reindex"
-
-    def matches(
-        self,
-        config: Config,
-        storage_path: Path,
-        knowledge_path: Path,
-    ) -> bool:
-        """Return True when manager settings match the provided config."""
-        return self._settings == _settings_key(config, storage_path, self.base_id, knowledge_path)
-
-    def needs_full_reindex(
-        self,
-        config: Config,
-        storage_path: Path,
-        knowledge_path: Path,
-    ) -> bool:
-        """Return True when index-affecting settings changed."""
-        return self._indexing_settings != _indexing_settings_key(
-            config,
-            storage_path,
-            self.base_id,
-            knowledge_path,
-        )
 
     def get_knowledge(self) -> Knowledge:
         """Return the agno Knowledge instance."""
@@ -1444,12 +1377,6 @@ class KnowledgeManager:
     def _default_collection_name(self) -> str:
         return _collection_name(self.base_id, self._knowledge_source_path())
 
-    def _current_collection_name(self) -> str:
-        vector_db = self._knowledge.vector_db
-        if isinstance(vector_db, ChromaDb):
-            return vector_db.collection_name
-        return self._default_collection_name()
-
     def _candidate_collection_name(self) -> str:
         return f"{self._default_collection_name()}_candidate_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
 
@@ -1602,12 +1529,6 @@ class KnowledgeManager:
         )
         if publish_cancelled:
             _raise_cancelled()
-
-    def _reset_collection(self) -> None:
-        vector_db = self._knowledge.vector_db
-        if not isinstance(vector_db, ChromaDb):
-            return
-        self._reset_vector_db(vector_db)
 
     async def ensure_git_checkout_ready(self) -> None:
         """Ensure the Git checkout exists before direct file writes land in the knowledge folder."""
@@ -1771,9 +1692,8 @@ class KnowledgeManager:
         results = await asyncio.gather(*(_index_one(file_path) for file_path in files))
         return sum(int(indexed) for indexed in results)
 
-    async def reindex_all(self, *, protected_collections: tuple[str, ...] = ()) -> int:
+    async def reindex_all(self) -> int:
         """Clear and rebuild the knowledge index from disk."""
-        _ = protected_collections
         async with self._lock:
             self._last_refresh_error = None
             files = await asyncio.to_thread(self.list_files)
