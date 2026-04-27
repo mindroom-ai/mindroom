@@ -5469,6 +5469,46 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
 
 
 @pytest.mark.asyncio
+async def test_sync_git_source_once_unchanged_head_skips_worktree_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Polling an unchanged managed checkout should not scan the working tree."""
+    manager = _git_manager(tmp_path, lfs=True)
+    git_calls: list[list[str]] = []
+
+    async def _fake_ensure_git_repository(_git_config: object) -> bool:
+        return False
+
+    async def _fake_git_rev_parse(ref: str) -> str | None:
+        if ref in {"HEAD", "origin/main"}:
+            return "same"
+        return None
+
+    async def _unexpected_git_list_tracked_files() -> set[str]:
+        msg = "unchanged Git sync should not list tracked files"
+        raise AssertionError(msg)
+
+    async def _fake_run_git(args: list[str], **_: object) -> str:
+        git_calls.append(args)
+        return ""
+
+    monkeypatch.setattr(manager, "_ensure_git_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager, "_git_list_tracked_files", _unexpected_git_list_tracked_files)
+    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+
+    changed_files, removed_files, updated = await manager._sync_git_source_once(manager._git_config())
+
+    assert updated is False
+    assert changed_files == set()
+    assert removed_files == set()
+    assert ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"] in git_calls
+    assert ["lfs", "pull", "origin", "main"] in git_calls
+    assert not any(call[:3] == ["diff", "--name-only", "--no-renames"] for call in git_calls)
+
+
+@pytest.mark.asyncio
 async def test_sync_git_source_once_skips_repeated_lfs_pull_for_already_hydrated_unchanged_head(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

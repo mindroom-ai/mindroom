@@ -1142,10 +1142,6 @@ class KnowledgeManager:
         self._git_tracked_relative_paths = set(tracked_files)
         return tracked_files
 
-    async def _git_dirty_tracked_files(self) -> set[str]:
-        output = await self._run_git(["diff", "--name-only", "--no-renames", "HEAD"])
-        return {path for path in output.splitlines() if self._include_semantic_relative_path(path)}
-
     async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
         runtime_paths = self.runtime_paths
         knowledge_root = self._knowledge_source_path()
@@ -1197,8 +1193,6 @@ class KnowledgeManager:
             return await self._git_list_tracked_files(), set(), True
 
         before_head = await self._git_rev_parse("HEAD")
-        before_files = await self._git_list_tracked_files()
-        dirty_tracked_files = set() if before_head is None else await self._git_dirty_tracked_files()
 
         remote_ref = f"origin/{git_config.branch}"
         await self._run_git(
@@ -1211,21 +1205,10 @@ class KnowledgeManager:
             raise RuntimeError(msg)
 
         if before_head == remote_head:
-            if not dirty_tracked_files:
-                await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
-                return set(), set(), False
-
-            await self._run_git(
-                ["checkout", "--force", "-B", git_config.branch, remote_ref],
-                env=self._git_lfs_skip_smudge_env(git_config),
-            )
-            # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
-            # intentional way to realign it with the configured remote state.
-            await self._run_git(["reset", "--hard", remote_ref], env=self._git_lfs_skip_smudge_env(git_config))
             await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
-            after_files = await self._git_list_tracked_files()
-            changed_files = {path for path in dirty_tracked_files if path in after_files}
-            return changed_files, set(), True
+            return set(), set(), False
+
+        before_files = await self._git_list_tracked_files()
 
         await self._run_git(
             ["checkout", "--force", "-B", git_config.branch, remote_ref],
@@ -1247,7 +1230,6 @@ class KnowledgeManager:
         changed_files = (
             {path for path in changed_paths if path in after_files}
             | (after_files - before_files)
-            | {path for path in dirty_tracked_files if path in after_files}
         )
         return changed_files, removed_files, True
 
