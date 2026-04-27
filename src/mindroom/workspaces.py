@@ -299,6 +299,15 @@ def _effective_workspace(
     )
 
 
+def _template_unavailable_for_dedicated_worker(template_dir: Path, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a dedicated worker should rely on the control plane's existing scaffold."""
+    return (
+        runtime_paths.env_flag("MINDROOM_SANDBOX_RUNNER_MODE")
+        and bool(runtime_paths.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", default=""))
+        and not template_dir.expanduser().is_dir()
+    )
+
+
 def _resolve_workspace(
     agent_name: str,
     config: Config,
@@ -345,7 +354,8 @@ def _resolve_workspace(
         root.mkdir(parents=True, exist_ok=True)
         if template_dir is not None:
             assert template_dir is not None
-            _copy_workspace_template(root, template_dir=template_dir)
+            if not _template_unavailable_for_dedicated_worker(template_dir, runtime_paths):
+                _copy_workspace_template(root, template_dir=template_dir)
 
     context_files = tuple(
         resolve_workspace_relative_path(
