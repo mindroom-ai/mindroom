@@ -803,8 +803,8 @@ def test_upload_source_change_mark_write_runs_off_event_loop(
     refresh.assert_not_awaited()
 
 
-def test_upload_source_change_mark_failure_keeps_source_change_and_schedules_refresh(tmp_path: Path) -> None:
-    """Uploads schedule refresh when source-change state cannot be committed after the source write."""
+def test_upload_source_change_mark_failure_leaves_source_unchanged_and_schedules_refresh(tmp_path: Path) -> None:
+    """Uploads schedule refresh when source-change state cannot be committed before replacement."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -830,7 +830,7 @@ def test_upload_source_change_mark_failure_keeps_source_change_and_schedules_ref
             files=[("files", ("guide.md", b"new", "text/markdown"))],
         )
 
-    assert (docs / "guide.md").read_text(encoding="utf-8") == "new"
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "old"
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
         ("research", config),
     ]
@@ -1009,6 +1009,54 @@ def test_upload_write_failure_leaves_ready_index_unchanged_and_skips_refresh(
     assert "availability" not in metadata
     assert (docs / "guide.md").read_text(encoding="utf-8") == "old"
     assert scheduler.scheduled == []
+    refresh.assert_not_awaited()
+
+
+def test_upload_replace_failure_schedules_refresh_for_partial_commit(
+    tmp_path: Path,
+) -> None:
+    """Failed upload replacement after a partial commit must still queue refresh."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("old guide", encoding="utf-8")
+    (docs / "extra.md").write_text("old extra", encoding="utf-8")
+    config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, config)
+    _write_index_metadata(config, runtime_paths, base_id="research")
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
+    original_replace = type(docs).replace
+    replace_count = 0
+
+    def _fail_second_replace(self: object, target: object) -> object:
+        nonlocal replace_count
+        if isinstance(self, type(docs)) and self.name.endswith(".upload.tmp"):
+            replace_count += 1
+            if replace_count == 2:
+                msg = "replace failed"
+                raise RuntimeError(msg)
+        return original_replace(self, target)
+
+    with (
+        patch("pathlib.Path.replace", _fail_second_replace),
+        patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
+        pytest.raises(RuntimeError, match="replace failed"),
+    ):
+        client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[
+                ("files", ("guide.md", b"new guide", "text/markdown")),
+                ("files", ("extra.md", b"new extra", "text/markdown")),
+            ],
+        )
+
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "new guide"
+    assert (docs / "extra.md").read_text(encoding="utf-8") == "old extra"
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
+        ("research", config),
+    ]
     refresh.assert_not_awaited()
 
 

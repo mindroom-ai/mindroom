@@ -262,7 +262,12 @@ def request_has_frontend_access(request: Request) -> bool:
         authorization,
         cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
     )
-    return token is not None and _validate_supabase_token(token, auth_state) is not None
+    if token is None:
+        return False
+    user = _validate_supabase_token(token, auth_state)
+    if user is None:
+        return False
+    return not auth_state.settings.account_id or user.id == auth_state.settings.account_id
 
 
 def sanitize_next_path(next_path: str | None) -> str:

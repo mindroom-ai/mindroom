@@ -38,6 +38,8 @@ from mindroom.knowledge.status import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 
@@ -477,7 +479,8 @@ async def _write_uploads(
     base_id: str,
     runtime_paths: constants.RuntimePaths,
     root: Path,
-) -> list[str]:
+    before_commit: Callable[[], Awaitable[bool]] | None = None,
+) -> tuple[list[str], bool]:
     try:
         upload_targets: list[_UploadTarget] = []
         seen_relative_paths: set[str] = set()
@@ -515,13 +518,14 @@ async def _write_uploads(
                 )
                 for target in upload_targets
             ]
+            cancelled_after_source_changed = await before_commit() if staged_uploads and before_commit else False
             for staged_upload in staged_uploads:
                 staged_upload.temp_path.replace(staged_upload.destination)
         except (asyncio.CancelledError, Exception):
             for staged_upload in staged_uploads:
                 staged_upload.temp_path.unlink(missing_ok=True)
             raise
-        return [staged_upload.relative_path for staged_upload in staged_uploads]
+        return [staged_upload.relative_path for staged_upload in staged_uploads], cancelled_after_source_changed
     finally:
         for upload in files:
             await upload.close()
@@ -602,12 +606,22 @@ async def upload_knowledge_files(
     async with knowledge_binding_mutation_lock(base_id, config=config, runtime_paths=runtime_paths):
         root = _knowledge_root(config, base_id, runtime_paths)
 
-        uploaded = await _write_uploads(
+        async def _mark_uploaded_source_changed() -> bool:
+            return await _mark_committed_mutation_and_schedule_refresh(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                request=request,
+                reason="dashboard_upload",
+            )
+
+        uploaded, cancelled_after_source_changed = await _write_uploads(
             files,
             config=config,
             base_id=base_id,
             runtime_paths=runtime_paths,
             root=root,
+            before_commit=_mark_uploaded_source_changed,
         )
 
         if not uploaded:
@@ -617,13 +631,6 @@ async def upload_knowledge_files(
                 "count": 0,
             }
 
-        cancelled_after_source_changed = await _mark_committed_mutation_and_schedule_refresh(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            request=request,
-            reason="dashboard_upload",
-        )
         if cancelled_after_source_changed:
             raise asyncio.CancelledError
 

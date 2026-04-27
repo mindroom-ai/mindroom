@@ -3977,11 +3977,13 @@ def _set_platform_auth(
     *,
     valid_tokens: set[str],
     platform_login_url: str = "https://platform.example.com/login",
+    account_id: str | None = None,
+    user_id: str = "user-123",
 ) -> None:
     """Configure the API module for platform-managed cookie auth tests."""
 
     class _FakeUser:
-        id = "user-123"
+        id = user_id
         email = "user@example.com"
 
     class _FakeResponse:
@@ -4003,7 +4005,7 @@ def _set_platform_auth(
             platform_login_url=platform_login_url,
             supabase_url="https://supabase.example.com",
             supabase_anon_key="anon-key",
-            account_id=None,
+            account_id=account_id,
             mindroom_api_key=None,
         ),
         supabase_auth=_FakeClient(),
@@ -4093,6 +4095,34 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
     )
     assert response.status_code == 200
     assert "MindRoom Dashboard" in response.text
+
+
+def test_platform_frontend_redirects_when_cookie_account_mismatches(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Platform frontend access must enforce the instance account id."""
+    valid_cookie_token = "valid-cookie-token"  # noqa: S105
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    _set_platform_auth(
+        valid_tokens={valid_cookie_token},
+        platform_login_url="https://app.example.com/auth/login",
+        account_id="account-owner",
+        user_id="other-account",
+    )
+
+    response = test_client.get(
+        "/",
+        cookies={"mindroom_jwt": valid_cookie_token},
+        follow_redirects=False,
+    )
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
 
 
 def test_health_startup_grace_expires_after_stale_threshold(
