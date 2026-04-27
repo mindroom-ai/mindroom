@@ -31,7 +31,7 @@ from mindroom.knowledge import (
     KnowledgeAvailability,
     KnowledgeAvailabilityDetail,
     KnowledgeRefreshScheduler,
-    get_agent_knowledge,
+    resolve_agent_knowledge_access,
 )
 from mindroom.knowledge.manager import (
     KnowledgeManager,
@@ -300,11 +300,8 @@ def test_cold_git_status_with_existing_non_checkout_dir_returns_empty_files(tmp_
     )
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
-    status = manager.get_status()
-
     assert manager.list_files() == []
-    assert status["file_count"] == 0
-    assert status["git"]["repo_present"] is False
+    assert manager._git_repo_present is False
     assert not (knowledge_path / ".git").exists()
 
 
@@ -346,12 +343,12 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
 
-    knowledge = get_agent_knowledge(
+    knowledge = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths_for(config),
         refresh_scheduler=scheduler,
-    )
+    ).knowledge
 
     assert knowledge is None
     scheduler.schedule_refresh.assert_called_once()
@@ -371,7 +368,7 @@ def test_initializing_knowledge_skips_duplicate_initial_load_when_scheduler_is_a
     scheduler.is_refreshing = MagicMock(return_value=True)
     scheduler.schedule_refresh = MagicMock()
 
-    knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler).knowledge
 
     assert knowledge is None
     scheduler.is_refreshing.assert_called_once()
@@ -386,7 +383,9 @@ def test_real_refresh_scheduler_without_running_loop_does_not_mark_active(tmp_pa
     runtime_paths = runtime_paths_for(config)
     scheduler = KnowledgeRefreshScheduler()
 
-    assert get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler) is None
+    assert (
+        resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler).knowledge is None
+    )
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     refresh_target = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
 
@@ -466,8 +465,13 @@ async def test_ready_index_access_does_not_refresh_unchanged_sources(tmp_path: P
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
 
-    knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler)
-    second_knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler).knowledge
+    second_knowledge = resolve_agent_knowledge_access(
+        "helper",
+        config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
+    ).knowledge
 
     assert knowledge is not None
     assert second_knowledge is not None
@@ -490,13 +494,18 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
     scheduler = KnowledgeRefreshScheduler()
 
     try:
-        knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler)
+        knowledge = resolve_agent_knowledge_access(
+            "helper",
+            config,
+            runtime_paths,
+            refresh_scheduler=scheduler,
+        ).knowledge
         assert knowledge is not None
         assert [document.content for document in knowledge.search("shared", max_results=5)] == ["shared local old"]
 
         for _attempt in range(50):
             await asyncio.sleep(0.01)
-            refreshed = get_agent_knowledge("helper", config, runtime_paths)
+            refreshed = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
             if refreshed is not None and [
                 document.content for document in refreshed.search("shared", max_results=5)
             ] == ["shared local new"]:
@@ -521,18 +530,15 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
-
-    assert (
-        get_agent_knowledge(
-            "helper",
-            config,
-            runtime_paths,
-            refresh_scheduler=scheduler,
-            on_unavailable_bases=unavailable.update,
-            on_unavailable_base_details=unavailable_details.update,
-        )
-        is not None
+    _resolution = resolve_agent_knowledge_access(
+        "helper",
+        config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    unavailable_details.update(_resolution.unavailable)
+    assert _resolution.knowledge is not None
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
     assert unavailable_details == {
         "docs": KnowledgeAvailabilityDetail(
@@ -545,15 +551,15 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     unavailable.clear()
     unavailable_details.clear()
-
-    refreshed_knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
         refresh_scheduler=scheduler,
-        on_unavailable_bases=unavailable.update,
-        on_unavailable_base_details=unavailable_details.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    unavailable_details.update(_resolution.unavailable)
+    refreshed_knowledge = _resolution.knowledge
 
     assert refreshed_knowledge is not None
     assert [document.content for document in refreshed_knowledge.search("shared", max_results=5)] == [
@@ -561,28 +567,24 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
     ]
     assert unavailable == {}
     assert unavailable_details == {}
-    assert (
-        get_agent_knowledge(
-            "helper",
-            config,
-            runtime_paths,
-            refresh_scheduler=scheduler,
-            on_unavailable_bases=unavailable.update,
-            on_unavailable_base_details=unavailable_details.update,
-        )
-        is not None
+    _resolution = resolve_agent_knowledge_access(
+        "helper",
+        config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
     )
-    assert (
-        get_agent_knowledge(
-            "helper",
-            config,
-            runtime_paths,
-            refresh_scheduler=scheduler,
-            on_unavailable_bases=unavailable.update,
-            on_unavailable_base_details=unavailable_details.update,
-        )
-        is not None
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    unavailable_details.update(_resolution.unavailable)
+    assert _resolution.knowledge is not None
+    _resolution = resolve_agent_knowledge_access(
+        "helper",
+        config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    unavailable_details.update(_resolution.unavailable)
+    assert _resolution.knowledge is not None
     assert unavailable == {}
     assert unavailable_details == {}
 
@@ -628,15 +630,13 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
 
     assert state is not None
     assert published_index_refresh_state(state) == "stale"
-    assert (
-        get_agent_knowledge(
-            "helper",
-            config,
-            runtime_paths,
-            on_unavailable_base_details=unavailable_details.update,
-        )
-        is not None
+    _resolution = resolve_agent_knowledge_access(
+        "helper",
+        config,
+        runtime_paths,
     )
+    unavailable_details.update(_resolution.unavailable)
+    assert _resolution.knowledge is not None
     refresh_scheduler.schedule_refresh.assert_called_once()
     assert refresh_scheduler.schedule_refresh.call_args.args == ("docs",)
     assert unavailable_details == {
@@ -745,15 +745,15 @@ async def test_schedule_refresh_on_access_reports_stale_while_scheduler_is_activ
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
-
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
         refresh_scheduler=scheduler,
-        on_unavailable_bases=unavailable.update,
-        on_unavailable_base_details=unavailable_details.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    unavailable_details.update(_resolution.unavailable)
+    knowledge = _resolution.knowledge
 
     assert knowledge is not None
     assert [document.content for document in knowledge.search("active", max_results=5)] == ["active refresh old"]
@@ -784,21 +784,22 @@ async def test_stale_index_metadata_schedules_refresh_without_source_scan(tmp_pa
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
-
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
         refresh_scheduler=scheduler,
     )
-    second_knowledge = get_agent_knowledge(
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
         refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    second_knowledge = _resolution.knowledge
 
     assert knowledge is not None
     assert second_knowledge is not None
@@ -826,14 +827,14 @@ async def test_stale_index_skips_duplicate_refresh_when_scheduler_is_active(tmp_
     scheduler.is_refreshing = MagicMock(return_value=True)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
-
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
         refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert knowledge is not None
     assert [document.content for document in knowledge.search("index", max_results=5)] == ["ready index"]
@@ -852,7 +853,7 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    initial_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    initial_knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert initial_knowledge is not None
     assert {document.content for document in initial_knowledge.search("anything", max_results=5)} == {
         "deleted secret",
@@ -876,7 +877,7 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
         key,
         error="refresh failed after delete",
     )
-    stale_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    stale_knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
 
     assert stale_knowledge is not None
     assert {document.content for document in stale_knowledge.search("anything", max_results=5)} == {
@@ -896,7 +897,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    initial_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    initial_knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert initial_knowledge is not None
     assert {document.content for document in initial_knowledge.search("anything", max_results=5)} == {
         "replaced secret",
@@ -918,7 +919,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
         main.app.state.knowledge_refresh_scheduler = None
     assert response.status_code == 200
 
-    pending_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    pending_knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert pending_knowledge is not None
     assert {document.content for document in pending_knowledge.search("anything", max_results=5)} == {
         "replaced secret",
@@ -930,7 +931,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
         key,
         error="refresh failed after replacement",
     )
-    filtered_knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    filtered_knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
 
     assert (docs_path / "guide.md").read_text(encoding="utf-8") == "replacement content"
     assert filtered_knowledge is not None
@@ -1013,8 +1014,8 @@ async def test_ready_index_access_never_recomputes_source_signature(
 
     monkeypatch.setattr("mindroom.knowledge.manager.knowledge_source_signature", _unexpected_signature)
 
-    assert get_agent_knowledge("helper", config, runtime_paths) is not None
-    assert get_agent_knowledge("helper", config, runtime_paths) is not None
+    assert resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge is not None
+    assert resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge is not None
 
 
 def test_knowledge_file_listing_rejects_symlink_file_escape(tmp_path: Path) -> None:
@@ -1068,14 +1069,14 @@ async def test_index_metadata_without_source_signature_is_unavailable_and_schedu
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
-
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
         refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
@@ -1103,12 +1104,13 @@ async def test_successful_publish_clears_stale_refresh_state(tmp_path: Path) -> 
     state = load_published_index_state(published_index_metadata_path(key))
 
     unavailable: dict[str, KnowledgeAvailability] = {}
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert knowledge is not None
     assert state is not None
@@ -1815,13 +1817,14 @@ def test_passwordless_ssh_username_change_invalidates_published_index(tmp_path: 
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     lookup = get_published_index("docs", config=changed_config, runtime_paths=runtime_paths)
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         changed_config,
         runtime_paths,
         refresh_scheduler=scheduler,
-        on_unavailable_bases=unavailable.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert lookup.index is None
     assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
@@ -1929,14 +1932,14 @@ async def test_git_ready_index_schedules_refresh_after_poll_interval(
         raise AssertionError(msg)
 
     monkeypatch.setattr("mindroom.knowledge.manager.knowledge_source_signature", _unexpected_signature)
-
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
         refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert knowledge is not None
     assert [document.content for document in knowledge.search("git", max_results=5)] == ["git index"]
@@ -1992,15 +1995,15 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
-
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
         execution_identity=identity,
         refresh_scheduler=scheduler,
-        on_unavailable_bases=unavailable.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert knowledge is not None
     assert unavailable == {}
@@ -2015,15 +2018,15 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
     unavailable = {}
-
-    stale_knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
         execution_identity=identity,
         refresh_scheduler=scheduler,
-        on_unavailable_bases=unavailable.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    stale_knowledge = _resolution.knowledge
 
     assert stale_knowledge is not None
     assert unavailable == {base_id: KnowledgeAvailability.STALE}
@@ -2158,7 +2161,7 @@ async def test_existing_published_index_is_used_while_refresh_runs(
         indexed_files: set[str] | None = None,
         indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
     ) -> bool:
-        if knowledge is not None and knowledge is not self.get_knowledge() and not started.is_set():
+        if knowledge is not None and knowledge is not self._knowledge and not started.is_set():
             started.set()
             await release.wait()
         return await original_index_file_locked(
@@ -2174,13 +2177,13 @@ async def test_existing_published_index_is_used_while_refresh_runs(
     refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
     await started.wait()
 
-    knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert knowledge is not None
     assert [document.content for document in knowledge.search("index", max_results=5)] == ["old index"]
 
     release.set()
     await refresh_task
-    knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert knowledge is not None
     assert [document.content for document in knowledge.search("index", max_results=5)] == ["new index"]
 
@@ -2212,7 +2215,7 @@ async def test_cancelled_refresh_deletes_unpublished_candidate_collection(
         indexed_files: set[str] | None = None,
         indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
     ) -> bool:
-        if knowledge is not None and knowledge is not self.get_knowledge():
+        if knowledge is not None and knowledge is not self._knowledge:
             candidate_started.set()
             await asyncio.Event().wait()
         return await original_index_file_locked(
@@ -2235,7 +2238,7 @@ async def test_cancelled_refresh_deletes_unpublished_candidate_collection(
         await refresh_task
 
     assert set(_VectorDb.collections).isdisjoint(cancelled_candidate_collections)
-    knowledge = get_agent_knowledge("helper", config, runtime_paths)
+    knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert knowledge is not None
     assert [document.content for document in knowledge.search("cancel", max_results=5)] == ["cancel stable"]
 
@@ -2619,7 +2622,7 @@ async def test_failed_refresh_preserves_last_good_index(tmp_path: Path, monkeypa
         indexed_files: set[str] | None = None,
         indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
     ) -> bool:
-        if knowledge is not None and knowledge is not self.get_knowledge():
+        if knowledge is not None and knowledge is not self._knowledge:
             msg = "candidate failed"
             raise RuntimeError(msg)
         return await original_index_file_locked(
@@ -2636,12 +2639,13 @@ async def test_failed_refresh_preserves_last_good_index(tmp_path: Path, monkeypa
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     unavailable: dict[str, KnowledgeAvailability] = {}
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
@@ -2679,12 +2683,13 @@ async def test_metadata_save_failure_after_candidate_index_keeps_serving_last_go
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     unavailable: dict[str, KnowledgeAvailability] = {}
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
@@ -2705,7 +2710,7 @@ async def test_partial_refresh_after_cached_index_updates_failed_availability(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    assert get_agent_knowledge("helper", config, runtime_paths) is not None
+    assert resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge is not None
     (docs_path / "bad.md").write_text("bad candidate", encoding="utf-8")
     original_index_file_locked = KnowledgeManager._index_file_locked
 
@@ -2733,12 +2738,13 @@ async def test_partial_refresh_after_cached_index_updates_failed_availability(
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     unavailable: dict[str, KnowledgeAvailability] = {}
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert result.index_published is False
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
@@ -2761,14 +2767,14 @@ async def test_embedder_config_mismatch_returns_no_incompatible_index(tmp_path: 
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
-
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         changed_config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
         refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
@@ -2791,8 +2797,14 @@ async def test_config_mismatch_refresh_cooldown_is_settings_aware(tmp_path: Path
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
 
-    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_scheduler=scheduler) is not None
-    assert get_agent_knowledge("helper", newer_config, runtime_paths, refresh_scheduler=scheduler) is not None
+    assert (
+        resolve_agent_knowledge_access("helper", changed_config, runtime_paths, refresh_scheduler=scheduler).knowledge
+        is not None
+    )
+    assert (
+        resolve_agent_knowledge_access("helper", newer_config, runtime_paths, refresh_scheduler=scheduler).knowledge
+        is not None
+    )
 
     assert scheduler.schedule_refresh.call_count == 2
     assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
@@ -2813,8 +2825,14 @@ async def test_initializing_refresh_cooldown_is_settings_aware(tmp_path: Path) -
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
 
-    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_scheduler=scheduler) is None
-    assert get_agent_knowledge("helper", newer_config, runtime_paths, refresh_scheduler=scheduler) is None
+    assert (
+        resolve_agent_knowledge_access("helper", changed_config, runtime_paths, refresh_scheduler=scheduler).knowledge
+        is None
+    )
+    assert (
+        resolve_agent_knowledge_access("helper", newer_config, runtime_paths, refresh_scheduler=scheduler).knowledge
+        is None
+    )
 
     assert scheduler.schedule_refresh.call_count == 2
     assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
@@ -2837,27 +2855,20 @@ async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) ->
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
-
-    assert (
-        get_agent_knowledge(
-            "helper",
-            changed_config,
-            runtime_paths,
-            refresh_scheduler=scheduler,
-            on_unavailable_bases=unavailable.update,
-        )
-        is None
+    _resolution = resolve_agent_knowledge_access(
+        "helper",
+        changed_config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
     )
-    assert (
-        get_agent_knowledge(
-            "helper",
-            newer_config,
-            runtime_paths,
-            refresh_scheduler=scheduler,
-            on_unavailable_bases=unavailable.update,
-        )
-        is None
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    _resolution = resolve_agent_knowledge_access(
+        "helper",
+        newer_config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
 
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert scheduler.schedule_refresh.call_count == 2
@@ -2890,8 +2901,13 @@ async def test_failed_git_refresh_cooldown_is_credentials_service_aware(tmp_path
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
 
-    assert get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler) is None
-    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_scheduler=scheduler) is None
+    assert (
+        resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler).knowledge is None
+    )
+    assert (
+        resolve_agent_knowledge_access("helper", changed_config, runtime_paths, refresh_scheduler=scheduler).knowledge
+        is None
+    )
 
     assert scheduler.schedule_refresh.call_count == 2
     assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is config
@@ -2922,8 +2938,13 @@ async def test_failed_git_refresh_cooldown_is_embedded_userinfo_aware(tmp_path: 
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
 
-    assert get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler) is None
-    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_scheduler=scheduler) is None
+    assert (
+        resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler).knowledge is None
+    )
+    assert (
+        resolve_agent_knowledge_access("helper", changed_config, runtime_paths, refresh_scheduler=scheduler).knowledge
+        is None
+    )
 
     assert scheduler.schedule_refresh.call_count == 2
     assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is config
@@ -2959,27 +2980,22 @@ async def test_stale_or_failed_index_reports_chunking_config_mismatch_before_coo
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
-
-    assert (
-        get_agent_knowledge(
-            "helper",
-            changed_config,
-            runtime_paths,
-            refresh_scheduler=scheduler,
-            on_unavailable_bases=unavailable.update,
-        )
-        is not None
+    _resolution = resolve_agent_knowledge_access(
+        "helper",
+        changed_config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
     )
-    assert (
-        get_agent_knowledge(
-            "helper",
-            newer_config,
-            runtime_paths,
-            refresh_scheduler=scheduler,
-            on_unavailable_bases=unavailable.update,
-        )
-        is not None
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    assert _resolution.knowledge is not None
+    _resolution = resolve_agent_knowledge_access(
+        "helper",
+        newer_config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    assert _resolution.knowledge is not None
 
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
     assert scheduler.schedule_refresh.call_count == 2
@@ -3034,14 +3050,14 @@ async def test_corpus_changing_config_mismatch_returns_no_index(
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
-
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         changed_config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
         refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
@@ -3159,14 +3175,14 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
         raise RuntimeError(msg)
 
     monkeypatch.setattr("mindroom.knowledge.registry._build_published_index_vector_db", _broken_vector_db)
-
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
         refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
@@ -3338,20 +3354,22 @@ async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
-    first = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
         refresh_scheduler=scheduler,
     )
-    second = get_agent_knowledge(
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    first = _resolution.knowledge
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
         refresh_scheduler=scheduler,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    second = _resolution.knowledge
 
     assert first is None
     assert second is None
@@ -3396,7 +3414,7 @@ async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    before_delete = get_agent_knowledge("helper", config, runtime_paths)
+    before_delete = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert before_delete is not None
     assert [document.content for document in before_delete.search("delete", max_results=5)] == ["delete me now"]
 
@@ -3407,12 +3425,13 @@ async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_
 
     response = client.delete("/api/knowledge/bases/docs/files/guide.md")
     unavailable: dict[str, KnowledgeAvailability] = {}
-    after_delete = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    after_delete = _resolution.knowledge
 
     assert response.status_code == 200
     assert after_delete is not None
@@ -3444,12 +3463,13 @@ async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best
         files=[("files", ("guide.md", b"new upload", "text/markdown"))],
     )
     unavailable: dict[str, KnowledgeAvailability] = {}
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
 
     assert response.status_code == 200
     assert knowledge is not None
@@ -3489,12 +3509,13 @@ async def test_api_upload_failure_does_not_commit_earlier_staged_writes(
 
     assert response.status_code == 413
     unavailable: dict[str, KnowledgeAvailability] = {}
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
-        on_unavailable_bases=unavailable.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    knowledge = _resolution.knowledge
     assert knowledge is not None
     assert unavailable == {}
     assert (docs_path / "guide.md").read_text(encoding="utf-8") == "existing upload"
@@ -3809,8 +3830,18 @@ async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path
 
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity_a)
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity_b)
-    knowledge_a = get_agent_knowledge("helper", config, runtime_paths, execution_identity=identity_a)
-    knowledge_b = get_agent_knowledge("helper", config, runtime_paths, execution_identity=identity_b)
+    knowledge_a = resolve_agent_knowledge_access(
+        "helper",
+        config,
+        runtime_paths,
+        execution_identity=identity_a,
+    ).knowledge
+    knowledge_b = resolve_agent_knowledge_access(
+        "helper",
+        config,
+        runtime_paths,
+        execution_identity=identity_b,
+    ).knowledge
 
     assert key_a != key_b
     assert knowledge_a is not None
@@ -3870,16 +3901,16 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
 
     monkeypatch.setattr("mindroom.knowledge.manager.knowledge_source_signature", _unexpected_signature)
     monkeypatch.setattr(knowledge_utils, "knowledge_source_signature", _unexpected_signature, raising=False)
-
-    knowledge = get_agent_knowledge(
+    _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
         execution_identity=identity,
         refresh_scheduler=scheduler,
-        on_unavailable_bases=unavailable.update,
-        on_unavailable_base_details=unavailable_details.update,
     )
+    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
+    unavailable_details.update(_resolution.unavailable)
+    knowledge = _resolution.knowledge
 
     assert knowledge is not None
     assert [document.content for document in knowledge.search("private", max_results=5)] == ["alice private old"]
@@ -5083,7 +5114,6 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
     git_config_text = (docs_path / ".git" / "config").read_text(encoding="utf-8")
-    status = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths).get_status()
 
     assert result.index_published is True
     assert clone_envs
@@ -5094,7 +5124,7 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
     assert "frag-secret" not in git_config_text
     assert "query-secret" not in metadata_text
     assert "frag-secret" not in metadata_text
-    assert status["git"]["repo_url"] == clean_url
+    assert redact_url_credentials(config.knowledge_bases["docs"].git.repo_url) == clean_url
 
 
 @pytest.mark.asyncio
@@ -5225,7 +5255,7 @@ async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_s
 
     assert cloned is False
     assert git_checkout_present(docs_path)
-    assert manager.get_status()["git"]["repo_present"] is True
+    assert manager._git_repo_present is True
     assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
 
     main.initialize_api_app(main.app, runtime_paths)

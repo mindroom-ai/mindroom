@@ -636,7 +636,7 @@ class TestRoutingRegression:
         mock_ai_response: AsyncMock,
         mock_team_arun: AsyncMock,
         mock_create_agent: MagicMock,
-        mock_get_agent_knowledge: MagicMock,
+        mock_resolve_agent_knowledge_access: MagicMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -668,7 +668,7 @@ class TestRoutingRegression:
         # Mock get_model_instance to return a mock model
         mock_model = Ollama(id="test-model")
         mock_get_model_instance.return_value = mock_model
-        mock_get_agent_knowledge.return_value = KnowledgeResolution(knowledge=None)
+        mock_resolve_agent_knowledge_access.return_value = KnowledgeResolution(knowledge=None)
         fake_member = MagicMock()
         fake_member.name = "MockAgent"
         fake_member.instructions = []

@@ -402,41 +402,30 @@ def resolve_agent_knowledge_access(
         resolved_knowledge[base_id] = (knowledge, availability)
         return resolved_knowledge[base_id]
 
-    return resolve_agent_knowledge(
-        agent_name,
-        config,
-        lambda base_id: _resolve(base_id)[0],
-        get_availability=lambda base_id: _resolve(base_id)[1],
-    )
+    base_ids = config.get_agent_knowledge_base_ids(agent_name)
+    if not base_ids:
+        return KnowledgeResolution(knowledge=None)
 
+    missing_base_ids: list[str] = []
+    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+    knowledges: list[Knowledge] = []
+    for base_id in base_ids:
+        knowledge, availability = _resolve(base_id)
+        if availability is not KnowledgeAvailability.READY:
+            unavailable_bases[base_id] = KnowledgeAvailabilityDetail(
+                availability=availability,
+                search_available=knowledge is not None,
+            )
+        if knowledge is None:
+            missing_base_ids.append(base_id)
+            continue
+        knowledges.append(knowledge)
 
-def get_agent_knowledge(
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    on_missing_bases: Callable[[list[str]], None] | None = None,
-    on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
-    on_unavailable_base_details: Callable[[Mapping[str, KnowledgeAvailabilityDetail]], None] | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> Knowledge | None:
-    """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
-    resolution = resolve_agent_knowledge_access(
-        agent_name,
-        config,
-        runtime_paths,
-        refresh_scheduler=refresh_scheduler,
-        execution_identity=execution_identity,
+    return KnowledgeResolution(
+        knowledge=_merge_knowledge(agent_name, knowledges),
+        missing=tuple(missing_base_ids),
+        unavailable=unavailable_bases,
     )
-    if resolution.missing and on_missing_bases is not None:
-        on_missing_bases(list(resolution.missing))
-    if resolution.unavailable and on_unavailable_bases is not None:
-        on_unavailable_bases(
-            {base_id: detail.availability for base_id, detail in resolution.unavailable.items()},
-        )
-    if resolution.unavailable and on_unavailable_base_details is not None:
-        on_unavailable_base_details(resolution.unavailable)
-    return resolution.knowledge
 
 
 def _stale_availability_notice(base_id: str, *, search_available: bool) -> str:
@@ -452,20 +441,16 @@ def _stale_availability_notice(base_id: str, *, search_available: bool) -> str:
 
 
 def format_knowledge_availability_notice(
-    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
+    unavailable_bases: Mapping[str, KnowledgeAvailabilityDetail],
 ) -> str | None:
     """Render one user-facing notice for unavailable or stale knowledge bases."""
     if not unavailable_bases:
         return None
 
     lines: list[str] = []
-    for base_id, availability_value in sorted(unavailable_bases.items()):
-        if isinstance(availability_value, KnowledgeAvailabilityDetail):
-            availability = availability_value.availability
-            search_available = availability_value.search_available
-        else:
-            availability = availability_value
-            search_available = True
+    for base_id, detail in sorted(unavailable_bases.items()):
+        availability = detail.availability
+        search_available = detail.search_available
 
         if availability is KnowledgeAvailability.INITIALIZING:
             lines.append(
@@ -611,7 +596,7 @@ class MultiKnowledgeVectorDb:
                 if isinstance(vdb, _AsyncKnowledgeVectorDb):
                     try:
                         results = await vdb.async_search(query=query, limit=limit, filters=filters)
-                    except (NotImplementedError, AttributeError):
+                    except NotImplementedError:
                         results = vdb.search(query=query, limit=limit, filters=filters)
                 else:
                     results = vdb.search(query=query, limit=limit, filters=filters)
@@ -666,40 +651,4 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
         name=f"{agent_name}_multi_knowledge",
         vector_db=MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
         max_results=max(knowledge.max_results for knowledge in knowledges),
-    )
-
-
-def resolve_agent_knowledge(
-    agent_name: str,
-    config: Config,
-    get_knowledge: Callable[[str], Knowledge | None],
-    *,
-    get_availability: Callable[[str], KnowledgeAvailability] | None = None,
-) -> KnowledgeResolution:
-    """Resolve configured knowledge base(s) for an agent with diagnostics."""
-    base_ids = config.get_agent_knowledge_base_ids(agent_name)
-    if not base_ids:
-        return KnowledgeResolution(knowledge=None)
-
-    missing_base_ids: list[str] = []
-    unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] = {}
-    knowledges: list[Knowledge] = []
-    for base_id in base_ids:
-        knowledge = get_knowledge(base_id)
-        if get_availability is not None:
-            availability = get_availability(base_id)
-            if availability is not KnowledgeAvailability.READY:
-                unavailable_base_details[base_id] = KnowledgeAvailabilityDetail(
-                    availability=availability,
-                    search_available=knowledge is not None,
-                )
-        if knowledge is None:
-            missing_base_ids.append(base_id)
-            continue
-        knowledges.append(knowledge)
-
-    return KnowledgeResolution(
-        knowledge=_merge_knowledge(agent_name, knowledges),
-        missing=tuple(missing_base_ids),
-        unavailable=unavailable_base_details,
     )

@@ -42,7 +42,6 @@ from mindroom.hooks import (
 )
 from mindroom.knowledge import (
     KnowledgeAccessSupport,
-    KnowledgeAvailability,
     KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
 )
@@ -128,7 +127,7 @@ _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 def _append_knowledge_availability_enrichment(
     system_enrichment_items: Sequence[EnrichmentItem],
-    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
+    unavailable_bases: Mapping[str, KnowledgeAvailabilityDetail],
 ) -> tuple[EnrichmentItem, ...]:
     """Append one volatile knowledge-availability notice when needed."""
     notice = format_knowledge_availability_notice(unavailable_bases)

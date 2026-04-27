@@ -1020,27 +1020,6 @@ class TestAgentBot:
         assert [doc.content for doc in docs] == ["research 1", "research 2"]
 
     @pytest.mark.asyncio
-    async def test_multi_knowledge_vector_db_async_falls_back_on_attribute_error(self) -> None:
-        """Async search should fall back to sync search when async_search errors mid-call."""
-
-        class _AttributeErrorAsyncStubVectorDb(_SyncStubVectorDb):
-            async def async_search(
-                self,
-                *,
-                query: str,
-                limit: int,
-                filters: dict[str, Any] | list[Any] | None = None,
-            ) -> list[Document]:
-                _ = (query, limit, filters)
-                error_message = "simulated mid-execution"
-                raise AttributeError(error_message)
-
-        docs = await MultiKnowledgeVectorDb(
-            vector_dbs=[_AttributeErrorAsyncStubVectorDb(documents=[Document(content="fallback doc")])],
-        ).async_search(query="knowledge query", limit=1)
-        assert [doc.content for doc in docs] == ["fallback doc"]
-
-    @pytest.mark.asyncio
     @patch("mindroom.config.main.Config.from_yaml")
     async def test_agent_bot_initialization(
         self,
@@ -9614,7 +9593,7 @@ class TestAgentBot:
         mock_team_arun: AsyncMock,
         mock_get_model_instance: MagicMock,
         mock_create_agent: MagicMock,
-        mock_get_agent_knowledge: MagicMock,
+        mock_resolve_agent_knowledge_access: MagicMock,
         mock_load_config: MagicMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
@@ -9628,7 +9607,7 @@ class TestAgentBot:
         # Mock get_model_instance to return a mock model
         mock_model = Ollama(id="test-model")
         mock_get_model_instance.return_value = mock_model
-        mock_get_agent_knowledge.return_value = KnowledgeResolution(knowledge=None)
+        mock_resolve_agent_knowledge_access.return_value = KnowledgeResolution(knowledge=None)
         fake_member = MagicMock()
         fake_member.name = "MockAgent"
         fake_member.instructions = []
