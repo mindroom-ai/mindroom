@@ -653,6 +653,50 @@ async def test_execute_request_inprocess_ignores_null_tool_output_path(
     assert response.result == {"called": True}
 
 
+@pytest.mark.asyncio
+async def test_execute_request_inprocess_preserves_normal_null_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only the reserved output-path argument treats null as omission."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    class _FakeToolkit:
+        requires_connect = False
+
+    def _fake_entrypoint(limit: int | None = 10) -> dict[str, object]:
+        return {"limit": limit}
+
+    def _fake_resolve_entrypoint(**kwargs: object) -> tuple[_FakeToolkit, object]:
+        assert kwargs["tool_output_workspace_root"] is None
+        return _FakeToolkit(), _fake_entrypoint
+
+    monkeypatch.setattr(sandbox_runner_module, "_resolve_entrypoint", _fake_resolve_entrypoint)
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="fake",
+            function_name="with_optional_limit",
+            args=[],
+            kwargs={"limit": None},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+    )
+
+    assert response.ok is True
+    assert response.result == {"limit": None}
+
+
 def test_execute_request_subprocess_sync_marks_subprocess_timeouts_as_worker_failures(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
