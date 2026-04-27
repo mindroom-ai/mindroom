@@ -3616,7 +3616,7 @@ def test_snapshot_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_private_request_scoped_knowledge_publishes_isolated_snapshots(tmp_path: Path) -> None:
+async def test_private_agent_knowledge_publishes_isolated_snapshots(tmp_path: Path) -> None:
     """Requester-local private knowledge must resolve to separate physical snapshot bindings."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -3671,7 +3671,7 @@ async def test_private_request_scoped_knowledge_publishes_isolated_snapshots(tmp
 
 
 @pytest.mark.asyncio
-async def test_private_request_scoped_knowledge_schedules_refresh_when_source_changes(
+async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3744,7 +3744,7 @@ async def test_private_request_scoped_knowledge_schedules_refresh_when_source_ch
     owner.schedule_refresh.assert_called_once()
 
 
-def test_private_request_scoped_bookkeeping_is_bounded(tmp_path: Path) -> None:
+def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
     """Private snapshot, lock, and refresh-cooldown registries should be pruned."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(

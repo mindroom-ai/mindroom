@@ -52,7 +52,7 @@ def test_resolve_agent_policy_inherits_default_worker_scope_without_private_work
     assert policy.scope_label == "worker_scope=user"
     assert policy.scope_source == "defaults.worker_scope"
     assert policy.request_scoped_workspace_enabled is False
-    assert policy.request_scoped_knowledge_enabled is False
+    assert policy.private_agent_knowledge_enabled is False
 
 
 def test_resolve_agent_policy_index_marks_private_team_ineligibility() -> None:
@@ -131,7 +131,7 @@ def test_private_knowledge_base_derives_from_policy_seed() -> None:
     )
 
     assert policy.private_knowledge_base_id == "__agent_private__:mind"
-    assert policy.request_scoped_knowledge_enabled is True
+    assert policy.private_agent_knowledge_enabled is True
 
 
 def test_resolve_private_knowledge_base_agent_requires_active_private_knowledge() -> None:

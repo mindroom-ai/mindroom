@@ -43,7 +43,7 @@ class ResolvedAgentPolicy:
     team_eligibility_reason: str | None
     private_knowledge_base_id: str | None
     request_scoped_workspace_enabled: bool
-    request_scoped_knowledge_enabled: bool
+    private_agent_knowledge_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -160,7 +160,7 @@ def _resolve_agent_policy(
     if seed.is_private and seed.private_knowledge_enabled:
         private_knowledge_base_id = f"{private_knowledge_base_id_prefix}{seed.agent_name}"
     request_scoped_workspace_enabled = seed.is_private and execution_scope not in {None, "shared"}
-    request_scoped_knowledge_enabled = private_knowledge_base_id is not None and execution_scope not in {
+    private_agent_knowledge_enabled = private_knowledge_base_id is not None and execution_scope not in {
         None,
         "shared",
     }
@@ -174,7 +174,7 @@ def _resolve_agent_policy(
         team_eligibility_reason=team_eligibility_reason,
         private_knowledge_base_id=private_knowledge_base_id,
         request_scoped_workspace_enabled=request_scoped_workspace_enabled,
-        request_scoped_knowledge_enabled=request_scoped_knowledge_enabled,
+        private_agent_knowledge_enabled=private_agent_knowledge_enabled,
     )
 
 

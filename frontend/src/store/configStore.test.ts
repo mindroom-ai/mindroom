@@ -20,7 +20,7 @@ function makeAgentPolicy(
     team_eligibility_reason: null,
     private_knowledge_base_id: null,
     request_scoped_workspace_enabled: false,
-    request_scoped_knowledge_enabled: false,
+    private_agent_knowledge_enabled: false,
     ...overrides,
   };
 }

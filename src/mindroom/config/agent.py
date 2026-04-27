@@ -63,11 +63,11 @@ def _validate_safe_relative_path(
 
 
 class AgentPrivateKnowledgeConfig(BaseModel):
-    """Private requester-local knowledge indexed from the agent's private root."""
+    """PrivateAgentKnowledge indexed from the agent's private root."""
 
     enabled: bool = Field(
         default=True,
-        description="Whether to index requester-local knowledge for this private agent instance",
+        description="Whether to index private agent knowledge for this private agent instance",
     )
     path: str | None = Field(
         default=None,
@@ -75,7 +75,7 @@ class AgentPrivateKnowledgeConfig(BaseModel):
     )
     watch: bool = Field(
         default=True,
-        description="When true, requester-local private knowledge schedules background refresh on access; when false, direct external edits require explicit refresh",
+        description="When true, private agent knowledge schedules background refresh on access; when false, direct external edits require explicit refresh",
     )
     chunk_size: int = Field(
         default=5000,
@@ -89,7 +89,7 @@ class AgentPrivateKnowledgeConfig(BaseModel):
     )
     git: KnowledgeGitConfig | None = Field(
         default=None,
-        description="Optional Git sync configuration for requester-local private knowledge",
+        description="Optional Git sync configuration for private agent knowledge",
     )
 
     @field_validator("path")
@@ -133,7 +133,7 @@ class AgentPrivateConfig(BaseModel):
     )
     knowledge: AgentPrivateKnowledgeConfig | None = Field(
         default=None,
-        description="Optional requester-local knowledge indexed from the private root",
+        description="Optional private agent knowledge indexed from the private root",
     )
 
     @field_validator("root")

@@ -296,7 +296,7 @@ export interface AgentPolicy {
   team_eligibility_reason: string | null;
   private_knowledge_base_id: string | null;
   request_scoped_workspace_enabled: boolean;
-  request_scoped_knowledge_enabled: boolean;
+  private_agent_knowledge_enabled: boolean;
 }
 
 function normalizePrivateKnowledgeConfig(

@@ -123,7 +123,7 @@ def _refresh_schedule_due(
 
 
 def _prune_refresh_schedule_bookkeeping() -> None:
-    """Bound refresh cooldown bookkeeping for request-scoped bindings."""
+    """Bound refresh cooldown bookkeeping for private agent knowledge bindings."""
     if len(_refresh_scheduled_at) <= _MAX_REFRESH_SCHEDULED_COOLDOWNS:
         return
     excess = len(_refresh_scheduled_at) - _MAX_REFRESH_SCHEDULED_COOLDOWNS

@@ -72,7 +72,7 @@ The public config should describe intent, not implementation plumbing.
 Private template source files should be explicit local files, not hidden built-in content.
 Private context files and private knowledge paths should stay explicit in config rather than being inferred from template contents.
 
-Shared/global knowledge should remain distinct from requester-local knowledge.
+Shared/global knowledge should remain distinct from PrivateAgentKnowledge.
 
 Supported external behavior and protocol compatibility must continue to work.
 
@@ -100,7 +100,7 @@ The public config should expose one explicit agent-local concept for requester-p
 
 That concept should be higher-level than the current `workspace.*` and `path_relative_to_agent_workspace` surface.
 
-Private requester-local knowledge should be representable as private instance state.
+PrivateAgentKnowledge should be representable as private instance state.
 
 Top-level shared knowledge definitions should remain available for truly shared/global corpora.
 

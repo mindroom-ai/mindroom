@@ -755,7 +755,7 @@ def _snapshot_key_is_private(key: KnowledgeSnapshotKey) -> bool:
 
 
 def prune_private_snapshot_bookkeeping() -> None:
-    """Bound request-scoped in-process snapshot handles."""
+    """Bound PrivateAgentKnowledge in-process snapshot handles."""
     private_snapshot_keys = [key for key in _published_snapshots if _snapshot_key_is_private(key)]
     for key in private_snapshot_keys[:-_MAX_PRIVATE_PUBLISHED_SNAPSHOTS]:
         _published_snapshots.pop(key, None)

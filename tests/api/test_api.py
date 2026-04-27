@@ -3374,7 +3374,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "team_eligibility_reason": None,
                 "private_knowledge_base_id": None,
                 "request_scoped_workspace_enabled": False,
-                "request_scoped_knowledge_enabled": False,
+                "private_agent_knowledge_enabled": False,
             },
             "leader": {
                 "agent_name": "leader",
@@ -3386,7 +3386,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "team_eligibility_reason": "Delegates to private agent 'mind', so it cannot participate in teams yet.",
                 "private_knowledge_base_id": None,
                 "request_scoped_workspace_enabled": False,
-                "request_scoped_knowledge_enabled": False,
+                "private_agent_knowledge_enabled": False,
             },
             "mind": {
                 "agent_name": "mind",
@@ -3398,7 +3398,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "team_eligibility_reason": "Private agents cannot participate in teams yet.",
                 "private_knowledge_base_id": None,
                 "request_scoped_workspace_enabled": True,
-                "request_scoped_knowledge_enabled": False,
+                "private_agent_knowledge_enabled": False,
             },
         },
     }

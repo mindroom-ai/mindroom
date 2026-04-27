@@ -950,7 +950,7 @@ export function AgentEditor() {
               <>
                 <FieldGroup
                   label="Private Knowledge Path"
-                  helperText="Private-root-relative path to index for requester-local knowledge."
+                  helperText="Private-root-relative path to index as private agent knowledge."
                   htmlFor="private_knowledge_path"
                   error={privateKnowledgePathError}
                 >
@@ -966,7 +966,7 @@ export function AgentEditor() {
 
                 <FieldGroup
                   label="Refresh Private Knowledge"
-                  helperText="Schedule refresh on access for requester-local knowledge."
+                  helperText="Schedule refresh on access for private agent knowledge."
                   htmlFor="private_knowledge_watch"
                 >
                   <div className="flex items-center gap-2">
