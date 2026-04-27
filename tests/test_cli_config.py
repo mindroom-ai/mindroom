@@ -121,6 +121,8 @@ class TestConfigInit:
         assert mind["include_default_tools"] is False
         assert mind["learning"] is False
         assert mind["memory_backend"] == "file"
+        assert mind["boot_file"] == "BOOT.md"
+        assert mind["bootstrap_file"] == "BOOTSTRAP.md"
         assert mind["rooms"] == ["personal"]
         assert mind["context_files"] == [
             "SOUL.md",
@@ -171,8 +173,9 @@ class TestConfigInit:
         assert (workspace / "IDENTITY.md").exists()
         assert (workspace / "TOOLS.md").exists()
         assert (workspace / "HEARTBEAT.md").exists()
+        assert (workspace / "BOOT.md").exists()
+        assert (workspace / "BOOTSTRAP.md").exists()
         assert (workspace / "MEMORY.md").exists()
-        assert not (workspace / "BOOT.md").exists()
 
     def test_init_full_profile_respects_storage_path_override(
         self,
