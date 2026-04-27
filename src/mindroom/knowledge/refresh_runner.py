@@ -325,7 +325,7 @@ async def _maybe_publish_unchanged_index(
 ) -> KnowledgeRefreshResult | None:
     force_reindex = force_reindex or manager._needs_full_reindex_on_create()
     if manager._git_config() is not None:
-        git_sync_result = await manager.sync_git_repository(index_changes=False)
+        git_sync_result = await manager.sync_git_source()
         if force_reindex or git_sync_result.get("updated", False):
             if git_sync_result.get("updated", False):
                 await mark_knowledge_source_changed_async(

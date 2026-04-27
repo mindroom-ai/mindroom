@@ -437,7 +437,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _app.state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
     await _sync_standalone_knowledge_watchers(_app)
     logger.info(
-        "Published knowledge indexes are not warmed during API startup; refresh is scheduled on access, filesystem watch, or explicit API actions",
+        "Published knowledge index refresh is scheduled by Git polling, filesystem watch, on access, or explicit API actions",
     )
 
     stop_event = asyncio.Event()

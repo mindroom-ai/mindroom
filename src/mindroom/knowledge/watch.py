@@ -1,4 +1,4 @@
-"""Filesystem watch scheduling for published knowledge index refreshes."""
+"""Source-change scheduling for published knowledge index refreshes."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from watchfiles import Change, awatch
 
 from mindroom.knowledge.manager import include_semantic_knowledge_relative_path
 from mindroom.knowledge.registry import (
+    KnowledgeRefreshTarget,
     KnowledgeSourceRoot,
     mark_knowledge_source_changed_async,
     resolve_refresh_target,
@@ -32,6 +33,13 @@ class _WatchTarget:
     key: KnowledgeSourceRoot
     path: Path
     base_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _GitPollTarget:
+    key: KnowledgeRefreshTarget
+    base_id: str
+    poll_interval_seconds: float
 
 
 @dataclass(slots=True)
@@ -72,6 +80,32 @@ def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> 
     return targets
 
 
+def _shared_git_poll_targets(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> dict[KnowledgeRefreshTarget, _GitPollTarget]:
+    targets: dict[KnowledgeRefreshTarget, _GitPollTarget] = {}
+    for base_id in sorted(config.knowledge_bases):
+        base_config = config.get_knowledge_base_config(base_id)
+        if base_config.git is None:
+            continue
+        if config.get_private_knowledge_base_agent(base_id) is not None:
+            continue
+
+        refresh_target = resolve_refresh_target(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            create=True,
+        )
+        targets[refresh_target] = _GitPollTarget(
+            key=refresh_target,
+            base_id=base_id,
+            poll_interval_seconds=float(base_config.git.poll_interval_seconds),
+        )
+    return targets
+
+
 def _changed_path_is_indexable(target: _WatchTarget, config: Config, changed_path: Path) -> bool:
     try:
         relative_path = changed_path.relative_to(target.path)
@@ -97,14 +131,15 @@ def _changes_include_indexable_path(
 
 
 class KnowledgeSourceWatcher:
-    """Own filesystem watchers that schedule atomic published index refreshes."""
+    """Own source watchers that schedule atomic published index refreshes."""
 
     def __init__(self, refresh_scheduler: KnowledgeRefreshScheduler) -> None:
         self._refresh_scheduler = refresh_scheduler
-        self._tasks: dict[KnowledgeSourceRoot, _WatchTask] = {}
+        self._filesystem_tasks: dict[KnowledgeSourceRoot, _WatchTask] = {}
+        self._git_poll_tasks: dict[KnowledgeRefreshTarget, _WatchTask] = {}
 
     async def sync(self, *, config: Config | None, runtime_paths: RuntimePaths) -> None:
-        """Replace watcher tasks so they match the current shared local knowledge config."""
+        """Replace watcher tasks so they match the current shared knowledge config."""
         await self.shutdown()
         if config is None:
             return
@@ -114,17 +149,31 @@ class KnowledgeSourceWatcher:
             task = asyncio.create_task(
                 self._watch_source(target, config=config, runtime_paths=runtime_paths, stop_event=stop_event),
             )
-            self._tasks[target.key] = _WatchTask(stop_event=stop_event, task=task)
+            self._filesystem_tasks[target.key] = _WatchTask(stop_event=stop_event, task=task)
             logger.info(
                 "Knowledge filesystem watcher started",
                 knowledge_path=str(target.path),
                 base_ids=list(target.base_ids),
             )
 
+        for target in _shared_git_poll_targets(config, runtime_paths).values():
+            stop_event = asyncio.Event()
+            task = asyncio.create_task(
+                self._poll_git_source(target, config=config, runtime_paths=runtime_paths, stop_event=stop_event),
+            )
+            self._git_poll_tasks[target.key] = _WatchTask(stop_event=stop_event, task=task)
+            logger.info(
+                "Knowledge Git poller started",
+                base_id=target.base_id,
+                poll_interval_seconds=target.poll_interval_seconds,
+            )
+
     async def shutdown(self) -> None:
-        """Stop all filesystem watchers owned by this instance."""
-        tasks = list(self._tasks.values())
-        self._tasks.clear()
+        """Stop all source watchers owned by this instance."""
+        tasks = list(self._filesystem_tasks.values())
+        tasks.extend(self._git_poll_tasks.values())
+        self._filesystem_tasks.clear()
+        self._git_poll_tasks.clear()
         for watch_task in tasks:
             watch_task.stop_event.set()
             watch_task.task.cancel()
@@ -159,6 +208,37 @@ class KnowledgeSourceWatcher:
                 knowledge_path=str(target.path),
                 base_ids=list(target.base_ids),
             )
+
+    async def _poll_git_source(
+        self,
+        target: _GitPollTarget,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        stop_event: asyncio.Event,
+    ) -> None:
+        try:
+            while not stop_event.is_set():
+                self._refresh_scheduler.schedule_refresh(
+                    target.base_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                )
+                logger.debug(
+                    "Knowledge Git poller scheduled refresh",
+                    base_id=target.base_id,
+                    poll_interval_seconds=target.poll_interval_seconds,
+                )
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=target.poll_interval_seconds)
+                except TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Knowledge Git poller stopped after failure", base_id=target.base_id)
+        finally:
+            logger.info("Knowledge Git poller stopped", base_id=target.base_id)
 
     async def _schedule_refresh_for_target(
         self,

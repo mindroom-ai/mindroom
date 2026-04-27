@@ -55,7 +55,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Coroutine, Iterator
 
 
 class _Collection:
@@ -636,6 +636,90 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
             search_available=True,
         ),
     }
+
+
+@pytest.mark.asyncio
+async def test_git_knowledge_polling_schedules_background_refresh_on_startup(tmp_path: Path) -> None:
+    """Shared Git bases should schedule their first refresh as soon as runtime support starts."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=5)
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+        watch=False,
+    )
+    runtime_paths = runtime_paths_for(config)
+    refresh_scheduler = MagicMock()
+    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
+
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    try:
+        for _attempt in range(50):
+            if refresh_scheduler.schedule_refresh.called:
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("Git poller did not schedule startup refresh")
+    finally:
+        await source_watcher.shutdown()
+
+    refresh_scheduler.schedule_refresh.assert_called_once()
+    assert refresh_scheduler.schedule_refresh.call_args.args == ("docs",)
+
+
+@pytest.mark.asyncio
+async def test_git_knowledge_polling_repeats_after_poll_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared Git bases should keep scheduling refreshes on their configured poll interval."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=5)
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+        watch=False,
+    )
+    runtime_paths = runtime_paths_for(config)
+    second_schedule = asyncio.Event()
+    refresh_scheduler = MagicMock()
+
+    def _record_schedule(*_args: object, **_kwargs: object) -> None:
+        if refresh_scheduler.schedule_refresh.call_count == 2:
+            second_schedule.set()
+
+    refresh_scheduler.schedule_refresh.side_effect = _record_schedule
+    wait_calls = 0
+
+    async def _fake_wait_for(awaitable: Coroutine[object, object, object], **kwargs: object) -> object:
+        nonlocal wait_calls
+        assert kwargs == {"timeout": 5.0}
+        wait_calls += 1
+        if wait_calls == 1:
+            awaitable.close()
+            raise TimeoutError
+        return await awaitable
+
+    monkeypatch.setattr("mindroom.knowledge.watch.asyncio.wait_for", _fake_wait_for)
+    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
+
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    try:
+        for _attempt in range(50):
+            if second_schedule.is_set():
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("Git poller did not schedule refresh after interval")
+    finally:
+        await source_watcher.shutdown()
+
+    assert refresh_scheduler.schedule_refresh.call_count == 2
+    assert [call.args for call in refresh_scheduler.schedule_refresh.call_args_list] == [("docs",), ("docs",)]
 
 
 @pytest.mark.asyncio
@@ -1799,7 +1883,7 @@ async def test_git_ready_index_schedules_refresh_after_poll_interval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Git READY access polls in the background even when the local checkout signature is unchanged."""
+    """Stale Git access can schedule refresh without scanning the local checkout."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("git index", encoding="utf-8")
@@ -1812,13 +1896,12 @@ async def test_git_ready_index_schedules_refresh_after_poll_interval(
     )
     runtime_paths = runtime_paths_for(config)
 
-    async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        _ = index_changes
+    async def _sync_success(self: KnowledgeManager) -> dict[str, object]:
         self._git_last_successful_commit = "rev-a"
         _set_git_tracked_files(self, "doc.md")
         return {"updated": False, "changed_count": 0, "removed_count": 0}
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     metadata_path = published_index_metadata_path(key)
@@ -1889,13 +1972,12 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     knowledge_path.mkdir(parents=True, exist_ok=True)
     (knowledge_path / "note.md").write_text("alice private git note", encoding="utf-8")
 
-    async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        _ = index_changes
+    async def _sync_success(self: KnowledgeManager) -> dict[str, object]:
         self._git_last_successful_commit = "rev-a"
         _set_git_tracked_files(self, "note.md")
         return {"updated": False, "changed_count": 0, "removed_count": 0}
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
@@ -1976,13 +2058,12 @@ async def test_private_git_updated_refresh_preserves_execution_identity(
     knowledge_path.mkdir(parents=True, exist_ok=True)
     (knowledge_path / "note.md").write_text("alice private git updated", encoding="utf-8")
 
-    async def _sync_updated(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync_updated(self: KnowledgeManager) -> dict[str, object]:
         self._git_last_successful_commit = "rev-private"
         _set_git_tracked_files(self, "note.md")
         return {"updated": True, "changed_count": 1, "removed_count": 0}
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_updated)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_updated)
 
     result = await refresh_knowledge_binding(
         base_id,
@@ -1998,6 +2079,45 @@ async def test_private_git_updated_refresh_preserves_execution_identity(
     assert [document.content for document in lookup.index.knowledge.search("updated", max_results=5)] == [
         "alice private git updated",
     ]
+
+
+@pytest.mark.asyncio
+async def test_git_source_sync_does_not_mutate_index_directly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git source sync should never bypass candidate publish by mutating the live index."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager("docs", config, runtime_paths)
+
+    async def _sync_once(_git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
+        return {"changed.md"}, {"removed.md"}, True
+
+    async def _git_rev_parse(_ref: str) -> str:
+        return "rev-source-only"
+
+    async def _git_checkout_present() -> bool:
+        return True
+
+    monkeypatch.setattr(manager, "_sync_git_source_once", _sync_once)
+    monkeypatch.setattr(manager, "_git_rev_parse", _git_rev_parse)
+    monkeypatch.setattr(manager, "_git_checkout_present", _git_checkout_present)
+
+    result = await manager.sync_git_source()
+
+    assert not hasattr(manager, "remove_file")
+    assert not hasattr(manager, "index_file")
+    assert result == {"updated": True, "changed_count": 1, "removed_count": 1}
+    assert manager._git_last_successful_commit == "rev-source-only"
 
 
 @pytest.mark.asyncio
@@ -2893,13 +3013,12 @@ async def test_corpus_changing_config_mismatch_returns_no_index(
     )
     runtime_paths = runtime_paths_for(config)
 
-    async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync_success(self: KnowledgeManager) -> dict[str, object]:
         self._git_last_successful_commit = "rev-a"
         _set_git_tracked_files(self, "doc.md")
         return {"updated": True, "changed_count": 1, "removed_count": 0}
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     changed_config = config.model_copy(deep=True)
     mutate(changed_config)
@@ -4089,8 +4208,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
     order: list[str] = []
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync_success(self: KnowledgeManager) -> dict[str, object]:
         order.append("sync")
         self._git_last_successful_commit = "rev-git"
         _set_git_tracked_files(self, "doc.md")
@@ -4100,7 +4218,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
         order.append("reindex")
         return await original_reindex(self, protected_collections=protected_collections)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -4146,8 +4264,7 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync(self: KnowledgeManager) -> dict[str, object]:
         result = sync_results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
         _set_git_tracked_files(self, "doc.md")
@@ -4161,7 +4278,7 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
             raise AssertionError(msg)
         return await original_reindex(self, protected_collections=protected_collections)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -4207,8 +4324,7 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync(self: KnowledgeManager) -> dict[str, object]:
         result = sync_results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
         _set_git_tracked_files(self, "doc.md")
@@ -4219,7 +4335,7 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
         reindex_count += 1
         return await original_reindex(self, protected_collections=protected_collections)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -4260,8 +4376,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync(self: KnowledgeManager) -> dict[str, object]:
         result = sync_results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
         _set_git_tracked_files(self, "doc.md")
@@ -4272,7 +4387,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
         reindex_count += 1
         return await original_reindex(self, protected_collections=protected_collections)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -4352,8 +4467,7 @@ async def test_git_noop_refresh_rebuilds_after_chunking_config_change(
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync(self: KnowledgeManager) -> dict[str, object]:
         result = sync_results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
         _set_git_tracked_files(self, "doc.md")
@@ -4364,7 +4478,7 @@ async def test_git_noop_refresh_rebuilds_after_chunking_config_change(
         reindex_count += 1
         return await original_reindex(self, protected_collections=protected_collections)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -4405,8 +4519,7 @@ async def test_force_git_reindex_bypasses_noop_fast_path(
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync(self: KnowledgeManager) -> dict[str, object]:
         result = sync_results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
         _set_git_tracked_files(self, "doc.md")
@@ -4417,7 +4530,7 @@ async def test_force_git_reindex_bypasses_noop_fast_path(
         reindex_count += 1
         return await original_reindex(self, protected_collections=protected_collections)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -4459,21 +4572,20 @@ async def test_git_sync_failure_preserves_last_good_index_and_redacts_error(
     )
     runtime_paths = runtime_paths_for(config)
 
-    async def _sync_success(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync_success(self: KnowledgeManager) -> dict[str, object]:
         self._git_last_successful_commit = "rev-ok"
         _set_git_tracked_files(self, "doc.md")
         return {"updated": True, "changed_count": 1, "removed_count": 0}
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    async def _sync_failure(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        _ = (self, index_changes)
+    async def _sync_failure(self: KnowledgeManager) -> dict[str, object]:
+        _ = self
         msg = "fetch failed https://ghp_secret:x-oauth-basic@example.com/org/repo.git"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_failure)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_failure)
     with pytest.raises(RuntimeError, match="fetch failed"):
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -4513,12 +4625,12 @@ async def test_cold_git_sync_failure_records_failed_availability_and_redacted_er
     )
     runtime_paths = runtime_paths_for(config)
 
-    async def _sync_failure(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        _ = (self, index_changes)
+    async def _sync_failure(self: KnowledgeManager) -> dict[str, object]:
+        _ = self
         msg = "clone failed https://ghp_secret:x-oauth-basic@example.com/org/repo.git"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_failure)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_failure)
 
     with pytest.raises(RuntimeError, match="clone failed"):
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -4630,13 +4742,12 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
     )
     runtime_paths = runtime_paths_for(config)
 
-    async def _sync_updated(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync_updated(self: KnowledgeManager) -> dict[str, object]:
         self._git_last_successful_commit = f"rev-{self.base_id}"
         _set_git_tracked_files(self, "doc.md")
         return {"updated": True, "changed_count": 1, "removed_count": 0}
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_updated)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_updated)
 
     await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
     await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
@@ -5105,7 +5216,7 @@ async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_s
 
 
 @pytest.mark.asyncio
-async def test_index_file_hashes_content_off_event_loop(
+async def test_candidate_indexing_hashes_content_off_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5151,8 +5262,7 @@ async def test_git_updated_stale_registry_mark_uses_async_registry_path(
     event_loop_thread = get_ident()
     mark_threads: list[int] = []
 
-    async def _sync_updated(self: KnowledgeManager, *, index_changes: bool = True) -> dict[str, object]:
-        assert index_changes is False
+    async def _sync_updated(self: KnowledgeManager) -> dict[str, object]:
         self._git_last_successful_commit = "rev-updated"
         _set_git_tracked_files(self, "doc.md")
         return {"updated": True, "changed_count": 1, "removed_count": 0}
@@ -5161,7 +5271,7 @@ async def test_git_updated_stale_registry_mark_uses_async_registry_path(
         mark_threads.append(get_ident())
         return ("docs",)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_updated)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_updated)
     monkeypatch.setattr(knowledge_refresh_runner, "mark_knowledge_source_changed_async", _record_mark_thread)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -5218,7 +5328,7 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
 
 
 @pytest.mark.asyncio
-async def test_sync_git_repository_once_skips_repeated_lfs_pull_for_already_hydrated_unchanged_head(
+async def test_sync_git_source_once_skips_repeated_lfs_pull_for_already_hydrated_unchanged_head(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5246,7 +5356,7 @@ async def test_sync_git_repository_once_skips_repeated_lfs_pull_for_already_hydr
     monkeypatch.setattr(manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
     monkeypatch.setattr(manager, "_run_git", _fake_run_git)
 
-    changed_files, removed_files, updated = await manager._sync_git_repository_once(manager._git_config())
+    changed_files, removed_files, updated = await manager._sync_git_source_once(manager._git_config())
 
     assert updated is False
     assert changed_files == set()
@@ -5265,7 +5375,7 @@ async def test_sync_git_repository_once_skips_repeated_lfs_pull_for_already_hydr
     monkeypatch.setattr(hydrated_manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
     monkeypatch.setattr(hydrated_manager, "_run_git", _fake_run_git_second)
 
-    changed_files, removed_files, updated = await hydrated_manager._sync_git_repository_once(
+    changed_files, removed_files, updated = await hydrated_manager._sync_git_source_once(
         hydrated_manager._git_config(),
     )
 
@@ -5276,7 +5386,7 @@ async def test_sync_git_repository_once_skips_repeated_lfs_pull_for_already_hydr
 
 
 @pytest.mark.asyncio
-async def test_sync_git_repository_once_pulls_lfs_after_reset(
+async def test_sync_git_source_once_pulls_lfs_after_reset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5310,7 +5420,7 @@ async def test_sync_git_repository_once_pulls_lfs_after_reset(
     monkeypatch.setattr(manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
     monkeypatch.setattr(manager, "_run_git", _fake_run_git)
 
-    changed_files, removed_files, updated = await manager._sync_git_repository_once(manager._git_config())
+    changed_files, removed_files, updated = await manager._sync_git_source_once(manager._git_config())
 
     assert updated is True
     assert changed_files == {"doc.md"}

@@ -2217,13 +2217,9 @@ class TestStreamingBehavior:
                 ),
             ),
             patch(
-                "mindroom.knowledge.manager.KnowledgeManager.sync_git_repository",
+                "mindroom.knowledge.manager.KnowledgeManager.sync_git_source",
                 new=AsyncMock(),
-            ) as sync_git_repository,
-            patch(
-                "mindroom.knowledge.manager.KnowledgeManager.sync_indexed_files",
-                new=AsyncMock(),
-            ) as sync_indexed_files,
+            ) as sync_git_source,
             patch(
                 "mindroom.knowledge.manager.KnowledgeManager.reindex_all",
                 new=AsyncMock(),
@@ -2245,8 +2241,7 @@ class TestStreamingBehavior:
             )
 
         assert delivery.event_id == "$response"
-        assert sync_git_repository.await_count == 0
-        assert sync_indexed_files.await_count == 0
+        assert sync_git_source.await_count == 0
         assert reindex_all.await_count == 0
 
     @pytest.mark.asyncio

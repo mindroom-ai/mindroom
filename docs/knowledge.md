@@ -177,7 +177,9 @@ When an agent has multiple knowledge bases, results are interleaved fairly so no
 ## Git-Backed Knowledge Bases
 
 Knowledge bases can sync from a Git repository.
-MindRoom clones or fetches the repo during scheduled or explicit refreshes, not during global startup.
+MindRoom starts a background refresh for configured shared Git knowledge bases when runtime support starts.
+After that, it schedules another background refresh every `poll_interval_seconds`.
+Reads keep using the last published index while a refresh is running.
 
 ```yaml
 knowledge_bases:
@@ -202,7 +204,7 @@ knowledge_bases:
 |-------|------|---------|-------------|
 | `repo_url` | string | *required* | HTTPS repository URL to clone/fetch |
 | `branch` | string | `main` | Branch to track |
-| `poll_interval_seconds` | int | `300` | Minimum age before a READY Git published index schedules advisory on-access refresh. Git polling loops are not started |
+| `poll_interval_seconds` | int | `300` | Interval for scheduling background Git refreshes |
 | `credentials_service` | string | `null` | Service name in CredentialsManager for private repos |
 | `lfs` | bool | `false` | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom |
 | `sync_timeout_seconds` | int | `3600` | Abort one Git command if it exceeds this timeout |

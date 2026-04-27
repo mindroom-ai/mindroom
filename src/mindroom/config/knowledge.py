@@ -15,7 +15,7 @@ class KnowledgeGitConfig(BaseModel):
     poll_interval_seconds: int = Field(
         default=300,
         ge=5,
-        description="Minimum age before a READY Git-backed published index schedules a background on-access refresh",
+        description="How often to schedule a background refresh for a Git-backed knowledge base",
     )
     credentials_service: str | None = Field(
         default=None,

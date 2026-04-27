@@ -343,7 +343,7 @@ knowledge_bases:
     git:                           # Optional: Sync this folder from a Git repository
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
-      poll_interval_seconds: 300  # Minimum age before a READY Git published index schedules advisory on-access refresh
+      poll_interval_seconds: 300  # Interval for background Git refresh scheduling
       lfs: false                   # Optional: enable Git LFS support (requires git-lfs on the runtime host)
       sync_timeout_seconds: 3600   # Optional: abort a hung git command after this many seconds
       skip_hidden: true

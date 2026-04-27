@@ -59,8 +59,6 @@ _SOURCE_PATH_KEY = "source_path"
 _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
 _SOURCE_DIGEST_KEY = "source_digest"
-_FAILED_SIGNATURE_RETRY_SECONDS = 300
-_FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
 _MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 32
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
 _GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS = 5.0
@@ -127,7 +125,6 @@ _TEXT_LIKE_EXTENSIONS = {
     ".proto",
 }
 _FileSignature = tuple[int, int, str]
-_FailedFileSignature = tuple[int, int, str, int]
 INDEXING_SETTINGS_BASE_ID_INDEX = 0
 INDEXING_SETTINGS_STORAGE_ROOT_INDEX = 1
 INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX = 2
@@ -811,7 +808,6 @@ class KnowledgeManager:
     _settings: tuple[str, ...] = field(init=False)
     _indexing_settings: tuple[str, ...] = field(init=False)
     _base_storage_path: Path = field(init=False)
-    _index_failures_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
     _git_lfs_hydrated_head_path: Path = field(init=False)
     _knowledge: Knowledge = field(init=False)
@@ -851,7 +847,6 @@ class KnowledgeManager:
             self.storage_path / "knowledge_db" / _base_storage_key(self.base_id, self.knowledge_path)
         ).resolve()
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
-        self._index_failures_path = self._base_storage_path / "index_failures.json"
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
         self._git_repo_present = base_config.git is not None and _git_metadata_present(self.knowledge_path)
@@ -1288,7 +1283,7 @@ class KnowledgeManager:
         await self._hydrate_git_lfs_worktree(git_config, repo_root=knowledge_root)
         return True
 
-    async def _sync_git_repository_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
+    async def _sync_git_source_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
         cloned = await self._ensure_git_repository(git_config)
         if cloned:
             return await self._git_list_tracked_files(), set(), True
@@ -1386,57 +1381,6 @@ class KnowledgeManager:
     def _file_signature(self, file_path: Path) -> _FileSignature:
         stat = file_path.stat()
         return stat.st_mtime_ns, stat.st_size, _file_content_digest(file_path)
-
-    def _load_failed_signatures(self) -> dict[str, _FailedFileSignature]:
-        if not self._index_failures_path.exists():
-            return {}
-
-        try:
-            payload = json.loads(self._index_failures_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-
-        if not isinstance(payload, dict):
-            return {}
-
-        failed_signatures: dict[str, _FailedFileSignature] = {}
-        for path, value in payload.items():
-            if not isinstance(path, str):
-                continue
-            if not isinstance(value, list | tuple) or len(value) != 4:
-                continue
-            mtime_ns = _coerce_int(value[0])
-            size = _coerce_int(value[1])
-            if mtime_ns is None or size is None:
-                continue
-            raw_digest = value[2]
-            if not isinstance(raw_digest, str) or not raw_digest:
-                continue
-            source_digest = raw_digest
-            failed_at_ns = _coerce_int(value[3])
-            failed_signatures[path] = (mtime_ns, size, source_digest, max(failed_at_ns or 0, 0))
-        return failed_signatures
-
-    def _save_failed_signatures(self, failed_signatures: dict[str, _FailedFileSignature]) -> None:
-        payload = {
-            path: [signature[0], signature[1], signature[2], signature[3]]
-            for path, signature in failed_signatures.items()
-        }
-        self._index_failures_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-
-    def _should_skip_failed_signature(
-        self,
-        *,
-        failed_signature: _FailedFileSignature,
-        current_signature: _FileSignature,
-    ) -> bool:
-        failed_mtime_ns, failed_size, failed_digest, failed_at_ns = failed_signature
-        if (failed_mtime_ns, failed_size, failed_digest) != current_signature:
-            return False
-        if failed_at_ns <= 0:
-            return False
-        elapsed_ns = time.time_ns() - failed_at_ns
-        return elapsed_ns < _FAILED_SIGNATURE_RETRY_NS
 
     def _has_vectors_for_source_path(
         self,
@@ -1665,124 +1609,6 @@ class KnowledgeManager:
             return
         self._reset_vector_db(vector_db)
 
-    def _load_indexed_files_from_vector_db(self) -> dict[str, _FileSignature | None]:
-        """Load indexed source paths and optional file signatures from the vector collection."""
-        vector_db = self._knowledge.vector_db
-        if not isinstance(vector_db, ChromaDb):
-            return {}
-        if not vector_db.exists():
-            return {}
-
-        collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        indexed_files: dict[str, _FileSignature | None] = {}
-        offset = 0
-        batch_size = 1_000
-
-        while True:
-            result = collection.get(
-                limit=batch_size,
-                offset=offset,
-                include=["metadatas"],
-            )
-
-            metadatas = result.get("metadatas", []) or []
-            for metadata in metadatas:
-                if not isinstance(metadata, dict):
-                    continue
-                source_path = metadata.get(_SOURCE_PATH_KEY)
-                if not isinstance(source_path, str) or not source_path:
-                    continue
-
-                source_mtime_ns = _coerce_int(metadata.get(_SOURCE_MTIME_NS_KEY))
-                source_size = _coerce_int(metadata.get(_SOURCE_SIZE_KEY))
-                source_digest = metadata.get(_SOURCE_DIGEST_KEY)
-                signature = (
-                    (source_mtime_ns, source_size, source_digest)
-                    if (
-                        source_mtime_ns is not None
-                        and source_size is not None
-                        and isinstance(source_digest, str)
-                        and source_digest
-                    )
-                    else None
-                )
-                if source_path not in indexed_files or (indexed_files[source_path] is None and signature is not None):
-                    indexed_files[source_path] = signature
-
-            ids = result.get("ids", []) or []
-            fetched_count = len(ids)
-            if fetched_count == 0:
-                break
-            offset += fetched_count
-
-        return indexed_files
-
-    async def load_indexed_files(self) -> int:
-        """Load in-memory indexed file state from the existing vector DB collection."""
-        indexed_files = await asyncio.to_thread(self._load_indexed_files_from_vector_db)
-        async with self._lock:
-            self._indexed_signatures = indexed_files
-            self._indexed_files = set(indexed_files)
-        return len(indexed_files)
-
-    async def sync_indexed_files(self) -> dict[str, int]:
-        """Incrementally align index with files on disk."""
-        await self.load_indexed_files()
-        files = await asyncio.to_thread(self.list_files)
-        current_signatures = await asyncio.to_thread(
-            lambda: {self._relative_path(path): self._file_signature(path) for path in files},
-        )
-        failed_signatures = await asyncio.to_thread(self._load_failed_signatures)
-
-        async with self._lock:
-            indexed_files = set(self._indexed_files)
-            indexed_signatures = dict(self._indexed_signatures)
-
-        removed_paths = sorted(indexed_files - set(current_signatures))
-        changed_or_missing_paths: list[str] = []
-        for path, signature in current_signatures.items():
-            if path not in indexed_files:
-                failed_signature = failed_signatures.get(path)
-                if failed_signature and self._should_skip_failed_signature(
-                    failed_signature=failed_signature,
-                    current_signature=signature,
-                ):
-                    continue
-                changed_or_missing_paths.append(path)
-                continue
-
-            indexed_signature = indexed_signatures.get(path)
-            if indexed_signature is None or indexed_signature != signature:
-                changed_or_missing_paths.append(path)
-        changed_or_missing_paths.sort()
-
-        removed_count = 0
-        for relative_path in removed_paths:
-            removed = await self.remove_file(relative_path)
-            removed_count += int(removed)
-            failed_signatures.pop(relative_path, None)
-
-        indexed_count = 0
-        for relative_path in changed_or_missing_paths:
-            indexed = await self.index_file(relative_path, upsert=True)
-            indexed_count += int(indexed)
-            if indexed:
-                failed_signatures.pop(relative_path, None)
-            elif relative_path not in indexed_files:
-                # Only suppress retries for genuinely new files.  Previously-
-                # indexed files lost their vectors during the upsert attempt
-                # and must be retried on the next startup.
-                source_mtime_ns, source_size, source_digest = current_signatures[relative_path]
-                failed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest, time.time_ns())
-
-        await asyncio.to_thread(self._save_failed_signatures, failed_signatures)
-
-        return {
-            "loaded_count": len(indexed_files),
-            "indexed_count": indexed_count,
-            "removed_count": removed_count,
-        }
-
     async def ensure_git_checkout_ready(self) -> None:
         """Ensure the Git checkout exists before direct file writes land in the knowledge folder."""
         if self._git_config() is None:
@@ -1790,10 +1616,10 @@ class KnowledgeManager:
         if await self._git_checkout_present():
             self._git_repo_present = True
             return
-        await self.sync_git_repository(index_changes=False)
+        await self.sync_git_source()
 
-    async def sync_git_repository(self, *, index_changes: bool = True) -> dict[str, Any]:
-        """Fetch and force-align one configured Git repository, then update the index."""
+    async def sync_git_source(self) -> dict[str, Any]:
+        """Fetch and force-align one configured Git repository checkout."""
         git_config = self._git_config()
         if git_config is None:
             return {"updated": False, "changed_count": 0, "removed_count": 0}
@@ -1801,7 +1627,7 @@ class KnowledgeManager:
         self._git_syncing = True
         try:
             async with self._git_sync_lock:
-                changed_files, removed_files, updated = await self._sync_git_repository_once(git_config)
+                changed_files, removed_files, updated = await self._sync_git_source_once(git_config)
             current_head = await self._git_rev_parse("HEAD")
         except Exception as exc:
             self._git_repo_present = await self._git_checkout_present()
@@ -1814,14 +1640,6 @@ class KnowledgeManager:
         self._git_last_successful_sync_at = datetime.now(tz=UTC)
         self._git_last_successful_commit = current_head
         self._git_last_error = None
-
-        if index_changes:
-            for relative_path in sorted(removed_files):
-                await self.remove_file(relative_path)
-
-            for relative_path in sorted(changed_files):
-                await self.index_file(relative_path, upsert=True)
-            self._mark_git_initial_sync_complete()
 
         if updated:
             logger.info(
@@ -2025,36 +1843,6 @@ class KnowledgeManager:
             finally:
                 if not candidate_publish_state.index_published:
                     await self._delete_unpublished_candidate_vector_db(candidate_vector_db)
-
-    async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:
-        """Index or reindex a single file."""
-        resolved_path = self.resolve_file_path(file_path)
-        if not self._include_file(resolved_path):
-            return False
-        if not resolved_path.exists() or not resolved_path.is_file():
-            return False
-
-        async with self._lock:
-            return await self._index_file_locked(resolved_path, upsert=upsert)
-
-    async def remove_file(self, file_path: Path | str) -> bool:
-        """Remove a file from the vector database index."""
-        resolved_path = self.resolve_file_path(file_path)
-        relative_path = self._relative_path(resolved_path)
-        if not self._include_relative_path(relative_path):
-            return False
-
-        async with self._lock:
-            removed = await asyncio.to_thread(
-                self._knowledge.remove_vectors_by_metadata,
-                {_SOURCE_PATH_KEY: relative_path},
-            )
-            async with self._state_lock:
-                self._indexed_files.discard(relative_path)
-                self._indexed_signatures.pop(relative_path, None)
-
-        logger.info("Removed knowledge file from index", base_id=self.base_id, path=relative_path, removed=removed)
-        return removed
 
     def get_status(self) -> dict[str, Any]:
         """Get current knowledge indexing status."""
