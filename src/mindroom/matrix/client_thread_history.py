@@ -327,6 +327,15 @@ async def _load_stale_cached_thread_history(
         return None
     if cached_event_sources is None:
         return None
+    if not _thread_history_fetch_is_cacheable(cached_event_sources, thread_id=thread_id):
+        logger.warning(
+            "Stale thread cache missing root; refusing degraded history",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(fetch_error),
+        )
+        await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
+        return None
 
     resolution_started = time.perf_counter()
     resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
@@ -451,6 +460,18 @@ async def _load_cached_thread_history_if_usable(
         return None, {
             THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing",
         }
+    if not _thread_history_fetch_is_cacheable(cached_event_sources, thread_id=thread_id):
+        await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
+        cache_reject_diagnostics = {
+            THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_missing_thread_root",
+        }
+        logger.info(
+            "Thread cache rejected for read",
+            room_id=room_id,
+            thread_id=thread_id,
+            **cache_reject_diagnostics,
+        )
+        return None, cache_reject_diagnostics
 
     resolution_started = time.perf_counter()
     resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
