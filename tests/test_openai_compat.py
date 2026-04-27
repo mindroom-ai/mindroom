@@ -4509,7 +4509,7 @@ class TestTeamCompletion:
                     reason="Team 'coord_team' cannot be materialized",
                 ),
             ),
-            patch("mindroom.api.openai_compat.close_team_runtime_sqlite_dbs") as mock_close,
+            patch("mindroom.api.openai_compat.close_team_runtime_state_dbs") as mock_close,
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 

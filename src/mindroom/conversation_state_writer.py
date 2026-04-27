@@ -19,7 +19,7 @@ from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     import structlog
-    from agno.db.sqlite import SqliteDb
+    from agno.db.base import BaseDb
 
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
@@ -67,7 +67,7 @@ class ConversationStateWriter:
         execution_identity: ToolExecutionIdentity | None,
         *,
         scope: HistoryScope | None = None,
-    ) -> SqliteDb:
+    ) -> BaseDb:
         """Create storage for one exact persisted history scope."""
         config = self.deps.runtime.config
         normalized_scope = (
@@ -94,7 +94,7 @@ class ConversationStateWriter:
     def persist_response_event_id_in_session_run(
         self,
         *,
-        storage: SqliteDb,
+        storage: BaseDb,
         session_id: str,
         session_type: SessionType,
         run_id: str,

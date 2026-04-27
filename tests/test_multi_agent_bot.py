@@ -10264,7 +10264,10 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch("mindroom.runtime_support._EventCache.initialize", new=AsyncMock(side_effect=RuntimeError("boom"))),
+            patch(
+                "mindroom.runtime_support.SqliteEventCache.initialize",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ),
             patch.object(MultiAgentOrchestrator, "_create_managed_bot") as mock_create_managed_bot,
         ):
             await orchestrator.initialize()

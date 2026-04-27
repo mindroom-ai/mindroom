@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.matrix.cache import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
-from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -51,7 +51,7 @@ async def _read_snapshot(
     sender: str,
     runtime_started_at: float | None,
 ) -> AgentMessageSnapshot | None:
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         return await cache.get_latest_agent_message_snapshot(
@@ -70,7 +70,7 @@ async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message
 ) -> None:
     """Thread-scope reads should return the latest unedited agent message."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.replace_thread(
@@ -119,7 +119,7 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
 ) -> None:
     """Edited threaded messages should surface the latest visible stream status."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.replace_thread(
@@ -179,7 +179,7 @@ async def test_get_latest_agent_message_snapshot_returns_room_level_message_when
 ) -> None:
     """Room-scope reads should skip threaded replies and stay on the room timeline."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -234,7 +234,7 @@ async def test_get_latest_agent_message_snapshot_returns_none_when_sender_has_no
 ) -> None:
     """Missing sender matches should return None instead of raising."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -271,7 +271,7 @@ async def test_get_latest_agent_message_snapshot_returns_none_when_cache_has_no_
 ) -> None:
     """Empty cache files should return None for any scope lookup."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     await cache.close()
 
@@ -292,7 +292,7 @@ async def test_room_scope_ignores_messages_cached_before_current_runtime(
 ) -> None:
     """Room-scope reads should ignore stale message rows from a prior runtime."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -329,7 +329,7 @@ async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
 ) -> None:
     """Room-scope reads should keep a message whose visible edit was cached after restart."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -393,7 +393,7 @@ async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_
 ) -> None:
     """Room-scope reads should fail closed when the latest sender message is stale."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -445,7 +445,7 @@ async def test_accessor_accepts_old_thread_cache_without_stale_marker(
 ) -> None:
     """Threaded reads should trust old snapshots unless a stale marker exists."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.replace_thread(
@@ -495,7 +495,7 @@ async def test_accessor_reuses_thread_cache_from_prior_bot_run(
 ) -> None:
     """Threaded reads should trust snapshots unless an explicit stale marker exists."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.replace_thread(
@@ -545,7 +545,7 @@ async def test_accessor_rejects_invalidated_thread_cache(
 ) -> None:
     """Threaded reads should fail closed after durable invalidation."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.replace_thread(
@@ -592,7 +592,7 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
 ) -> None:
     """Room-scope reads should follow Matrix timeline order, not cache write time."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -652,7 +652,7 @@ async def test_room_scope_preserves_cache_insert_order_for_same_timestamp_messag
 ) -> None:
     """Room-scope reads should keep the later cached sender message when timestamps tie."""
     db_path = tmp_path / "event_cache.db"
-    cache = _EventCache(db_path)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         await cache.store_events_batch(

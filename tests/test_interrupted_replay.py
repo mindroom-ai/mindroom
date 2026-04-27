@@ -10,7 +10,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
-from mindroom.agent_storage import create_state_storage_db, get_agent_session
+from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
     build_interrupted_replay_run,
@@ -201,7 +201,7 @@ def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> N
 
 def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_path: Path) -> None:
     """Interrupted replay persistence must merge against the latest stored session state."""
-    storage = create_state_storage_db(
+    storage = create_state_storage(
         "test_agent",
         tmp_path,
         subdir="sessions",
@@ -336,7 +336,7 @@ def test_turn_recorder_record_helpers_capture_completed_and_interrupted_turns() 
 
 def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_path: Path) -> None:
     """Even hard-cancelled turns with no observed assistant state should persist one interrupted record."""
-    storage = create_state_storage_db(
+    storage = create_state_storage(
         "test_agent",
         tmp_path,
         subdir="sessions",

@@ -11,8 +11,7 @@ from mindroom.post_response_effects import apply_post_response_effects
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from agno.db.base import SessionType
-    from agno.db.sqlite import SqliteDb
+    from agno.db.base import BaseDb, SessionType
 
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.history import HistoryScope
@@ -35,7 +34,7 @@ class SessionStartedWatch:
     thread_id: str | None
     session_type: SessionType
     correlation_id: str
-    create_storage: Callable[[], SqliteDb]
+    create_storage: Callable[[], BaseDb]
 
 
 class ResponseLifecycle:
@@ -65,7 +64,7 @@ class ResponseLifecycle:
         scope: HistoryScope,
         room_id: str,
         thread_id: str | None,
-        create_storage: Callable[[], SqliteDb],
+        create_storage: Callable[[], BaseDb],
     ) -> SessionStartedWatch:
         """Pre-compute session:started eligibility for one response path."""
         return SessionStartedWatch(

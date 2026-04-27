@@ -11,8 +11,7 @@ from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
 from agno.culture.manager import CultureManager
-from agno.db.base import SessionType
-from agno.db.sqlite import SqliteDb
+from agno.db.base import BaseDb, SessionType
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
@@ -638,7 +637,7 @@ def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) ->
 def _resolve_agent_learning(
     agent_config: AgentConfig,
     defaults: DefaultsConfig,
-    learning_storage: SqliteDb | None = None,
+    learning_storage: BaseDb | None = None,
 ) -> bool | LearningMachine:
     """Resolve Agent.learning setting from MindRoom agent configuration."""
     if not _is_learning_enabled(agent_config, defaults):
@@ -696,15 +695,8 @@ def _enable_all_history_replay(entity: Agent | Team) -> None:
     entity.num_history_runs = None
 
 
-def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
-    """Create persistent culture storage shared by all agents in a culture."""
-    culture_dir = storage_path / "culture"
-    culture_dir.mkdir(parents=True, exist_ok=True)
-    return SqliteDb(db_file=str(culture_dir / f"{culture_name}.db"))
-
-
 def remove_run_by_event_id(
-    storage: SqliteDb,
+    storage: BaseDb,
     session_id: str,
     event_id: str,
     *,
@@ -805,7 +797,7 @@ def _resolve_agent_culture(
     culture_scope = culture_config.description.strip() or "Shared best practices and principles."
     culture_manager = CultureManager(
         model=model,
-        db=_create_culture_storage(culture_name, storage_path),
+        db=agent_storage.create_culture_storage(culture_name, storage_path),
         culture_capture_instructions=f"Culture '{culture_name}': {culture_scope}",
         add_knowledge=culture_config.mode != "manual",
         update_knowledge=culture_config.mode != "manual",
@@ -887,7 +879,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     session_id: str | None = None,
     hook_registry: HookRegistry | None = None,
     knowledge: KnowledgeProtocol | None = None,
-    history_storage: SqliteDb | None = None,
+    history_storage: BaseDb | None = None,
     active_model_name: str | None = None,
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
@@ -958,7 +950,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     storage = (
         history_storage
         if history_storage is not None
-        else agent_storage.create_state_storage_db(
+        else agent_storage.create_state_storage(
             agent_name,
             agent_runtime.state_root,
             subdir="sessions",
@@ -1010,7 +1002,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 error=str(exc),
             )
     learning_storage = (
-        agent_storage.create_state_storage_db(
+        agent_storage.create_state_storage(
             storage_name=agent_name,
             state_root=agent_runtime.state_root,
             subdir="learning",

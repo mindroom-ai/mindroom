@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 
 if TYPE_CHECKING:
@@ -40,7 +40,7 @@ class StartupThreadPrewarmRegistry:
 class OwnedRuntimeSupport:
     """Concrete event-cache services owned by one runtime lifecycle."""
 
-    event_cache: _EventCache
+    event_cache: SqliteEventCache
     event_cache_write_coordinator: _EventCacheWriteCoordinator
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry
 
@@ -53,7 +53,7 @@ def build_owned_runtime_support(
 ) -> OwnedRuntimeSupport:
     """Build one owned runtime-support bundle without initializing the cache."""
     return OwnedRuntimeSupport(
-        event_cache=_EventCache(db_path),
+        event_cache=SqliteEventCache(db_path),
         event_cache_write_coordinator=_EventCacheWriteCoordinator(
             logger=logger,
             background_task_owner=background_task_owner,

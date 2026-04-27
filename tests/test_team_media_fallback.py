@@ -219,7 +219,7 @@ def test_materialize_exact_team_members_closes_partial_agents_on_failure() -> No
     with (
         patch("mindroom.teams.create_agent", side_effect=[built_agent, RuntimeError("boom")]),
         patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
-        patch("mindroom.teams.close_team_runtime_sqlite_dbs") as mock_close,
+        patch("mindroom.teams.close_team_runtime_state_dbs") as mock_close,
         pytest.raises(ValueError, match="research"),
     ):
         materialize_exact_team_members(

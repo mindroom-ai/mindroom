@@ -31,7 +31,7 @@ from mindroom.tool_system.events import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.db.sqlite import SqliteDb
+    from agno.db.base import BaseDb
     from agno.models.response import ToolExecution
 
     from mindroom.history.runtime import ScopeSessionContext
@@ -228,7 +228,7 @@ def build_interrupted_replay_snapshot(
 
 def persist_interrupted_replay_snapshot(
     *,
-    storage: SqliteDb,
+    storage: BaseDb,
     session: AgentSession | TeamSession | None,
     session_id: str,
     scope_id: str,
@@ -303,7 +303,7 @@ def persist_interrupted_replay(
 
 def _load_persisted_session(
     *,
-    storage: SqliteDb,
+    storage: BaseDb,
     session_id: str,
     is_team: bool,
 ) -> AgentSession | TeamSession | None:

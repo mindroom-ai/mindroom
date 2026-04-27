@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .event_cache_events import (
+from .event_cache import ThreadCacheState
+from .sqlite_event_cache_events import (
     delete_cached_events,
     delete_event_edit_rows,
     delete_event_thread_rows,
@@ -22,17 +22,6 @@ from .event_cache_events import (
 
 if TYPE_CHECKING:
     import aiosqlite
-
-
-@dataclass(frozen=True, slots=True)
-class ThreadCacheState:
-    """Durable freshness and invalidation metadata for one cached thread."""
-
-    validated_at: float | None
-    invalidated_at: float | None
-    invalidation_reason: str | None
-    room_invalidated_at: float | None
-    room_invalidation_reason: str | None
 
 
 _INCREMENTAL_THREAD_REVALIDATION_REASONS = frozenset(

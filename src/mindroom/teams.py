@@ -42,7 +42,7 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history import (
     ScopeSessionContext,
-    close_team_runtime_sqlite_dbs,
+    close_team_runtime_state_dbs,
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
     update_scope_seen_event_ids,
@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 
     import nio
-    from agno.db.sqlite import SqliteDb
+    from agno.db.base import BaseDb
     from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
@@ -1219,7 +1219,7 @@ def materialize_exact_team_members(
         build_member=_build_member,
     )
     if team_members.failed_agent_names:
-        close_team_runtime_sqlite_dbs(
+        close_team_runtime_state_dbs(
             agents=team_members.agents,
             team_db=None,
             shared_scope_storage=None,
@@ -1271,7 +1271,7 @@ def _create_team_instance(
     fallback_team_id: str,
     model_name: str | None = None,
     configured_team_name: str | None = None,
-    history_storage: SqliteDb | None = None,
+    history_storage: BaseDb | None = None,
 ) -> Team:
     """Create a configured Team instance.
 
@@ -1748,9 +1748,9 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         logger.exception("Error preparing team members", agents=agent_list)
         return get_user_friendly_error_message(e, team_name)
     finally:
-        close_team_runtime_sqlite_dbs(
+        close_team_runtime_state_dbs(
             agents=agents,
-            team_db=cast("SqliteDb | None", team.db) if team is not None else None,
+            team_db=cast("BaseDb | None", team.db) if team is not None else None,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
 
@@ -2339,9 +2339,9 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         yield get_user_friendly_error_message(e, team_label)
         return
     finally:
-        close_team_runtime_sqlite_dbs(
+        close_team_runtime_state_dbs(
             agents=team_members.agents,
-            team_db=cast("SqliteDb | None", team.db) if team is not None else None,
+            team_db=cast("BaseDb | None", team.db) if team is not None else None,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
 

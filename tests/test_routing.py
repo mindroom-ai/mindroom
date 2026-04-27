@@ -144,8 +144,8 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     """Curated seam modules should not freeze low-level runtime or prompt-plumbing helpers as public API."""
     hidden_attrs = {
         "mindroom.agents": (
-            "create_state_storage_db",
-            "get_agent_runtime_sqlite_dbs",
+            "create_state_storage",
+            "get_agent_runtime_state_dbs",
             "build_agent_tool_init_context",
         ),
         "mindroom.ai": (

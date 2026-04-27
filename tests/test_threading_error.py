@@ -23,7 +23,7 @@ import pytest_asyncio
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache as matrix_cache
-import mindroom.matrix.cache.event_cache_threads as event_cache_threads_module
+import mindroom.matrix.cache.sqlite_event_cache_threads as sqlite_event_cache_threads_module
 import mindroom.timing as timing_module
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -34,7 +34,8 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix import thread_bookkeeping
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
-from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
+from mindroom.matrix.cache.event_cache import ThreadCacheState
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_CACHE,
@@ -310,11 +311,11 @@ def _message_mutation_event_info(*, original_event_id: str = "$target:localhost"
     )
 
 
-async def _reopen_event_cache(event_cache: _EventCache) -> _EventCache:
+async def _reopen_event_cache(event_cache: SqliteEventCache) -> SqliteEventCache:
     """Close and reopen one SQLite cache against the same database file."""
     db_path = event_cache.db_path
     await event_cache.close()
-    reopened_cache = _EventCache(db_path)
+    reopened_cache = SqliteEventCache(db_path)
     await reopened_cache.initialize()
     return reopened_cache
 
@@ -322,7 +323,7 @@ async def _reopen_event_cache(event_cache: _EventCache) -> _EventCache:
 def _conversation_runtime(
     *,
     client: nio.AsyncClient | None = None,
-    event_cache: _EventCache | None = None,
+    event_cache: SqliteEventCache | None = None,
     coordinator: _EventCacheWriteCoordinator | None = None,
 ) -> BotRuntimeState:
     """Build one minimal live runtime state for conversation-cache tests."""
@@ -357,7 +358,7 @@ async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_rac
     """Assert a blocked thread read does not validate cache after a racing UNKNOWN live mutation."""
     room_id = "!test:localhost"
     thread_id = "$thread:localhost"
-    event_cache = _EventCache(tmp_path / "event_cache.db")
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
     await event_cache.initialize()
     root_event = _text_event(
         event_id=thread_id,
@@ -1055,7 +1056,7 @@ class TestMatrixConversationCacheThreadReads:
         tmp_path: Path,
     ) -> None:
         """Synthetic outbound reactions should be normalized before durable cache persistence."""
-        event_cache = _EventCache(tmp_path / "event_cache.db")
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@agent:localhost"
@@ -1447,7 +1448,7 @@ class TestMatrixConversationCacheThreadReads:
     @pytest.mark.asyncio
     async def test_lookup_miss_invalidation_survives_restart_and_refetches_next_read(self, tmp_path: Path) -> None:
         """Lookup-miss mutations should leave a durable marker that the next runtime observes."""
-        event_cache = _EventCache(tmp_path / "event_cache.db")
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         root_event = {
             "event_id": "$thread:localhost",
@@ -1764,7 +1765,7 @@ class TestThreadingBehavior:
             runtime_paths=bot.runtime_paths,
         )
 
-        shared_cache = _EventCache(bot.config.cache.resolve_db_path(bot.runtime_paths))
+        shared_cache = SqliteEventCache(bot.config.cache.resolve_db_path(bot.runtime_paths))
         shared_coordinator = _EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
@@ -3600,7 +3601,7 @@ class TestThreadingBehavior:
         thread_reply_id = "$thread_reply:localhost"
         plain_reply_id = "$plain_reply:localhost"
 
-        real_event_cache = _EventCache(bot.storage_path / "plain-reply-thread-membership.db")
+        real_event_cache = SqliteEventCache(bot.storage_path / "plain-reply-thread-membership.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
         bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
@@ -3666,7 +3667,7 @@ class TestThreadingBehavior:
         plain_reply_id = "$plain_reply:localhost"
         second_plain_reply_id = "$second_plain_reply:localhost"
 
-        real_event_cache = _EventCache(bot.storage_path / "plain-reply-second-hop-membership.db")
+        real_event_cache = SqliteEventCache(bot.storage_path / "plain-reply-second-hop-membership.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
         bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
@@ -3749,7 +3750,7 @@ class TestThreadingBehavior:
         audio_event_id = "$audio_reply:localhost"
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = room_id
-        real_event_cache = _EventCache(bot.storage_path / "media-ingress-thread-membership.db")
+        real_event_cache = SqliteEventCache(bot.storage_path / "media-ingress-thread-membership.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
         bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
@@ -4397,7 +4398,7 @@ class TestThreadingBehavior:
         plain_reply_id = "$plain_reply:localhost"
         plain_reply_edit_id = "$plain_reply_edit:localhost"
 
-        real_event_cache = _EventCache(bot.storage_path / "plain-reply-edit-thread-membership.db")
+        real_event_cache = SqliteEventCache(bot.storage_path / "plain-reply-edit-thread-membership.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
         bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
@@ -5175,7 +5176,7 @@ class TestThreadingBehavior:
         tmp_path: Path,
     ) -> None:
         """A synced thread edit should force the next read to refetch from Matrix, even after a restart."""
-        event_cache = _EventCache(tmp_path / "event_cache.db")
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         root_event = _text_event(
             event_id="$thread_root:localhost",
@@ -5250,7 +5251,7 @@ class TestThreadingBehavior:
         tmp_path: Path,
     ) -> None:
         """A guarded prewarm write must not overwrite a newer thread snapshot written after the fetch began."""
-        event_cache = _EventCache(tmp_path / "event_cache.db")
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         room_id = "!test:localhost"
         thread_id = "$thread_root:localhost"
@@ -5503,7 +5504,7 @@ class TestThreadingBehavior:
         )
         write_entered = asyncio.Event()
         allow_write_commit = asyncio.Event()
-        original_replace = event_cache_threads_module.replace_thread_locked_if_not_newer
+        original_replace = sqlite_event_cache_threads_module.replace_thread_locked_if_not_newer
 
         async def blocked_replace(*args: object, **kwargs: object) -> bool:
             write_entered.set()
@@ -5513,7 +5514,7 @@ class TestThreadingBehavior:
         try:
             fetch_started_at = time.time()
             with patch(
-                "mindroom.matrix.cache.event_cache_threads.replace_thread_locked_if_not_newer",
+                "mindroom.matrix.cache.sqlite_event_cache_threads.replace_thread_locked_if_not_newer",
                 new=blocked_replace,
             ):
                 write_task = asyncio.create_task(
@@ -5551,7 +5552,7 @@ class TestThreadingBehavior:
         tmp_path: Path,
     ) -> None:
         """Plain sync edits with missing originals should invalidate cached room thread state."""
-        event_cache = _EventCache(tmp_path / "event_cache.db")
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         root_event = _text_event(
             event_id="$thread_root:localhost",
@@ -5832,7 +5833,7 @@ class TestThreadingBehavior:
 
         room_id = "!test:localhost"
         thread_id = "$thread:localhost"
-        event_cache = _EventCache(tmp_path / "event_cache.db")
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         root_event = _text_event(
             event_id=thread_id,
@@ -5997,7 +5998,7 @@ class TestThreadingBehavior:
         """A dispatch snapshot fetched before room invalidation must not validate stale cache."""
         room_id = "!test:localhost"
         thread_id = "$thread:localhost"
-        event_cache = _EventCache(tmp_path / "event_cache.db")
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         root_event = _text_event(
             event_id=thread_id,
@@ -6119,7 +6120,7 @@ class TestThreadingBehavior:
         tmp_path: Path,
     ) -> None:
         """MSC3440 fallback should use the refetched latest visible thread event, not a stale cached tail."""
-        event_cache = _EventCache(tmp_path / "event_cache.db")
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         root_event = _text_event(
             event_id="$thread_root:localhost",
@@ -7718,7 +7719,7 @@ class TestThreadingBehavior:
         room.room_id = "!test:localhost"
         room.name = "Test Room"
 
-        real_event_cache = _EventCache(bot.storage_path / "root-edit-thread-cache.db")
+        real_event_cache = SqliteEventCache(bot.storage_path / "root-edit-thread-cache.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
 

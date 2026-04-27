@@ -1655,7 +1655,7 @@ class TestConversationCacheArchitecture:
         """Hot-path conversation modules should not bypass the conversation-cache layer for cache state."""
         repo_root = Path(__file__).resolve().parents[1]
         banned_tokens = (
-            "_EventCache(",
+            "SqliteEventCache(",
             "event_cache.",
         )
         for relative_path in (

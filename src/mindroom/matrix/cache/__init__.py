@@ -1,14 +1,16 @@
 """Matrix cache domain ownership.
 
 Developer note:
-- `event_cache.py` owns the concrete durable cache implementation, runtime, locking, and schema lifecycle.
-- `event_cache_events.py` owns event lookup normalization, lookup/index rows, edits, and redaction tombstones.
-- `event_cache_threads.py` owns thread snapshot rows, cache-state reads, and thread/room invalidation state.
+- `event_cache.py` owns the storage-agnostic durable cache protocol.
+- `sqlite_event_cache.py` owns the SQLite implementation, runtime, locking, and schema lifecycle.
+- `sqlite_event_cache_events.py` owns event lookup normalization, lookup/index rows, edits, and redaction tombstones.
+- `sqlite_event_cache_threads.py` owns thread snapshot rows, cache-state reads, and thread/room invalidation state.
+- `sqlite_agent_message_snapshot.py` owns SQLite reads for latest cached agent message snapshots.
 - `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_bookkeeping.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
 
 Package boundary:
 - `mindroom.matrix.cache` is the package-level import surface for cache-facing contracts and shared helpers used above the cache package.
-- `_EventCache` and `_EventCacheWriteCoordinator` remain private concrete implementations used by `runtime_support.py` through their concrete owner modules.
+- `SqliteEventCache` and `_EventCacheWriteCoordinator` remain private concrete services used by `runtime_support.py` through their concrete owner modules.
 - `MatrixConversationCache` remains the higher-level conversation read/write facade above the cache package and may use specific cache helper submodules through narrow Tach visibility.
 
 Main invariants:
@@ -22,7 +24,7 @@ from .agent_message_snapshot import (
     AgentMessageSnapshotUnavailable,
 )
 from .event_cache import ConversationEventCache, ThreadCacheState
-from .event_cache_events import normalize_nio_event_for_cache
+from .sqlite_event_cache_events import normalize_nio_event_for_cache
 from .thread_cache_helpers import thread_cache_rejection_reason, thread_cache_state_is_usable
 from .thread_history_result import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,

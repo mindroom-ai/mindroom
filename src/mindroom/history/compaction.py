@@ -42,7 +42,7 @@ from mindroom.tool_system.runtime_context import (
 
 if TYPE_CHECKING:
     from agno.agent import Agent
-    from agno.db.sqlite import SqliteDb
+    from agno.db.base import BaseDb
     from agno.models.base import Model
     from agno.models.response import ModelResponse
     from agno.team import Team
@@ -227,7 +227,7 @@ def _should_collect_compaction_hook_messages() -> bool:
 @timed("system_prompt_assembly.history_prepare.compaction")
 async def compact_scope_history(
     *,
-    storage: SqliteDb,
+    storage: BaseDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: HistoryScopeState,
@@ -355,7 +355,7 @@ async def compact_scope_history(
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
 async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
     *,
-    storage: SqliteDb,
+    storage: BaseDb,
     persisted_session: AgentSession | TeamSession,
     working_session: AgentSession | TeamSession,
     summary_model: Model,
@@ -469,7 +469,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
 
 def _persist_compaction_progress(
     *,
-    storage: SqliteDb,
+    storage: BaseDb,
     persisted_session: AgentSession | TeamSession,
     working_session: AgentSession | TeamSession,
 ) -> None:

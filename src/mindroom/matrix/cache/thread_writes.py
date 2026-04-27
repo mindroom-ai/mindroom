@@ -9,10 +9,6 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.matrix.cache.event_cache_events import (
-    normalize_event_source_for_cache,
-    normalize_nio_event_for_cache,
-)
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
@@ -24,6 +20,11 @@ from mindroom.matrix.thread_bookkeeping import (
     is_thread_affecting_relation,
 )
 from mindroom.timing import emit_timing_event, timing_enabled
+
+from .sqlite_event_cache_events import (
+    normalize_event_source_for_cache,
+    normalize_nio_event_for_cache,
+)
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
