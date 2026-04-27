@@ -29,13 +29,6 @@ import {
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   FolderOpen,
@@ -72,14 +65,12 @@ interface KnowledgeStatus {
     repo_url: string;
     branch: string;
     lfs: boolean;
-    startup_behavior: "blocking" | "background";
     syncing: boolean;
     repo_present: boolean;
     initial_sync_complete: boolean;
     last_successful_sync_at: string | null;
     last_successful_commit: string | null;
     last_error: string | null;
-    pending_startup_mode: "resume" | "incremental" | null;
   };
 }
 
@@ -107,7 +98,6 @@ const DEFAULT_GIT_SETTINGS: KnowledgeGitConfig = {
   repo_url: "",
   branch: "main",
   poll_interval_seconds: 300,
-  startup_behavior: "blocking",
   lfs: false,
   sync_timeout_seconds: 3600,
   skip_hidden: true,
@@ -161,15 +151,6 @@ function gitRepoUrlHasRedactionSentinel(value: string): boolean {
   return value.includes(REDACTED_CREDENTIALS_SENTINEL);
 }
 
-function formatStartupMode(value: "resume" | "incremental"): string {
-  switch (value) {
-    case "resume":
-      return "Resume";
-    case "incremental":
-      return "Incremental";
-  }
-}
-
 function defaultPathForBase(baseName: string): string {
   return `./knowledge_docs/${baseName}`;
 }
@@ -216,8 +197,6 @@ function normalizeGitConfig(gitConfig: KnowledgeGitConfig): KnowledgeGitConfig {
         ? gitConfig.poll_interval_seconds
         : DEFAULT_GIT_SETTINGS.poll_interval_seconds,
     credentials_service: gitConfig.credentials_service?.trim() || undefined,
-    startup_behavior:
-      gitConfig.startup_behavior === "background" ? "background" : "blocking",
     lfs: gitConfig.lfs ?? DEFAULT_GIT_SETTINGS.lfs,
     sync_timeout_seconds:
       typeof gitConfig.sync_timeout_seconds === "number" &&
@@ -1402,38 +1381,6 @@ export function Knowledge() {
                     <div className="space-y-2">
                       <label
                         className="text-sm font-medium"
-                        htmlFor="knowledge-git-startup-behavior"
-                      >
-                        Legacy Startup Behavior
-                      </label>
-                      <Select
-                        value={settings.git.startup_behavior ?? "blocking"}
-                        onValueChange={(value) =>
-                          updateGitSettings({
-                            startup_behavior:
-                              value === "background"
-                                ? "background"
-                                : "blocking",
-                          })
-                        }
-                      >
-                        <SelectTrigger id="knowledge-git-startup-behavior">
-                          <SelectValue placeholder="Select startup behavior" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="blocking">Blocking</SelectItem>
-                          <SelectItem value="background">Background</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <p className="text-xs text-muted-foreground">
-                        Retained for compatibility. Git refreshes are scheduled
-                        on access or by explicit reindex.
-                      </p>
-                    </div>
-
-                    <div className="space-y-2">
-                      <label
-                        className="text-sm font-medium"
                         htmlFor="knowledge-git-credentials-service"
                       >
                         Credentials Service (optional)
@@ -1624,9 +1571,6 @@ export function Knowledge() {
                   ) : null}
                   {status?.git ? (
                     <>
-                      <Badge variant="outline">
-                        Git policy: {status.git.startup_behavior}
-                      </Badge>
                       <Badge
                         variant={status.git.syncing ? "default" : "outline"}
                       >
@@ -1642,12 +1586,6 @@ export function Knowledge() {
                           ? "Snapshot Ready"
                           : "Snapshot Pending"}
                       </Badge>
-                      {status.git.pending_startup_mode ? (
-                        <Badge variant="secondary">
-                          Pending refresh:{" "}
-                          {formatStartupMode(status.git.pending_startup_mode)}
-                        </Badge>
-                      ) : null}
                       {status.git.lfs ? (
                         <Badge variant="secondary">LFS</Badge>
                       ) : null}

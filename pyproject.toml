@@ -48,6 +48,7 @@ dependencies = [
   "tenacity>=9.1.2",
   "typer>=0.24",
   "uvicorn>=0.35",
+  "watchfiles>=1",
 ]
 [[project.authors]]
 name = "mindroom team"

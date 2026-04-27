@@ -486,7 +486,6 @@ def test_git_status_reads_disk_and_snapshot_metadata(tmp_path: Path) -> None:
     assert response.status_code == 200
     git_status = response.json()["git"]
     assert git_status["syncing"] is False
-    assert git_status["pending_startup_mode"] is None
     assert git_status["repo_present"] is True
     assert git_status["initial_sync_complete"] is True
     assert git_status["last_successful_commit"] == "abc123"

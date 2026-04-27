@@ -3260,6 +3260,7 @@ dependencies = [
     { name = "tenacity" },
     { name = "typer" },
     { name = "uvicorn" },
+    { name = "watchfiles" },
 ]
 
 [package.optional-dependencies]
@@ -3748,6 +3749,7 @@ requires-dist = [
     { name = "twilio", marker = "extra == 'twilio'" },
     { name = "typer", specifier = ">=0.24" },
     { name = "uvicorn", specifier = ">=0.35" },
+    { name = "watchfiles", specifier = ">=1" },
     { name = "webexpythonsdk", marker = "extra == 'webex'" },
     { name = "wikipedia", marker = "extra == 'wikipedia'" },
     { name = "yfinance", marker = "extra == 'yfinance'" },

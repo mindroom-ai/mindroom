@@ -13,31 +13,35 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
-from mindroom.knowledge import (
-    KnowledgeAvailability,
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.manager import (
+    git_checkout_present,
+    include_semantic_knowledge_relative_path,
+)
+from mindroom.knowledge.manager import (
+    list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files,
+)
+from mindroom.knowledge.manager import (
+    list_knowledge_files as list_managed_knowledge_files,
+)
+from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
+from mindroom.knowledge.refresh_runner import (
+    is_refresh_active_for_binding,
+    knowledge_binding_mutation_lock,
+    refresh_knowledge_binding,
+)
+from mindroom.knowledge.registry import (
     KnowledgeSnapshotKey,
     PublishedIndexingState,
     indexing_settings_snapshot_compatible,
-    is_refresh_active_for_binding,
-    knowledge_binding_mutation_lock,
     load_published_indexing_state,
     mark_snapshot_dirty_async,
-    redact_credentials_in_text,
-    redact_url_credentials,
-    refresh_knowledge_binding,
     resolve_snapshot_key,
     snapshot_availability_for_state,
     snapshot_collection_exists_for_state,
     snapshot_metadata_path,
     snapshot_refresh_state,
 )
-from mindroom.knowledge import (
-    list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files,
-)
-from mindroom.knowledge import (
-    list_knowledge_files as list_managed_knowledge_files,
-)
-from mindroom.knowledge.manager import git_checkout_present, include_semantic_knowledge_relative_path
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -320,7 +324,6 @@ async def _git_status(
         "repo_url": redact_url_credentials(git_config.repo_url),
         "branch": git_config.branch,
         "lfs": git_config.lfs,
-        "startup_behavior": git_config.startup_behavior,
         "syncing": _is_refreshing(config, base_id, runtime_paths, request=request),
         "repo_present": repo_present,
         "initial_sync_complete": (
@@ -329,7 +332,6 @@ async def _git_status(
         "last_successful_sync_at": state.last_published_at if state is not None else None,
         "last_successful_commit": state.published_revision if state is not None else None,
         "last_error": _redacted_last_error(state.last_error if state is not None else None),
-        "pending_startup_mode": None,
     }
 
 

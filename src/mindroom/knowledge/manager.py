@@ -324,7 +324,6 @@ def _settings_key(config: Config, storage_path: Path, base_id: str, knowledge_pa
         *_indexing_settings_key(config, storage_path, base_id, knowledge_path),
         str(base_config.watch),
         str(git_config.poll_interval_seconds) if git_config is not None else "",
-        git_config.startup_behavior if git_config is not None else "",
         str(git_config.sync_timeout_seconds) if git_config is not None else "",
         git_config.credentials_service or "" if git_config is not None else "",
     )
@@ -1097,10 +1096,6 @@ class KnowledgeManager:
     def _git_uses_lfs(self) -> bool:
         git_config = self._git_config()
         return bool(git_config and git_config.lfs)
-
-    def _git_startup_behavior(self) -> Literal["blocking", "background"]:
-        git_config = self._git_config()
-        return git_config.startup_behavior if git_config is not None else "blocking"
 
     def _clear_git_initial_sync_complete(self) -> None:
         self._git_initial_sync_complete = False
@@ -2076,7 +2071,6 @@ class KnowledgeManager:
                 "repo_url": redact_url_credentials(git_config.repo_url),
                 "branch": git_config.branch,
                 "lfs": git_config.lfs,
-                "startup_behavior": git_config.startup_behavior,
                 "syncing": self._git_syncing,
                 "repo_present": self._git_repo_present,
                 "initial_sync_complete": self._git_initial_sync_complete,

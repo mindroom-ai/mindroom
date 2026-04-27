@@ -2446,6 +2446,17 @@ def test_config_rejects_legacy_agent_knowledge_base_field() -> None:
         )
 
 
+def test_config_rejects_removed_knowledge_git_startup_behavior_field() -> None:
+    """Removed Git startup behavior field must fail fast to avoid inert config."""
+    with pytest.raises(ValidationError, match="startup_behavior"):
+        KnowledgeGitConfig.model_validate(
+            {
+                "repo_url": "https://github.com/example/repo",
+                "startup_behavior": "background",
+            },
+        )
+
+
 def test_config_rejects_legacy_agent_memory_dir_field() -> None:
     """Legacy memory_dir field must fail fast to avoid silent drops."""
     with pytest.raises(

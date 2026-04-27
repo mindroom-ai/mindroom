@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 from agno.knowledge.document.base import Document
 from fastapi.testclient import TestClient
+from watchfiles import Change
 
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
@@ -29,14 +30,7 @@ from mindroom.knowledge import (
     KnowledgeAvailability,
     KnowledgeAvailabilityDetail,
     PerBindingKnowledgeRefreshOwner,
-    clear_published_snapshots,
-    credential_free_url_identity,
     get_agent_knowledge,
-    get_published_snapshot,
-    knowledge_binding_mutation_lock,
-    redact_url_credentials,
-    refresh_knowledge_binding,
-    snapshot_indexed_count,
 )
 from mindroom.knowledge.manager import (
     KnowledgeManager,
@@ -45,12 +39,23 @@ from mindroom.knowledge.manager import (
     list_git_tracked_knowledge_files,
     list_knowledge_files,
 )
-from mindroom.knowledge.registry import load_published_indexing_state, resolve_snapshot_key, snapshot_metadata_path
+from mindroom.knowledge.redaction import credential_free_url_identity, redact_url_credentials
+from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
+from mindroom.knowledge.registry import (
+    clear_published_snapshots,
+    get_published_snapshot,
+    load_published_indexing_state,
+    resolve_snapshot_key,
+    snapshot_indexed_count,
+    snapshot_metadata_path,
+    snapshot_refresh_state,
+)
+from mindroom.knowledge.watch import KnowledgeFilesystemWatchOwner
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Iterator
 
 
 class _Collection:
@@ -581,6 +586,64 @@ async def test_shared_local_watch_ready_refresh_on_access_is_throttled(tmp_path:
 
     owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filesystem watch events should preserve last-good reads and refresh in the background."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("watch old", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], watch=True)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    event_delivered = asyncio.Event()
+
+    async def _fake_awatch(
+        *_paths: Path,
+        stop_event: asyncio.Event,
+        **_kwargs: object,
+    ) -> AsyncIterator[set[tuple[Change, str]]]:
+        yield {(Change.modified, str(doc))}
+        event_delivered.set()
+        await stop_event.wait()
+
+    monkeypatch.setattr("mindroom.knowledge.watch.awatch", _fake_awatch)
+    refresh_owner = MagicMock()
+    watch_owner = KnowledgeFilesystemWatchOwner(refresh_owner)
+
+    await watch_owner.sync(config=config, runtime_paths=runtime_paths)
+    await asyncio.wait_for(event_delivered.wait(), timeout=1)
+    await watch_owner.shutdown()
+
+    key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(snapshot_metadata_path(key))
+    unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
+
+    assert state is not None
+    assert snapshot_refresh_state(state) == "stale"
+    assert (
+        get_agent_knowledge(
+            "helper",
+            config,
+            runtime_paths,
+            on_unavailable_base_details=unavailable_details.update,
+        )
+        is not None
+    )
+    refresh_owner.schedule_refresh.assert_called_once()
+    assert refresh_owner.schedule_refresh.call_args.args == ("docs",)
+    assert unavailable_details == {
+        "docs": KnowledgeAvailabilityDetail(
+            availability=KnowledgeAvailability.STALE,
+            snapshot_attached=True,
+        ),
+    }
 
 
 @pytest.mark.asyncio

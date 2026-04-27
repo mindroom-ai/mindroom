@@ -26,6 +26,7 @@ from mindroom.hooks import (
     emit,
 )
 from mindroom.knowledge import OrchestratorKnowledgeRefreshOwner
+from mindroom.knowledge.watch import KnowledgeFilesystemWatchOwner
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
@@ -225,6 +226,7 @@ class MultiAgentOrchestrator:
     _plugin_watch_last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict, init=False)
     _plugin_watch_state_revision: int = field(default=0, init=False)
     _knowledge_refresh_owner: OrchestratorKnowledgeRefreshOwner = field(init=False)
+    _knowledge_watch_owner: KnowledgeFilesystemWatchOwner = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
 
@@ -238,6 +240,7 @@ class MultiAgentOrchestrator:
             background_task_owner=self._event_cache_write_task_owner,
         )
         self._knowledge_refresh_owner = OrchestratorKnowledgeRefreshOwner()
+        self._knowledge_watch_owner = KnowledgeFilesystemWatchOwner(self._knowledge_refresh_owner)
 
     @property
     def knowledge_refresh_owner(self) -> OrchestratorKnowledgeRefreshOwner:
@@ -601,7 +604,10 @@ class MultiAgentOrchestrator:
         start_watcher: bool,
     ) -> None:
         """Refresh runtime support services that depend on the active config."""
-        _ = start_watcher
+        await self._knowledge_watch_owner.sync(
+            config=config if start_watcher else None,
+            runtime_paths=self.runtime_paths,
+        )
         ensure_default_agent_workspaces(config, self.storage_path)
         await self._sync_event_cache_service(config)
         await self._sync_memory_auto_flush_worker()
@@ -1567,6 +1573,7 @@ class MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         await self._cancel_config_reload_task()
         await self._stop_memory_auto_flush_worker()
+        await self._knowledge_watch_owner.shutdown()
         await self._knowledge_refresh_owner.shutdown()
         await self._cancel_bot_start_tasks()
         await self._stop_mcp_manager()

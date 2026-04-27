@@ -68,7 +68,6 @@ export interface KnowledgeGitConfig {
   poll_interval_seconds?: number;
   credentials_service?: string;
   lfs?: boolean;
-  startup_behavior?: "blocking" | "background";
   sync_timeout_seconds?: number;
   skip_hidden?: boolean;
   include_patterns?: string[];

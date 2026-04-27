@@ -1089,7 +1089,6 @@ knowledge_bases:
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
       poll_interval_seconds: 300  # Minimum age before a READY Git snapshot schedules advisory on-access refresh
-      startup_behavior: blocking   # Legacy/advisory; startup does not schedule Git sync
       lfs: false                   # Optional: enable Git LFS support (requires git-lfs on the runtime host)
       sync_timeout_seconds: 3600   # Optional: abort a hung git command after this many seconds
       skip_hidden: true
@@ -8676,7 +8675,7 @@ agents:
     knowledge_bases: [docs]
 ```
 
-Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom schedule a refresh when an assigned agent first needs a base with `watch: true`. Chat uses the last successfully published snapshot and continues without blocking when a base is missing, stale, or failed. The `watch` field no longer starts a realtime filesystem watcher. When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
+Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom watch shared local bases with `watch: true`. Chat uses the last successfully published snapshot and continues without blocking when a base is missing, stale, or failed. When a watched file changes, MindRoom marks the snapshot stale, refreshes in the background, and atomically publishes the replacement when it succeeds. When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
 
 ## Configuration
 
@@ -8691,13 +8690,13 @@ knowledge_bases:
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
 
-| Field           | Type   | Default            | Description                                                                                                                                                                                                |
-| --------------- | ------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)                                                                                                                                            |
-| `watch`         | bool   | `true`             | When true, READY local snapshots schedule a background refresh on agent access. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
-| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                                                                                          |
-| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                                                                                        |
-| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                                                                                      |
+| Field           | Type   | Default            | Description                                                                                                                                                                                                                                          |
+| --------------- | ------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)                                                                                                                                                                                      |
+| `watch`         | bool   | `true`             | When true, shared local folders watch filesystem changes and schedule background snapshot refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
+| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                                                                                                                                    |
+| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                                                                                                                                  |
+| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                                                                                                                                |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits. If chunking is too large, indexing retries will fail with embedder 500 errors.
 
@@ -8795,7 +8794,6 @@ knowledge_bases:
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
       poll_interval_seconds: 300
-      startup_behavior: blocking
       lfs: false
       skip_hidden: true
       include_patterns:
@@ -8811,7 +8809,6 @@ knowledge_bases:
 | `poll_interval_seconds` | int    | `300`      | Minimum age before a READY Git snapshot schedules advisory on-access refresh. Git polling loops are not started |
 | `credentials_service`   | string | `null`     | Service name in CredentialsManager for private repos                                                            |
 | `lfs`                   | bool   | `false`    | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom    |
-| `startup_behavior`      | string | `blocking` | Advisory setting. Startup no longer blocks on or schedules Git knowledge sync                                   |
 | `sync_timeout_seconds`  | int    | `3600`     | Abort one Git command if it exceeds this timeout                                                                |
 | `skip_hidden`           | bool   | `true`     | Skip files/folders starting with `.`                                                                            |
 | `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                                                          |

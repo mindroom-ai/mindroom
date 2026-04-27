@@ -352,7 +352,6 @@ knowledge_bases:
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
       poll_interval_seconds: 300  # Minimum age before a READY Git snapshot schedules advisory on-access refresh
-      startup_behavior: blocking   # Legacy/advisory; startup does not schedule Git sync
       lfs: false                   # Optional: enable Git LFS support (requires git-lfs on the runtime host)
       sync_timeout_seconds: 3600   # Optional: abort a hung git command after this many seconds
       skip_hidden: true

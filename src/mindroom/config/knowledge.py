@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class KnowledgeGitConfig(BaseModel):
     """Git repository synchronization settings for a knowledge base."""
+
+    model_config = ConfigDict(extra="forbid")
 
     repo_url: str = Field(description="Git repository URL used as the knowledge source")
     branch: str = Field(default="main", description="Git branch to track")
@@ -24,10 +24,6 @@ class KnowledgeGitConfig(BaseModel):
     lfs: bool = Field(
         default=False,
         description="Enable Git LFS support for repositories that require large-file downloads",
-    )
-    startup_behavior: Literal["blocking", "background"] = Field(
-        default="blocking",
-        description="Reserved legacy setting; startup no longer blocks on or schedules Git knowledge sync",
     )
     sync_timeout_seconds: int = Field(
         default=3600,
@@ -54,7 +50,7 @@ class KnowledgeBaseConfig(BaseModel):
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(
         default=True,
-        description="When true, READY local snapshots schedule a background refresh on agent access; when false, direct external file edits require explicit reindex or dashboard/API mutations",
+        description="When true, shared local folders watch filesystem changes and schedule background snapshot refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
     )
     chunk_size: int = Field(
         default=5000,

@@ -38,14 +38,12 @@ type KnowledgeApiPayloads = {
       repo_url: string;
       branch: string;
       lfs: boolean;
-      startup_behavior: "blocking" | "background";
       syncing: boolean;
       repo_present: boolean;
       initial_sync_complete: boolean;
       last_successful_sync_at: string | null;
       last_successful_commit: string | null;
       last_error: string | null;
-      pending_startup_mode: "resume" | "incremental" | null;
     };
   };
   files: {
@@ -509,14 +507,12 @@ describe("Knowledge", () => {
               "https://token:secret@github.com/org/git-docs;token=path-secret?token=query-secret#fragment-secret",
             branch: "release",
             lfs: false,
-            startup_behavior: "blocking",
             syncing: false,
             repo_present: true,
             initial_sync_complete: true,
             last_successful_sync_at: null,
             last_successful_commit: null,
             last_error: null,
-            pending_startup_mode: null,
           },
         },
         files: {
@@ -594,14 +590,12 @@ describe("Knowledge", () => {
               repo_url: repoUrl,
               branch: "release",
               lfs: false,
-              startup_behavior: "blocking",
               syncing: false,
               repo_present: true,
               initial_sync_complete: true,
               last_successful_sync_at: null,
               last_successful_commit: null,
               last_error: null,
-              pending_startup_mode: null,
             },
           },
           files: {
@@ -683,7 +677,6 @@ describe("Knowledge", () => {
     await screen.findByText("Active: docs");
 
     expect(screen.getByText("Refresh Running")).toBeInTheDocument();
-    expect(screen.queryByText("Git policy:")).not.toBeInTheDocument();
   });
 
   it("shows non-git refresh failures with redacted last error", async () => {
@@ -730,7 +723,6 @@ describe("Knowledge", () => {
         git: {
           repo_url: "https://github.com/org/git-docs",
           branch: "release",
-          startup_behavior: "background",
         },
       },
     });
@@ -746,14 +738,12 @@ describe("Knowledge", () => {
             repo_url: "https://token:secret@github.com/org/git-docs",
             branch: "release",
             lfs: true,
-            startup_behavior: "background",
             syncing: true,
             repo_present: true,
             initial_sync_complete: false,
             last_successful_sync_at: "2026-04-17T12:00:00+00:00",
             last_successful_commit: "abc123",
             last_error: "fetch failed",
-            pending_startup_mode: "resume",
           },
         },
         files: {
@@ -768,7 +758,6 @@ describe("Knowledge", () => {
     render(<Knowledge />);
     await screen.findByText("Active: git_docs");
 
-    expect(screen.getByText("Git policy: background")).toBeInTheDocument();
     expect(
       screen.getByText("https://***@github.com/org/git-docs"),
     ).toBeInTheDocument();
@@ -776,7 +765,6 @@ describe("Knowledge", () => {
     expect(screen.getByText("Refreshing")).toBeInTheDocument();
     expect(screen.getByText("Repo Present")).toBeInTheDocument();
     expect(screen.getByText("Snapshot Pending")).toBeInTheDocument();
-    expect(screen.getByText("Pending refresh: Resume")).toBeInTheDocument();
     expect(screen.getByText("LFS")).toBeInTheDocument();
     expect(screen.getByText("Git Error")).toBeInTheDocument();
     expect(screen.getByText(/Last Commit:/)).toHaveTextContent("abc123");
@@ -809,14 +797,12 @@ describe("Knowledge", () => {
             repo_url: "https://github.com/org/git-docs",
             branch: "release",
             lfs: false,
-            startup_behavior: "blocking",
             syncing: false,
             repo_present: true,
             initial_sync_complete: true,
             last_successful_sync_at: null,
             last_successful_commit: null,
             last_error: null,
-            pending_startup_mode: null,
           },
         },
         files: {
@@ -861,14 +847,12 @@ describe("Knowledge", () => {
             repo_url: "https://github.com/org/git-docs",
             branch: "release",
             lfs: false,
-            startup_behavior: "blocking",
             syncing: false,
             repo_present: true,
             initial_sync_complete: true,
             last_successful_sync_at: null,
             last_successful_commit: "abc123",
             last_error: null,
-            pending_startup_mode: null,
           },
         },
         files: {
@@ -973,14 +957,12 @@ describe("Knowledge", () => {
               repo_url: "https://github.com/org/git-docs",
               branch: "release",
               lfs: false,
-              startup_behavior: "blocking",
               syncing: false,
               repo_present: true,
               initial_sync_complete: false,
               last_successful_sync_at: null,
               last_successful_commit: null,
               last_error: null,
-              pending_startup_mode: null,
             },
           },
           files: {
@@ -1184,7 +1166,6 @@ describe("Knowledge", () => {
             branch: "release",
             poll_interval_seconds: 45,
             credentials_service: "github-private",
-            startup_behavior: "blocking",
             lfs: false,
             sync_timeout_seconds: 3600,
             skip_hidden: false,
@@ -1311,7 +1292,6 @@ describe("Knowledge", () => {
           git: {
             repo_url: "https://github.com/org/repo",
             branch: "main",
-            startup_behavior: "background",
             lfs: true,
             sync_timeout_seconds: 1800,
           },
@@ -1340,10 +1320,6 @@ describe("Knowledge", () => {
     render(<Knowledge />);
     await screen.findByText("Active: docs");
 
-    fireEvent.click(
-      screen.getByRole("combobox", { name: "Legacy Startup Behavior" }),
-    );
-    fireEvent.click(screen.getByRole("option", { name: "Blocking" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Enable Git LFS" }));
     fireEvent.change(screen.getByLabelText("Sync Timeout (seconds)"), {
       target: { value: "900" },
@@ -1358,7 +1334,6 @@ describe("Knowledge", () => {
           git: expect.objectContaining({
             repo_url: "https://github.com/org/repo",
             branch: "main",
-            startup_behavior: "blocking",
             lfs: false,
             sync_timeout_seconds: 900,
           }),
