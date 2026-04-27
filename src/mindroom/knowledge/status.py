@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-_KnowledgeIndexingStatus = Literal["resetting", "indexing", "complete", "failed"]
+_PersistedIndexStatus = Literal["resetting", "indexing", "complete", "failed"]
 _KnowledgeRefreshState = Literal["none", "stale", "refreshing", "refresh_failed"]
 
 
@@ -24,7 +24,7 @@ class KnowledgeIndexStatus:
     indexed_count: int = 0
     refresh_state: _KnowledgeRefreshState = "none"
     availability: KnowledgeAvailability = KnowledgeAvailability.INITIALIZING
-    indexing_status: _KnowledgeIndexingStatus | None = None
+    persisted_index_status: _PersistedIndexStatus | None = None
     last_error: str | None = None
     last_published_at: str | None = None
     published_revision: str | None = None
@@ -33,12 +33,12 @@ class KnowledgeIndexStatus:
     @property
     def initial_sync_complete(self) -> bool:
         """Return whether a Git-backed source has produced at least one committed index."""
-        return self.indexing_status == "complete" and self.published_revision is not None
+        return self.persisted_index_status == "complete" and self.published_revision is not None
 
 
 def _indexed_count_for_state(
     key: registry.PublishedIndexKey,
-    state: registry.PublishedIndexingState | None,
+    state: registry.PublishedIndexState | None,
 ) -> int:
     if state is None:
         return 0
@@ -67,7 +67,7 @@ def get_knowledge_index_status(
     )
     metadata_path = registry.published_index_metadata_path(key)
     metadata_exists = metadata_path.exists()
-    state = registry.load_published_indexing_state(metadata_path)
+    state = registry.load_published_index_state(metadata_path)
     return KnowledgeIndexStatus(
         indexed_count=_indexed_count_for_state(key, state),
         refresh_state=registry.published_index_refresh_state(state, metadata_exists=metadata_exists),
@@ -76,7 +76,7 @@ def get_knowledge_index_status(
             state=state,
             metadata_exists=metadata_exists,
         ),
-        indexing_status=state.status if state is not None else None,
+        persisted_index_status=state.status if state is not None else None,
         last_error=state.last_error if state is not None else None,
         last_published_at=state.last_published_at if state is not None else None,
         published_revision=state.published_revision if state is not None else None,
@@ -84,7 +84,7 @@ def get_knowledge_index_status(
     )
 
 
-async def mark_source_dirty_async(
+async def mark_knowledge_source_changed_async(
     base_id: str,
     *,
     config: Config,
@@ -93,7 +93,7 @@ async def mark_source_dirty_async(
     reason: str = "source_mutated",
 ) -> tuple[str, ...]:
     """Mark same-source published indexes stale without exposing registry internals to callers."""
-    return await registry.mark_source_dirty_async(
+    return await registry.mark_knowledge_source_changed_async(
         base_id,
         config=config,
         runtime_paths=runtime_paths,

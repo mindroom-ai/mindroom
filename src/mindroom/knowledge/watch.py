@@ -13,7 +13,7 @@ from watchfiles import Change, awatch
 from mindroom.knowledge.manager import include_semantic_knowledge_relative_path
 from mindroom.knowledge.registry import (
     KnowledgeSourceRoot,
-    mark_source_dirty_async,
+    mark_knowledge_source_changed_async,
     resolve_refresh_target,
     source_root_for_refresh_target,
 )
@@ -169,21 +169,21 @@ class KnowledgeSourceWatcher:
     ) -> None:
         scheduled_base_ids: set[str] = set()
         for base_id in target.base_ids:
-            dirty_base_ids = await mark_source_dirty_async(
+            changed_base_ids = await mark_knowledge_source_changed_async(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
                 reason="filesystem_watch",
             )
-            for dirty_base_id in dirty_base_ids:
-                if dirty_base_id in scheduled_base_ids:
+            for changed_base_id in changed_base_ids:
+                if changed_base_id in scheduled_base_ids:
                     continue
-                dirty_config = config.get_knowledge_base_config(dirty_base_id)
-                if not dirty_config.watch or dirty_config.git is not None:
+                changed_config = config.get_knowledge_base_config(changed_base_id)
+                if not changed_config.watch or changed_config.git is not None:
                     continue
-                scheduled_base_ids.add(dirty_base_id)
+                scheduled_base_ids.add(changed_base_id)
                 self._refresh_scheduler.schedule_refresh(
-                    dirty_base_id,
+                    changed_base_id,
                     config=config,
                     runtime_paths=runtime_paths,
                 )

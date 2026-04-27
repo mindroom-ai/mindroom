@@ -67,7 +67,7 @@ class KnowledgeSourceRoot:
 
 
 @dataclass(frozen=True)
-class PublishedIndexingState:
+class PublishedIndexState:
     """Persisted state for the published knowledge index."""
 
     settings: tuple[str, ...]
@@ -85,22 +85,22 @@ class PublishedIndexingState:
 
 
 @dataclass(frozen=True)
-class PublishedKnowledgeIndex:
+class PublishedIndexHandle:
     """Read handle for the published knowledge index."""
 
     key: PublishedIndexKey
     knowledge: Knowledge
-    state: PublishedIndexingState
+    state: PublishedIndexState
     metadata_path: Path
 
 
 @dataclass(frozen=True)
-class KnowledgeIndexLookup:
+class PublishedIndexResolution:
     """Result of resolving the published index for one knowledge base."""
 
     key: PublishedIndexKey
-    index: PublishedKnowledgeIndex | None
-    state: PublishedIndexingState | None
+    index: PublishedIndexHandle | None
+    state: PublishedIndexState | None
     availability: KnowledgeAvailability
     schedule_refresh_on_access: bool = False
 
@@ -114,7 +114,7 @@ class _PublishedIndexVectorDb(Protocol):
         ...
 
 
-_published_indexes: dict[PublishedIndexKey, PublishedKnowledgeIndex] = {}
+_published_indexes: dict[PublishedIndexKey, PublishedIndexHandle] = {}
 _PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
 _MAX_PRIVATE_PUBLISHED_INDEXES = 128
 _P = ParamSpec("_P")
@@ -277,7 +277,7 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState | None:
+def load_published_index_state(metadata_path: Path) -> PublishedIndexState | None:
     """Load published index metadata."""
     if not metadata_path.exists():
         return None
@@ -299,7 +299,7 @@ def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState
     if status == "complete" and (collection is None or indexed_count is None or source_signature is None):
         return None
 
-    return PublishedIndexingState(
+    return PublishedIndexState(
         settings=tuple(raw_settings),
         status=status,
         collection=collection,
@@ -315,7 +315,7 @@ def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState
     )
 
 
-def save_published_indexing_state(metadata_path: Path, state: PublishedIndexingState) -> None:
+def save_published_index_state(metadata_path: Path, state: PublishedIndexState) -> None:
     """Atomically persist published index metadata."""
     payload: dict[str, object] = {
         "settings": list(state.settings),
@@ -351,7 +351,7 @@ def save_published_indexing_state(metadata_path: Path, state: PublishedIndexingS
 
 
 def published_index_refresh_state(
-    state: PublishedIndexingState | None,
+    state: PublishedIndexState | None,
     *,
     metadata_exists: bool = False,
 ) -> Literal["none", "stale", "refreshing", "refresh_failed"]:
@@ -375,11 +375,11 @@ def _state_with_refresh_fields(
     reason: str | None = None,
     last_error: str | None = None,
     clear_error: bool = False,
-) -> PublishedIndexingState:
-    current = load_published_indexing_state(published_index_metadata_path(key))
+) -> PublishedIndexState:
+    current = load_published_index_state(published_index_metadata_path(key))
     now = _utc_now()
     if current is None:
-        return PublishedIndexingState(
+        return PublishedIndexState(
             settings=key.indexing_settings,
             status=status_when_missing,
             refresh_job=refresh_job,
@@ -405,7 +405,7 @@ def mark_published_index_stale(
     refresh_job: Literal["idle", "pending", "running", "failed"] = "pending",
 ) -> None:
     """Mark the published index stale without changing the last queryable index."""
-    save_published_indexing_state(
+    save_published_index_state(
         published_index_metadata_path(key),
         _state_with_refresh_fields(
             key,
@@ -418,7 +418,7 @@ def mark_published_index_stale(
 
 def mark_published_index_refresh_running(key: PublishedIndexKey, *, reason: str = "refreshing") -> None:
     """Mark refresh work running while keeping the last queryable index readable."""
-    save_published_indexing_state(
+    save_published_index_state(
         published_index_metadata_path(key),
         _state_with_refresh_fields(
             key,
@@ -431,7 +431,7 @@ def mark_published_index_refresh_running(key: PublishedIndexKey, *, reason: str 
 
 def mark_published_index_refresh_failed_preserving_last_good(key: PublishedIndexKey, *, error: str) -> None:
     """Record refresh failure while keeping any last queryable index readable."""
-    current = load_published_indexing_state(published_index_metadata_path(key))
+    current = load_published_index_state(published_index_metadata_path(key))
     state = _state_with_refresh_fields(
         key,
         refresh_job="failed",
@@ -441,15 +441,15 @@ def mark_published_index_refresh_failed_preserving_last_good(key: PublishedIndex
     )
     if current is not None and current.status == "complete":
         state = replace(state, status="complete")
-    save_published_indexing_state(published_index_metadata_path(key), state)
+    save_published_index_state(published_index_metadata_path(key), state)
 
 
 def mark_published_index_refresh_succeeded(key: PublishedIndexKey) -> None:
     """Clear refresh status after a successful publish."""
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     if state is None:
         return
-    save_published_indexing_state(
+    save_published_index_state(
         published_index_metadata_path(key),
         replace(
             state,
@@ -462,7 +462,7 @@ def mark_published_index_refresh_succeeded(key: PublishedIndexKey) -> None:
     )
 
 
-def _state_collection_name(key: PublishedIndexKey, state: PublishedIndexingState) -> str:
+def _state_collection_name(key: PublishedIndexKey, state: PublishedIndexState) -> str:
     _ = key
     if state.collection is None:
         msg = "Published knowledge metadata is missing a collection name"
@@ -472,7 +472,7 @@ def _state_collection_name(key: PublishedIndexKey, state: PublishedIndexingState
 
 def _build_published_index_vector_db(
     key: PublishedIndexKey,
-    state: PublishedIndexingState,
+    state: PublishedIndexState,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -490,7 +490,7 @@ def _build_published_index_vector_db(
 
 def _build_published_index_knowledge(
     key: PublishedIndexKey,
-    state: PublishedIndexingState,
+    state: PublishedIndexState,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -500,7 +500,7 @@ def _build_published_index_knowledge(
     )
 
 
-def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexingState) -> bool:
+def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
     """Return whether persisted metadata points at an existing Chroma collection."""
     if state.status != "complete" or state.collection is None:
         return False
@@ -557,7 +557,7 @@ def published_index_settings_compatible(
     ) and indexing_settings_corpus_compatible(published_settings, current_settings)
 
 
-def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedIndexingState) -> bool:
+def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
     return (
         state.status == "complete"
         and state.collection is not None
@@ -568,7 +568,7 @@ def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedInd
 def _published_index_availability(
     *,
     key: PublishedIndexKey,
-    state: PublishedIndexingState | None,
+    state: PublishedIndexState | None,
     metadata_exists: bool = False,
 ) -> KnowledgeAvailability:
     refresh_state = published_index_refresh_state(state, metadata_exists=metadata_exists)
@@ -599,7 +599,7 @@ def _published_index_availability(
 def published_index_availability_for_state(
     *,
     key: PublishedIndexKey,
-    state: PublishedIndexingState | None,
+    state: PublishedIndexState | None,
     metadata_exists: bool = False,
 ) -> KnowledgeAvailability:
     """Return the public availability value for published index state."""
@@ -610,7 +610,7 @@ def published_index_availability_for_state(
     )
 
 
-def _cached_index_still_queryable(index: PublishedKnowledgeIndex) -> bool:
+def _cached_index_still_queryable(index: PublishedIndexHandle) -> bool:
     if not _published_index_state_queryable(index.key, index.state):
         return False
     vector_db = cast("_PublishedIndexVectorDb | None", index.knowledge.vector_db)
@@ -619,7 +619,7 @@ def _cached_index_still_queryable(index: PublishedKnowledgeIndex) -> bool:
 
 def _load_queryable_index_from_state(
     key: PublishedIndexKey,
-    state: PublishedIndexingState,
+    state: PublishedIndexState,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -637,7 +637,7 @@ def get_published_index(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> KnowledgeIndexLookup:
+) -> PublishedIndexResolution:
     """Return the currently published index, if one is usable."""
     key, binding = _resolve_published_index_key_and_binding(
         base_id,
@@ -647,13 +647,13 @@ def get_published_index(
         create=False,
     )
     metadata_path = published_index_metadata_path(key)
-    state = load_published_indexing_state(metadata_path)
+    state = load_published_index_state(metadata_path)
     availability = _published_index_availability(key=key, state=state, metadata_exists=metadata_path.exists())
 
     index = _published_indexes.get(key)
     if index is not None:
         if _cached_index_still_queryable(index):
-            return KnowledgeIndexLookup(
+            return PublishedIndexResolution(
                 key=key,
                 index=index,
                 state=state,
@@ -663,7 +663,7 @@ def get_published_index(
         _published_indexes.pop(key, None)
 
     if state is None:
-        return KnowledgeIndexLookup(
+        return PublishedIndexResolution(
             key=key,
             index=None,
             state=state,
@@ -673,7 +673,7 @@ def get_published_index(
 
     knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
     if knowledge is None:
-        return KnowledgeIndexLookup(
+        return PublishedIndexResolution(
             key=key,
             index=None,
             state=state,
@@ -683,14 +683,14 @@ def get_published_index(
             schedule_refresh_on_access=binding.incremental_sync_on_access,
         )
 
-    index = PublishedKnowledgeIndex(
+    index = PublishedIndexHandle(
         key=key,
         knowledge=knowledge,
         state=state,
         metadata_path=published_index_metadata_path(key),
     )
     _cache_published_index(index)
-    return KnowledgeIndexLookup(
+    return PublishedIndexResolution(
         key=key,
         index=index,
         state=state,
@@ -703,12 +703,12 @@ def publish_knowledge_index(
     key: PublishedIndexKey,
     *,
     knowledge: Knowledge,
-    state: PublishedIndexingState,
+    state: PublishedIndexState,
     metadata_path: Path | None = None,
-) -> PublishedKnowledgeIndex:
+) -> PublishedIndexHandle:
     """Publish a read handle in this process."""
     _evict_published_indexes_for_refresh_target(refresh_target_for_published_index_key(key))
-    index = PublishedKnowledgeIndex(
+    index = PublishedIndexHandle(
         key=key,
         knowledge=knowledge,
         state=state,
@@ -721,11 +721,11 @@ def publish_knowledge_index(
 def publish_knowledge_index_from_state(
     key: PublishedIndexKey,
     *,
-    state: PublishedIndexingState,
+    state: PublishedIndexState,
     config: Config,
     runtime_paths: RuntimePaths,
     metadata_path: Path | None = None,
-) -> PublishedKnowledgeIndex | None:
+) -> PublishedIndexHandle | None:
     """Publish a read handle rebuilt from persisted metadata."""
     knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
     if knowledge is None:
@@ -733,7 +733,7 @@ def publish_knowledge_index_from_state(
     return publish_knowledge_index(key, knowledge=knowledge, state=state, metadata_path=metadata_path)
 
 
-def published_indexed_count(index: PublishedKnowledgeIndex) -> int:
+def published_indexed_count(index: PublishedIndexHandle) -> int:
     """Return the persisted indexed source file count."""
     return index.state.indexed_count or 0
 
@@ -761,7 +761,7 @@ def prune_private_index_bookkeeping() -> None:
         _published_indexes.pop(key, None)
 
 
-def _cache_published_index(index: PublishedKnowledgeIndex) -> None:
+def _cache_published_index(index: PublishedIndexHandle) -> None:
     _published_indexes[index.key] = index
     prune_private_index_bookkeeping()
 
@@ -800,7 +800,7 @@ def _published_index_keys_for_shared_source(
             )
         except Exception:
             logger.warning(
-                "Could not resolve related published knowledge index while marking dirty",
+                "Could not resolve related published knowledge index while marking source changed",
                 base_id=base_id,
                 related_base_id=candidate_base_id,
                 exc_info=True,
@@ -817,7 +817,7 @@ def _mark_published_index_key_stale_on_disk(matching_key: PublishedIndexKey, *, 
     return True
 
 
-def mark_source_dirty(
+def mark_knowledge_source_changed(
     base_id: str,
     *,
     config: Config,
@@ -837,7 +837,7 @@ def mark_source_dirty(
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 
-async def mark_source_dirty_async(
+async def mark_knowledge_source_changed_async(
     base_id: str,
     *,
     config: Config,
@@ -847,7 +847,7 @@ async def mark_source_dirty_async(
 ) -> tuple[str, ...]:
     """Async stale marker that keeps metadata I/O off the event loop."""
     return await _run_to_thread_to_completion_on_cancel(
-        mark_source_dirty,
+        mark_knowledge_source_changed,
         base_id,
         config=config,
         runtime_paths=runtime_paths,

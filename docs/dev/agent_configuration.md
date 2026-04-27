@@ -258,7 +258,7 @@ knowledge_bases:
     git:  # Optional: sync from a Git repository
       repo_url: "https://github.com/org/docs.git"
       branch: main
-      poll_interval_seconds: 300  # Minimum age before a READY Git snapshot schedules advisory refresh
+      poll_interval_seconds: 300  # Minimum age before a READY Git published index schedules advisory refresh
       # lfs: false  # Enable Git LFS support (requires git-lfs on the runtime host)
       # sync_timeout_seconds: 3600  # Abort a hung git command after this many seconds
       # credentials_service: null  # CredentialsManager service for private HTTPS repos

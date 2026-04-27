@@ -52,8 +52,8 @@ agents:
 ```
 
 Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom watch shared local bases with `watch: true`.
-Chat uses the last successfully published snapshot and continues without blocking when a base is missing, stale, or failed.
-When a watched file changes, MindRoom marks the snapshot stale, refreshes in the background, and atomically publishes the replacement when it succeeds.
+Chat uses the last successfully published index and continues without blocking when a base is missing, stale, or failed.
+When a watched file changes, MindRoom marks the published index stale, refreshes in the background, and atomically publishes the replacement when it succeeds.
 When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation.
 Knowledge base IDs are the keys under `knowledge_bases`.
 Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
@@ -74,7 +74,7 @@ knowledge_bases:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
-| `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background snapshot refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
+| `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent chunks (must be `< chunk_size`) |
 | `git` | object | `null` | Optional Git repository sync settings |
@@ -202,7 +202,7 @@ knowledge_bases:
 |-------|------|---------|-------------|
 | `repo_url` | string | *required* | HTTPS repository URL to clone/fetch |
 | `branch` | string | `main` | Branch to track |
-| `poll_interval_seconds` | int | `300` | Minimum age before a READY Git snapshot schedules advisory on-access refresh. Git polling loops are not started |
+| `poll_interval_seconds` | int | `300` | Minimum age before a READY Git published index schedules advisory on-access refresh. Git polling loops are not started |
 | `credentials_service` | string | `null` | Service name in CredentialsManager for private repos |
 | `lfs` | bool | `false` | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom |
 | `sync_timeout_seconds` | int | `3600` | Abort one Git command if it exceeds this timeout |
@@ -221,7 +221,7 @@ Bundled container images already include it.
 - When `lfs: true`, MindRoom runs `git lfs pull origin <branch>` when a checkout is first hydrated or when sync advances to a new Git head.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and reindex instead.
-- Successful refresh publishes a new last-good snapshot while failed refresh preserves the previous one and records the error in status metadata.
+- Successful refresh publishes a new last-good published index while failed refresh preserves the previous one and records the error in status metadata.
 
 ### File Filtering with Patterns
 
@@ -344,5 +344,5 @@ See the [Dashboard API reference](dashboard.md#knowledge) for the full list of k
 
 Knowledge base configuration supports hot reload.
 Changing `config.yaml` does not initialize every configured knowledge base.
-Agents keep using already-published last-good snapshots until a refresh for their resolved binding succeeds.
-Changed settings make existing snapshots stale or unavailable depending on query compatibility, and scheduled refresh rebuilds the affected binding in the background.
+Agents keep using already-published last-good published indexes until a refresh for their resolved binding succeeds.
+Changed settings make existing published indexes stale or unavailable depending on query compatibility, and scheduled refresh rebuilds the affected binding in the background.

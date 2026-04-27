@@ -15,15 +15,15 @@ from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
     KnowledgeSourceRoot,
-    PublishedIndexingState,
     PublishedIndexKey,
+    PublishedIndexState,
     indexing_settings_metadata_equal,
-    load_published_indexing_state,
+    load_published_index_state,
+    mark_knowledge_source_changed_async,
     mark_published_index_refresh_failed_preserving_last_good,
     mark_published_index_refresh_running,
     mark_published_index_refresh_succeeded,
     mark_published_index_stale,
-    mark_source_dirty_async,
     prune_private_index_bookkeeping,
     publish_knowledge_index_from_state,
     published_index_availability_for_state,
@@ -33,7 +33,7 @@ from mindroom.knowledge.registry import (
     refresh_target_for_published_index_key,
     resolve_published_index_key,
     resolve_refresh_target,
-    save_published_indexing_state,
+    save_published_index_state,
     source_root_for_published_index_key,
     source_root_for_refresh_target,
 )
@@ -53,7 +53,7 @@ class KnowledgeRefreshResult:
 
     key: PublishedIndexKey
     indexed_count: int
-    published: bool
+    index_published: bool
     availability: KnowledgeAvailability
     last_error: str | None = None
 
@@ -213,7 +213,7 @@ async def refresh_knowledge_binding(
     _mark_refresh_active(refresh_target)
     try:
         initial_state = await asyncio.to_thread(
-            load_published_indexing_state,
+            load_published_index_state,
             published_index_metadata_path(key),
         )
         try:
@@ -295,7 +295,7 @@ async def _refresh_knowledge_binding_locked(
             return KnowledgeRefreshResult(
                 key=key,
                 indexed_count=indexed_count,
-                published=False,
+                index_published=False,
                 availability=KnowledgeAvailability.REFRESH_FAILED,
                 last_error=error,
             )
@@ -328,7 +328,7 @@ async def _maybe_publish_unchanged_index(
         git_sync_result = await manager.sync_git_repository(index_changes=False)
         if force_reindex or git_sync_result.get("updated", False):
             if git_sync_result.get("updated", False):
-                await mark_source_dirty_async(
+                await mark_knowledge_source_changed_async(
                     key.base_id,
                     config=manager.config,
                     runtime_paths=manager.runtime_paths,
@@ -343,7 +343,7 @@ async def _maybe_publish_unchanged_index(
             mark_git_initial_sync_complete=True,
         )
     if force_reindex:
-        await mark_source_dirty_async(
+        await mark_knowledge_source_changed_async(
             key.base_id,
             config=manager.config,
             runtime_paths=manager.runtime_paths,
@@ -366,14 +366,14 @@ async def _refresh_result_from_persisted_state(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> KnowledgeRefreshResult:
-    state = await asyncio.to_thread(load_published_indexing_state, published_index_metadata_path(key))
+    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
     if state is None:
         error = "Published index metadata was missing after refresh"
         await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
-            published=False,
+            index_published=False,
             availability=KnowledgeAvailability.REFRESH_FAILED,
             last_error=error,
         )
@@ -383,7 +383,7 @@ async def _refresh_result_from_persisted_state(
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
-            published=False,
+            index_published=False,
             availability=KnowledgeAvailability.REFRESH_FAILED,
             last_error=error,
         )
@@ -398,7 +398,7 @@ async def _refresh_result_from_persisted_state(
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
-            published=False,
+            index_published=False,
             availability=availability,
             last_error=None,
         )
@@ -415,7 +415,7 @@ async def _refresh_result_from_persisted_state(
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
-            published=False,
+            index_published=False,
             availability=KnowledgeAvailability.REFRESH_FAILED,
             last_error=error,
         )
@@ -423,7 +423,7 @@ async def _refresh_result_from_persisted_state(
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=indexed_count,
-        published=True,
+        index_published=True,
         availability=KnowledgeAvailability.READY,
         last_error=None,
     )
@@ -438,7 +438,7 @@ async def _publish_unchanged_index(
     mark_stale_on_source_change: bool = False,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeRefreshResult | None:
-    state = await asyncio.to_thread(load_published_indexing_state, published_index_metadata_path(key))
+    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
     if (
         state is None
         or state.status != "complete"
@@ -457,7 +457,7 @@ async def _publish_unchanged_index(
     )
     if current_source_signature != state.source_signature:
         if mark_stale_on_source_change:
-            await mark_source_dirty_async(
+            await mark_knowledge_source_changed_async(
                 key.base_id,
                 config=manager.config,
                 runtime_paths=manager.runtime_paths,
@@ -478,7 +478,7 @@ async def _publish_unchanged_index(
             published_revision=published_revision,
         )
     if updated_state != state:
-        await asyncio.to_thread(save_published_indexing_state, published_index_metadata_path(key), updated_state)
+        await asyncio.to_thread(save_published_index_state, published_index_metadata_path(key), updated_state)
     index = publish_knowledge_index_from_state(
         key,
         state=updated_state,
@@ -492,7 +492,7 @@ async def _publish_unchanged_index(
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=updated_state.indexed_count or 0,
-            published=False,
+            index_published=False,
             availability=KnowledgeAvailability.REFRESH_FAILED,
             last_error=error,
         )
@@ -500,13 +500,13 @@ async def _publish_unchanged_index(
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=updated_state.indexed_count or 0,
-        published=True,
+        index_published=True,
         availability=KnowledgeAvailability.READY,
         last_error=None,
     )
 
 
-def _published_state_fingerprint(state: PublishedIndexingState | None) -> tuple[object, ...] | None:
+def _published_state_fingerprint(state: PublishedIndexState | None) -> tuple[object, ...] | None:
     if state is None:
         return None
     return (
@@ -523,11 +523,11 @@ def _published_state_fingerprint(state: PublishedIndexingState | None) -> tuple[
 async def _reconcile_cancelled_refresh(
     key: PublishedIndexKey,
     *,
-    initial_state: PublishedIndexingState | None,
+    initial_state: PublishedIndexState | None,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> None:
-    state = await asyncio.to_thread(load_published_indexing_state, published_index_metadata_path(key))
+    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
     state_advanced = _published_state_fingerprint(state) != _published_state_fingerprint(initial_state)
     if (
         state_advanced

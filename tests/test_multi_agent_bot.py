@@ -823,7 +823,7 @@ class TestAgentBot:
                 knowledge_path=str(tmp_path / "kb"),
                 indexing_settings=(),
             ),
-            snapshot=SimpleNamespace(
+            index=SimpleNamespace(
                 knowledge=expected_knowledge,
                 state=SimpleNamespace(
                     source_signature=hashlib.sha256().hexdigest(),
@@ -833,7 +833,7 @@ class TestAgentBot:
             availability=KnowledgeAvailability.READY,
         )
 
-        with patch("mindroom.knowledge.utils.get_published_snapshot", return_value=lookup):
+        with patch("mindroom.knowledge.utils.get_published_index", return_value=lookup):
             assert bot._knowledge_access_support.for_agent("calculator") is expected_knowledge
 
     def test_agent_property_rejects_private_agent_without_request_identity(
@@ -905,7 +905,7 @@ class TestAgentBot:
                     knowledge_path=str(tmp_path / f"kb_{base_id}"),
                     indexing_settings=(),
                 ),
-                snapshot=SimpleNamespace(
+                index=SimpleNamespace(
                     knowledge={"research": research_knowledge, "legal": legal_knowledge}[base_id],
                     state=SimpleNamespace(
                         source_signature=hashlib.sha256().hexdigest(),
@@ -915,7 +915,7 @@ class TestAgentBot:
                 availability=KnowledgeAvailability.READY,
             )
 
-        with patch("mindroom.knowledge.utils.get_published_snapshot", side_effect=_lookup):
+        with patch("mindroom.knowledge.utils.get_published_index", side_effect=_lookup):
             combined_knowledge = bot._knowledge_access_support.for_agent("calculator")
         assert combined_knowledge is not None
 

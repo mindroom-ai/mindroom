@@ -25,7 +25,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge import KnowledgeAvailability
 from mindroom.knowledge.registry import (
-    load_published_indexing_state,
+    load_published_index_state,
     published_index_metadata_path,
     resolve_published_index_key,
 )
@@ -700,7 +700,7 @@ def test_upload_rejects_duplicate_normalized_multipart_filenames(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_empty_upload_parts_are_noop_without_dirty_mark_or_refresh(tmp_path: Path) -> None:
+async def test_empty_upload_parts_are_noop_without_source_change_mark_or_refresh(tmp_path: Path) -> None:
     """Multipart parts without filenames should not mutate source availability."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
@@ -711,7 +711,7 @@ async def test_empty_upload_parts_are_noop_without_dirty_mark_or_refresh(tmp_pat
     client.app.state.knowledge_refresh_scheduler = scheduler
 
     with (
-        patch("mindroom.api.knowledge.mark_source_dirty_async", side_effect=AssertionError("no mutation")),
+        patch("mindroom.api.knowledge.mark_knowledge_source_changed_async", side_effect=AssertionError("no mutation")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
     ):
         response = await knowledge_api.upload_knowledge_files(
@@ -760,11 +760,11 @@ def test_upload_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     refresh.assert_not_awaited()
 
 
-def test_upload_dirty_mark_write_runs_off_event_loop(
+def test_upload_source_change_mark_write_runs_off_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upload dirty-state I/O should be offloaded while the API mutation lock is held."""
+    """Upload source-change-state I/O should be offloaded while the API mutation lock is held."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -803,8 +803,8 @@ def test_upload_dirty_mark_write_runs_off_event_loop(
     refresh.assert_not_awaited()
 
 
-def test_upload_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_path: Path) -> None:
-    """Uploads fail when dirty state cannot be committed without rolling back the source write."""
+def test_upload_source_change_mark_failure_keeps_source_change_and_skips_refresh(tmp_path: Path) -> None:
+    """Uploads fail when source-change state cannot be committed without rolling back the source write."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -814,14 +814,14 @@ def test_upload_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_pat
     scheduler = _RecordingRefreshScheduler()
     client.app.state.knowledge_refresh_scheduler = scheduler
 
-    async def _fail_dirty_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
-        msg = "dirty mark failed"
+    async def _fail_source_change_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        msg = "source change mark failed"
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge.mark_source_dirty_async", _fail_dirty_mark),
+        patch("mindroom.api.knowledge.mark_knowledge_source_changed_async", _fail_source_change_mark),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
-        pytest.raises(RuntimeError, match="dirty mark failed"),
+        pytest.raises(RuntimeError, match="source change mark failed"),
     ):
         client.post(
             "/api/knowledge/bases/research/upload",
@@ -914,11 +914,11 @@ async def test_replacement_upload_cancellation_preserves_existing_file(
 
 
 @pytest.mark.asyncio
-async def test_upload_cancellation_after_dirty_mark_finalizes_backup_and_schedules_refresh(
+async def test_upload_cancellation_after_source_change_mark_finalizes_backup_and_schedules_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upload cancellation after dirty state commits should keep mutation cleanup and refresh scheduling."""
+    """Upload cancellation after source-change state commits should keep mutation cleanup and refresh scheduling."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -927,15 +927,15 @@ async def test_upload_cancellation_after_dirty_mark_finalizes_backup_and_schedul
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
     client.app.state.knowledge_refresh_scheduler = scheduler
-    dirty_started = asyncio.Event()
-    release_dirty = asyncio.Event()
+    source_change_started = asyncio.Event()
+    release_source_change = asyncio.Event()
 
-    async def _slow_dirty_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
-        dirty_started.set()
-        await release_dirty.wait()
+    async def _slow_source_change_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        source_change_started.set()
+        await release_source_change.wait()
         return ("research",)
 
-    monkeypatch.setattr(knowledge_api, "mark_source_dirty_async", _slow_dirty_mark)
+    monkeypatch.setattr(knowledge_api, "mark_knowledge_source_changed_async", _slow_source_change_mark)
 
     upload_task = asyncio.create_task(
         knowledge_api.upload_knowledge_files(
@@ -952,9 +952,9 @@ async def test_upload_cancellation_after_dirty_mark_finalizes_backup_and_schedul
             [UploadFile(file=BytesIO(b"new"), filename="guide.md")],
         ),
     )
-    await dirty_started.wait()
+    await source_change_started.wait()
     upload_task.cancel()
-    release_dirty.set()
+    release_source_change.set()
 
     with pytest.raises(asyncio.CancelledError):
         await upload_task
@@ -986,7 +986,10 @@ def test_upload_write_failure_leaves_ready_index_unchanged_and_skips_refresh(
 
     with (
         patch("mindroom.api.knowledge._stream_upload_to_destination", _fail_write),
-        patch("mindroom.api.knowledge.mark_source_dirty_async", side_effect=AssertionError("no dirty")),
+        patch(
+            "mindroom.api.knowledge.mark_knowledge_source_changed_async",
+            side_effect=AssertionError("no source change"),
+        ),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="write failed"),
     ):
@@ -1218,7 +1221,7 @@ async def test_delete_uses_once_decoded_route_path_for_percent_bearing_filenames
     assert not literal_file.exists()
     assert decoded_file.read_text(encoding="utf-8") == "decoded"
     key = resolve_published_index_key("research", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     assert knowledge_registry.published_index_refresh_state(state) == "stale"
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
         ("research", config),
@@ -1307,8 +1310,8 @@ def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     refresh.assert_not_awaited()
 
 
-def test_delete_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_path: Path) -> None:
-    """Deletes fail when dirty state cannot be committed without rolling back the source write."""
+def test_delete_source_change_mark_failure_keeps_source_change_and_skips_refresh(tmp_path: Path) -> None:
+    """Deletes fail when source-change state cannot be committed without rolling back the source write."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -1318,14 +1321,14 @@ def test_delete_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_pat
     scheduler = _RecordingRefreshScheduler()
     client.app.state.knowledge_refresh_scheduler = scheduler
 
-    async def _fail_dirty_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
-        msg = "dirty mark failed"
+    async def _fail_source_change_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        msg = "source change mark failed"
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge.mark_source_dirty_async", _fail_dirty_mark),
+        patch("mindroom.api.knowledge.mark_knowledge_source_changed_async", _fail_source_change_mark),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
-        pytest.raises(RuntimeError, match="dirty mark failed"),
+        pytest.raises(RuntimeError, match="source change mark failed"),
     ):
         client.delete("/api/knowledge/bases/research/files/guide.md")
 
@@ -1335,11 +1338,11 @@ def test_delete_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_delete_cancellation_after_dirty_mark_removes_backup_and_schedules_refresh(
+async def test_delete_cancellation_after_source_change_mark_removes_backup_and_schedules_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Delete cancellation after dirty state commits should finalize backup cleanup and schedule refresh."""
+    """Delete cancellation after source-change state commits should finalize backup cleanup and schedule refresh."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -1348,15 +1351,15 @@ async def test_delete_cancellation_after_dirty_mark_removes_backup_and_schedules
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
     client.app.state.knowledge_refresh_scheduler = scheduler
-    dirty_started = asyncio.Event()
-    release_dirty = asyncio.Event()
+    source_change_started = asyncio.Event()
+    release_source_change = asyncio.Event()
 
-    async def _slow_dirty_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
-        dirty_started.set()
-        await release_dirty.wait()
+    async def _slow_source_change_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        source_change_started.set()
+        await release_source_change.wait()
         return ("research",)
 
-    monkeypatch.setattr(knowledge_api, "mark_source_dirty_async", _slow_dirty_mark)
+    monkeypatch.setattr(knowledge_api, "mark_knowledge_source_changed_async", _slow_source_change_mark)
 
     delete_task = asyncio.create_task(
         knowledge_api.delete_knowledge_file(
@@ -1373,9 +1376,9 @@ async def test_delete_cancellation_after_dirty_mark_removes_backup_and_schedules
             ),
         ),
     )
-    await dirty_started.wait()
+    await source_change_started.wait()
     delete_task.cancel()
-    release_dirty.set()
+    release_source_change.set()
 
     with pytest.raises(asyncio.CancelledError):
         await delete_task
@@ -1407,7 +1410,10 @@ def test_delete_filesystem_failure_leaves_ready_index_unchanged_and_skips_refres
 
     with (
         patch("pathlib.Path.unlink", _fail_delete_stage),
-        patch("mindroom.api.knowledge.mark_source_dirty_async", side_effect=AssertionError("no dirty")),
+        patch(
+            "mindroom.api.knowledge.mark_knowledge_source_changed_async",
+            side_effect=AssertionError("no source change"),
+        ),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="unlink failed"),
     ):
@@ -1546,7 +1552,7 @@ def test_explicit_reindex_uses_refresh_runner(tmp_path: Path) -> None:
         new=AsyncMock(
             return_value=SimpleNamespace(
                 indexed_count=7,
-                published=True,
+                index_published=True,
                 availability=KnowledgeAvailability.READY,
                 last_error=None,
             ),
@@ -1590,7 +1596,7 @@ def test_explicit_reindex_uses_refresh_scheduler_when_available(tmp_path: Path) 
             self.manual_calls.append((base_id, config, runtime_paths, force_reindex))
             return SimpleNamespace(
                 indexed_count=11,
-                published=True,
+                index_published=True,
                 availability=KnowledgeAvailability.READY,
                 last_error=None,
             )
@@ -1619,7 +1625,7 @@ def test_explicit_reindex_returns_conflict_when_no_index_is_published(tmp_path: 
         new=AsyncMock(
             return_value=SimpleNamespace(
                 indexed_count=0,
-                published=False,
+                index_published=False,
                 availability=KnowledgeAvailability.REFRESH_FAILED,
                 last_error="Indexed 0 of 1 managed knowledge files",
             ),
@@ -1646,7 +1652,7 @@ def test_explicit_reindex_returns_conflict_when_last_good_is_not_ready(tmp_path:
         new=AsyncMock(
             return_value=SimpleNamespace(
                 indexed_count=3,
-                published=True,
+                index_published=True,
                 availability=KnowledgeAvailability.CONFIG_MISMATCH,
                 last_error="chunking config changed",
             ),

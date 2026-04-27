@@ -33,7 +33,7 @@ from mindroom.knowledge.refresh_runner import (
 from mindroom.knowledge.status import (
     KnowledgeIndexStatus,
     get_knowledge_index_status,
-    mark_source_dirty_async,
+    mark_knowledge_source_changed_async,
 )
 from mindroom.logging_config import get_logger
 
@@ -185,15 +185,15 @@ def _schedule_refreshes(
         _schedule_refresh(config, base_id, runtime_paths, request=request)
 
 
-async def _mark_dirty_after_committed_mutation(
+async def _mark_source_changed_after_committed_mutation(
     base_id: str,
     *,
     config: Config,
     runtime_paths: constants.RuntimePaths,
     reason: str,
 ) -> tuple[tuple[str, ...], bool]:
-    dirty_task = asyncio.create_task(
-        mark_source_dirty_async(
+    source_changed_task = asyncio.create_task(
+        mark_knowledge_source_changed_async(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -201,9 +201,9 @@ async def _mark_dirty_after_committed_mutation(
         ),
     )
     try:
-        return await asyncio.shield(dirty_task), False
+        return await asyncio.shield(source_changed_task), False
     except asyncio.CancelledError:
-        return await dirty_task, True
+        return await source_changed_task, True
 
 
 def _index_status_sync(
@@ -540,14 +540,14 @@ async def upload_knowledge_files(
                 "count": 0,
             }
 
-        affected_base_ids, cancelled_after_dirty = await _mark_dirty_after_committed_mutation(
+        affected_base_ids, cancelled_after_source_changed = await _mark_source_changed_after_committed_mutation(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             reason="dashboard_upload",
         )
         _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
-        if cancelled_after_dirty:
+        if cancelled_after_source_changed:
             raise asyncio.CancelledError
 
     return {
@@ -573,14 +573,14 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         relative_path = target.relative_to(root.resolve()).as_posix()
         _reject_unmanaged_knowledge_file_path(config, base_id, relative_path)
         target.unlink()
-        affected_base_ids, cancelled_after_dirty = await _mark_dirty_after_committed_mutation(
+        affected_base_ids, cancelled_after_source_changed = await _mark_source_changed_after_committed_mutation(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             reason="dashboard_delete",
         )
         _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
-        if cancelled_after_dirty:
+        if cancelled_after_source_changed:
             raise asyncio.CancelledError
 
     return {
@@ -649,7 +649,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
         index_status = _index_status_sync(config, base_id, runtime_paths)
         availability = (
             index_status.availability
-            if index_status.indexing_status is not None
+            if index_status.persisted_index_status is not None
             else KnowledgeAvailability.REFRESH_FAILED
         )
         last_error = index_status.last_error if index_status.last_error is not None else str(exc)
@@ -663,7 +663,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
                 "last_error": _redacted_last_error(last_error),
             },
         ) from exc
-    if not (result.published and result.availability is KnowledgeAvailability.READY):
+    if not (result.index_published and result.availability is KnowledgeAvailability.READY):
         raise HTTPException(
             status_code=409,
             detail={

@@ -44,7 +44,7 @@ from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, r
 from mindroom.knowledge.registry import (
     clear_published_indexes,
     get_published_index,
-    load_published_indexing_state,
+    load_published_index_state,
     published_index_metadata_path,
     published_index_refresh_state,
     published_indexed_count,
@@ -243,7 +243,7 @@ def _publish_api_config(api_app: object, config: Config) -> None:
 def _refresh_state_for_key(key: knowledge_registry.PublishedIndexKey) -> str:
     metadata_path = published_index_metadata_path(key)
     return knowledge_registry.published_index_refresh_state(
-        load_published_indexing_state(metadata_path),
+        load_published_index_state(metadata_path),
         metadata_exists=metadata_path.exists(),
     )
 
@@ -399,7 +399,7 @@ def test_failed_notice_without_index_says_unavailable() -> None:
         {
             "docs": KnowledgeAvailabilityDetail(
                 availability=KnowledgeAvailability.REFRESH_FAILED,
-                index_attached=False,
+                search_available=False,
             ),
         },
     )
@@ -416,7 +416,7 @@ def test_config_mismatch_notice_without_index_says_unavailable() -> None:
         {
             "docs": KnowledgeAvailabilityDetail(
                 availability=KnowledgeAvailability.CONFIG_MISMATCH,
-                index_attached=False,
+                search_available=False,
             ),
         },
     )
@@ -433,7 +433,7 @@ def test_stale_notice_without_index_says_unavailable() -> None:
         {
             "docs": KnowledgeAvailabilityDetail(
                 availability=KnowledgeAvailability.STALE,
-                index_attached=False,
+                search_available=False,
             ),
         },
     )
@@ -528,7 +528,7 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
     assert unavailable_details == {
         "docs": KnowledgeAvailabilityDetail(
             availability=KnowledgeAvailability.STALE,
-            index_attached=True,
+            search_available=True,
         ),
     }
 
@@ -614,7 +614,7 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
     await source_watcher.shutdown()
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
 
     assert state is not None
@@ -633,7 +633,7 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
     assert unavailable_details == {
         "docs": KnowledgeAvailabilityDetail(
             availability=KnowledgeAvailability.STALE,
-            index_attached=True,
+            search_available=True,
         ),
     }
 
@@ -668,7 +668,7 @@ async def test_schedule_refresh_on_access_reports_stale_while_scheduler_is_activ
     assert unavailable_details == {
         "docs": KnowledgeAvailabilityDetail(
             availability=KnowledgeAvailability.STALE,
-            index_attached=True,
+            search_available=True,
         ),
     }
     scheduler.schedule_refresh.assert_not_called()
@@ -676,7 +676,7 @@ async def test_schedule_refresh_on_access_reports_stale_while_scheduler_is_activ
 
 @pytest.mark.asyncio
 async def test_stale_index_metadata_schedules_refresh_without_source_scan(tmp_path: Path) -> None:
-    """Ready access only uses persisted metadata/dirty markers, not request-time source scans."""
+    """Ready access only uses persisted metadata/source change markers, not request-time source scans."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -686,7 +686,7 @@ async def test_stale_index_metadata_schedules_refresh_without_source_scan(tmp_pa
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("ready index changed", encoding="utf-8")
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.mark_published_index_stale(key, reason="test_dirty")
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
     clear_published_indexes()
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
@@ -727,7 +727,7 @@ async def test_stale_index_skips_duplicate_refresh_when_scheduler_is_active(tmp_
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("ready index changed", encoding="utf-8")
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.mark_published_index_stale(key, reason="test_dirty")
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
     clear_published_indexes()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=True)
@@ -849,11 +849,11 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
 
 
 @pytest.mark.asyncio
-async def test_dashboard_delete_dirty_write_failure_keeps_best_effort_source_change(
+async def test_dashboard_delete_stale_write_failure_keeps_best_effort_source_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dirty metadata failures do not roll back source deletes or last-good indexs."""
+    """Stale metadata failures do not roll back source deletes or last-good indexs."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("restored public", encoding="utf-8")
@@ -861,18 +861,18 @@ async def test_dashboard_delete_dirty_write_failure_keeps_best_effort_source_cha
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("research", config=config, runtime_paths=runtime_paths)
     await refresh_knowledge_binding("summary", config=config, runtime_paths=runtime_paths)
-    original_save_dirty = knowledge_registry.mark_published_index_stale
-    dirty_write_count = 0
+    original_save_stale = knowledge_registry.mark_published_index_stale
+    stale_write_count = 0
 
-    def _fail_second_dirty_write(*args: object, **kwargs: object) -> None:
-        nonlocal dirty_write_count
-        dirty_write_count += 1
-        if dirty_write_count == 2:
-            msg = "same-source dirty write failed"
+    def _fail_second_stale_write(*args: object, **kwargs: object) -> None:
+        nonlocal stale_write_count
+        stale_write_count += 1
+        if stale_write_count == 2:
+            msg = "same-source stale write failed"
             raise RuntimeError(msg)
-        original_save_dirty(*args, **kwargs)
+        original_save_stale(*args, **kwargs)
 
-    monkeypatch.setattr(knowledge_registry, "mark_published_index_stale", _fail_second_dirty_write)
+    monkeypatch.setattr(knowledge_registry, "mark_published_index_stale", _fail_second_stale_write)
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
     scheduler = MagicMock()
@@ -880,12 +880,12 @@ async def test_dashboard_delete_dirty_write_failure_keeps_best_effort_source_cha
     scheduler.is_refreshing = MagicMock(return_value=False)
     main.app.state.knowledge_refresh_scheduler = scheduler
     try:
-        with pytest.raises(RuntimeError, match="same-source dirty write failed"):
+        with pytest.raises(RuntimeError, match="same-source stale write failed"):
             TestClient(main.app).delete("/api/knowledge/bases/research/files/guide.md")
     finally:
         main.app.state.knowledge_refresh_scheduler = None
 
-    assert dirty_write_count == 2
+    assert stale_write_count == 2
     assert not (docs_path / "guide.md").exists()
     for base_id in ("research", "summary"):
         lookup = get_published_index(base_id, config=config, runtime_paths=runtime_paths)
@@ -909,7 +909,7 @@ async def test_ready_index_access_never_recomputes_source_signature(
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     assert state is not None
     assert state.source_signature is not None
 
@@ -989,8 +989,8 @@ async def test_index_metadata_without_source_signature_is_unavailable_and_schedu
 
 
 @pytest.mark.asyncio
-async def test_successful_publish_clears_dirty_refresh_state(tmp_path: Path) -> None:
-    """A successful publish clears dirty refresh state."""
+async def test_successful_publish_clears_stale_refresh_state(tmp_path: Path) -> None:
+    """A successful publish clears stale refresh state."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("index", encoding="utf-8")
@@ -998,15 +998,15 @@ async def test_successful_publish_clears_dirty_refresh_state(tmp_path: Path) -> 
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.mark_published_index_stale(key, reason="test_dirty")
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
 
-    dirty_lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
-    assert dirty_lookup.index is not None
-    assert dirty_lookup.availability is KnowledgeAvailability.STALE
+    stale_lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert stale_lookup.index is not None
+    assert stale_lookup.availability is KnowledgeAvailability.STALE
 
     (docs_path / "doc.md").write_text("index updated", encoding="utf-8")
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
 
     unavailable: dict[str, KnowledgeAvailability] = {}
     knowledge = get_agent_knowledge(
@@ -1095,7 +1095,7 @@ async def test_cancelled_refresh_after_refreshing_write_keeps_existing_index_sta
     with pytest.raises(asyncio.CancelledError):
         await refresh_task
 
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     assert knowledge_registry.published_index_refresh_state(state) == "stale"
     assert state is not None
     assert state.refresh_job == "idle"
@@ -1145,7 +1145,7 @@ async def test_cancelled_refresh_waiting_for_source_lock_clears_running_state(
         await second_task
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     assert state is not None
     assert state.refresh_job != "running"
 
@@ -1241,8 +1241,8 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     assert waiter_entered.is_set()
 
 
-def test_mark_dirty_updates_refresh_state_without_changing_collection(tmp_path: Path) -> None:
-    """Source mutation records dirtiness without mutating published collection data."""
+def test_source_changed_updates_refresh_state_without_changing_index(tmp_path: Path) -> None:
+    """Source mutation records source changes without mutating published index data."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("published old", encoding="utf-8")
@@ -1255,9 +1255,9 @@ def test_mark_dirty_updates_refresh_state_without_changing_collection(tmp_path: 
         {"content": "published old", "metadata": {"source_path": "guide.md"}},
     ]
     metadata_path = published_index_metadata_path(key)
-    knowledge_registry.save_published_indexing_state(
+    knowledge_registry.save_published_index_state(
         metadata_path,
-        knowledge_registry.PublishedIndexingState(
+        knowledge_registry.PublishedIndexState(
             settings=key.indexing_settings,
             status="complete",
             collection=default_collection,
@@ -1267,12 +1267,12 @@ def test_mark_dirty_updates_refresh_state_without_changing_collection(tmp_path: 
     )
     knowledge_registry.mark_published_index_refresh_succeeded(key)
 
-    marked_base_ids = knowledge_registry.mark_source_dirty(
+    marked_base_ids = knowledge_registry.mark_knowledge_source_changed(
         "docs",
         config=config,
         runtime_paths=runtime_paths,
     )
-    state = load_published_indexing_state(metadata_path)
+    state = load_published_index_state(metadata_path)
 
     assert marked_base_ids == ("docs",)
     assert _VectorDb.collections[default_collection] == [
@@ -1299,13 +1299,13 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
     assert beta_lookup.availability is KnowledgeAvailability.READY
     doc.write_text("shared source new", encoding="utf-8")
 
-    marked_base_ids = knowledge_registry.mark_source_dirty(
+    marked_base_ids = knowledge_registry.mark_knowledge_source_changed(
         "alpha",
         config=config,
         runtime_paths=runtime_paths,
     )
     beta_key = resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)
-    beta_state = load_published_indexing_state(published_index_metadata_path(beta_key))
+    beta_state = load_published_index_state(published_index_metadata_path(beta_key))
     refreshed_beta_lookup = get_published_index("beta", config=config, runtime_paths=runtime_paths)
 
     assert marked_base_ids == ("alpha", "beta")
@@ -1315,11 +1315,11 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_async_mark_dirty_cancellation_waits_for_state_commit(
+async def test_async_source_changed_cancellation_waits_for_state_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation during dirty writes must wait for the metadata commit before propagating."""
+    """Cancellation during stale writes must wait for the metadata commit before propagating."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("cached old", encoding="utf-8")
@@ -1344,7 +1344,7 @@ async def test_async_mark_dirty_cancellation_waits_for_state_commit(
     monkeypatch.setattr(knowledge_registry, "_mark_published_index_key_stale_on_disk", _block_after_stale_write)
 
     mark_task = asyncio.create_task(
-        knowledge_registry.mark_source_dirty_async(
+        knowledge_registry.mark_knowledge_source_changed_async(
             "docs",
             config=config,
             runtime_paths=runtime_paths,
@@ -1357,7 +1357,7 @@ async def test_async_mark_dirty_cancellation_waits_for_state_commit(
         await mark_task
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     refreshed_lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
     assert state is not None
@@ -1366,7 +1366,7 @@ async def test_async_mark_dirty_cancellation_waits_for_state_commit(
 
 
 @pytest.mark.asyncio
-async def test_async_mark_dirty_cancellation_finishes_same_source_aliases(
+async def test_async_source_changed_cancellation_finishes_same_source_aliases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1398,7 +1398,7 @@ async def test_async_mark_dirty_cancellation_finishes_same_source_aliases(
     monkeypatch.setattr(knowledge_registry, "_mark_published_index_key_stale_on_disk", _block_after_first_alias)
 
     mark_task = asyncio.create_task(
-        knowledge_registry.mark_source_dirty_async(
+        knowledge_registry.mark_knowledge_source_changed_async(
             "alpha",
             config=config,
             runtime_paths=runtime_paths,
@@ -1412,8 +1412,8 @@ async def test_async_mark_dirty_cancellation_finishes_same_source_aliases(
 
     alpha_key = resolve_published_index_key("alpha", config=config, runtime_paths=runtime_paths)
     beta_key = resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)
-    alpha_state = load_published_indexing_state(published_index_metadata_path(alpha_key))
-    beta_state = load_published_indexing_state(published_index_metadata_path(beta_key))
+    alpha_state = load_published_index_state(published_index_metadata_path(alpha_key))
+    beta_state = load_published_index_state(published_index_metadata_path(beta_key))
 
     assert tuple(written_base_ids) == ("alpha", "beta")
     assert knowledge_registry.published_index_refresh_state(alpha_state) == "stale"
@@ -1421,7 +1421,7 @@ async def test_async_mark_dirty_cancellation_finishes_same_source_aliases(
 
 
 @pytest.mark.asyncio
-async def test_async_mark_dirty_recached_index_reports_refresh_state_after_write(
+async def test_async_source_changed_recached_index_reports_refresh_state_after_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1449,7 +1449,7 @@ async def test_async_mark_dirty_recached_index_reports_refresh_state_after_write
     monkeypatch.setattr(knowledge_registry, "_mark_published_index_key_stale_on_disk", _block_before_stale_write)
 
     mark_task = asyncio.create_task(
-        knowledge_registry.mark_source_dirty_async(
+        knowledge_registry.mark_knowledge_source_changed_async(
             "docs",
             config=config,
             runtime_paths=runtime_paths,
@@ -1486,7 +1486,7 @@ async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_c
     await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
     alpha_lookup = get_published_index("alpha", config=config, runtime_paths=runtime_paths)
     beta_key = resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)
-    beta_state = load_published_indexing_state(published_index_metadata_path(beta_key))
+    beta_state = load_published_index_state(published_index_metadata_path(beta_key))
     refreshed_beta_lookup = get_published_index("beta", config=config, runtime_paths=runtime_paths)
 
     assert alpha_lookup.index is not None
@@ -1992,7 +1992,7 @@ async def test_private_git_updated_refresh_preserves_execution_identity(
     )
     lookup = get_published_index(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
 
-    assert result.published is True
+    assert result.index_published is True
     assert lookup.index is not None
     assert lookup.availability is KnowledgeAvailability.READY
     assert [document.content for document in lookup.index.knowledge.search("updated", max_results=5)] == [
@@ -2132,7 +2132,7 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
     loop = asyncio.get_running_loop()
     metadata_saved = asyncio.Event()
     release_metadata_save = Event()
-    original_save = KnowledgeManager._save_persisted_indexing_state
+    original_save = KnowledgeManager._save_persisted_index_state
 
     def _block_after_candidate_metadata_save(
         self: KnowledgeManager,
@@ -2144,7 +2144,7 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
             loop.call_soon_threadsafe(metadata_saved.set)
             assert release_metadata_save.wait(timeout=5)
 
-    monkeypatch.setattr(KnowledgeManager, "_save_persisted_indexing_state", _block_after_candidate_metadata_save)
+    monkeypatch.setattr(KnowledgeManager, "_save_persisted_index_state", _block_after_candidate_metadata_save)
 
     refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
     await metadata_saved.wait()
@@ -2155,7 +2155,7 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
         await refresh_task
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     assert state is not None
     assert state.collection is not None
     assert "_candidate_" in state.collection
@@ -2209,7 +2209,7 @@ async def test_refresh_discards_candidate_when_sources_change_before_publish(
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
-    assert result.published is False
+    assert result.index_published is False
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
     assert result.last_error == "Knowledge source changed during refresh; refresh skipped"
     assert lookup.index is not None
@@ -2301,7 +2301,7 @@ async def test_shared_source_mutation_waits_for_duplicate_base_refresh(
         async with knowledge_binding_mutation_lock("beta", config=config, runtime_paths=runtime_paths):
             mutation_entered.set()
             doc.write_text("mutated", encoding="utf-8")
-            knowledge_registry.mark_source_dirty(
+            knowledge_registry.mark_knowledge_source_changed(
                 "beta",
                 config=config,
                 runtime_paths=runtime_paths,
@@ -2394,7 +2394,7 @@ async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) ->
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     assert state is not None
     assert state.collection in _VectorDb.collections
     assert len(_VectorDb.collections) == 1
@@ -2459,7 +2459,7 @@ async def test_superseded_collection_listing_failure_is_best_effort(
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
-    assert result.published is True
+    assert result.index_published is True
     assert result.availability is KnowledgeAvailability.READY
     assert lookup.index is not None
     assert lookup.availability is KnowledgeAvailability.READY
@@ -2533,7 +2533,7 @@ async def test_metadata_save_failure_after_candidate_index_keeps_serving_last_go
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("uncommitted candidate index", encoding="utf-8")
-    original_save = KnowledgeManager._save_persisted_indexing_state
+    original_save = KnowledgeManager._save_persisted_index_state
 
     def _fail_candidate_metadata_save(
         self: KnowledgeManager,
@@ -2545,7 +2545,7 @@ async def test_metadata_save_failure_after_candidate_index_keeps_serving_last_go
             raise OSError(msg)
         original_save(self, status, **kwargs)
 
-    monkeypatch.setattr(KnowledgeManager, "_save_persisted_indexing_state", _fail_candidate_metadata_save)
+    monkeypatch.setattr(KnowledgeManager, "_save_persisted_index_state", _fail_candidate_metadata_save)
     with pytest.raises(OSError, match="metadata commit failed"):
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -2611,7 +2611,7 @@ async def test_partial_refresh_after_cached_index_updates_failed_availability(
         on_unavailable_bases=unavailable.update,
     )
 
-    assert result.published is False
+    assert result.index_published is False
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
@@ -2819,7 +2819,7 @@ async def test_stale_or_failed_index_reports_chunking_config_mismatch_before_coo
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     if availability is KnowledgeAvailability.STALE:
-        knowledge_registry.mark_published_index_stale(key, reason="test_dirty")
+        knowledge_registry.mark_published_index_stale(key, reason="test_stale")
     else:
         knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="previous failure")
     clear_published_indexes()
@@ -2933,7 +2933,7 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     old_key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    old_state = load_published_indexing_state(published_index_metadata_path(old_key))
+    old_state = load_published_index_state(published_index_metadata_path(old_key))
     assert old_state is not None
 
     changed_config = config.model_copy(deep=True)
@@ -2957,7 +2957,7 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
         await refresh_knowledge_binding("docs", config=changed_config, runtime_paths=runtime_paths)
 
     changed_key = resolve_published_index_key("docs", config=changed_config, runtime_paths=runtime_paths)
-    preserved_state = load_published_indexing_state(published_index_metadata_path(changed_key))
+    preserved_state = load_published_index_state(published_index_metadata_path(changed_key))
     assert preserved_state is not None
     assert preserved_state.settings == old_state.settings
     assert preserved_state.collection == old_state.collection
@@ -3083,11 +3083,11 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
     assert result.indexed_count == 1
-    assert result.published is False
+    assert result.index_published is False
     assert state is not None
     assert state.status == "indexing"
     assert state.collection is None
@@ -3127,11 +3127,11 @@ async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
     assert result.indexed_count == 2
-    assert result.published is True
+    assert result.index_published is True
     assert result.availability is KnowledgeAvailability.READY
     assert state is not None
     assert state.indexed_count == 2
@@ -3177,7 +3177,7 @@ async def test_embedder_changing_partial_refresh_does_not_publish_old_index_unde
     lookup = get_published_index("docs", config=changed_config, runtime_paths=runtime_paths)
 
     assert result.indexed_count == 0
-    assert result.published is False
+    assert result.index_published is False
     assert lookup.index is None
     assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
 
@@ -3243,7 +3243,7 @@ async def test_refresh_setup_failure_records_failed_availability(tmp_path: Path)
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
     assert state is not None
@@ -3510,7 +3510,7 @@ async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
         return knowledge_refresh_runner.KnowledgeRefreshResult(
             key=resolve_published_index_key("docs", config=refresh_config, runtime_paths=runtime_paths),
             indexed_count=1,
-            published=True,
+            index_published=True,
             availability=KnowledgeAvailability.READY,
         )
 
@@ -3742,7 +3742,7 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
     assert unavailable_details == {
         base_id: KnowledgeAvailabilityDetail(
             availability=KnowledgeAvailability.STALE,
-            index_attached=True,
+            search_available=True,
         ),
     }
     scheduler.schedule_refresh.assert_called_once()
@@ -3789,7 +3789,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
         knowledge_registry.publish_knowledge_index(
             key,
             knowledge=_Knowledge(_VectorDb(collection=collection)),
-            state=knowledge_registry.PublishedIndexingState(
+            state=knowledge_registry.PublishedIndexState(
                 settings=key.indexing_settings,
                 status="complete",
                 collection=collection,
@@ -3849,9 +3849,9 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
         _VectorDb.collections[collection] = [
             {"content": f"private read {index}", "metadata": {"source_path": "note.md"}},
         ]
-        knowledge_registry.save_published_indexing_state(
+        knowledge_registry.save_published_index_state(
             published_index_metadata_path(key),
-            knowledge_registry.PublishedIndexingState(
+            knowledge_registry.PublishedIndexState(
                 settings=key.indexing_settings,
                 status="complete",
                 collection=collection,
@@ -3893,7 +3893,7 @@ def test_publish_knowledge_index_caches_handle_without_collection_leases(tmp_pat
     index = knowledge_registry.publish_knowledge_index(
         key,
         knowledge=knowledge,
-        state=knowledge_registry.PublishedIndexingState(
+        state=knowledge_registry.PublishedIndexState(
             settings=key.indexing_settings,
             status="complete",
             collection="non_weakref_collection",
@@ -3953,7 +3953,7 @@ async def test_local_noop_refresh_reports_published_index(tmp_path: Path, monkey
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert result.published is True
+    assert result.index_published is True
     assert result.indexed_count == 1
     assert reindex_count == 1
 
@@ -3987,7 +3987,7 @@ async def test_local_refresh_reindexes_when_content_changes_with_same_mtime_and_
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
-    assert result.published is True
+    assert result.index_published is True
     assert reindex_count == 2
     assert lookup.index is not None
     assert [document.content for document in lookup.index.knowledge.search("index", max_results=5)] == [
@@ -4021,9 +4021,9 @@ async def test_refresh_does_not_synthesize_missing_published_metadata(
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
 
-    assert result.published is False
+    assert result.index_published is False
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
     assert state is not None
     assert state.status == "failed"
@@ -4051,9 +4051,9 @@ def test_published_metadata_write_uses_unique_temp_and_cleans_failed_replace(
     monkeypatch.setattr(Path, "replace", _fail_temp_replace)
 
     with pytest.raises(OSError, match="replace failed"):
-        knowledge_registry.save_published_indexing_state(
+        knowledge_registry.save_published_index_state(
             metadata_path,
-            knowledge_registry.PublishedIndexingState(
+            knowledge_registry.PublishedIndexState(
                 settings=("settings",),
                 status="complete",
                 collection="collection",
@@ -4105,10 +4105,10 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
 
-    assert result.published is True
+    assert result.index_published is True
     assert order == ["sync", "reindex"]
     assert state is not None
     assert state.published_revision == "rev-git"
@@ -4166,14 +4166,14 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state_before_noop = load_published_indexing_state(published_index_metadata_path(key))
+    state_before_noop = load_published_index_state(published_index_metadata_path(key))
     assert state_before_noop is not None
     assert state_before_noop.published_revision == "rev-a"
     await asyncio.sleep(0.001)
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    state_after_noop = load_published_indexing_state(published_index_metadata_path(key))
+    state_after_noop = load_published_index_state(published_index_metadata_path(key))
 
-    assert result.published is True
+    assert result.index_published is True
     assert result.indexed_count == 1
     assert state_after_noop is not None
     assert state_after_noop.collection == state_before_noop.collection
@@ -4227,7 +4227,7 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
-    assert result.published is True
+    assert result.index_published is True
     assert reindex_count == 1
     assert lookup.index is not None
     assert [document.content for document in lookup.index.knowledge.search("git", max_results=5)] == [
@@ -4240,7 +4240,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unchanged Git poll must not let Agno auto-create a missing published collection."""
+    """An unchanged Git poll must not let Agno auto-create a Chroma collection for a missing index."""
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _AutoCreatingKnowledge)
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -4277,16 +4277,16 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     assert state is not None
     assert state.collection is not None
     missing_collection = state.collection
     _VectorDb.collections.pop(missing_collection, None)
     clear_published_indexes()
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    repaired_state = load_published_indexing_state(published_index_metadata_path(key))
+    repaired_state = load_published_index_state(published_index_metadata_path(key))
 
-    assert result.published is True
+    assert result.index_published is True
     assert reindex_count == 2
     assert repaired_state is not None
     assert repaired_state.collection != missing_collection
@@ -4315,9 +4315,9 @@ async def test_unchanged_refresh_fails_when_publish_handle_rebuild_returns_none(
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
 
-    assert result.published is False
+    assert result.index_published is False
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
     assert result.last_error == "Published index collection was missing during unchanged refresh"
     assert state is not None
@@ -4371,7 +4371,7 @@ async def test_git_noop_refresh_rebuilds_after_chunking_config_change(
     doc.write_text("git chunking rebuilt", encoding="utf-8")
     result = await refresh_knowledge_binding("docs", config=changed_config, runtime_paths=runtime_paths)
 
-    assert result.published is True
+    assert result.index_published is True
     assert reindex_count == 2
     lookup = get_published_index("docs", config=changed_config, runtime_paths=runtime_paths)
     assert lookup.index is not None
@@ -4429,7 +4429,7 @@ async def test_force_git_reindex_bypasses_noop_fast_path(
         force_reindex=True,
     )
 
-    assert result.published is True
+    assert result.index_published is True
     assert reindex_count == 2
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
@@ -4478,7 +4478,7 @@ async def test_git_sync_failure_preserves_last_good_index_and_redacts_error(
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
     assert state is not None
@@ -4524,7 +4524,7 @@ async def test_cold_git_sync_failure_records_failed_availability_and_redacted_er
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
     assert state is not None
@@ -4594,7 +4594,7 @@ async def test_git_failure_redacts_authorization_headers_from_raised_and_metadat
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(published_index_metadata_path(key))
+    state = load_published_index_state(published_index_metadata_path(key))
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert state is not None
     assert lookup.state is not None
@@ -4650,7 +4650,7 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
     doc.write_text("shared git new", encoding="utf-8")
     await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
     beta_key = resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)
-    beta_state = load_published_indexing_state(published_index_metadata_path(beta_key))
+    beta_state = load_published_index_state(published_index_metadata_path(beta_key))
     refreshed_beta_lookup = get_published_index("beta", config=config, runtime_paths=runtime_paths)
 
     assert beta_state is not None
@@ -4744,7 +4744,7 @@ async def test_git_credentials_service_token_stays_out_of_git_config_and_metadat
     git_config_text = (docs_path / ".git" / "config").read_text(encoding="utf-8")
     clone_env = clone_envs[0]
 
-    assert result.published is True
+    assert result.index_published is True
     assert clone_env is not None
     assert clone_env["GIT_CONFIG_KEY_0"] == f"http.{clean_url}.extraHeader"
     assert clone_env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
@@ -4803,7 +4803,7 @@ async def test_git_embedded_userinfo_url_is_not_reused_in_git_auth_env(
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     clone_env = clone_envs[0]
 
-    assert result.published is True
+    assert result.index_published is True
     assert clone_env is not None
     assert clone_env["GIT_CONFIG_KEY_0"] == f"http.{clean_url}.extraHeader"
     assert clone_env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
@@ -4868,7 +4868,7 @@ async def test_git_unsupported_scheme_userinfo_is_not_copied_to_git_config_env(
     clone_args, clone_env = clone_calls[0]
     serialized_clone_call = json.dumps({"args": clone_args, "env": clone_env}, sort_keys=True)
 
-    assert result.published is True
+    assert result.index_published is True
     assert clone_env is None
     assert clean_url in clone_args
     assert raw_url not in serialized_clone_call
@@ -4952,7 +4952,7 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
     git_config_text = (docs_path / ".git" / "config").read_text(encoding="utf-8")
     status = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths).get_status()
 
-    assert result.published is True
+    assert result.index_published is True
     assert clone_envs
     assert "query-secret" in str(clone_envs[0])
     assert "frag-secret" in str(clone_envs[0])
@@ -5027,7 +5027,7 @@ async def test_existing_single_branch_checkout_switches_to_new_remote_branch(tmp
     )
     release_lookup = get_published_index("docs", config=release_config, runtime_paths=runtime_paths)
 
-    assert result.published is True
+    assert result.index_published is True
     assert release_lookup.index is not None
     assert [document.content for document in release_lookup.index.knowledge.search("branch", max_results=5)] == [
         "release branch content",
@@ -5162,7 +5162,7 @@ async def test_git_updated_stale_registry_mark_uses_async_registry_path(
         return ("docs",)
 
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_updated)
-    monkeypatch.setattr(knowledge_refresh_runner, "mark_source_dirty_async", _record_mark_thread)
+    monkeypatch.setattr(knowledge_refresh_runner, "mark_knowledge_source_changed_async", _record_mark_thread)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -5197,7 +5197,7 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
         return knowledge_refresh_runner.KnowledgeRefreshResult(
             key=resolve_published_index_key("docs", config=refresh_config, runtime_paths=runtime_paths),
             indexed_count=1,
-            published=True,
+            index_published=True,
             availability=KnowledgeAvailability.READY,
         )
 

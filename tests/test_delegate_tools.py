@@ -324,7 +324,7 @@ class TestDelegateKnowledge:
                     knowledge_path=str(tmp_path / base_id),
                     indexing_settings=(),
                 ),
-                snapshot=None,
+                index=None,
                 availability=KnowledgeAvailability.INITIALIZING,
             )
 

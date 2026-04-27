@@ -72,7 +72,7 @@ list_sessions(limit=20)
 
 ### What It Does
 
-`delegate` exposes one tool call, `delegate_task(agent_name, task)`. The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller. The caller waits for the delegated agent to finish, and the delegated agent's `response.content` becomes the tool result. MindRoom gives the delegated agent any already-published last-good knowledge snapshots and schedules missing or stale refresh work in the background. Interactive questions are disabled for delegated runs. Unlike \[`subagents`\], \[`delegate`\] does not create a Matrix thread, does not write to the room timeline, and does not keep a reusable session handle. If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string. Empty tasks are rejected.
+`delegate` exposes one tool call, `delegate_task(agent_name, task)`. The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller. The caller waits for the delegated agent to finish, and the delegated agent's `response.content` becomes the tool result. MindRoom gives the delegated agent any already-published last-good knowledge indexes and schedules missing or stale refresh work in the background. Interactive questions are disabled for delegated runs. Unlike \[`subagents`\], \[`delegate`\] does not create a Matrix thread, does not write to the room timeline, and does not keep a reusable session handle. If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string. Empty tasks are rejected.
 
 ### Configuration
 

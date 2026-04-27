@@ -113,12 +113,13 @@ def _knowledge_lookup(
     base_id: str = "docs",
     availability: KnowledgeAvailability = KnowledgeAvailability.READY,
 ) -> SimpleNamespace:
-    snapshot = (
+    index = (
         SimpleNamespace(
             knowledge=knowledge,
             state=SimpleNamespace(
                 source_signature=hashlib.sha256().hexdigest(),
                 last_published_at="2999-01-01T00:00:00+00:00",
+                last_refresh_at=None,
             ),
         )
         if knowledge is not None
@@ -130,7 +131,13 @@ def _knowledge_lookup(
         knowledge_path=f"memory/{base_id}",
         indexing_settings=(),
     )
-    return SimpleNamespace(key=key, snapshot=snapshot, availability=availability)
+    return SimpleNamespace(
+        key=key,
+        index=index,
+        state=index.state if index is not None else None,
+        availability=availability,
+        schedule_refresh_on_access=False,
+    )
 
 
 def _prepared_team_execution_context(

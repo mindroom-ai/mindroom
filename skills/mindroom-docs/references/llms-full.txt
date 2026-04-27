@@ -560,7 +560,7 @@ Git-backed knowledge bases are managed from the dashboard, but file mutations st
 - Private HTTPS repo auth can be managed in the **Credentials** tab, then referenced by `knowledge_bases.<id>.git.credentials_service`.
 - `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases before rebuilding the index.
 - `POST /api/knowledge/bases/{base_id}/upload` and `DELETE /api/knowledge/bases/{base_id}/files/{path}` reject Git-backed bases with `409`; update the repository and reindex instead.
-- Chat/runtime requests use already-published last-good snapshots and do not wait for indexing or Git sync.
+- Chat/runtime requests use already-published last-good published indexes and do not wait for indexing or Git sync.
 
 ### Credentials
 
@@ -1088,7 +1088,7 @@ knowledge_bases:
     git:                           # Optional: Sync this folder from a Git repository
       repo_url: https://github.com/pipefunc/pipefunc
       branch: main
-      poll_interval_seconds: 300  # Minimum age before a READY Git snapshot schedules advisory on-access refresh
+      poll_interval_seconds: 300  # Minimum age before a READY Git published index schedules advisory on-access refresh
       lfs: false                   # Optional: enable Git LFS support (requires git-lfs on the runtime host)
       sync_timeout_seconds: 3600   # Optional: abort a hung git command after this many seconds
       skip_hidden: true
@@ -7034,7 +7034,7 @@ list_sessions(limit=20)
 
 ### What It Does
 
-`delegate` exposes one tool call, `delegate_task(agent_name, task)`. The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller. The caller waits for the delegated agent to finish, and the delegated agent's `response.content` becomes the tool result. MindRoom gives the delegated agent any already-published last-good knowledge snapshots and schedules missing or stale refresh work in the background. Interactive questions are disabled for delegated runs. Unlike \[`subagents`\], \[`delegate`\] does not create a Matrix thread, does not write to the room timeline, and does not keep a reusable session handle. If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string. Empty tasks are rejected.
+`delegate` exposes one tool call, `delegate_task(agent_name, task)`. The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller. The caller waits for the delegated agent to finish, and the delegated agent's `response.content` becomes the tool result. MindRoom gives the delegated agent any already-published last-good knowledge indexes and schedules missing or stale refresh work in the background. Interactive questions are disabled for delegated runs. Unlike \[`subagents`\], \[`delegate`\] does not create a Matrix thread, does not write to the room timeline, and does not keep a reusable session handle. If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string. Empty tasks are rejected.
 
 ### Configuration
 
@@ -8675,7 +8675,7 @@ agents:
     knowledge_bases: [docs]
 ```
 
-Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom watch shared local bases with `watch: true`. Chat uses the last successfully published snapshot and continues without blocking when a base is missing, stale, or failed. When a watched file changes, MindRoom marks the snapshot stale, refreshes in the background, and atomically publishes the replacement when it succeeds. When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
+Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom watch shared local bases with `watch: true`. Chat uses the last successfully published index and continues without blocking when a base is missing, stale, or failed. When a watched file changes, MindRoom marks the published index stale, refreshes in the background, and atomically publishes the replacement when it succeeds. When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
 
 ## Configuration
 
@@ -8690,13 +8690,13 @@ knowledge_bases:
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
 
-| Field           | Type   | Default            | Description                                                                                                                                                                                                                                          |
-| --------------- | ------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)                                                                                                                                                                                      |
-| `watch`         | bool   | `true`             | When true, shared local folders watch filesystem changes and schedule background snapshot refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
-| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                                                                                                                                    |
-| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                                                                                                                                  |
-| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                                                                                                                                |
+| Field           | Type   | Default            | Description                                                                                                                                                                                                                                                 |
+| --------------- | ------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)                                                                                                                                                                                             |
+| `watch`         | bool   | `true`             | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
+| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                                                                                                                                           |
+| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                                                                                                                                         |
+| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                                                                                                                                       |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits. If chunking is too large, indexing retries will fail with embedder 500 errors.
 
@@ -8802,17 +8802,17 @@ knowledge_bases:
 
 ### Git Configuration Fields
 
-| Field                   | Type   | Default    | Description                                                                                                     |
-| ----------------------- | ------ | ---------- | --------------------------------------------------------------------------------------------------------------- |
-| `repo_url`              | string | *required* | HTTPS repository URL to clone/fetch                                                                             |
-| `branch`                | string | `main`     | Branch to track                                                                                                 |
-| `poll_interval_seconds` | int    | `300`      | Minimum age before a READY Git snapshot schedules advisory on-access refresh. Git polling loops are not started |
-| `credentials_service`   | string | `null`     | Service name in CredentialsManager for private repos                                                            |
-| `lfs`                   | bool   | `false`    | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom    |
-| `sync_timeout_seconds`  | int    | `3600`     | Abort one Git command if it exceeds this timeout                                                                |
-| `skip_hidden`           | bool   | `true`     | Skip files/folders starting with `.`                                                                            |
-| `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                                                          |
-| `exclude_patterns`      | list   | `[]`       | Root-anchored glob patterns to exclude                                                                          |
+| Field                   | Type   | Default    | Description                                                                                                            |
+| ----------------------- | ------ | ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `repo_url`              | string | *required* | HTTPS repository URL to clone/fetch                                                                                    |
+| `branch`                | string | `main`     | Branch to track                                                                                                        |
+| `poll_interval_seconds` | int    | `300`      | Minimum age before a READY Git published index schedules advisory on-access refresh. Git polling loops are not started |
+| `credentials_service`   | string | `null`     | Service name in CredentialsManager for private repos                                                                   |
+| `lfs`                   | bool   | `false`    | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom           |
+| `sync_timeout_seconds`  | int    | `3600`     | Abort one Git command if it exceeds this timeout                                                                       |
+| `skip_hidden`           | bool   | `true`     | Skip files/folders starting with `.`                                                                                   |
+| `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                                                                 |
+| `exclude_patterns`      | list   | `[]`       | Root-anchored glob patterns to exclude                                                                                 |
 
 When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows. Bundled container images already include it.
 
@@ -8824,7 +8824,7 @@ When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` fl
 - When `lfs: true`, MindRoom runs `git lfs pull origin <branch>` when a checkout is first hydrated or when sync advances to a new Git head.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and reindex instead.
-- Successful refresh publishes a new last-good snapshot while failed refresh preserves the previous one and records the error in status metadata.
+- Successful refresh publishes a new last-good published index while failed refresh preserves the previous one and records the error in status metadata.
 
 ### File Filtering with Patterns
 
@@ -8941,7 +8941,7 @@ See the [Dashboard API reference](https://docs.mindroom.chat/dashboard/#knowledg
 
 ## Hot Reload
 
-Knowledge base configuration supports hot reload. Changing `config.yaml` does not initialize every configured knowledge base. Agents keep using already-published last-good snapshots until a refresh for their resolved binding succeeds. Changed settings make existing snapshots stale or unavailable depending on query compatibility, and scheduled refresh rebuilds the affected binding in the background.
+Knowledge base configuration supports hot reload. Changing `config.yaml` does not initialize every configured knowledge base. Agents keep using already-published last-good published indexes until a refresh for their resolved binding succeeds. Changed settings make existing published indexes stale or unavailable depending on query compatibility, and scheduled refresh rebuilds the affected binding in the background.
 
 # Memory System
 
@@ -10478,7 +10478,7 @@ Parallel Claude sub-sessions are supported by using different `session_label` va
 
 ### Knowledge bases
 
-Agents with configured `knowledge_bases` in `config.yaml` get RAG support automatically. No additional API configuration needed. For Git-backed knowledge bases, missing or stale snapshots schedule the same per-binding refresh flow used by the Matrix runtime. Explicit dashboard/API reindex runs Git sync first and then rebuilds a candidate index.
+Agents with configured `knowledge_bases` in `config.yaml` get RAG support automatically. No additional API configuration needed. For Git-backed knowledge bases, missing or stale published indexes schedule the same per-binding refresh flow used by the Matrix runtime. Explicit dashboard/API reindex runs Git sync first and then rebuilds a candidate index.
 
 ## What's ignored
 

@@ -192,7 +192,7 @@ class _CollectionExistenceEmbedder(Embedder):
 
 
 @dataclass(frozen=True)
-class _PersistedIndexingState:
+class _PersistedIndexState:
     settings: tuple[str, ...]
     status: Literal["resetting", "indexing", "complete"]
     collection: str | None = None
@@ -204,7 +204,7 @@ class _PersistedIndexingState:
 
 @dataclass
 class _CandidatePublishState:
-    published: bool = False
+    index_published: bool = False
 
 
 def _raise_cancelled() -> NoReturn:
@@ -830,7 +830,7 @@ class KnowledgeManager:
     _git_lfs_checked: bool = field(default=False, init=False)
     _git_lfs_repository_ready: bool = field(default=False, init=False)
     _git_tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
-    _cached_persisted_indexing_state: _PersistedIndexingState | None = field(default=None, init=False, repr=False)
+    _cached_persisted_index_state: _PersistedIndexState | None = field(default=None, init=False, repr=False)
     _persisted_collection_missing_on_init: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -855,8 +855,8 @@ class KnowledgeManager:
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
         self._git_repo_present = base_config.git is not None and _git_metadata_present(self.knowledge_path)
-        persisted_state = self._load_persisted_indexing_state()
-        self._cached_persisted_indexing_state = persisted_state
+        persisted_state = self._load_persisted_index_state()
+        self._cached_persisted_index_state = persisted_state
         self._persisted_collection_missing_on_init = self._persisted_collection_missing(persisted_state)
         collection_name = (
             persisted_state.collection
@@ -906,7 +906,7 @@ class KnowledgeManager:
             raise RuntimeError(msg)
         return knowledge_path
 
-    def _persisted_collection_missing(self, persisted_state: _PersistedIndexingState | None) -> bool:
+    def _persisted_collection_missing(self, persisted_state: _PersistedIndexState | None) -> bool:
         if persisted_state is None or persisted_state.status != _INDEXING_STATUS_COMPLETE:
             return False
         collection_name = persisted_state.collection or self._default_collection_name()
@@ -921,7 +921,7 @@ class KnowledgeManager:
             )
             return True
 
-    def _load_persisted_indexing_state(self) -> _PersistedIndexingState | None:
+    def _load_persisted_index_state(self) -> _PersistedIndexState | None:
         if not self._indexing_settings_path.exists():
             return None
         try:
@@ -957,7 +957,7 @@ class KnowledgeManager:
         published_revision = (
             raw_published_revision if isinstance(raw_published_revision, str) and raw_published_revision else None
         )
-        return _PersistedIndexingState(
+        return _PersistedIndexState(
             tuple(raw_settings),
             cast('Literal["resetting", "indexing", "complete"]', raw_status),
             collection=raw_collection,
@@ -968,10 +968,10 @@ class KnowledgeManager:
         )
 
     def _load_persisted_indexing_settings(self) -> tuple[str, ...] | None:
-        persisted_state = self._load_persisted_indexing_state()
+        persisted_state = self._load_persisted_index_state()
         return persisted_state.settings if persisted_state is not None else None
 
-    def _save_persisted_indexing_state(
+    def _save_persisted_index_state(
         self,
         status: Literal["resetting", "indexing", "complete"],
         *,
@@ -1006,7 +1006,7 @@ class KnowledgeManager:
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
-        self._cached_persisted_indexing_state = _PersistedIndexingState(
+        self._cached_persisted_index_state = _PersistedIndexState(
             settings=persisted_settings,
             status=status,
             collection=collection,
@@ -1022,7 +1022,7 @@ class KnowledgeManager:
         indexed_count: int,
         source_signature: str,
     ) -> None:
-        self._save_persisted_indexing_state(
+        self._save_persisted_index_state(
             _INDEXING_STATUS_COMPLETE,
             collection=self._current_collection_name(),
             last_published_at=datetime.now(tz=UTC).isoformat(),
@@ -1051,7 +1051,7 @@ class KnowledgeManager:
     def _startup_index_mode(self) -> Literal["full_reindex", "resume", "incremental"]:
         if self._persisted_collection_missing_on_init:
             return "full_reindex"
-        persisted_state = self._load_persisted_indexing_state()
+        persisted_state = self._load_persisted_index_state()
         if persisted_state is None:
             return "full_reindex" if self._indexing_settings_path.exists() and self._has_existing_index() else "resume"
         if persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING:
@@ -1607,7 +1607,7 @@ class KnowledgeManager:
     ) -> bool:
         save_task = asyncio.create_task(
             asyncio.to_thread(
-                self._save_persisted_indexing_state,
+                self._save_persisted_index_state,
                 _INDEXING_STATUS_COMPLETE,
                 collection=candidate_vector_db.collection_name,
                 last_published_at=datetime.now(tz=UTC).isoformat(),
@@ -1650,7 +1650,7 @@ class KnowledgeManager:
             indexed_count=indexed_count,
             source_signature=source_signature,
         )
-        publish_state.published = True
+        publish_state.index_published = True
         await self._adopt_candidate_vector_db(
             candidate_vector_db=candidate_vector_db,
             indexed_files=indexed_files,
@@ -2023,7 +2023,7 @@ class KnowledgeManager:
             else:
                 return indexed_count
             finally:
-                if not candidate_publish_state.published:
+                if not candidate_publish_state.index_published:
                     await self._delete_unpublished_candidate_vector_db(candidate_vector_db)
 
     async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:

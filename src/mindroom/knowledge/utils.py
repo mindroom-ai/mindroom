@@ -17,8 +17,8 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.redaction import embedded_http_userinfo
 from mindroom.knowledge.registry import (
-    KnowledgeIndexLookup,
     KnowledgeRefreshTarget,
+    PublishedIndexResolution,
     get_published_index,
     refresh_target_for_published_index_key,
 )
@@ -48,7 +48,7 @@ class KnowledgeAvailabilityDetail:
     """Availability plus whether this turn received a last-good index."""
 
     availability: KnowledgeAvailability
-    index_attached: bool
+    search_available: bool
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,7 @@ def _lookup_knowledge_for_base(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> KnowledgeIndexLookup | None:
+) -> PublishedIndexResolution | None:
     """Resolve one configured base ID to its current Knowledge instance."""
     try:
         return get_published_index(
@@ -143,14 +143,14 @@ def _published_index_age_seconds(value: str | None) -> float | None:
     return max((datetime.now(tz=UTC) - published_at).total_seconds(), 0.0)
 
 
-def _git_poll_interval_seconds(lookup: KnowledgeIndexLookup, config: Config) -> float | None:
+def _git_poll_interval_seconds(lookup: PublishedIndexResolution, config: Config) -> float | None:
     git_config = config.get_knowledge_base_config(lookup.key.base_id).git
     if git_config is None:
         return None
     return max(float(git_config.poll_interval_seconds), 0.0)
 
 
-def _git_poll_due(lookup: KnowledgeIndexLookup, config: Config) -> bool:
+def _git_poll_due(lookup: PublishedIndexResolution, config: Config) -> bool:
     if lookup.index is None:
         return False
     poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
@@ -163,7 +163,7 @@ def _git_poll_due(lookup: KnowledgeIndexLookup, config: Config) -> bool:
 
 
 def _ready_index_effective_availability(
-    lookup: KnowledgeIndexLookup,
+    lookup: PublishedIndexResolution,
     config: Config,
 ) -> KnowledgeAvailability:
     """Return request-path availability for a ready index without eager rescans."""
@@ -174,7 +174,7 @@ def _ready_index_effective_availability(
 
 
 def _refresh_cooldown_seconds(
-    lookup: KnowledgeIndexLookup | None,
+    lookup: PublishedIndexResolution | None,
     config: Config,
     availability: KnowledgeAvailability,
 ) -> float:
@@ -187,7 +187,7 @@ def _refresh_cooldown_seconds(
 
 
 def _failed_refresh_retry_fingerprint(
-    lookup: KnowledgeIndexLookup,
+    lookup: PublishedIndexResolution,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, ...]:
@@ -232,7 +232,7 @@ def _embedded_userinfo_fingerprint(repo_url: str) -> str:
 
 
 def _refresh_retry_settings(
-    lookup: KnowledgeIndexLookup,
+    lookup: PublishedIndexResolution,
     config: Config,
     runtime_paths: RuntimePaths,
     availability: KnowledgeAvailability,
@@ -244,7 +244,7 @@ def _refresh_retry_settings(
     return None
 
 
-def _schedule_refresh_on_access_cooldown_seconds(lookup: KnowledgeIndexLookup, config: Config) -> float:
+def _schedule_refresh_on_access_cooldown_seconds(lookup: PublishedIndexResolution, config: Config) -> float:
     """Return READY refresh throttle without request-path source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return _REFRESH_RETRY_COOLDOWN_SECONDS
@@ -252,7 +252,7 @@ def _schedule_refresh_on_access_cooldown_seconds(lookup: KnowledgeIndexLookup, c
     return max(poll_interval_seconds or _REFRESH_RETRY_COOLDOWN_SECONDS, 1.0)
 
 
-def _schedule_refresh_on_access_due(lookup: KnowledgeIndexLookup, config: Config) -> bool:
+def _schedule_refresh_on_access_due(lookup: PublishedIndexResolution, config: Config) -> bool:
     """Return whether READY on-access refresh should be scheduled without source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return True
@@ -288,7 +288,7 @@ def _schedule_refresh_for_availability(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-    lookup: KnowledgeIndexLookup | None,
+    lookup: PublishedIndexResolution | None,
     availability: KnowledgeAvailability,
 ) -> KnowledgeAvailability:
     if lookup is None:
@@ -439,8 +439,8 @@ def get_agent_knowledge(
     return resolution.knowledge
 
 
-def _stale_availability_notice(base_id: str, *, index_attached: bool) -> str:
-    if index_attached:
+def _stale_availability_notice(base_id: str, *, search_available: bool) -> str:
+    if search_available:
         return (
             f"Knowledge base `{base_id}` may be stale while a refresh is pending this turn. "
             "Do not claim to have searched the latest contents."
@@ -462,10 +462,10 @@ def format_knowledge_availability_notice(
     for base_id, availability_value in sorted(unavailable_bases.items()):
         if isinstance(availability_value, KnowledgeAvailabilityDetail):
             availability = availability_value.availability
-            index_attached = availability_value.index_attached
+            search_available = availability_value.search_available
         else:
             availability = availability_value
-            index_attached = True
+            search_available = True
 
         if availability is KnowledgeAvailability.INITIALIZING:
             lines.append(
@@ -473,7 +473,7 @@ def format_knowledge_availability_notice(
                 "Do not claim to have searched it.",
             )
         elif availability is KnowledgeAvailability.CONFIG_MISMATCH:
-            if index_attached:
+            if search_available:
                 lines.append(
                     f"Knowledge base `{base_id}` is refreshing against newer config and may be stale this turn. "
                     "Do not claim to have searched the latest contents.",
@@ -484,9 +484,9 @@ def format_knowledge_availability_notice(
                     "published index does not match current config. Do not claim to have searched it.",
                 )
         elif availability is KnowledgeAvailability.STALE:
-            lines.append(_stale_availability_notice(base_id, index_attached=index_attached))
+            lines.append(_stale_availability_notice(base_id, search_available=search_available))
         elif availability is KnowledgeAvailability.REFRESH_FAILED:
-            if index_attached:
+            if search_available:
                 lines.append(
                     f"Knowledge base `{base_id}` had a recent refresh failure and may be stale this turn. "
                     "Do not claim to have searched the latest contents.",
@@ -691,7 +691,7 @@ def resolve_agent_knowledge(
             if availability is not KnowledgeAvailability.READY:
                 unavailable_base_details[base_id] = KnowledgeAvailabilityDetail(
                     availability=availability,
-                    index_attached=knowledge is not None,
+                    search_available=knowledge is not None,
                 )
         if knowledge is None:
             missing_base_ids.append(base_id)
