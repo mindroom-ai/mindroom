@@ -29,6 +29,7 @@ from mindroom.api.credentials import (
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
+from mindroom.api.runtime_reload import reload_api_runtime_config
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
 from mindroom.tool_system.worker_routing import resolve_worker_target
@@ -446,10 +447,8 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
         )
 
     try:
-        from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
-
         snapshot = _require_request_snapshot(request)
-        _reload_api_runtime_config(
+        reload_api_runtime_config(
             request.app,
             api_runtime_paths(request),
             expected_snapshot=snapshot,
@@ -471,10 +470,8 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
 async def reset(request: Request) -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
     try:
-        from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
-
         snapshot = _require_request_snapshot(request)
-        _reload_api_runtime_config(
+        reload_api_runtime_config(
             request.app,
             api_runtime_paths(request),
             expected_snapshot=snapshot,

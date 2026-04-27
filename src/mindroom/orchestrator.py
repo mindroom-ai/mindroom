@@ -16,6 +16,7 @@ from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import configured_bot_usernames_for_room
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
     ConfigReloadedContext,
@@ -1563,7 +1564,7 @@ class MultiAgentOrchestrator:
         )
 
         for room_id in joined_rooms:
-            configured_bots = config.get_configured_bots_for_room(room_id, self.runtime_paths)
+            configured_bots = configured_bot_usernames_for_room(config, room_id, self.runtime_paths)
             if not configured_bots:
                 continue
 

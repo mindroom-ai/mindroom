@@ -1794,44 +1794,6 @@ class Config(BaseModel):
 
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
 
-    def get_configured_bots_for_room(
-        self,
-        room_id: str,
-        runtime_paths: RuntimePaths,
-    ) -> set[str]:
-        """Get the set of bot usernames that should be in a specific room.
-
-        Args:
-            room_id: The Matrix room ID
-            runtime_paths: Explicit runtime context for room resolution.
-
-        Returns:
-            Set of bot usernames (without domain) that should be in this room
-
-        """
-        from mindroom.matrix.identity import agent_username_localpart  # noqa: PLC0415
-        from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
-
-        configured_bots = set()
-
-        # Check which agents should be in this room
-        for agent_name, agent_config in self.agents.items():
-            resolved_rooms = set(resolve_room_aliases(agent_config.rooms, runtime_paths))
-            if room_id in resolved_rooms:
-                configured_bots.add(agent_username_localpart(agent_name, runtime_paths))
-
-        # Check which teams should be in this room
-        for team_name, team_config in self.teams.items():
-            resolved_rooms = set(resolve_room_aliases(team_config.rooms, runtime_paths))
-            if room_id in resolved_rooms:
-                configured_bots.add(agent_username_localpart(team_name, runtime_paths))
-
-        # Router should be in any room that has any configured agents/teams
-        if configured_bots:  # If any bots are configured for this room
-            configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths))
-
-        return configured_bots
-
     def save_to_yaml(
         self,
         config_path: Path,

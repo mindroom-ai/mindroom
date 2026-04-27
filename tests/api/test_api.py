@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
-from mindroom.api import auth, config_lifecycle, frontend, google_integration, main
+from mindroom.api import auth, config_lifecycle, frontend, google_integration, main, runtime_reload
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
@@ -598,10 +598,10 @@ def test_reload_api_runtime_config_does_not_clear_worker_snapshot_on_failed_load
 
     with (
         patch.object(config_lifecycle, "_load_config_result", return_value=(failure, None, None)),
-        patch("mindroom.api.main.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
+        patch("mindroom.api.runtime_reload.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
         pytest.raises(HTTPException) as exc_info,
     ):
-        main._reload_api_runtime_config(fresh_app, runtime_paths)
+        runtime_reload.reload_api_runtime_config(fresh_app, runtime_paths)
 
     assert exc_info.value.status_code == 422
     mock_clear_snapshot_cache.assert_not_called()
