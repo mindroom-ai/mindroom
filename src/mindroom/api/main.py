@@ -41,6 +41,7 @@ from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import (
+    clear_worker_validation_snapshot_cache,
     get_primary_worker_manager,
     primary_worker_backend_available,
     primary_worker_backend_name,
@@ -429,6 +430,7 @@ def _reload_api_runtime_config(
     mutate_runtime: Callable[[constants.RuntimePaths], constants.RuntimePaths] | None = None,
 ) -> None:
     """Rebind the API app to one runtime and surface structured config reload failures."""
+    clear_worker_validation_snapshot_cache()
     app_state = config_lifecycle.app_state(api_app)
     api_state = config_lifecycle.require_api_state(api_app)
     with api_state.config_lock:

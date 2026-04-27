@@ -43,6 +43,7 @@ from mindroom.tool_system.metadata import (
     ConfigField,
     ToolCategory,
     ToolInitOverrideError,
+    ToolValidationInfo,
     get_tool_by_name,
     register_tool_with_metadata,
     resolved_tool_validation_snapshot_for_runtime,
@@ -2179,6 +2180,62 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
         sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
 
     assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+
+
+def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated proxy worker-manager access should not repeatedly resolve validation metadata."""
+    workers_runtime_module.clear_worker_validation_snapshot_cache()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    runtime_config = Config()
+    resolver_call_count = 0
+    captured_snapshots: list[dict[str, dict[str, object]]] = []
+
+    def fake_resolver(*_args: object, **_kwargs: object) -> dict[str, ToolValidationInfo]:
+        nonlocal resolver_call_count
+        resolver_call_count += 1
+        return {"fake": ToolValidationInfo(name="fake")}
+
+    def fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> object:
+        captured_snapshots.append(kwargs["kubernetes_tool_validation_snapshot"])
+        return object()
+
+    runtime_context = ToolRuntimeContext(
+        agent_name="code",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        requester_id="@user:example.org",
+        client=object(),
+        config=runtime_config,
+        runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
+    )
+    proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
+    monkeypatch.setattr(
+        "mindroom.tool_system.catalog.resolved_tool_validation_snapshot_for_runtime",
+        fake_resolver,
+    )
+    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", fake_get_primary_worker_manager)
+
+    with tool_runtime_context(runtime_context):
+        sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
+        sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
+
+    assert resolver_call_count == 1
+    assert len(captured_snapshots) == 2
+    assert captured_snapshots[0] == captured_snapshots[1]
+    assert captured_snapshots[0] is not captured_snapshots[1]
 
 
 def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:

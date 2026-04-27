@@ -70,6 +70,7 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.workers.runtime import clear_worker_validation_snapshot_cache
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
@@ -741,6 +742,7 @@ class MultiAgentOrchestrator:
                 source=source,
                 changed_paths=[str(path) for path in changed_paths],
             )
+            clear_worker_validation_snapshot_cache()
             try:
                 result = reload_plugins(config, self.runtime_paths)
             except Exception:
@@ -1231,6 +1233,7 @@ class MultiAgentOrchestrator:
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
         new_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
+        clear_worker_validation_snapshot_cache()
 
         if not self.config:
             return await self._load_initial_config(new_config, self._build_hook_registry(new_config))
