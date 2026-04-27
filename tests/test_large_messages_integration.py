@@ -431,7 +431,10 @@ async def test_streaming_multiple_edits_with_growth() -> None:
     nonterminal_large_edit = client.messages_sent[-2][2]
     assert nonterminal_large_edit["m.new_content"]["msgtype"] == "m.text"
     assert nonterminal_large_edit["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
-    assert "io.mindroom.long_text" not in nonterminal_large_edit["m.new_content"]
+    assert nonterminal_large_edit["m.new_content"]["format"] == "org.matrix.custom.html"
+    assert "Streaming preview truncated" in nonterminal_large_edit["m.new_content"]["formatted_body"]
+    assert nonterminal_large_edit["m.new_content"]["io.mindroom.long_text"]["version"] == 2
+    assert nonterminal_large_edit["m.new_content"]["io.mindroom.long_text"]["encoding"] == "matrix_event_content_json"
 
     terminal_large_edit = client.messages_sent[-1][2]
     assert terminal_large_edit["m.new_content"]["msgtype"] == "m.file"

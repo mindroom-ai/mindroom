@@ -213,24 +213,36 @@ async def test_prepare_edit_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_nonterminal_streaming_edit_uses_preview_without_sidecar() -> None:
-    """In-progress stream edits should not upload obsolete full-content sidecars."""
+async def test_prepare_nonterminal_streaming_edit_uses_rich_inline_preview() -> None:
+    """Oversized in-progress stream edits keep an HTML preview and fresh sidecar."""
 
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
 
-        async def upload(self, **_kwargs: object) -> tuple:
-            msg = "non-terminal stream edit should not upload a sidecar"
-            raise AssertionError(msg)
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/streaming-preview"})
+            return response, None
 
     client = MockClient()
-    text = "streaming " * 10000
+    text = ("streaming **markdown**\n\n🔧 `save_file` [1]\n" * 1000) + "tail"
+    formatted_body = "<p>streaming <strong>markdown</strong></p><p>🔧 <code>save_file</code> [1]</p>" * 1000
+    tool_trace = {"version": 2, "events": [{"type": "tool_call_started", "tool_name": "save_file"}]}
     edit_content = {
         "body": f"* {text}",
+        "format": "org.matrix.custom.html",
+        "formatted_body": formatted_body,
         "m.new_content": {
             "body": text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": formatted_body,
             "msgtype": "m.text",
             STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+            _TOOL_TRACE_KEY: tool_trace,
         },
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
         "msgtype": "m.text",
@@ -241,12 +253,81 @@ async def test_prepare_nonterminal_streaming_edit_uses_preview_without_sidecar()
     assert result["m.new_content"]["msgtype"] == "m.text"
     assert result["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
     assert result[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
-    assert "io.mindroom.long_text" not in result["m.new_content"]
-    assert "url" not in result["m.new_content"]
+    assert result["m.new_content"]["format"] == "org.matrix.custom.html"
+    assert "<strong>markdown</strong>" in result["m.new_content"]["formatted_body"]
+    assert "Streaming preview truncated" in result["m.new_content"]["formatted_body"]
+    assert _TOOL_TRACE_KEY not in result["m.new_content"]
+    assert result["m.new_content"]["io.mindroom.long_text"]["version"] == 2
+    assert result["m.new_content"]["io.mindroom.long_text"]["encoding"] == "matrix_event_content_json"
+    assert result["m.new_content"]["url"] == "mxc://server/streaming-preview"
     assert "file" not in result["m.new_content"]
     assert len(result["m.new_content"]["body"]) < len(text)
     assert "[Streaming preview truncated]" in result["m.new_content"]["body"]
     assert "[Message continues in attached file]" not in result["m.new_content"]["body"]
+    assert client.uploaded_data is not None
+    uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
+    assert uploaded_payload == edit_content
+    assert uploaded_payload["m.new_content"][_TOOL_TRACE_KEY] == tool_trace
+    assert _calculate_event_size(result) <= 64000
+
+
+@pytest.mark.asyncio
+async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_sidecar_tool_trace() -> None:
+    """Huge tool traces should go to the sidecar instead of shrinking visible preview."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
+
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/huge-trace"})
+            return response, None
+
+    client = MockClient()
+    text = ("streaming **markdown**\n" * 2000) + "tail"
+    huge_tool_trace = {
+        "version": 2,
+        "events": [
+            {
+                "type": "tool_call_completed",
+                "tool_name": "save_file",
+                "result_preview": "x" * 90000,
+            },
+        ],
+    }
+    edit_content = {
+        "body": f"* {text}",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<p>streaming <strong>markdown</strong></p>" * 2000,
+        "m.new_content": {
+            "body": text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>streaming <strong>markdown</strong></p>" * 2000,
+            "msgtype": "m.text",
+            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+            _TOOL_TRACE_KEY: huge_tool_trace,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
+        "msgtype": "m.text",
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    assert result["m.new_content"]["msgtype"] == "m.text"
+    assert result["m.new_content"]["format"] == "org.matrix.custom.html"
+    assert "<strong>markdown</strong>" in result["m.new_content"]["formatted_body"]
+    assert "Streaming preview truncated" in result["m.new_content"]["formatted_body"]
+    assert len(result["m.new_content"]["body"]) > 5000
+    assert _TOOL_TRACE_KEY not in result["m.new_content"]
+    assert result["m.new_content"]["io.mindroom.long_text"]["version"] == 2
+    assert result["m.new_content"]["url"] == "mxc://server/huge-trace"
+    assert client.uploaded_data is not None
+    uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
+    assert uploaded_payload["m.new_content"][_TOOL_TRACE_KEY] == huge_tool_trace
     assert _calculate_event_size(result) <= 64000
 
 
