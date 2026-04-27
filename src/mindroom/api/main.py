@@ -610,7 +610,6 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
         nested_index_path = candidate / "index.html"
         if nested_index_path.is_file():
             return nested_index_path
-
     if PurePosixPath(normalized_path).suffix:
         return None
 

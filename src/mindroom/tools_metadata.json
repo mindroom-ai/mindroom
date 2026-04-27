@@ -1767,7 +1767,7 @@
       ],
       "default_execution_target": "worker",
       "dependencies": [],
-      "description": "Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents; keep file for backward compatibility.",
+      "description": "Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents.",
       "display_name": "Coding Tools",
       "docs_url": null,
       "function_names": [
@@ -5394,7 +5394,7 @@
         "summarize_table"
       ],
       "helper_text": null,
-      "icon": "SiAmazonredshift",
+      "icon": "FaAws",
       "icon_color": "text-red-600",
       "name": "redshift",
       "setup_type": "special",
