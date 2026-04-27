@@ -1173,7 +1173,7 @@ def materialize_exact_team_members(
     session_id: str | None = None,
     include_openai_compat_guidance: bool = False,
     materializable_agent_names: set[str] | None = None,
-    unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] | None = None,
+    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
@@ -1195,8 +1195,8 @@ def materialize_exact_team_members(
                 agent_name=agent_name,
                 knowledge_bases=list(knowledge_resolution.missing),
             )
-        if unavailable_base_details is not None:
-            unavailable_base_details.update(knowledge_resolution.unavailable)
+        if unavailable_bases is not None:
+            unavailable_bases.update(knowledge_resolution.unavailable)
         return create_agent(
             agent_name,
             config,
@@ -1241,7 +1241,7 @@ def _materialize_team_members(
     execution_identity: ToolExecutionIdentity | None,
     *,
     session_id: str | None = None,
-    unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] | None = None,
+    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact requested team-member set without silent fallback."""
@@ -1255,7 +1255,7 @@ def _materialize_team_members(
         execution_identity=execution_identity,
         session_id=session_id,
         materializable_agent_names=resolve_live_shared_agent_names(orchestrator),
-        unavailable_base_details=unavailable_base_details,
+        unavailable_bases=unavailable_bases,
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
         reason_prefix=reason_prefix,
     )
@@ -1504,7 +1504,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             orchestrator,
             execution_identity,
             session_id=session_id,
-            unavailable_base_details=unavailable_bases,
+            unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
         )
     except ValueError as exc:
@@ -1861,7 +1861,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             orchestrator,
             execution_identity,
             session_id=session_id,
-            unavailable_base_details=unavailable_bases,
+            unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
         )
     except ValueError as exc:

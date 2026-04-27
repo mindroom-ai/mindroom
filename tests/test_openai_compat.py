@@ -2878,14 +2878,14 @@ class TestTeamCompletion:
             requested_agent_names: list[str],
             **kwargs: object,
         ) -> ResolvedExactTeamMembers:
-            unavailable_base_details = cast(
+            unavailable_bases = cast(
                 "dict[str, KnowledgeAvailabilityDetail] | None",
-                kwargs["unavailable_base_details"],
+                kwargs["unavailable_bases"],
             )
             refresh_scheduler = kwargs["refresh_scheduler"]
-            assert unavailable_base_details is not None
+            assert unavailable_bases is not None
             assert refresh_scheduler is team_app_client.app.state.knowledge_refresh_scheduler
-            unavailable_base_details["docs"] = KnowledgeAvailabilityDetail(
+            unavailable_bases["docs"] = KnowledgeAvailabilityDetail(
                 availability=KnowledgeAvailability.INITIALIZING,
                 search_available=False,
             )
@@ -3243,14 +3243,14 @@ class TestTeamCompletion:
             requested_agent_names: list[str],
             **kwargs: object,
         ) -> ResolvedExactTeamMembers:
-            unavailable_base_details = cast(
+            unavailable_bases = cast(
                 "dict[str, KnowledgeAvailabilityDetail] | None",
-                kwargs["unavailable_base_details"],
+                kwargs["unavailable_bases"],
             )
             refresh_scheduler = kwargs["refresh_scheduler"]
-            assert unavailable_base_details is not None
+            assert unavailable_bases is not None
             assert refresh_scheduler is team_app_client.app.state.knowledge_refresh_scheduler
-            unavailable_base_details["docs"] = KnowledgeAvailabilityDetail(
+            unavailable_bases["docs"] = KnowledgeAvailabilityDetail(
                 availability=KnowledgeAvailability.CONFIG_MISMATCH,
                 search_available=True,
             )

@@ -402,11 +402,29 @@ def resolve_agent_knowledge_access(
         resolved_knowledge[base_id] = (knowledge, availability)
         return resolved_knowledge[base_id]
 
-    return resolve_agent_knowledge(
-        agent_name,
-        config,
-        lambda base_id: _resolve(base_id)[0],
-        get_availability=lambda base_id: _resolve(base_id)[1],
+    base_ids = config.get_agent_knowledge_base_ids(agent_name)
+    if not base_ids:
+        return KnowledgeResolution(knowledge=None)
+
+    missing_base_ids: list[str] = []
+    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+    knowledges: list[Knowledge] = []
+    for base_id in base_ids:
+        knowledge, availability = _resolve(base_id)
+        if availability is not KnowledgeAvailability.READY:
+            unavailable_bases[base_id] = KnowledgeAvailabilityDetail(
+                availability=availability,
+                search_available=knowledge is not None,
+            )
+        if knowledge is None:
+            missing_base_ids.append(base_id)
+            continue
+        knowledges.append(knowledge)
+
+    return KnowledgeResolution(
+        knowledge=_merge_knowledge(agent_name, knowledges),
+        missing=tuple(missing_base_ids),
+        unavailable=unavailable_bases,
     )
 
 
@@ -633,40 +651,4 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
         name=f"{agent_name}_multi_knowledge",
         vector_db=MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
         max_results=max(knowledge.max_results for knowledge in knowledges),
-    )
-
-
-def resolve_agent_knowledge(
-    agent_name: str,
-    config: Config,
-    get_knowledge: Callable[[str], Knowledge | None],
-    *,
-    get_availability: Callable[[str], KnowledgeAvailability] | None = None,
-) -> KnowledgeResolution:
-    """Resolve configured knowledge base(s) for an agent with diagnostics."""
-    base_ids = config.get_agent_knowledge_base_ids(agent_name)
-    if not base_ids:
-        return KnowledgeResolution(knowledge=None)
-
-    missing_base_ids: list[str] = []
-    unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] = {}
-    knowledges: list[Knowledge] = []
-    for base_id in base_ids:
-        knowledge = get_knowledge(base_id)
-        if get_availability is not None:
-            availability = get_availability(base_id)
-            if availability is not KnowledgeAvailability.READY:
-                unavailable_base_details[base_id] = KnowledgeAvailabilityDetail(
-                    availability=availability,
-                    search_available=knowledge is not None,
-                )
-        if knowledge is None:
-            missing_base_ids.append(base_id)
-            continue
-        knowledges.append(knowledge)
-
-    return KnowledgeResolution(
-        knowledge=_merge_knowledge(agent_name, knowledges),
-        missing=tuple(missing_base_ids),
-        unavailable=unavailable_base_details,
     )
