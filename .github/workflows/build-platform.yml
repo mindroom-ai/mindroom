@@ -69,9 +69,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.REGISTRY_USER }}/${{ matrix.service.name }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha,format=short
+            type=ref,event=pr,enable=${{ github.event_name == 'pull_request' }}
+            type=sha,format=short,enable=${{ github.event_name == 'pull_request' }}
             type=raw,value=${{ inputs.release_ref }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' }}
             type=raw,value=amd64,enable=${{ github.event_name == 'workflow_dispatch' }}
