@@ -410,35 +410,6 @@ def resolve_agent_knowledge_access(
     )
 
 
-def get_agent_knowledge(
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    on_missing_bases: Callable[[list[str]], None] | None = None,
-    on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
-    on_unavailable_base_details: Callable[[Mapping[str, KnowledgeAvailabilityDetail]], None] | None = None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> Knowledge | None:
-    """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
-    resolution = resolve_agent_knowledge_access(
-        agent_name,
-        config,
-        runtime_paths,
-        refresh_scheduler=refresh_scheduler,
-        execution_identity=execution_identity,
-    )
-    if resolution.missing and on_missing_bases is not None:
-        on_missing_bases(list(resolution.missing))
-    if resolution.unavailable and on_unavailable_bases is not None:
-        on_unavailable_bases(
-            {base_id: detail.availability for base_id, detail in resolution.unavailable.items()},
-        )
-    if resolution.unavailable and on_unavailable_base_details is not None:
-        on_unavailable_base_details(resolution.unavailable)
-    return resolution.knowledge
-
-
 def _stale_availability_notice(base_id: str, *, search_available: bool) -> str:
     if search_available:
         return (
@@ -452,20 +423,16 @@ def _stale_availability_notice(base_id: str, *, search_available: bool) -> str:
 
 
 def format_knowledge_availability_notice(
-    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
+    unavailable_bases: Mapping[str, KnowledgeAvailabilityDetail],
 ) -> str | None:
     """Render one user-facing notice for unavailable or stale knowledge bases."""
     if not unavailable_bases:
         return None
 
     lines: list[str] = []
-    for base_id, availability_value in sorted(unavailable_bases.items()):
-        if isinstance(availability_value, KnowledgeAvailabilityDetail):
-            availability = availability_value.availability
-            search_available = availability_value.search_available
-        else:
-            availability = availability_value
-            search_available = True
+    for base_id, detail in sorted(unavailable_bases.items()):
+        availability = detail.availability
+        search_available = detail.search_available
 
         if availability is KnowledgeAvailability.INITIALIZING:
             lines.append(
@@ -611,7 +578,7 @@ class MultiKnowledgeVectorDb:
                 if isinstance(vdb, _AsyncKnowledgeVectorDb):
                     try:
                         results = await vdb.async_search(query=query, limit=limit, filters=filters)
-                    except (NotImplementedError, AttributeError):
+                    except NotImplementedError:
                         results = vdb.search(query=query, limit=limit, filters=filters)
                 else:
                     results = vdb.search(query=query, limit=limit, filters=filters)

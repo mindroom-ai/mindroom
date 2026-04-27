@@ -998,10 +998,6 @@ class KnowledgeManager:
             persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING
         )
 
-    def get_knowledge(self) -> Knowledge:
-        """Return the agno Knowledge instance."""
-        return self._knowledge
-
     def _git_config(self) -> KnowledgeGitConfig | None:
         return self.config.get_knowledge_base_config(self.base_id).git
 
@@ -1706,29 +1702,3 @@ class KnowledgeManager:
             finally:
                 if not candidate_publish_state.index_published:
                     await self._delete_unpublished_candidate_vector_db(candidate_vector_db)
-
-    def get_status(self) -> dict[str, Any]:
-        """Get current knowledge indexing status."""
-        files = self.list_files()
-        status = {
-            "base_id": self.base_id,
-            "folder_path": str(self._knowledge_source_path()),
-            "file_count": len(files),
-            "indexed_count": len(self._indexed_files),
-        }
-        git_config = self._git_config()
-        if git_config is not None:
-            status["git"] = {
-                "repo_url": redact_url_credentials(git_config.repo_url),
-                "branch": git_config.branch,
-                "lfs": git_config.lfs,
-                "syncing": self._git_syncing,
-                "repo_present": self._git_repo_present,
-                "initial_sync_complete": self._git_initial_sync_complete,
-                "last_successful_sync_at": (
-                    self._git_last_successful_sync_at.isoformat() if self._git_last_successful_sync_at else None
-                ),
-                "last_successful_commit": self._git_last_successful_commit,
-                "last_error": self._git_last_error,
-            }
-        return status

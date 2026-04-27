@@ -2857,7 +2857,7 @@ class TestTeamCompletion:
 
     def test_team_non_streaming_unready_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
         """Non-streaming team completions should prepend the degraded knowledge notice."""
-        from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
+        from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail  # noqa: PLC0415
         from mindroom.team_exact_members import ResolvedExactTeamMembers  # noqa: PLC0415
 
         scheduled_base_ids: list[str] = []
@@ -2878,11 +2878,17 @@ class TestTeamCompletion:
             requested_agent_names: list[str],
             **kwargs: object,
         ) -> ResolvedExactTeamMembers:
-            unavailable_bases = cast("dict[str, KnowledgeAvailability] | None", kwargs["unavailable_bases"])
+            unavailable_base_details = cast(
+                "dict[str, KnowledgeAvailabilityDetail] | None",
+                kwargs["unavailable_base_details"],
+            )
             refresh_scheduler = kwargs["refresh_scheduler"]
-            assert unavailable_bases is not None
+            assert unavailable_base_details is not None
             assert refresh_scheduler is team_app_client.app.state.knowledge_refresh_scheduler
-            unavailable_bases["docs"] = KnowledgeAvailability.INITIALIZING
+            unavailable_base_details["docs"] = KnowledgeAvailabilityDetail(
+                availability=KnowledgeAvailability.INITIALIZING,
+                search_available=False,
+            )
             refresh_scheduler.schedule_refresh("docs")
             return ResolvedExactTeamMembers(
                 requested_agent_names=requested_agent_names,
@@ -3212,7 +3218,7 @@ class TestTeamCompletion:
 
     def test_team_streaming_config_mismatch_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
         """Streaming team completions should prepend the stale-knowledge notice."""
-        from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
+        from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail  # noqa: PLC0415
         from mindroom.team_exact_members import ResolvedExactTeamMembers  # noqa: PLC0415
 
         scheduled_base_ids: list[str] = []
@@ -3237,11 +3243,17 @@ class TestTeamCompletion:
             requested_agent_names: list[str],
             **kwargs: object,
         ) -> ResolvedExactTeamMembers:
-            unavailable_bases = cast("dict[str, KnowledgeAvailability] | None", kwargs["unavailable_bases"])
+            unavailable_base_details = cast(
+                "dict[str, KnowledgeAvailabilityDetail] | None",
+                kwargs["unavailable_base_details"],
+            )
             refresh_scheduler = kwargs["refresh_scheduler"]
-            assert unavailable_bases is not None
+            assert unavailable_base_details is not None
             assert refresh_scheduler is team_app_client.app.state.knowledge_refresh_scheduler
-            unavailable_bases["docs"] = KnowledgeAvailability.CONFIG_MISMATCH
+            unavailable_base_details["docs"] = KnowledgeAvailabilityDetail(
+                availability=KnowledgeAvailability.CONFIG_MISMATCH,
+                search_available=True,
+            )
             refresh_scheduler.schedule_refresh("docs")
             return ResolvedExactTeamMembers(
                 requested_agent_names=requested_agent_names,

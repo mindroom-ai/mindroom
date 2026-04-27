@@ -50,7 +50,6 @@ from mindroom.history import (
 from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import (
-    KnowledgeAvailability,
     KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
     resolve_agent_knowledge_access,
@@ -107,7 +106,7 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
 
 def _append_knowledge_availability_enrichment(
     system_enrichment_items: Sequence[EnrichmentItem],
-    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
+    unavailable_bases: Mapping[str, KnowledgeAvailabilityDetail],
 ) -> tuple[EnrichmentItem, ...]:
     """Append one volatile knowledge-availability notice when needed."""
     notice = format_knowledge_availability_notice(unavailable_bases)
@@ -1174,7 +1173,6 @@ def materialize_exact_team_members(
     session_id: str | None = None,
     include_openai_compat_guidance: bool = False,
     materializable_agent_names: set[str] | None = None,
-    unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
     unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     reason_prefix: str = "Team request",
@@ -1196,10 +1194,6 @@ def materialize_exact_team_members(
                 "Knowledge bases not available for team agent",
                 agent_name=agent_name,
                 knowledge_bases=list(knowledge_resolution.missing),
-            )
-        if unavailable_bases is not None:
-            unavailable_bases.update(
-                {base_id: detail.availability for base_id, detail in knowledge_resolution.unavailable.items()},
             )
         if unavailable_base_details is not None:
             unavailable_base_details.update(knowledge_resolution.unavailable)
@@ -1247,7 +1241,6 @@ def _materialize_team_members(
     execution_identity: ToolExecutionIdentity | None,
     *,
     session_id: str | None = None,
-    unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
     unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
@@ -1262,7 +1255,6 @@ def _materialize_team_members(
         execution_identity=execution_identity,
         session_id=session_id,
         materializable_agent_names=resolve_live_shared_agent_names(orchestrator),
-        unavailable_bases=unavailable_bases,
         unavailable_base_details=unavailable_base_details,
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
         reason_prefix=reason_prefix,

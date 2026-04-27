@@ -50,7 +50,6 @@ from mindroom.history import (
     run_post_response_compaction_check,
 )
 from mindroom.knowledge import (
-    KnowledgeAvailability,
     KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
     resolve_agent_knowledge_access,
@@ -793,7 +792,7 @@ def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]
 
 
 def _knowledge_availability_system_message(
-    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
+    unavailable_bases: Mapping[str, KnowledgeAvailabilityDetail],
 ) -> str | None:
     """Render one OpenAI-compatible system message for unavailable or stale knowledge."""
     return format_knowledge_availability_notice(unavailable_bases)
@@ -801,7 +800,7 @@ def _knowledge_availability_system_message(
 
 def _prepend_knowledge_availability_notice(
     prompt: str,
-    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
+    unavailable_bases: Mapping[str, KnowledgeAvailabilityDetail],
 ) -> str:
     """Prefix the prompt with the degraded-knowledge notice when shared bases are unavailable."""
     availability_hint = _knowledge_availability_system_message(unavailable_bases)
@@ -1417,7 +1416,6 @@ def _build_team(
     execution_identity: ToolExecutionIdentity | None,
     scope_context: ScopeSessionContext | None = None,
     session_id: str | None = None,
-    unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
     unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> tuple[list[Agent], Team, TeamMode]:
@@ -1438,7 +1436,6 @@ def _build_team(
         execution_identity=execution_identity,
         session_id=session_id,
         include_openai_compat_guidance=True,
-        unavailable_bases=unavailable_bases,
         unavailable_base_details=unavailable_base_details,
         refresh_scheduler=refresh_scheduler,
         reason_prefix=f"Team '{team_name}'",
@@ -1537,7 +1534,6 @@ async def _non_stream_team_completion(
     agents: list[Agent] = []
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
-    unavailable_bases: dict[str, KnowledgeAvailability] = {}
     unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] = {}
     post_response_compaction_checks: list[PostResponseCompactionCheck] = []
     try:
@@ -1558,7 +1554,6 @@ async def _non_stream_team_completion(
                     execution_identity,
                     scope_context,
                     session_id,
-                    unavailable_bases,
                     unavailable_base_details,
                     refresh_scheduler,
                 )
@@ -1576,7 +1571,7 @@ async def _non_stream_team_completion(
             try:
                 prompt = _prepend_knowledge_availability_notice(
                     prompt,
-                    unavailable_base_details or unavailable_bases,
+                    unavailable_base_details,
                 )
                 team_run_input = await _prepare_openai_team_run_input(
                     scope_context=scope_context,
@@ -1659,7 +1654,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
-    unavailable_bases: dict[str, KnowledgeAvailability] = {}
     unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] = {}
     post_response_compaction_checks: list[PostResponseCompactionCheck] = []
 
@@ -1693,7 +1687,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                     execution_identity,
                     scope_context,
                     session_id,
-                    unavailable_bases,
                     unavailable_base_details,
                     refresh_scheduler,
                 )
@@ -1712,7 +1705,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         try:
             prompt = _prepend_knowledge_availability_notice(
                 prompt,
-                unavailable_base_details or unavailable_bases,
+                unavailable_base_details,
             )
             team_run_input = await _prepare_openai_team_run_input(
                 scope_context=scope_context,

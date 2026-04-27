@@ -374,19 +374,15 @@ export function Knowledge() {
         );
       }
 
-      if (isCurrentRequest()) {
-        setStatus({
-          ...statusData,
-          file_listing_degraded:
-            filesData.file_listing_degraded ?? statusData.file_listing_degraded,
-          file_listing_error:
-            filesData.file_listing_error ??
-            statusData.file_listing_error ??
-            null,
-        });
-        setFiles(filesData.files);
-        setTotalSize(filesData.total_size);
-      }
+      setStatus({
+        ...statusData,
+        file_listing_degraded:
+          filesData.file_listing_degraded ?? statusData.file_listing_degraded,
+        file_listing_error:
+          filesData.file_listing_error ?? statusData.file_listing_error ?? null,
+      });
+      setFiles(filesData.files);
+      setTotalSize(filesData.total_size);
     } catch (err) {
       if (!isCurrentRequest()) {
         return;
