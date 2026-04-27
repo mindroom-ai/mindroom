@@ -242,7 +242,7 @@ def _refresh_retry_settings(
     return None
 
 
-def _ready_refresh_on_access_cooldown_seconds(lookup: KnowledgeSnapshotLookup, config: Config) -> float:
+def _schedule_refresh_on_access_cooldown_seconds(lookup: KnowledgeSnapshotLookup, config: Config) -> float:
     """Return READY refresh throttle without request-path source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return _REFRESH_RETRY_COOLDOWN_SECONDS
@@ -250,7 +250,7 @@ def _ready_refresh_on_access_cooldown_seconds(lookup: KnowledgeSnapshotLookup, c
     return max(poll_interval_seconds or _REFRESH_RETRY_COOLDOWN_SECONDS, 1.0)
 
 
-def _ready_refresh_on_access_due(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
+def _schedule_refresh_on_access_due(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
     """Return whether READY on-access refresh should be scheduled without source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return True
@@ -294,7 +294,7 @@ def _schedule_refresh_for_availability(
 
     refresh_key = refresh_key_for_snapshot_key(lookup.key)
     if availability is KnowledgeAvailability.READY:
-        if not lookup.refresh_on_access or not _ready_refresh_on_access_due(lookup, config):
+        if not lookup.schedule_refresh_on_access or not _schedule_refresh_on_access_due(lookup, config):
             return availability
 
         owner_is_refreshing = _refresh_owner_is_refreshing(
@@ -311,7 +311,7 @@ def _schedule_refresh_for_availability(
                 refresh_key,
                 KnowledgeAvailability.READY,
                 settings=lookup.key.indexing_settings,
-                cooldown_seconds=_ready_refresh_on_access_cooldown_seconds(lookup, config),
+                cooldown_seconds=_schedule_refresh_on_access_cooldown_seconds(lookup, config),
             )
         )
         if schedule_due:

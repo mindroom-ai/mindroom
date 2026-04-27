@@ -97,7 +97,7 @@ class KnowledgeSnapshotLookup:
     snapshot: PublishedKnowledgeSnapshot | None
     state: PublishedIndexingState | None
     availability: KnowledgeAvailability
-    refresh_on_access: bool = False
+    schedule_refresh_on_access: bool = False
 
 
 class _SnapshotVectorDb(Protocol):
@@ -653,7 +653,7 @@ def get_published_snapshot(
                 snapshot=snapshot,
                 state=state,
                 availability=availability,
-                refresh_on_access=binding.incremental_sync_on_access,
+                schedule_refresh_on_access=binding.incremental_sync_on_access,
             )
         _published_snapshots.pop(key, None)
 
@@ -663,7 +663,7 @@ def get_published_snapshot(
             snapshot=None,
             state=state,
             availability=availability,
-            refresh_on_access=binding.incremental_sync_on_access,
+            schedule_refresh_on_access=binding.incremental_sync_on_access,
         )
 
     knowledge = _load_queryable_snapshot_from_state(key, state, config=config, runtime_paths=runtime_paths)
@@ -675,7 +675,7 @@ def get_published_snapshot(
             availability=availability
             if availability is not KnowledgeAvailability.READY
             else KnowledgeAvailability.REFRESH_FAILED,
-            refresh_on_access=binding.incremental_sync_on_access,
+            schedule_refresh_on_access=binding.incremental_sync_on_access,
         )
 
     snapshot = PublishedKnowledgeSnapshot(
@@ -690,7 +690,7 @@ def get_published_snapshot(
         snapshot=snapshot,
         state=state,
         availability=availability,
-        refresh_on_access=binding.incremental_sync_on_access,
+        schedule_refresh_on_access=binding.incremental_sync_on_access,
     )
 
 

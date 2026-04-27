@@ -499,7 +499,7 @@ async def test_shared_local_watch_snapshot_refreshes_on_access_without_blocking_
 
 
 @pytest.mark.asyncio
-async def test_shared_local_watch_ready_refresh_on_access_is_throttled(tmp_path: Path) -> None:
+async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_path: Path) -> None:
     """A freshly refreshed local watch=true base stays READY during refresh-on-access cooldown."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -639,7 +639,7 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
 
 
 @pytest.mark.asyncio
-async def test_ready_refresh_on_access_reports_stale_while_owner_is_active(tmp_path: Path) -> None:
+async def test_schedule_refresh_on_access_reports_stale_while_owner_is_active(tmp_path: Path) -> None:
     """Due refresh-on-access remains visible as STALE even when the owner already has work active."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -1848,7 +1848,7 @@ async def test_git_ready_snapshot_schedules_refresh_after_poll_interval(
 
 
 @pytest.mark.asyncio
-async def test_private_git_ready_refresh_on_access_honors_poll_interval(
+async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
