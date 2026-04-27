@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
+from mindroom.entity_resolution import configured_bot_usernames_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID, agent_username_localpart
@@ -100,7 +101,7 @@ async def _cleanup_orphaned_bots_in_room(
         return []
 
     # Get configured bots for this room
-    configured_bots = config.get_configured_bots_for_room(room_id, runtime_paths)
+    configured_bots = configured_bot_usernames_for_room(config, room_id, runtime_paths)
     known_bot_usernames = _get_all_known_bot_usernames(runtime_paths)
     if persisted_invited_rooms_by_bot is None:
         persisted_invited_rooms_by_bot = _load_all_persisted_invited_rooms(config, runtime_paths)

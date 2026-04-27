@@ -159,6 +159,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.entity_resolution"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.identity",
+    "mindroom.matrix.rooms",
+]
+
+[[modules]]
 path = "mindroom.team_exact_members"
 depends_on = [
     "mindroom.constants",
@@ -215,21 +223,25 @@ depends_on = [
     "mindroom.frontend_assets",
 ]
 
-# NOTE (arch-b-7): mindroom.api.google_integration still imports
-# _reload_api_runtime_config from api.main via lazy function-local imports.
-# This codifies the remaining runtime-reload back-edge until that helper is
-# lifted into a leaf lifecycle module.
 [[modules]]
 path = "mindroom.api.google_integration"
 depends_on = [
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
-    "mindroom.api.main",
+    "mindroom.api.runtime_reload",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.tool_system.dependencies",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.runtime_reload"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.constants",
+    "mindroom.workers.runtime",
 ]
 
 [[modules]]
@@ -665,7 +677,7 @@ depends_on = ["mindroom.matrix.client_session", "mindroom.constants"]
 
 [[modules]]
 path = "mindroom.matrix.room_cleanup"
-depends_on = ["mindroom.matrix.rooms", "mindroom.matrix.client_room_admin", "mindroom.matrix.users"]
+depends_on = ["mindroom.entity_resolution", "mindroom.matrix.rooms", "mindroom.matrix.client_room_admin", "mindroom.matrix.users"]
 
 [[modules]]
 path = "mindroom.matrix.rooms"
@@ -699,6 +711,7 @@ depends_on = [
     "mindroom.bot",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.knowledge",
     "mindroom.knowledge.watch",

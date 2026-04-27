@@ -154,7 +154,7 @@ class TestDMPreservationDuringCleanup:
         )
         # Mock a room with no configured bots (DM room)
         with patch(
-            "mindroom.config.main.Config.get_configured_bots_for_room",
+            "mindroom.matrix.room_cleanup.configured_bot_usernames_for_room",
             return_value=set(),  # No bots configured for this room
         ):
             kicked_bots = await _cleanup_orphaned_bots_in_room(
@@ -195,7 +195,7 @@ class TestDMPreservationDuringCleanup:
                 return_value={"mindroom_orphaned", "mindroom_configured_agent"},
             ),
             patch(
-                "mindroom.config.main.Config.get_configured_bots_for_room",
+                "mindroom.matrix.room_cleanup.configured_bot_usernames_for_room",
                 return_value={"mindroom_configured_agent"},
             ),
         ):
@@ -270,7 +270,7 @@ class TestDMPreservationDuringCleanup:
         # Mock joined rooms - mix of configured and DM rooms
         joined_rooms = ["!configured:server", "!dm:server", "!another_dm:server"]
 
-        def mock_get_configured_bots(room_id: str, runtime_paths: object | None = None) -> set[str]:
+        def mock_get_configured_bots(_config: Config, room_id: str, runtime_paths: object | None = None) -> set[str]:
             del runtime_paths
             # Only !configured:server has configured bots
             if room_id == "!configured:server":
@@ -292,7 +292,7 @@ class TestDMPreservationDuringCleanup:
                 return_value={"mindroom_orphaned", "mindroom_agent"},
             ),
             patch(
-                "mindroom.config.main.Config.get_configured_bots_for_room",
+                "mindroom.matrix.room_cleanup.configured_bot_usernames_for_room",
                 side_effect=mock_get_configured_bots,
             ),
             patch("mindroom.matrix.room_cleanup.is_dm_room", side_effect=mock_is_dm_room),
@@ -431,7 +431,7 @@ class TestDMPreservationDuringCleanup:
                 return_value={"mindroom_router"},
             ),
             patch(
-                "mindroom.config.main.Config.get_configured_bots_for_room",
+                "mindroom.matrix.room_cleanup.configured_bot_usernames_for_room",
                 return_value={"mindroom_router"},
             ),
             patch("mindroom.matrix.room_cleanup.is_dm_room", side_effect=mock_is_dm_room),
