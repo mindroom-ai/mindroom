@@ -666,6 +666,7 @@ async def _execute_request_inprocess(
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
+    output_path = request.kwargs.get(OUTPUT_PATH_ARGUMENT)
     tool_output_workspace_root = (
         _runner_tool_output_workspace_root(
             config=config,
@@ -674,7 +675,7 @@ async def _execute_request_inprocess(
             execution_identity=execution_identity,
             routing_agent_name=request.routing_agent_name,
         )
-        if OUTPUT_PATH_ARGUMENT in request.kwargs
+        if output_path is not None
         else None
     )
     with (
