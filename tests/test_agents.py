@@ -2210,6 +2210,57 @@ def test_bind_runtime_paths_allows_missing_private_template_dir_for_dedicated_sa
     assert bound.get_agent("general").private is not None
 
 
+def test_resolve_agent_runtime_skips_missing_private_template_copy_for_dedicated_sandbox_worker(
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers should not need control-plane-only private templates at tool execution time."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user_agent",
+        root="mind_data",
+        template_dir="./missing-template",
+    )
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="general")
+    assert worker_key is not None
+    shared_root = tmp_path / "shared-storage"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=shared_root,
+        process_env={
+            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+        },
+    )
+    bound = _bind_runtime_paths(config, runtime_paths)
+
+    agent_runtime = resolve_agent_runtime(
+        "general",
+        bound,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+
+    expected_workspace = _private_instance_state_root_path(
+        shared_root,
+        worker_key=worker_key,
+        agent_name="general",
+    ) / "mind_data"
+    assert agent_runtime.workspace is not None
+    assert agent_runtime.workspace.root == expected_workspace
+    assert expected_workspace.is_dir()
+
+
 def test_bind_runtime_paths_rejects_private_template_dir_with_symlinked_content(tmp_path: Path) -> None:
     """Private templates must reject symlinked content instead of copying host files."""
     template_dir = tmp_path / "mind_template"
