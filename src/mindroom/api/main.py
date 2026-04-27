@@ -41,6 +41,7 @@ from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import (
+    clear_worker_validation_snapshot_cache,
     get_primary_worker_manager,
     primary_worker_backend_available,
     primary_worker_backend_name,
@@ -470,6 +471,7 @@ def _reload_api_runtime_config(
             config_load_result=result,
         )
     config_lifecycle.raise_for_config_load_result(result)
+    clear_worker_validation_snapshot_cache()
 
 
 def _sanitize_entity_payload(entity_data: dict[str, Any]) -> dict[str, Any]:

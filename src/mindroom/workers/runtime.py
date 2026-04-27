@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import threading
+from copy import deepcopy
+from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS
@@ -22,6 +24,39 @@ _PRIMARY_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _PRIMARY_WORKER_MANAGER: WorkerManager | None = None
 _PRIMARY_WORKER_MANAGER_CONFIG: tuple[str, ...] | None = None
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
+_WORKER_VALIDATION_SNAPSHOT_CACHE: dict[tuple[str, ...], dict[str, dict[str, object]]] = {}
+_WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK = threading.Lock()
+
+
+def _stable_json_digest(payload: object) -> str:
+    """Return a stable in-memory identity for JSON-like config payloads."""
+    serialized = json.dumps(payload, default=repr, separators=(",", ":"), sort_keys=True)
+    return sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _worker_validation_snapshot_cache_key(
+    runtime_paths: RuntimePaths,
+    runtime_config: Config,
+) -> tuple[str, ...]:
+    """Return the cheap explicit inputs that affect worker validation metadata."""
+    plugins_identity = [plugin_entry.model_dump(mode="json") for plugin_entry in runtime_config.plugins]
+    mcp_identity = {
+        server_id: server_config.model_dump(mode="json")
+        for server_id, server_config in runtime_config.mcp_servers.items()
+    }
+    return (
+        str(runtime_paths.config_path),
+        str(runtime_paths.config_dir),
+        str(runtime_paths.storage_root),
+        _stable_json_digest(plugins_identity),
+        _stable_json_digest(mcp_identity),
+    )
+
+
+def clear_worker_validation_snapshot_cache() -> None:
+    """Clear cached Kubernetes worker validation snapshots."""
+    with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
+        _WORKER_VALIDATION_SNAPSHOT_CACHE.clear()
 
 
 def serialized_kubernetes_worker_validation_snapshot(
@@ -30,17 +65,29 @@ def serialized_kubernetes_worker_validation_snapshot(
     runtime_config: Config | None = None,
 ) -> dict[str, dict[str, object]]:
     """Build the authoritative worker validation snapshot in the primary runtime."""
-    from mindroom.config.main import load_config  # noqa: PLC0415
-    from mindroom.tool_system.catalog import (  # noqa: PLC0415
-        resolved_tool_validation_snapshot_for_runtime,
-        serialize_tool_validation_snapshot,
-    )
+    if runtime_config is None:
+        from mindroom.config.main import load_config  # noqa: PLC0415
 
-    snapshot = resolved_tool_validation_snapshot_for_runtime(
-        runtime_paths,
-        runtime_config or load_config(runtime_paths),
-    )
-    return serialize_tool_validation_snapshot(snapshot)
+        config = load_config(runtime_paths)
+    else:
+        config = runtime_config
+
+    with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
+        cache_key = _worker_validation_snapshot_cache_key(runtime_paths, config)
+        cached_snapshot = _WORKER_VALIDATION_SNAPSHOT_CACHE.get(cache_key)
+        if cached_snapshot is None:
+            from mindroom.tool_system.catalog import (  # noqa: PLC0415
+                resolved_tool_validation_snapshot_for_runtime,
+                serialize_tool_validation_snapshot,
+            )
+
+            snapshot = resolved_tool_validation_snapshot_for_runtime(
+                runtime_paths,
+                config,
+            )
+            cached_snapshot = serialize_tool_validation_snapshot(snapshot)
+            _WORKER_VALIDATION_SNAPSHOT_CACHE[cache_key] = cached_snapshot
+        return deepcopy(cached_snapshot)
 
 
 def _normalize_backend_name(raw_value: str | None) -> str:
@@ -225,3 +272,4 @@ def _reset_primary_worker_manager() -> None:
     with _PRIMARY_WORKER_MANAGER_LOCK:
         _PRIMARY_WORKER_MANAGER = None
         _PRIMARY_WORKER_MANAGER_CONFIG = None
+    clear_worker_validation_snapshot_cache()

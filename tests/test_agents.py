@@ -2251,11 +2251,14 @@ def test_resolve_agent_runtime_skips_missing_private_template_copy_for_dedicated
         create=True,
     )
 
-    expected_workspace = _private_instance_state_root_path(
-        shared_root,
-        worker_key=worker_key,
-        agent_name="general",
-    ) / "mind_data"
+    expected_workspace = (
+        _private_instance_state_root_path(
+            shared_root,
+            worker_key=worker_key,
+            agent_name="general",
+        )
+        / "mind_data"
+    )
     assert agent_runtime.workspace is not None
     assert agent_runtime.workspace.root == expected_workspace
     assert expected_workspace.is_dir()
