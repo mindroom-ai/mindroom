@@ -164,6 +164,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.identity",
     "mindroom.matrix.rooms",
+    "mindroom.matrix_naming",
 ]
 
 [[modules]]
@@ -811,10 +812,10 @@ depends_on = [
     "mindroom.config.plugin",
     "mindroom.config.voice",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.history.types",
     "mindroom.logging_config",
-    "mindroom.matrix.identity",
-    "mindroom.matrix.rooms",
+    "mindroom.matrix_naming",
     "mindroom.mcp.config",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
@@ -1098,6 +1099,10 @@ visibility = [
 [[modules]]
 path = "mindroom.constants"
 depends_on = []
+
+[[modules]]
+path = "mindroom.matrix_naming"
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.cancellation"
