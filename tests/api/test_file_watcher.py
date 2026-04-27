@@ -6,6 +6,8 @@ from pathlib import Path
 import yaml
 from fastapi.testclient import TestClient
 
+from mindroom.api import config_lifecycle
+
 
 def test_file_watcher_detects_changes(test_client: TestClient, temp_config_file: Path) -> None:
     """Test that external config changes can be loaded."""
@@ -33,7 +35,7 @@ def test_file_watcher_detects_changes(test_client: TestClient, temp_config_file:
     # For testing, we manually trigger a reload
     from mindroom.api import main  # noqa: PLC0415
 
-    main._load_config_from_file(main._app_runtime_paths(main.app), main.app)
+    config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
 
     # Check that the config was reloaded
     response = test_client.get("/api/config/agents")

@@ -9,6 +9,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from mindroom.api import config_lifecycle
+
 
 @pytest.fixture
 def temp_config_file(tmp_path: Path) -> Generator[Path, None, None]:
@@ -47,7 +49,7 @@ def test_client(temp_config_file: Path) -> TestClient:
     main.initialize_api_app(main.app, runtime_paths)
 
     # Force reload of config
-    main._load_config_from_file(main._app_runtime_paths(main.app), main.app)
+    config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
 
     # Create test client
     return TestClient(main.app)

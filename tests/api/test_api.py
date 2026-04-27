@@ -109,6 +109,20 @@ def _publish_committed_runtime_config(
     context.auth_state = None
 
 
+def test_api_main_does_not_reexport_config_lifecycle_pass_through_helpers() -> None:
+    """Config lifecycle helpers should live in the lifecycle module only."""
+    for helper_name in (
+        "_app_config_data",
+        "_app_config_lock",
+        "_run_config_write",
+        "_run_request_config_write",
+        "_read_committed_config",
+        "_read_request_committed_config",
+        "_load_config_from_file",
+    ):
+        assert not hasattr(main, helper_name)
+
+
 class _ContextSwapLock:
     def __init__(self, on_enter: Callable[[], None] | None = None) -> None:
         self.on_enter = on_enter
@@ -331,8 +345,8 @@ def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
     main.initialize_api_app(fresh_app, runtime_paths)
 
     assert main._app_runtime_paths(fresh_app) == runtime_paths
-    assert main._app_config_data(fresh_app) == {}
-    assert hasattr(main._app_config_lock(fresh_app), "acquire")
+    assert main._app_context(fresh_app).config_data == {}
+    assert hasattr(main._app_state(fresh_app).config_lock, "acquire")
     assert auth.app_auth_state(fresh_app).runtime_paths == runtime_paths
 
 
@@ -392,12 +406,12 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
     fresh_app = FastAPI()
 
     main.initialize_api_app(fresh_app, first_runtime)
-    main._load_config_from_file(first_runtime, fresh_app)
-    assert set(main._app_config_data(fresh_app)["agents"]) == {"first"}
+    config_lifecycle.load_config_into_app(first_runtime, fresh_app)
+    assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
 
     main.initialize_api_app(fresh_app, second_runtime)
 
-    assert main._app_config_data(fresh_app) == {}
+    assert main._app_context(fresh_app).config_data == {}
 
 
 def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: Path) -> None:
@@ -417,12 +431,12 @@ def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: P
     fresh_app = FastAPI()
 
     main.initialize_api_app(fresh_app, runtime_one)
-    main._load_config_from_file(runtime_one, fresh_app)
-    assert set(main._app_config_data(fresh_app)["agents"]) == {"first"}
+    config_lifecycle.load_config_into_app(runtime_one, fresh_app)
+    assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
 
     main.initialize_api_app(fresh_app, runtime_two)
 
-    assert main._app_config_data(fresh_app) == {}
+    assert main._app_context(fresh_app).config_data == {}
 
 
 def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path: Path) -> None:
@@ -491,7 +505,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
     assert set(context.config_data["agents"]) == {"second"}
 
 
-def test_load_config_from_file_ignores_runtime_mismatches_after_api_runtime_swap(tmp_path: Path) -> None:
+def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(tmp_path: Path) -> None:
     """Loading one old runtime after a swap must not overwrite the current app context."""
     fresh_app = FastAPI()
     first_runtime = constants.resolve_primary_runtime_paths(
@@ -524,15 +538,15 @@ def test_load_config_from_file_ignores_runtime_mismatches_after_api_runtime_swap
     )
 
     main.initialize_api_app(fresh_app, first_runtime)
-    assert main._load_config_from_file(first_runtime, fresh_app) is True
-    assert set(main._app_config_data(fresh_app)["agents"]) == {"first"}
+    assert config_lifecycle.load_config_into_app(first_runtime, fresh_app) is True
+    assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
 
     main.initialize_api_app(fresh_app, second_runtime)
-    assert main._load_config_from_file(second_runtime, fresh_app) is True
-    assert set(main._app_config_data(fresh_app)["agents"]) == {"second"}
+    assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
+    assert set(main._app_context(fresh_app).config_data["agents"]) == {"second"}
 
-    assert main._load_config_from_file(first_runtime, fresh_app) is False
-    assert set(main._app_config_data(fresh_app)["agents"]) == {"second"}
+    assert config_lifecycle.load_config_into_app(first_runtime, fresh_app) is False
+    assert set(main._app_context(fresh_app).config_data["agents"]) == {"second"}
     assert main._app_context(fresh_app).config_load_result == main.ConfigLoadResult(success=True)
 
 
@@ -704,8 +718,8 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
     second_runtime = constants.resolve_primary_runtime_paths(config_path=second_config_path, process_env={})
     main.initialize_api_app(main.app, first_runtime)
     monkeypatch.setattr(
-        main,
-        "_load_config_from_file",
+        config_lifecycle,
+        "load_config_into_app",
         lambda runtime_paths, _app: _record_loaded_path(runtime_paths, loaded_paths, load_event),
     )
 
@@ -1582,7 +1596,7 @@ def test_get_tools_uses_one_runtime_snapshot(
 
     def _read_tools_runtime_config(_request: object) -> tuple[Config, constants.RuntimePaths]:
         main.initialize_api_app(main.app, second_runtime)
-        main._load_config_from_file(second_runtime, main.app)
+        config_lifecycle.load_config_into_app(second_runtime, main.app)
         return _config_with_worker_scope("shared"), first_runtime
 
     def _resolve_tool_availability_context(
@@ -2568,7 +2582,7 @@ def test_save_config_can_recover_from_invalid_reload(
     """Full config replacement should recover from an invalid on-disk config."""
     runtime_paths = main._app_runtime_paths(test_client.app)
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
-    assert main._load_config_from_file(runtime_paths, main.app) is False
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     valid_config = {
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
@@ -2602,7 +2616,7 @@ def test_get_raw_config_source_returns_current_invalid_file(
     invalid_source = "agents:\n  broken: [\n"
     temp_config_file.write_text(invalid_source, encoding="utf-8")
 
-    assert main._load_config_from_file(runtime_paths, main.app) is False
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     response = test_client.get("/api/config/raw")
 
@@ -2618,7 +2632,7 @@ def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_fil
     runtime_paths = main._app_runtime_paths(test_client.app)
     temp_config_file.write_bytes(b"agents:\n  broken: \xff\n")
 
-    assert main._load_config_from_file(runtime_paths, main.app) is False
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     response = test_client.get("/api/config/raw")
 
@@ -2634,7 +2648,7 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
     runtime_paths = main._app_runtime_paths(test_client.app)
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
 
-    assert main._load_config_from_file(runtime_paths, main.app) is False
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     valid_source = yaml.safe_dump(
         {
@@ -2804,7 +2818,7 @@ def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path)
     assert results[1][1]["agents"] == {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}}
 
 
-def test_run_config_write_restores_original_config_before_releasing_lock(tmp_path: Path) -> None:
+def test_write_app_committed_config_restores_original_config_before_releasing_lock(tmp_path: Path) -> None:
     """Failed config writes should leave committed config unchanged before the lock exits."""
     main.initialize_api_app(
         main.app,
@@ -2835,7 +2849,7 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
     app_state.config_lock = _AssertingLock()
     try:
         with pytest.raises(HTTPException) as exc_info:
-            main._run_config_write(
+            config_lifecycle.write_app_committed_config(
                 main.app,
                 lambda candidate_config: candidate_config.update(
                     {
@@ -2854,7 +2868,7 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
     assert context.config_data == original_config
 
 
-def test_run_config_write_returns_422_for_invalid_plugin_manifest_name(tmp_path: Path) -> None:
+def test_write_app_committed_config_returns_422_for_invalid_plugin_manifest_name(tmp_path: Path) -> None:
     """API config writes should surface invalid plugin manifests as user config errors."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
@@ -2875,7 +2889,7 @@ def test_run_config_write_returns_422_for_invalid_plugin_manifest_name(tmp_path:
     }
 
     with pytest.raises(HTTPException) as exc_info:
-        main._run_config_write(
+        config_lifecycle.write_app_committed_config(
             main.app,
             lambda candidate_config: candidate_config.update({"plugins": ["./plugins/bad-name"]}),
             error_prefix="Failed to save configuration",
@@ -2887,7 +2901,7 @@ def test_run_config_write_returns_422_for_invalid_plugin_manifest_name(tmp_path:
     assert exc_info.value.detail[0]["type"] == "value_error"
 
 
-def test_run_config_write_checks_current_config_load_result_after_acquiring_lock(tmp_path: Path) -> None:
+def test_write_app_committed_config_checks_current_config_load_result_after_acquiring_lock(tmp_path: Path) -> None:
     """Config writes should see a reload failure published while they are waiting on the lock."""
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -2930,7 +2944,7 @@ def test_run_config_write_checks_current_config_load_result_after_acquiring_lock
 
     def _run_write() -> None:
         try:
-            main._run_config_write(
+            config_lifecycle.write_app_committed_config(
                 main.app,
                 lambda candidate_config: candidate_config["agents"].update(
                     {
@@ -2984,7 +2998,7 @@ def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_confi
     )
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
-    assert main._load_config_from_file(runtime_paths, main.app) is True
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is True
     client = TestClient(main.app)
 
     response = client.post("/api/config/load")
@@ -2999,7 +3013,7 @@ def test_api_config_load_returns_422_for_malformed_yaml(temp_config_file: Path) 
     temp_config_file.write_text("agents:\n  bad: [\n", encoding="utf-8")
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
-    main._load_config_from_file(runtime_paths, main.app)
+    config_lifecycle.load_config_into_app(runtime_paths, main.app)
     client = TestClient(main.app)
 
     response = client.post("/api/config/load")
@@ -3013,7 +3027,7 @@ def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_co
     """API config loads should return the latest parse error instead of stale last-known-good data."""
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
-    main._load_config_from_file(runtime_paths, main.app)
+    config_lifecycle.load_config_into_app(runtime_paths, main.app)
     client = TestClient(main.app)
 
     initial_response = client.post("/api/config/load")
@@ -3022,7 +3036,7 @@ def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_co
 
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
 
-    assert main._load_config_from_file(runtime_paths, main.app) is False
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     response = client.post("/api/config/load")
 
@@ -3050,7 +3064,7 @@ def test_api_cached_read_endpoints_refuse_stale_config_after_invalid_reload(
     runtime_paths = main._app_runtime_paths(api_key_client.app)
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
 
-    assert main._load_config_from_file(runtime_paths, main.app) is False
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     response = api_key_client.get(path, headers={"Authorization": "Bearer test-key"})
 
@@ -3067,7 +3081,7 @@ def test_api_cached_write_endpoints_refuse_stale_config_after_invalid_reload(
     invalid_source = "agents:\n  broken: [\n"
     temp_config_file.write_text(invalid_source, encoding="utf-8")
 
-    assert main._load_config_from_file(runtime_paths, main.app) is False
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     response = api_key_client.put(
         "/api/config/models/default",
@@ -3089,7 +3103,7 @@ def test_api_key_raw_endpoints_recover_from_invalid_reload(
     invalid_source = "agents:\n  broken: [\n"
     temp_config_file.write_text(invalid_source, encoding="utf-8")
 
-    assert main._load_config_from_file(runtime_paths, main.app) is False
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     raw_response = api_key_client.get(
         "/api/config/raw",
@@ -3117,7 +3131,7 @@ def test_api_key_raw_endpoints_recover_from_invalid_reload(
     assert load_response.json()["agents"]["recovered"]["display_name"] == "Recovered"
 
 
-def test_load_config_from_file_omits_legacy_null_optional_sections(tmp_path: Path) -> None:
+def test_load_config_into_app_omits_legacy_null_optional_sections(tmp_path: Path) -> None:
     """API config loads should drop legacy null optional sections from authored config data."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -3134,14 +3148,14 @@ def test_load_config_from_file_omits_legacy_null_optional_sections(tmp_path: Pat
     )
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
 
-    main._load_config_from_file(runtime_paths, main.app)
+    config_lifecycle.load_config_into_app(runtime_paths, main.app)
 
     config_data = main._app_context(main.app).config_data
     assert "teams" not in config_data
     assert "plugins" not in config_data
 
 
-def test_run_config_write_omits_legacy_null_optional_sections(tmp_path: Path) -> None:
+def test_write_app_committed_config_omits_legacy_null_optional_sections(tmp_path: Path) -> None:
     """API config writes should drop legacy null optional sections from authored config data."""
     config_path = tmp_path / "config.yaml"
     main.initialize_api_app(
@@ -3156,7 +3170,7 @@ def test_run_config_write_omits_legacy_null_optional_sections(tmp_path: Path) ->
         "plugins": None,
     }
 
-    main._run_config_write(
+    config_lifecycle.write_app_committed_config(
         main.app,
         lambda _candidate_config: None,
         error_prefix="Failed to save configuration",
@@ -3635,7 +3649,7 @@ def api_key_client(temp_config_file: Path) -> TestClient:
         ),
         supabase_auth=None,
     )
-    main._load_config_from_file(main._app_runtime_paths(main.app), main.app)
+    config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
     return TestClient(main.app)
 
 
@@ -3699,14 +3713,14 @@ def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Pa
             },
         },
     }
-    original_read = main.read_api_committed_config
+    original_read = config_lifecycle.read_committed_config
 
     def _swap_then_read(request: Request, reader: Callable[[dict[str, Any]], object]) -> object:
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
         return original_read(request, reader)
 
     with (
-        patch.object(main, "read_api_committed_config", side_effect=_swap_then_read),
+        patch.object(config_lifecycle, "read_committed_config", side_effect=_swap_then_read),
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
@@ -3734,7 +3748,7 @@ def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None
     payload_a = _authored_config_payload("old")
     payload_b = _authored_config_payload("new")
     runtime_b.config_path.write_text(yaml.safe_dump(payload_b), encoding="utf-8")
-    original_replace = main.replace_api_committed_config
+    original_replace = config_lifecycle.replace_committed_config
 
     def _swap_then_replace(
         request: Request,
@@ -3752,7 +3766,7 @@ def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None
         )
 
     with (
-        patch.object(main, "replace_api_committed_config", side_effect=_swap_then_replace),
+        patch.object(config_lifecycle, "replace_committed_config", side_effect=_swap_then_replace),
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
@@ -3785,14 +3799,14 @@ def test_protected_raw_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path
     source_b = yaml.safe_dump(payload_b, sort_keys=True)
     runtime_a.config_path.write_text(source_a, encoding="utf-8")
     runtime_b.config_path.write_text(source_b, encoding="utf-8")
-    original_read = main.read_api_raw_config_source
+    original_read = config_lifecycle.read_raw_config_source
 
     def _swap_then_read(request: Request) -> str:
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
         return original_read(request)
 
     with (
-        patch.object(main, "read_api_raw_config_source", side_effect=_swap_then_read),
+        patch.object(config_lifecycle, "read_raw_config_source", side_effect=_swap_then_read),
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
@@ -3821,7 +3835,7 @@ def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> 
     payload_b = _authored_config_payload("new")
     source_b = yaml.safe_dump(payload_b, sort_keys=True)
     runtime_b.config_path.write_text(source_b, encoding="utf-8")
-    original_replace = main.replace_api_raw_config_source
+    original_replace = config_lifecycle.replace_raw_config_source
 
     def _swap_then_replace(
         request: Request,
@@ -3839,7 +3853,7 @@ def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> 
         )
 
     with (
-        patch.object(main, "replace_api_raw_config_source", side_effect=_swap_then_replace),
+        patch.object(config_lifecycle, "replace_raw_config_source", side_effect=_swap_then_replace),
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
@@ -3868,7 +3882,7 @@ def test_protected_crud_write_rejects_runtime_swap_after_auth(tmp_path: Path) ->
     payload_a = _authored_config_payload("old")
     payload_b = _authored_config_payload("new")
     runtime_b.config_path.write_text(yaml.safe_dump(payload_b), encoding="utf-8")
-    original_write = main.write_api_committed_config
+    original_write = config_lifecycle.write_committed_config
 
     def _swap_then_write(
         request: Request,
@@ -3880,7 +3894,7 @@ def test_protected_crud_write_rejects_runtime_swap_after_auth(tmp_path: Path) ->
         return original_write(request, mutate, error_prefix=error_prefix)
 
     with (
-        patch.object(main, "write_api_committed_config", side_effect=_swap_then_write),
+        patch.object(config_lifecycle, "write_committed_config", side_effect=_swap_then_write),
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
