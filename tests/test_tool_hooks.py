@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, Literal
@@ -585,6 +586,35 @@ async def test_sync_tool_function_call_aexecute_runs_tool_hooks(tmp_path: Path) 
         ("tool", "hi"),
         ("after", "HI", False, "$resolved-thread"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_bridge_runs_sync_tools_off_event_loop() -> None:
+    """Blocking sync tools should not stall the async tool-dispatch loop."""
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
+    assert bridge is not None
+
+    loop_thread_id = threading.get_ident()
+    stop_ticking = False
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while not stop_ticking:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    def slow_sync_tool() -> int:
+        time.sleep(0.1)
+        return threading.get_ident()
+
+    ticker_task = asyncio.create_task(ticker())
+    tool_thread_id = await bridge("slow_sync_tool", slow_sync_tool, {})
+    stop_ticking = True
+    await ticker_task
+
+    assert tool_thread_id != loop_thread_id
+    assert ticks > 0
 
 
 @pytest.mark.asyncio
