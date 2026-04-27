@@ -19,6 +19,7 @@ from watchfiles import Change
 
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
+import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
 from mindroom.api import main
@@ -29,7 +30,7 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge import (
     KnowledgeAvailability,
     KnowledgeAvailabilityDetail,
-    PerBindingKnowledgeRefreshScheduler,
+    KnowledgeRefreshScheduler,
     get_agent_knowledge,
 )
 from mindroom.knowledge.manager import (
@@ -383,7 +384,7 @@ def test_real_refresh_scheduler_without_running_loop_does_not_mark_active(tmp_pa
     docs_path.mkdir()
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    scheduler = PerBindingKnowledgeRefreshScheduler()
+    scheduler = KnowledgeRefreshScheduler()
 
     assert get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler) is None
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
@@ -391,6 +392,14 @@ def test_real_refresh_scheduler_without_running_loop_does_not_mark_active(tmp_pa
 
     assert knowledge_refresh_runner.is_refresh_active(refresh_target) is False
     assert scheduler.is_refreshing("docs", config=config, runtime_paths=runtime_paths) is False
+
+
+def test_refresh_scheduler_module_exports_one_concrete_scheduler_name() -> None:
+    """The refresh scheduler module should expose one concrete scheduler concept."""
+    assert knowledge_refresh_scheduler.KnowledgeRefreshScheduler.__name__ == "KnowledgeRefreshScheduler"
+    assert not hasattr(knowledge_refresh_scheduler, "StandaloneKnowledgeRefreshScheduler")
+    assert not hasattr(knowledge_refresh_scheduler, "OrchestratorKnowledgeRefreshScheduler")
+    assert not hasattr(knowledge_refresh_scheduler, "PerBindingKnowledgeRefreshScheduler")
 
 
 def test_failed_notice_without_index_says_unavailable() -> None:
@@ -478,7 +487,7 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("shared local new", encoding="utf-8")
-    scheduler = PerBindingKnowledgeRefreshScheduler()
+    scheduler = KnowledgeRefreshScheduler()
 
     try:
         knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler)
@@ -3545,7 +3554,7 @@ async def test_refresh_scheduler_runs_independent_per_binding_tasks(
     docs_b = tmp_path / "docs-b"
     config = _config(tmp_path, bases={"a": docs_a, "b": docs_b}, agent_bases=["a", "b"])
     runtime_paths = runtime_paths_for(config)
-    scheduler = PerBindingKnowledgeRefreshScheduler()
+    scheduler = KnowledgeRefreshScheduler()
     started: list[str] = []
     release: dict[str, asyncio.Event] = {"a": asyncio.Event(), "b": asyncio.Event()}
 
@@ -3586,7 +3595,7 @@ async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
     latest_pending_config = config.model_copy(deep=True)
     latest_pending_config.knowledge_bases["docs"].chunk_size = 4096
     runtime_paths = runtime_paths_for(config)
-    scheduler = PerBindingKnowledgeRefreshScheduler()
+    scheduler = KnowledgeRefreshScheduler()
     seen_chunk_sizes: list[int] = []
     first_started = asyncio.Event()
     release_first = asyncio.Event()
@@ -3635,7 +3644,7 @@ async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    scheduler = PerBindingKnowledgeRefreshScheduler()
+    scheduler = KnowledgeRefreshScheduler()
     seen_force_reindex: list[bool] = []
 
     async def _fake_refresh(base_id: str, **kwargs: object) -> object:
@@ -3667,7 +3676,7 @@ async def test_refresh_scheduler_shutdown_suppresses_completed_refresh_failures(
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    scheduler = PerBindingKnowledgeRefreshScheduler()
+    scheduler = KnowledgeRefreshScheduler()
 
     async def _fake_refresh(base_id: str, **_kwargs: object) -> object:
         _ = base_id
@@ -3690,7 +3699,7 @@ async def test_refresh_scheduler_does_not_schedule_after_shutdown(
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    scheduler = PerBindingKnowledgeRefreshScheduler()
+    scheduler = KnowledgeRefreshScheduler()
     calls = 0
 
     async def _fake_refresh(base_id: str, **_kwargs: object) -> object:
@@ -3718,8 +3727,8 @@ async def test_refresh_status_is_visible_across_scheduler_instances(
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    matrix_scheduler = PerBindingKnowledgeRefreshScheduler()
-    api_scheduler = PerBindingKnowledgeRefreshScheduler()
+    matrix_scheduler = KnowledgeRefreshScheduler()
+    api_scheduler = KnowledgeRefreshScheduler()
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -5303,7 +5312,7 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
     old_config = config.model_copy(deep=True)
     old_config.knowledge_bases["docs"].chunk_size = 1024
     runtime_paths = runtime_paths_for(config)
-    scheduler = PerBindingKnowledgeRefreshScheduler()
+    scheduler = KnowledgeRefreshScheduler()
     first_started = asyncio.Event()
     release_first = asyncio.Event()
     seen: list[tuple[int, bool]] = []

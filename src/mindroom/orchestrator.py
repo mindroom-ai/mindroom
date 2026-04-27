@@ -25,7 +25,7 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
-from mindroom.knowledge import OrchestratorKnowledgeRefreshScheduler
+from mindroom.knowledge import KnowledgeRefreshScheduler
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.client_session import PermanentMatrixStartupError
@@ -225,7 +225,7 @@ class MultiAgentOrchestrator:
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     _plugin_watch_last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict, init=False)
     _plugin_watch_state_revision: int = field(default=0, init=False)
-    _knowledge_refresh_scheduler: OrchestratorKnowledgeRefreshScheduler = field(init=False)
+    _knowledge_refresh_scheduler: KnowledgeRefreshScheduler = field(init=False)
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
@@ -239,11 +239,11 @@ class MultiAgentOrchestrator:
             logger=logger,
             background_task_owner=self._event_cache_write_task_owner,
         )
-        self._knowledge_refresh_scheduler = OrchestratorKnowledgeRefreshScheduler()
+        self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
 
     @property
-    def knowledge_refresh_scheduler(self) -> OrchestratorKnowledgeRefreshScheduler:
+    def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
         """Return the orchestrator-owned background knowledge refresh scheduler."""
         return self._knowledge_refresh_scheduler
 
@@ -1645,7 +1645,7 @@ async def _run_api_server(
     port: int,
     log_level: str,
     runtime_paths: RuntimePaths,
-    knowledge_refresh_scheduler: OrchestratorKnowledgeRefreshScheduler | None = None,
+    knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     shutdown_requested: asyncio.Event | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""

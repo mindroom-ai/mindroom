@@ -4,12 +4,7 @@
 
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import KnowledgeManager
-from mindroom.knowledge.refresh_scheduler import (
-    KnowledgeRefreshScheduler,
-    OrchestratorKnowledgeRefreshScheduler,
-    PerBindingKnowledgeRefreshScheduler,
-    StandaloneKnowledgeRefreshScheduler,
-)
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.utils import (
     KnowledgeAccessSupport,
     KnowledgeAvailabilityDetail,
@@ -29,7 +24,4 @@ __all__ = [
     "format_knowledge_availability_notice",
     "KnowledgeRefreshScheduler",
     "resolve_agent_knowledge_access",
-    "OrchestratorKnowledgeRefreshScheduler",
-    "PerBindingKnowledgeRefreshScheduler",
-    "StandaloneKnowledgeRefreshScheduler",
 ]

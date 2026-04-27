@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from mindroom.knowledge.refresh_runner import (
     is_refresh_active,
@@ -26,44 +26,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class KnowledgeRefreshScheduler(Protocol):
-    """Owns best-effort background refresh tasks keyed by resolved knowledge binding."""
-
-    def schedule_refresh(
-        self,
-        base_id: str,
-        *,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> None:
-        """Schedule a background refresh for one resolved knowledge binding."""
-        ...
-
-    def is_refreshing(
-        self,
-        base_id: str,
-        *,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> bool:
-        """Return whether one resolved knowledge binding is refreshing."""
-        ...
-
-    async def refresh_now(
-        self,
-        base_id: str,
-        *,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        execution_identity: ToolExecutionIdentity | None = None,
-        force_reindex: bool = False,
-    ) -> KnowledgeRefreshResult:
-        """Run a refresh immediately and wait for it."""
-        ...
-
-
 @dataclass(frozen=True, slots=True)
 class _ScheduledRefresh:
     base_id: str
@@ -73,7 +35,7 @@ class _ScheduledRefresh:
 
 
 @dataclass(slots=True)
-class PerBindingKnowledgeRefreshScheduler:
+class KnowledgeRefreshScheduler:
     """Run at most one best-effort background refresh per binding."""
 
     _tasks: dict[KnowledgeRefreshTarget, asyncio.Task[None]] = field(default_factory=dict, init=False)
@@ -232,7 +194,3 @@ def _running_loop_for_schedule(base_id: str) -> asyncio.AbstractEventLoop | None
     except RuntimeError:
         logger.warning("Skipping knowledge refresh schedule without a running event loop", base_id=base_id)
         return None
-
-
-StandaloneKnowledgeRefreshScheduler = PerBindingKnowledgeRefreshScheduler
-OrchestratorKnowledgeRefreshScheduler = PerBindingKnowledgeRefreshScheduler

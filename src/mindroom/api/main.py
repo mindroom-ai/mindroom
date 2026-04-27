@@ -43,7 +43,7 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.knowledge import StandaloneKnowledgeRefreshScheduler
+from mindroom.knowledge import KnowledgeRefreshScheduler
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
@@ -62,8 +62,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
-    from mindroom.knowledge import KnowledgeRefreshScheduler
-
 logger = get_logger(__name__)
 _UNSET = object()
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
@@ -426,12 +424,12 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("Syncing API credentials from runtime env")
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
-    standalone_knowledge_refresh_scheduler: StandaloneKnowledgeRefreshScheduler | None = None
+    api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler = _orchestrator_knowledge_refresh_scheduler(_app)
     if knowledge_refresh_scheduler is None:
-        standalone_knowledge_refresh_scheduler = StandaloneKnowledgeRefreshScheduler()
-        knowledge_refresh_scheduler = standalone_knowledge_refresh_scheduler
+        api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
+        knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
         standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler)
         _app.state.knowledge_source_watcher = standalone_knowledge_source_watcher
     _app.state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
@@ -455,8 +453,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await worker_cleanup_task
     if standalone_knowledge_source_watcher is not None:
         await standalone_knowledge_source_watcher.shutdown()
-    if standalone_knowledge_refresh_scheduler is not None:
-        await standalone_knowledge_refresh_scheduler.shutdown()
+    if api_owned_knowledge_refresh_scheduler is not None:
+        await api_owned_knowledge_refresh_scheduler.shutdown()
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
