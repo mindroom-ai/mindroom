@@ -362,7 +362,10 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
             mock_create_bot.side_effect = create_bot_side_effect
             await orchestrator.initialize()
 
-    # Start the orchestrator (in background)
+    # Start the orchestrator (in background). This test uses a deliberately small
+    # MagicMock config, so keep unrelated runtime services stubbed.
+    support_services_patch = patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock())
+    support_services_patch.start()
     start_task = asyncio.create_task(orchestrator.start())
 
     try:
@@ -513,6 +516,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         start_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await start_task
+        support_services_patch.stop()
 
 
 @pytest.mark.asyncio

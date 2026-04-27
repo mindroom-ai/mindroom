@@ -1041,7 +1041,7 @@ class MultiAgentOrchestrator:
         self.running = True
 
         set_runtime_starting("Starting background workers")
-        await self._sync_memory_auto_flush_worker()
+        await self._sync_runtime_support_services(config, start_watcher=True)
 
         # Create sync tasks for each bot with automatic restart on failure.
         set_runtime_starting("Starting Matrix sync loops")
