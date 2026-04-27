@@ -127,6 +127,15 @@ class PerBindingKnowledgeRefreshScheduler:
         force_reindex: bool = False,
     ) -> KnowledgeRefreshResult:
         """Run a refresh immediately and wait for it."""
+        with suppress(Exception):
+            key = resolve_refresh_target(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                create=False,
+            )
+            self._pending.pop(key, None)
         return await refresh_knowledge_binding(
             base_id,
             config=config,

@@ -3449,8 +3449,12 @@ async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best
     scheduler.schedule_refresh.assert_called_once()
 
 
-def test_api_upload_failure_keeps_earlier_best_effort_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A later upload failure does not roll back earlier direct source writes."""
+@pytest.mark.asyncio
+async def test_api_upload_failure_does_not_commit_earlier_staged_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed upload batch leaves the source tree and published index unchanged."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("existing upload", encoding="utf-8")
@@ -3458,6 +3462,7 @@ def test_api_upload_failure_keeps_earlier_best_effort_writes(tmp_path: Path, mon
     runtime_paths = runtime_paths_for(config)
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     scheduler = MagicMock()
     scheduler.schedule_refresh = MagicMock()
     main.app.state.knowledge_refresh_scheduler = scheduler
@@ -3473,8 +3478,20 @@ def test_api_upload_failure_keeps_earlier_best_effort_writes(tmp_path: Path, mon
     )
 
     assert response.status_code == 413
-    assert (docs_path / "guide.md").read_text(encoding="utf-8") == "small"
+    unavailable: dict[str, KnowledgeAvailability] = {}
+    knowledge = get_agent_knowledge(
+        "helper",
+        config,
+        runtime_paths,
+        on_unavailable_bases=unavailable.update,
+    )
+    assert knowledge is not None
+    assert unavailable == {}
+    assert (docs_path / "guide.md").read_text(encoding="utf-8") == "existing upload"
     assert not (docs_path / "new.md").exists()
+    assert [document.content for document in knowledge.search("existing upload", max_results=5)] == [
+        "existing upload",
+    ]
     scheduler.schedule_refresh.assert_not_called()
 
 
@@ -5317,6 +5334,12 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
     await asyncio.sleep(0)
     release_first.set()
     await manual_task
+    for _attempt in range(50):
+        if not scheduler._tasks:
+            break
+        await asyncio.sleep(0)
+    else:
+        pytest.fail("manual refresh left a stale background refresh running")
     await scheduler.shutdown()
 
     assert seen == [(1024, False), (5000, True)]

@@ -401,17 +401,31 @@ def _upload_temp_path(destination: Path) -> Path:
     return destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.upload.tmp")
 
 
-async def _write_upload(upload: UploadFile, destination: Path, filename: str, root: Path) -> str:
+@dataclass(frozen=True, slots=True)
+class _UploadTarget:
+    upload: UploadFile
+    destination: Path
+    filename: str
+    relative_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedUpload:
+    temp_path: Path
+    destination: Path
+    relative_path: str
+
+
+async def _stage_upload(upload: UploadFile, destination: Path, filename: str, relative_path: str) -> _StagedUpload:
     _validate_upload_size_hint(upload, filename)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_path = _upload_temp_path(destination)
     try:
         await _stream_upload_to_destination(upload, temp_path, filename)
-        temp_path.replace(destination)
     except (asyncio.CancelledError, Exception):
         temp_path.unlink(missing_ok=True)
         raise
-    return destination.relative_to(root.resolve()).as_posix()
+    return _StagedUpload(temp_path=temp_path, destination=destination, relative_path=relative_path)
 
 
 async def _write_uploads(
@@ -423,7 +437,7 @@ async def _write_uploads(
     root: Path,
 ) -> list[str]:
     try:
-        upload_targets: list[tuple[UploadFile, Path, str]] = []
+        upload_targets: list[_UploadTarget] = []
         seen_relative_paths: set[str] = set()
         resolved_root = root.resolve()
         for upload in files:
@@ -439,12 +453,33 @@ async def _write_uploads(
                 _reject_duplicate_upload_destination(relative_path)
             seen_relative_paths.add(relative_path)
             _reject_non_file_upload_destination(destination, relative_path)
-            upload_targets.append((upload, destination, filename))
+            upload_targets.append(
+                _UploadTarget(
+                    upload=upload,
+                    destination=destination,
+                    filename=filename,
+                    relative_path=relative_path,
+                ),
+            )
 
-        uploaded: list[str] = []
-        for upload, destination, filename in upload_targets:
-            uploaded.append(await _write_upload(upload, destination, filename, root))
-        return uploaded
+        staged_uploads: list[_StagedUpload] = []
+        try:
+            staged_uploads = [
+                await _stage_upload(
+                    target.upload,
+                    target.destination,
+                    target.filename,
+                    target.relative_path,
+                )
+                for target in upload_targets
+            ]
+            for staged_upload in staged_uploads:
+                staged_upload.temp_path.replace(staged_upload.destination)
+        except (asyncio.CancelledError, Exception):
+            for staged_upload in staged_uploads:
+                staged_upload.temp_path.unlink(missing_ok=True)
+            raise
+        return [staged_upload.relative_path for staged_upload in staged_uploads]
     finally:
         for upload in files:
             await upload.close()
