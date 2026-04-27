@@ -813,7 +813,6 @@ class KnowledgeManager:
     _git_lfs_checked: bool = field(default=False, init=False)
     _git_lfs_repository_ready: bool = field(default=False, init=False)
     _git_tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
-    _cached_persisted_index_state: _PersistedIndexState | None = field(default=None, init=False, repr=False)
     _persisted_collection_missing_on_init: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -838,7 +837,6 @@ class KnowledgeManager:
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
         self._git_repo_present = base_config.git is not None and _git_metadata_present(self.knowledge_path)
         persisted_state = self._load_persisted_index_state()
-        self._cached_persisted_index_state = persisted_state
         self._persisted_collection_missing_on_init = self._persisted_collection_missing(persisted_state)
         collection_name = (
             persisted_state.collection
@@ -972,15 +970,6 @@ class KnowledgeManager:
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
-        self._cached_persisted_index_state = _PersistedIndexState(
-            settings=persisted_settings,
-            status=status,
-            collection=collection,
-            last_published_at=last_published_at,
-            published_revision=published_revision,
-            indexed_count=indexed_count,
-            source_signature=source_signature,
-        )
 
     def _load_git_lfs_hydrated_head(self) -> str | None:
         try:
@@ -1025,9 +1014,6 @@ class KnowledgeManager:
         git_config = self._git_config()
         return bool(git_config and git_config.lfs)
 
-    def _clear_git_initial_sync_complete(self) -> None:
-        self._git_initial_sync_complete = False
-
     def _mark_git_initial_sync_complete(self) -> None:
         self._git_initial_sync_complete = True
 
@@ -1043,16 +1029,6 @@ class KnowledgeManager:
             self._knowledge_source_path(),
             timeout_seconds=self._git_sync_timeout_seconds(),
         )
-
-    def _skip_hidden_paths(self) -> bool:
-        git_config = self._git_config()
-        return bool(git_config and git_config.skip_hidden)
-
-    def _is_hidden_relative_path(self, relative_path: Path) -> bool:
-        return _is_hidden_relative_path(relative_path)
-
-    def _include_file(self, file_path: Path) -> bool:
-        return include_knowledge_file(self.config, self.base_id, self._knowledge_source_path(), file_path)
 
     def _include_semantic_relative_path(self, relative_path: str) -> bool:
         if not self._include_relative_path(relative_path):
@@ -1292,22 +1268,6 @@ class KnowledgeManager:
             )
         return list_knowledge_files(self.config, self.base_id, knowledge_root)
 
-    def resolve_file_path(self, file_path: Path | str) -> Path:
-        """Resolve a path and ensure it stays inside the knowledge folder."""
-        knowledge_root = self._knowledge_source_path()
-        candidate = Path(file_path)
-        resolved = (
-            candidate.expanduser().resolve() if candidate.is_absolute() else (knowledge_root / candidate).resolve()
-        )
-
-        try:
-            resolved.relative_to(knowledge_root)
-        except ValueError as exc:
-            msg = f"Path {resolved} is outside knowledge folder {knowledge_root}"
-            raise ValueError(msg) from exc
-
-        return resolved
-
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
 
@@ -1529,15 +1489,6 @@ class KnowledgeManager:
         )
         if publish_cancelled:
             _raise_cancelled()
-
-    async def ensure_git_checkout_ready(self) -> None:
-        """Ensure the Git checkout exists before direct file writes land in the knowledge folder."""
-        if self._git_config() is None:
-            return
-        if await self._git_checkout_present():
-            self._git_repo_present = True
-            return
-        await self.sync_git_source()
 
     async def sync_git_source(self) -> dict[str, Any]:
         """Fetch and force-align one configured Git repository checkout."""
