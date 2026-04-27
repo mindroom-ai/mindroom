@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mindroom import constants
-from mindroom.api import main
+from mindroom.api import config_lifecycle, main
 
 
 def _add_test_team_to_runtime_config() -> None:
@@ -406,7 +406,7 @@ def test_matrix_operations_refuse_stale_config_after_invalid_reload(
     """Matrix operations should surface malformed current config instead of stale cached entities."""
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
-    assert main._load_config_from_file(runtime_paths, main.app) is False
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     with (
         patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
