@@ -24,9 +24,9 @@ from mindroom.constants import (
 )
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.logging_config import get_logger
-from mindroom.matrix.identity import agent_username_localpart
 from mindroom.matrix.media import download_media_bytes, extract_media_caption, media_mime_type
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix_naming import agent_username_localpart
 
 if TYPE_CHECKING:
     from pathlib import Path

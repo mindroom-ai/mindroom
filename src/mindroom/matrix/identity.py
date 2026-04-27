@@ -6,18 +6,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar
 
+from mindroom import matrix_naming
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.state import managed_account_usernames
-from mindroom.matrix_naming import (
-    AGENT_USERNAME_PREFIX,
-    agent_username_localpart,
-    extract_server_name_from_homeserver,
-    managed_room_alias_localpart,
-    managed_room_key_from_alias_localpart,
-    managed_space_alias_localpart,
-    mindroom_namespace,
-    room_alias_localpart,
-)
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -25,15 +16,8 @@ if TYPE_CHECKING:
 __all__ = [
     "MatrixID",
     "active_internal_sender_ids",
-    "agent_username_localpart",
     "extract_agent_name",
-    "extract_server_name_from_homeserver",
     "is_agent_id",
-    "managed_room_alias_localpart",
-    "managed_room_key_from_alias_localpart",
-    "managed_space_alias_localpart",
-    "mindroom_namespace",
-    "room_alias_localpart",
 ]
 
 
@@ -44,7 +28,7 @@ class MatrixID:
     username: str
     domain: str
 
-    AGENT_PREFIX: ClassVar[str] = AGENT_USERNAME_PREFIX
+    AGENT_PREFIX: ClassVar[str] = matrix_naming.AGENT_USERNAME_PREFIX
 
     @classmethod
     def parse(cls, matrix_id: str) -> MatrixID:
@@ -59,7 +43,7 @@ class MatrixID:
         runtime_paths: RuntimePaths,
     ) -> MatrixID:
         """Create a MatrixID for an agent."""
-        return cls(username=agent_username_localpart(agent_name, runtime_paths), domain=domain)
+        return cls(username=matrix_naming.agent_username_localpart(agent_name, runtime_paths), domain=domain)
 
     @classmethod
     def from_username(cls, username: str, domain: str) -> MatrixID:
@@ -82,7 +66,7 @@ class MatrixID:
 
         persisted_usernames = managed_account_usernames(runtime_paths)
         for account_key, active_name in _active_managed_agent_account_names(config).items():
-            expected_username = persisted_usernames.get(account_key) or agent_username_localpart(
+            expected_username = persisted_usernames.get(account_key) or matrix_naming.agent_username_localpart(
                 active_name,
                 runtime_paths,
             )

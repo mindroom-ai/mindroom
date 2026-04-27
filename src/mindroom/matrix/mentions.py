@@ -7,8 +7,9 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
-from mindroom.matrix.identity import MatrixID, mindroom_namespace
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix_naming import mindroom_namespace
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
