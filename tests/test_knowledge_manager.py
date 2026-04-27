@@ -138,7 +138,7 @@ class _Knowledge:
     def __init__(self, vector_db: _VectorDb) -> None:
         self.vector_db = vector_db
 
-    async def ainsert(
+    def insert(
         self,
         *,
         path: str,
@@ -151,6 +151,17 @@ class _Knowledge:
             _VectorDb.collections.setdefault(self.vector_db.collection_name, []).append(
                 {"content": Path(path).read_text(encoding="utf-8"), "metadata": dict(metadata)},
             )
+
+    async def ainsert(
+        self,
+        *,
+        path: str,
+        metadata: dict[str, object],
+        upsert: bool,
+        reader: object | None = None,
+    ) -> None:
+        # Match the real Knowledge surface: ainsert delegates to insert.
+        self.insert(path=path, metadata=metadata, upsert=upsert, reader=reader)
 
     def remove_vectors_by_metadata(self, metadata: dict[str, object]) -> bool:
         with _VectorDb.lock:
@@ -3334,7 +3345,7 @@ async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
     runtime_paths = runtime_paths_for(config)
 
     class _SkipEmptyKnowledge(_Knowledge):
-        async def ainsert(
+        def insert(
             self,
             *,
             path: str,
@@ -3343,7 +3354,7 @@ async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
             reader: object | None = None,
         ) -> None:
             if Path(path).read_text(encoding="utf-8"):
-                await super().ainsert(path=path, metadata=metadata, upsert=upsert, reader=reader)
+                super().insert(path=path, metadata=metadata, upsert=upsert, reader=reader)
 
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _SkipEmptyKnowledge)
 
@@ -5948,3 +5959,52 @@ def test_git_url_identity_preserves_passwordless_ssh_usernames() -> None:
     assert credential_free_url_identity(
         "ssh://user:old@example.com/org/repo.git;token=secret?query=secret#frag-secret",
     ) == credential_free_url_identity("ssh://example.com/org/repo.git")
+
+
+@pytest.mark.asyncio
+async def test_index_file_locked_runs_off_event_loop_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-file indexing must run on a worker thread so the asyncio loop stays responsive.
+
+    Knowledge.ainsert in production agno is async by name only: it eventually calls into
+    the vector database's synchronous batch upsert (e.g. ChromaDB's Rust _upsert) on the
+    running event loop, which blocks Matrix sync, tool calls, and cache writes for the
+    full duration of every file's embed+upsert cycle. The manager guards against this by
+    using the sync Knowledge.insert API via asyncio.to_thread; this test pins that
+    behavior so the regression cannot return silently.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("hello", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    main_thread_id = get_ident()
+    insert_thread_ids: list[int] = []
+    original_insert = _Knowledge.insert
+
+    def _record_insert(self: _Knowledge, **kwargs: object) -> None:
+        insert_thread_ids.append(get_ident())
+        original_insert(self, **kwargs)  # type: ignore[arg-type]
+
+    async def _forbidden_ainsert(self: _Knowledge, **kwargs: object) -> None:
+        _ = (self, kwargs)
+        msg = (
+            "Knowledge.ainsert was called: indexing must use the sync Knowledge.insert "
+            "API via asyncio.to_thread to keep the event loop responsive."
+        )
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(_Knowledge, "insert", _record_insert)
+    monkeypatch.setattr(_Knowledge, "ainsert", _forbidden_ainsert)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert insert_thread_ids, "expected at least one insert call during refresh"
+    for thread_id in insert_thread_ids:
+        assert thread_id != main_thread_id, (
+            f"Knowledge.insert ran on the asyncio main thread (id={thread_id}); "
+            "it must run on a worker thread via asyncio.to_thread."
+        )
