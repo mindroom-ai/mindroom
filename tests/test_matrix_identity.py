@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 from typing import TYPE_CHECKING
 
 import pytest
@@ -263,6 +264,64 @@ class TestHelperFunctions:
         migrated_data = yaml.safe_load(state_file.read_text())
         assert migrated_data["accounts"]["agent_general"]["domain"] == self.config.get_domain(runtime_paths)
         assert "known_user_ids" not in migrated_data["accounts"]["agent_general"]
+
+    def test_matrix_state_load_migrates_without_advisory_lock(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Matrix state loads should stay lock-free even when normalizing old files."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(
+            yaml.safe_dump(
+                {
+                    "accounts": {
+                        "agent_general": {
+                            "username": "mindroom_general_oldns",
+                            "password": "pw",
+                        },
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        def _fail_flock(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError
+
+        monkeypatch.setattr(fcntl, "flock", _fail_flock)
+
+        state = MatrixState.load(runtime_paths=runtime_paths)
+
+        assert state.accounts["agent_general"].domain == self.config.get_domain(runtime_paths)
+        assert not state_file.with_name("matrix_state.yaml.lock").exists()
+
+    def test_matrix_state_save_is_atomic_without_advisory_lock(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Matrix state saves should use temp-file replacement, not blocking file locks."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
+        domain = self.config.get_domain(runtime_paths)
+
+        def _fail_flock(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError
+
+        monkeypatch.setattr(fcntl, "flock", _fail_flock)
+
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general", "pw", domain=domain)
+        state.save(runtime_paths=runtime_paths)
+
+        assert yaml.safe_load(state_file.read_text(encoding="utf-8"))["accounts"]["agent_general"]["domain"] == domain
+        assert not state_file.with_name("matrix_state.yaml.lock").exists()
 
     def test_matrix_state_save_keeps_existing_file_when_temp_write_is_interrupted(
         self,
