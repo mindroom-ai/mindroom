@@ -551,7 +551,6 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
             ),
         ),
         patch_response_runner_module(
-            ensure_request_knowledge_managers=AsyncMock(return_value={}),
             typing_indicator=_noop_typing_indicator,
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ),

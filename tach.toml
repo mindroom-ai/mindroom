@@ -199,16 +199,30 @@ depends_on = [
     "mindroom.logging_config",
 ]
 
-# NOTE (arch-b-7): mindroom.api.main edge here (and on
-# mindroom.api.{homeassistant_integration, integrations}) is honest because
-# verify_user and _reload_api_runtime_config are defined in api.main and
-# imported via lazy function-local imports to break the import-time cycle.
-# This codifies a real bidirectional cycle between mindroom.api.main and
-# these routers; ARCH-B-9 will lift those helpers into a leaf module
-# (likely a new api.auth) and remove the back-edges.
+[[modules]]
+path = "mindroom.api.auth"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.constants",
+    "mindroom.tool_system.dependencies",
+]
+
+[[modules]]
+path = "mindroom.api.frontend"
+depends_on = [
+    "mindroom.api.auth",
+    "mindroom.api.config_lifecycle",
+    "mindroom.frontend_assets",
+]
+
+# NOTE (arch-b-7): mindroom.api.google_integration still imports
+# _reload_api_runtime_config from api.main via lazy function-local imports.
+# This codifies the remaining runtime-reload back-edge until that helper is
+# lifted into a leaf lifecycle module.
 [[modules]]
 path = "mindroom.api.google_integration"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.api.main",
@@ -225,16 +239,16 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.homeassistant_integration"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.api.credentials",
     "mindroom.api.integrations",
-    "mindroom.api.main",
 ]
 
 [[modules]]
 path = "mindroom.api.integrations"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.api.credentials",
-    "mindroom.api.main",
     "mindroom.tool_system.dependencies",
 ]
 
@@ -243,7 +257,11 @@ path = "mindroom.api.knowledge"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
-    "mindroom.knowledge",
+    "mindroom.knowledge.availability",
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.redaction",
+    "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.status",
 ]
 
 [[modules]]
@@ -278,8 +296,10 @@ depends_on = [
 path = "mindroom.api.main"
 depends_on = [
     "mindroom.agent_policy",
+    "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
+    "mindroom.api.frontend",
     "mindroom.api.google_integration",
     "mindroom.api.homeassistant_integration",
     "mindroom.api.integrations",
@@ -292,13 +312,12 @@ depends_on = [
     "mindroom.api.workers",
     "mindroom.constants",
     "mindroom.credentials_sync",
-    "mindroom.frontend_assets",
     "mindroom.knowledge",
+    "mindroom.knowledge.watch",
     "mindroom.logging_config",
     "mindroom.matrix.health",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_state",
-    "mindroom.tool_system.dependencies",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.workers.runtime",
 ]
@@ -682,6 +701,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.hooks",
     "mindroom.knowledge",
+    "mindroom.knowledge.watch",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.rooms",
@@ -1625,25 +1645,25 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge"
 depends_on = [
+    "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
-    "mindroom.knowledge.refresh_owner",
-    "mindroom.knowledge.shared_managers",
+    "mindroom.knowledge.refresh_scheduler",
     "mindroom.knowledge.utils",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.availability"
+depends_on = []
 
 [[modules]]
 path = "mindroom.knowledge.chunking"
 depends_on = []
 
 [[modules]]
-path = "mindroom.knowledge.startup"
-depends_on = []
-
-[[modules]]
-path = "mindroom.knowledge.shared_managers"
+path = "mindroom.knowledge.registry"
 depends_on = [
+    "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
-    "mindroom.knowledge.startup",
     "mindroom.runtime_resolution",
 ]
 
@@ -1652,17 +1672,54 @@ path = "mindroom.knowledge.manager"
 depends_on = [
     "mindroom.constants",
     "mindroom.knowledge.chunking",
+    "mindroom.knowledge.redaction",
 ]
 
 [[modules]]
-path = "mindroom.knowledge.refresh_owner"
-depends_on = ["mindroom.knowledge.shared_managers"]
+path = "mindroom.knowledge.redaction"
+depends_on = []
+
+[[modules]]
+path = "mindroom.knowledge.status"
+depends_on = [
+    "mindroom.knowledge.availability",
+    "mindroom.knowledge.registry",
+]
+
+[[modules]]
+path = "mindroom.knowledge.refresh_scheduler"
+depends_on = [
+    "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.registry",
+    "mindroom.logging_config",
+]
+
+[[modules]]
+path = "mindroom.knowledge.refresh_runner"
+depends_on = [
+    "mindroom.knowledge.availability",
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.redaction",
+    "mindroom.knowledge.registry",
+    "mindroom.runtime_resolution",
+]
 
 [[modules]]
 path = "mindroom.knowledge.utils"
 depends_on = [
-    "mindroom.knowledge.shared_managers",
+    "mindroom.knowledge.availability",
+    "mindroom.knowledge.redaction",
+    "mindroom.knowledge.registry",
+    "mindroom.logging_config",
     "mindroom.runtime_protocols",
+]
+
+[[modules]]
+path = "mindroom.knowledge.watch"
+depends_on = [
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.registry",
+    "mindroom.logging_config",
 ]
 
 [[interfaces]]
@@ -1764,18 +1821,22 @@ from = ["mindroom.model_loading"]
 expose = [
     "KnowledgeAccessSupport",
     "KnowledgeManager",
-    "ensure_request_knowledge_managers",
-    "ensure_shared_knowledge_manager",
+    "KnowledgeRefreshScheduler",
     "format_knowledge_availability_notice",
     "get_agent_knowledge",
-    "get_shared_knowledge_manager_for_config",
-    "initialize_shared_knowledge_managers",
     "KnowledgeAvailability",
-    "OrchestratorKnowledgeRefreshOwner",
-    "StandaloneKnowledgeRefreshOwner",
-    "shutdown_shared_knowledge_managers",
+    "KnowledgeAvailabilityDetail",
+    "KnowledgeResolution",
+    "OrchestratorKnowledgeRefreshScheduler",
+    "PerBindingKnowledgeRefreshScheduler",
+    "resolve_agent_knowledge_access",
+    "StandaloneKnowledgeRefreshScheduler",
 ]
 from = ["mindroom.knowledge"]
+
+[[interfaces]]
+expose = ["KnowledgeSourceWatcher"]
+from = ["mindroom.knowledge.watch"]
 
 # ARCH-B memory enforcement slice: expose only the config-level memory settings surface.
 [[interfaces]]

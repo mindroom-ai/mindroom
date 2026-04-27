@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import contextmanager
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+    from collections.abc import AsyncIterator, Callable, Iterator
 
 import pytest
 from agno.agent import Agent as AgnoAgent
@@ -51,6 +52,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
 )
+from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
@@ -102,6 +104,39 @@ def _make_post_response_compaction_check() -> PostResponseCompactionCheck:
             hard_replay_budget_tokens=59_904,
         ),
         active_context_window=64_000,
+    )
+
+
+def _knowledge_lookup(
+    knowledge: object | None,
+    *,
+    base_id: str = "docs",
+    availability: KnowledgeAvailability = KnowledgeAvailability.READY,
+) -> SimpleNamespace:
+    index = (
+        SimpleNamespace(
+            knowledge=knowledge,
+            state=SimpleNamespace(
+                source_signature=hashlib.sha256().hexdigest(),
+                last_published_at="2999-01-01T00:00:00+00:00",
+                last_refresh_at=None,
+            ),
+        )
+        if knowledge is not None
+        else None
+    )
+    key = SimpleNamespace(
+        base_id=base_id,
+        storage_root="memory",
+        knowledge_path=f"memory/{base_id}",
+        indexing_settings=(),
+    )
+    return SimpleNamespace(
+        key=key,
+        index=index,
+        state=index.state if index is not None else None,
+        availability=availability,
+        schedule_refresh_on_access=False,
     )
 
 
@@ -2827,14 +2862,11 @@ class TestTeamCompletion:
 
         scheduled_base_ids: list[str] = []
 
-        class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str) -> None:
+        class _FakeRefreshScheduler:
+            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
-            def is_refreshing(self, base_id: str) -> bool:
+            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
                 _ = base_id
                 return False
 
@@ -2847,11 +2879,11 @@ class TestTeamCompletion:
             **kwargs: object,
         ) -> ResolvedExactTeamMembers:
             unavailable_bases = cast("dict[str, KnowledgeAvailability] | None", kwargs["unavailable_bases"])
-            refresh_owner = kwargs["refresh_owner"]
+            refresh_scheduler = kwargs["refresh_scheduler"]
             assert unavailable_bases is not None
-            assert refresh_owner is team_app_client.app.state.knowledge_refresh_owner
+            assert refresh_scheduler is team_app_client.app.state.knowledge_refresh_scheduler
             unavailable_bases["docs"] = KnowledgeAvailability.INITIALIZING
-            refresh_owner.schedule_initial_load("docs")
+            refresh_scheduler.schedule_refresh("docs")
             return ResolvedExactTeamMembers(
                 requested_agent_names=requested_agent_names,
                 agents=mock_agents,
@@ -2860,7 +2892,7 @@ class TestTeamCompletion:
                 failed_agent_names=[],
             )
 
-        team_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
+        team_app_client.app.state.knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
@@ -3185,14 +3217,11 @@ class TestTeamCompletion:
 
         scheduled_base_ids: list[str] = []
 
-        class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str) -> None:
+        class _FakeRefreshScheduler:
+            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
-            def is_refreshing(self, base_id: str) -> bool:
+            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
                 _ = base_id
                 return False
 
@@ -3209,11 +3238,11 @@ class TestTeamCompletion:
             **kwargs: object,
         ) -> ResolvedExactTeamMembers:
             unavailable_bases = cast("dict[str, KnowledgeAvailability] | None", kwargs["unavailable_bases"])
-            refresh_owner = kwargs["refresh_owner"]
+            refresh_scheduler = kwargs["refresh_scheduler"]
             assert unavailable_bases is not None
-            assert refresh_owner is team_app_client.app.state.knowledge_refresh_owner
+            assert refresh_scheduler is team_app_client.app.state.knowledge_refresh_scheduler
             unavailable_bases["docs"] = KnowledgeAvailability.CONFIG_MISMATCH
-            refresh_owner.schedule_refresh("docs")
+            refresh_scheduler.schedule_refresh("docs")
             return ResolvedExactTeamMembers(
                 requested_agent_names=requested_agent_names,
                 agents=mock_agents,
@@ -3222,7 +3251,7 @@ class TestTeamCompletion:
                 failed_agent_names=[],
             )
 
-        team_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
+        team_app_client.app.state.knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
@@ -3246,7 +3275,7 @@ class TestTeamCompletion:
             "Knowledge base `docs` is refreshing against newer config and may be stale this turn."
             in mock_prepare.await_args.kwargs["prompt"]
         )
-        assert scheduled_base_ids == ["refresh:docs"]
+        assert scheduled_base_ids == ["docs"]
 
     def test_team_streaming_falls_back_to_final_team_run_output(self, team_app_client: TestClient) -> None:
         """Providers that yield a final TeamRunOutput in stream mode should still emit content."""
@@ -3839,7 +3868,7 @@ class TestTeamCompletion:
         """Configured team failures should surface the user-facing materialization error."""
         with (
             patch("mindroom.model_loading.get_model_instance", return_value=MagicMock()),
-            patch("mindroom.teams.get_agent_knowledge", return_value=None),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
             patch(
                 "mindroom.teams.create_agent",
                 side_effect=[_make_test_agent("GeneralAgent"), RuntimeError("boom")],
@@ -4508,7 +4537,10 @@ class TestTeamCompletion:
         with (
             patch("mindroom.teams.create_agent") as mock_create,
             patch("mindroom.model_loading.get_model_instance"),
-            patch("mindroom.teams.get_agent_knowledge", return_value=mock_knowledge),
+            patch(
+                "mindroom.teams.resolve_agent_knowledge_access",
+                return_value=KnowledgeResolution(knowledge=mock_knowledge),
+            ),
             patch("agno.team.Team.__init__", return_value=None),
         ):
             mock_create.return_value = MagicMock(name="Research")
@@ -4581,7 +4613,10 @@ class TestKnowledgeIntegration:
 
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", return_value=mock_knowledge),
+            patch(
+                "mindroom.knowledge.utils._lookup_knowledge_for_base",
+                return_value=_knowledge_lookup(mock_knowledge),
+            ),
         ):
             mock_ai.return_value = "Response with knowledge"
 
@@ -4610,24 +4645,23 @@ class TestKnowledgeIntegration:
         mock_knowledge = MagicMock()
         observed_calls: list[tuple[str, Config | None, RuntimePaths | None]] = []
 
-        def fake_get_knowledge_for_base(
+        def fake_lookup_knowledge_for_base(
             base_id: str,
             *,
             config: Config | None = None,
             runtime_paths: RuntimePaths | None = None,
-            request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
-            shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
+            execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
-        ) -> MagicMock | None:
+        ) -> SimpleNamespace | None:
             observed_calls.append((base_id, config, runtime_paths))
             if config is None or runtime_paths is None or base_id != "docs":
                 return None
-            return mock_knowledge
+            return _knowledge_lookup(mock_knowledge, base_id=base_id)
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             TestClient(app) as client,
         ):
             mock_ai.return_value = "Response with keyed knowledge"
@@ -4660,17 +4694,14 @@ class TestKnowledgeIntegration:
 
         assert mock_ai.call_args.kwargs["knowledge"] is None
 
-    def test_chat_completions_does_not_await_initialize_shared_knowledge_managers(
+    def test_chat_completions_does_not_await_request_path_reindex(
         self,
         knowledge_app_client: TestClient,
     ) -> None:
         """Chat completions should not await shared-manager initialization on the request path."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch(
-                "mindroom.knowledge.shared_managers.initialize_shared_knowledge_managers",
-                new_callable=AsyncMock,
-            ) as mock_init,
+            patch("mindroom.knowledge.manager.KnowledgeManager.reindex_all", new_callable=AsyncMock) as reindex_all,
         ):
             mock_ai.return_value = "Response"
 
@@ -4682,42 +4713,36 @@ class TestKnowledgeIntegration:
                 },
             )
 
-        assert mock_init.await_count == 0
+        assert reindex_all.await_count == 0
 
     def test_unready_kb_emits_system_hint(self, knowledge_app_client: TestClient) -> None:
         """Missing published knowledge should inject a system-style degraded hint."""
-        from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
-
         scheduled_base_ids: list[str] = []
 
-        class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str) -> None:
+        class _FakeRefreshScheduler:
+            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
-            def is_refreshing(self, base_id: str) -> bool:
+            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
                 _ = base_id
                 return False
 
-        def fake_get_knowledge_for_base(
+        def fake_lookup_knowledge_for_base(
             base_id: str,
             *,
             config: Config | None = None,  # noqa: ARG001
             runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
-            request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
-            shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
+            execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[KnowledgeAvailability], None] | None = None,
-        ) -> None:
-            _ = base_id
+        ) -> SimpleNamespace:
             if on_availability is not None:
                 on_availability(KnowledgeAvailability.INITIALIZING)
+            return _knowledge_lookup(None, base_id=base_id, availability=KnowledgeAvailability.INITIALIZING)
 
-        knowledge_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
+        knowledge_app_client.app.state.knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
         ):
             mock_ai.return_value = "Response without knowledge"
 
@@ -4746,7 +4771,10 @@ class TestKnowledgeIntegration:
 
         with (
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", return_value=mock_knowledge),
+            patch(
+                "mindroom.knowledge.utils._lookup_knowledge_for_base",
+                return_value=_knowledge_lookup(mock_knowledge),
+            ),
         ):
             response = knowledge_app_client.post(
                 "/v1/chat/completions",
@@ -4784,21 +4812,21 @@ class TestKnowledgeIntegration:
         mock_knowledge_wiki.vector_db = MagicMock()
         mock_knowledge_wiki.max_results = 10
 
-        def fake_get_knowledge_for_base(
+        def fake_lookup_knowledge_for_base(
             base_id: str,
             *,
             config: Config | None = None,  # noqa: ARG001
             runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
-            request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
-            shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
+            execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
-        ) -> MagicMock | None:
-            return {"docs": mock_knowledge_docs, "wiki": mock_knowledge_wiki}.get(base_id)
+        ) -> SimpleNamespace | None:
+            knowledge = {"docs": mock_knowledge_docs, "wiki": mock_knowledge_wiki}.get(base_id)
+            return _knowledge_lookup(knowledge, base_id=base_id) if knowledge is not None else None
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             TestClient(app) as client,
         ):
             mock_ai.return_value = "Merged knowledge response"
@@ -4824,7 +4852,7 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
-                "mindroom.api.openai_compat.get_agent_knowledge",
+                "mindroom.api.openai_compat.resolve_agent_knowledge_access",
                 side_effect=RuntimeError("DB connection failed"),
             ),
         ):

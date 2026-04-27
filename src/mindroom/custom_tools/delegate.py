@@ -17,11 +17,8 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import ai_response
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge import (
-    KnowledgeAvailability,
-    KnowledgeManager,
-    ensure_request_knowledge_managers,
     format_knowledge_availability_notice,
-    get_agent_knowledge,
+    resolve_agent_knowledge_access,
 )
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import (
@@ -33,7 +30,7 @@ from mindroom.tool_system.runtime_context import (
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -52,7 +49,7 @@ class DelegateTools(Toolkit):
         config: Config,
         execution_identity: ToolExecutionIdentity | None = None,
         delegation_depth: int = 0,
-        refresh_owner: KnowledgeRefreshOwner | None = None,
+        refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = delegate_to
@@ -60,7 +57,7 @@ class DelegateTools(Toolkit):
         self._config = config
         self._execution_identity = execution_identity
         self._delegation_depth = delegation_depth
-        self._refresh_owner = refresh_owner
+        self._refresh_scheduler = refresh_scheduler
 
         super().__init__(
             name="delegate",
@@ -102,24 +99,22 @@ class DelegateTools(Toolkit):
             return "Cannot delegate an empty task. Please provide a task description."
 
         try:
-            request_knowledge_managers: dict[str, KnowledgeManager] = await ensure_request_knowledge_managers(
-                [agent_name],
-                config=self._config,
-                runtime_paths=self._runtime_paths,
-                execution_identity=self._execution_identity,
+            session_id = f"delegate:{self._agent_name}:{agent_name}:{uuid4()}"
+            execution_identity = (
+                replace(self._execution_identity, agent_name=agent_name, session_id=session_id)
+                if self._execution_identity is not None
+                else None
             )
 
-            unavailable_bases: dict[str, KnowledgeAvailability] = {}
-            knowledge = get_agent_knowledge(
+            knowledge_resolution = resolve_agent_knowledge_access(
                 agent_name,
                 self._config,
                 self._runtime_paths,
-                request_knowledge_managers=request_knowledge_managers,
-                on_unavailable_bases=unavailable_bases.update,
-                refresh_owner=self._refresh_owner,
+                refresh_scheduler=self._refresh_scheduler,
+                execution_identity=execution_identity,
             )
             system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-            notice = format_knowledge_availability_notice(unavailable_bases)
+            notice = format_knowledge_availability_notice(knowledge_resolution.unavailable)
             if notice is not None:
                 system_enrichment_items = (
                     EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
@@ -130,12 +125,6 @@ class DelegateTools(Toolkit):
                 to_agent=agent_name,
                 depth=self._delegation_depth + 1,
                 task_preview=task[:100],
-            )
-            session_id = f"delegate:{self._agent_name}:{agent_name}:{uuid4()}"
-            execution_identity = (
-                replace(self._execution_identity, agent_name=agent_name, session_id=session_id)
-                if self._execution_identity is not None
-                else None
             )
             runtime_context = get_tool_runtime_context()
             room_id = _resolve_delegated_room_id(
@@ -155,14 +144,14 @@ class DelegateTools(Toolkit):
                     session_id=session_id,
                     runtime_paths=self._runtime_paths,
                     config=self._config,
-                    knowledge=knowledge,
+                    knowledge=knowledge_resolution.knowledge,
                     user_id=execution_identity.requester_id if execution_identity is not None else None,
                     room_id=room_id,
                     include_interactive_questions=False,
                     execution_identity=execution_identity,
                     delegation_depth=self._delegation_depth + 1,
                     system_enrichment_items=system_enrichment_items,
-                    refresh_owner=self._refresh_owner,
+                    refresh_scheduler=self._refresh_scheduler,
                 )
         except Exception as e:
             logger.exception(

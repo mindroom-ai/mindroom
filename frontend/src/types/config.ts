@@ -68,7 +68,6 @@ export interface KnowledgeGitConfig {
   poll_interval_seconds?: number;
   credentials_service?: string;
   lfs?: boolean;
-  startup_behavior?: "blocking" | "background";
   sync_timeout_seconds?: number;
   skip_hidden?: boolean;
   include_patterns?: string[];
@@ -296,8 +295,8 @@ export interface AgentPolicy {
   dashboard_credentials_supported: boolean;
   team_eligibility_reason: string | null;
   private_knowledge_base_id: string | null;
-  request_scoped_workspace_enabled: boolean;
-  request_scoped_knowledge_enabled: boolean;
+  private_workspace_enabled: boolean;
+  private_agent_knowledge_enabled: boolean;
 }
 
 function normalizePrivateKnowledgeConfig(

@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class KnowledgeGitConfig(BaseModel):
     """Git repository synchronization settings for a knowledge base."""
+
+    model_config = ConfigDict(extra="forbid")
 
     repo_url: str = Field(description="Git repository URL used as the knowledge source")
     branch: str = Field(default="main", description="Git branch to track")
     poll_interval_seconds: int = Field(
         default=300,
         ge=5,
-        description="How often to poll the remote repository for updates",
+        description="How often to schedule a background refresh for a Git-backed knowledge base",
     )
     credentials_service: str | None = Field(
         default=None,
@@ -24,10 +24,6 @@ class KnowledgeGitConfig(BaseModel):
     lfs: bool = Field(
         default=False,
         description="Enable Git LFS support for repositories that require large-file downloads",
-    )
-    startup_behavior: Literal["blocking", "background"] = Field(
-        default="blocking",
-        description="Whether startup should wait for Git sync or schedule it in the background",
     )
     sync_timeout_seconds: int = Field(
         default=3600,
@@ -52,7 +48,10 @@ class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
-    watch: bool = Field(default=True, description="Watch folder for changes")
+    watch: bool = Field(
+        default=True,
+        description="When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
+    )
     chunk_size: int = Field(
         default=5000,
         ge=128,

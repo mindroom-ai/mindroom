@@ -252,14 +252,13 @@ Knowledge bases provide file-backed RAG context to agents:
 knowledge_bases:
   engineering_docs:
     path: ./knowledge_docs  # Path to documents folder
-    watch: true  # Watch for file changes
+    watch: false  # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000  # Characters per indexed chunk
     chunk_overlap: 0  # Overlap between adjacent chunks
     git:  # Optional: sync from a Git repository
       repo_url: "https://github.com/org/docs.git"
       branch: main
-      poll_interval_seconds: 300
-      # startup_behavior: blocking  # Or "background" to defer resume/incremental syncs
+      poll_interval_seconds: 300  # Interval for background Git refresh scheduling
       # lfs: false  # Enable Git LFS support (requires git-lfs on the runtime host)
       # sync_timeout_seconds: 3600  # Abort a hung git command after this many seconds
       # credentials_service: null  # CredentialsManager service for private HTTPS repos

@@ -19,6 +19,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom import constants
+from mindroom.api.auth import verify_user
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.credentials import (
@@ -372,8 +373,6 @@ async def callback(request: Request) -> RedirectResponse:
     state = request.query_params.get("state")
     if not state:
         raise HTTPException(status_code=400, detail="No OAuth state received")
-
-    from mindroom.api.main import verify_user  # noqa: PLC0415
 
     await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
     pending = consume_pending_oauth_request(request, "google", state)

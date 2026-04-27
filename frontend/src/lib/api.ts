@@ -111,6 +111,41 @@ export function withAgentExecutionScope(
   });
 }
 
+function stringField(
+  payload: Record<string, unknown>,
+  field: string,
+): string | null {
+  const value = payload[field];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+export function apiErrorMessageFromPayload(
+  payload: unknown,
+  fallback: string,
+): string {
+  if (payload == null || typeof payload !== "object") {
+    return fallback;
+  }
+
+  const detail = (payload as Record<string, unknown>).detail;
+  if (typeof detail === "string" && detail.trim()) {
+    return detail;
+  }
+
+  if (detail == null || typeof detail !== "object" || Array.isArray(detail)) {
+    return fallback;
+  }
+
+  const detailRecord = detail as Record<string, unknown>;
+  return (
+    stringField(detailRecord, "last_error") ??
+    stringField(detailRecord, "message") ??
+    stringField(detailRecord, "error") ??
+    stringField(detailRecord, "detail") ??
+    fallback
+  );
+}
+
 export async function fetchJSON<T>(
   url: string,
   options?: RequestInit,
@@ -138,9 +173,7 @@ export async function fetchJSON<T>(
       let detail = `API call failed: ${response.status} ${response.statusText}`;
       try {
         const payload = await response.json();
-        if (typeof payload?.detail === "string") {
-          detail = payload.detail;
-        }
+        detail = apiErrorMessageFromPayload(payload, detail);
       } catch {
         // Keep fallback detail text.
       }

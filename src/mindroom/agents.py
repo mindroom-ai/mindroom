@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
     from mindroom.hooks import HookRegistryPlugin
-    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import (
         ToolExecutionIdentity,
         WorkerScope,
@@ -441,7 +441,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
     execution_identity: ToolExecutionIdentity | None,
     session_id: str | None = None,
     delegation_depth: int = 0,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
@@ -504,7 +504,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
                 config=config,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
-                refresh_owner=refresh_owner,
+                refresh_scheduler=refresh_scheduler,
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
@@ -892,7 +892,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
     delegation_depth: int = 0,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     timing_scope: str | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
@@ -917,7 +917,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             history-format guidance in the shared identity prompt.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
-        refresh_owner: Optional runtime-owned shared knowledge refresh scheduler
+        refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
         timing_scope: Optional correlated timing scope id for nested
             `system_prompt_assembly` sub-timers.
@@ -998,7 +998,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 session_id=session_id,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
-                refresh_owner=refresh_owner,
+                refresh_scheduler=refresh_scheduler,
             )
             if toolkit:
                 tools.append(prepend_tool_hook_bridge(toolkit, tool_hook_bridge))

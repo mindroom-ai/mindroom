@@ -25,6 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
+from mindroom.knowledge import KnowledgeResolution
 from mindroom.memory import MemoryPromptParts
 from mindroom.teams import materialize_exact_team_members
 from mindroom.thread_utils import create_session_id
@@ -1048,7 +1049,7 @@ def test_team_builder_passes_team_session_id_to_create_agent(tmp_path: Path) -> 
     )
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create_agent,
     ):
         result = materialize_exact_team_members(
@@ -1088,7 +1089,7 @@ def test_openai_team_builder_passes_session_id_to_member_agents(tmp_path: Path) 
 
     with (
         patch("mindroom.teams.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create,
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch(
             "mindroom.api.openai_compat.resolve_bound_team_scope_context",
             create=True,

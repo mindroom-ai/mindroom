@@ -24,6 +24,7 @@ from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
+from mindroom.knowledge import KnowledgeResolution
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -93,8 +94,15 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
         return_value=HistoryScope(kind="team", scope_id=bot.agent_name),
     )
     bot._conversation_state_writer.session_type_for_scope = MagicMock(return_value=SessionType.AGENT)
-    bot._knowledge_access_support = SimpleNamespace(for_agent=MagicMock(return_value=None))
+    bot._knowledge_access_support = _knowledge_access_support()
     return bot
+
+
+def _knowledge_access_support() -> SimpleNamespace:
+    return SimpleNamespace(
+        for_agent=MagicMock(return_value=None),
+        resolve_for_agent=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+    )
 
 
 def _build_response_runner(bot: AgentBot) -> None:
@@ -342,7 +350,6 @@ class TestAIErrorDisplay:
             )
 
         with (
-            patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
             patch(
                 "mindroom.ai.open_resolved_scope_session_context",
                 new=lambda **_kwargs: nullcontext(
@@ -405,7 +412,6 @@ class TestAIErrorDisplay:
             )
 
         with (
-            patch("mindroom.response_runner.ensure_request_knowledge_managers", new=AsyncMock(return_value={})),
             patch(
                 "mindroom.ai.open_resolved_scope_session_context",
                 new=lambda **_kwargs: nullcontext(
@@ -529,17 +535,12 @@ class TestAIErrorDisplay:
         assert content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
     @pytest.mark.asyncio
-    async def test_knowledge_init_failure_falls_back_to_response_without_knowledge(self, tmp_path: Path) -> None:
-        """Matrix reply paths should continue when request-scoped knowledge init fails."""
+    async def test_unavailable_knowledge_falls_back_to_response_without_knowledge(self, tmp_path: Path) -> None:
+        """Matrix reply paths should continue when no published knowledge is available."""
         bot = _mock_bot(tmp_path)
-        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
+        bot._knowledge_access_support = _knowledge_access_support()
 
         with (
-            patch(
-                "mindroom.response_runner.ensure_request_knowledge_managers",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("knowledge init failed"),
-            ),
             patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
                 "mindroom.delivery_gateway.send_message_result",
@@ -560,4 +561,4 @@ class TestAIErrorDisplay:
 
         assert delivery.event_id == "$response_id"
         assert mock_ai.call_args.kwargs["knowledge"] is None
-        bot.logger.exception.assert_called_once()
+        bot.logger.exception.assert_not_called()

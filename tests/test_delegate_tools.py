@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
+from mindroom.knowledge import KnowledgeResolution
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -261,7 +263,10 @@ class TestDelegateKnowledge:
 
         mock_knowledge = MagicMock()
         with (
-            patch("mindroom.custom_tools.delegate.get_agent_knowledge", return_value=mock_knowledge) as mock_get,
+            patch(
+                "mindroom.custom_tools.delegate.resolve_agent_knowledge_access",
+                return_value=KnowledgeResolution(knowledge=mock_knowledge),
+            ) as mock_get,
             patch(
                 "mindroom.custom_tools.delegate.ai_response",
                 new_callable=AsyncMock,
@@ -273,8 +278,7 @@ class TestDelegateKnowledge:
             mock_get.assert_called_once()
             args, kwargs = mock_get.call_args
             assert args == ("researcher", config, runtime_paths)
-            assert kwargs["request_knowledge_managers"] == {}
-            assert "execution_identity" not in kwargs
+            assert kwargs["execution_identity"] is None
             ai_kwargs = mock_ai_response.await_args.kwargs
             assert ai_kwargs["agent_name"] == "researcher"
             assert ai_kwargs["config"] == config
@@ -291,32 +295,38 @@ class TestDelegateKnowledge:
         mock_storage: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """Delegation should trigger the shared-base initial load when the snapshot is still initializing."""
+        """Delegation should trigger the shared-base initial load when the published index is still initializing."""
         from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
 
         assert mock_storage is not None
         scheduled_base_ids: list[str] = []
 
-        class _FakeRefreshOwner:
-            def schedule_refresh(self, base_id: str) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str) -> None:
+        class _FakeRefreshScheduler:
+            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
-            def is_refreshing(self, base_id: str) -> bool:
+            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
                 _ = base_id
                 return False
 
-        def fake_get_knowledge_for_base(
+        def fake_lookup_knowledge_for_base(
             base_id: str,
             *,
             on_availability: object | None = None,
             **_kwargs: object,
-        ) -> None:
-            _ = base_id
+        ) -> SimpleNamespace:
             if on_availability is not None:
                 on_availability(KnowledgeAvailability.INITIALIZING)
+            return SimpleNamespace(
+                key=SimpleNamespace(
+                    base_id=base_id,
+                    storage_root=str(tmp_path),
+                    knowledge_path=str(tmp_path / base_id),
+                    indexing_settings=(),
+                ),
+                index=None,
+                availability=KnowledgeAvailability.INITIALIZING,
+            )
 
         config = Config(
             agents={
@@ -341,16 +351,12 @@ class TestDelegateKnowledge:
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
             include_interactive_questions=False,
-            refresh_owner=_FakeRefreshOwner(),
+            refresh_scheduler=_FakeRefreshScheduler(),
         )
         delegate_tool = next(tool for tool in agent.tools if tool.name == "delegate")
 
         with (
-            patch(
-                "mindroom.custom_tools.delegate.ensure_request_knowledge_managers",
-                new=AsyncMock(return_value={}),
-            ),
-            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+            patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             patch(
                 "mindroom.custom_tools.delegate.ai_response",
                 new_callable=AsyncMock,

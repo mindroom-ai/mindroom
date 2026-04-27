@@ -43,7 +43,7 @@ from mindroom.hooks import (
 from mindroom.knowledge import (
     KnowledgeAccessSupport,
     KnowledgeAvailability,
-    ensure_request_knowledge_managers,
+    KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
 )
 from mindroom.logging_config import bound_log_context
@@ -128,7 +128,7 @@ _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 def _append_knowledge_availability_enrichment(
     system_enrichment_items: Sequence[EnrichmentItem],
-    unavailable_bases: Mapping[str, KnowledgeAvailability],
+    unavailable_bases: Mapping[str, KnowledgeAvailability | KnowledgeAvailabilityDetail],
 ) -> tuple[EnrichmentItem, ...]:
     """Append one volatile knowledge-availability notice when needed."""
     notice = format_knowledge_availability_notice(unavailable_bases)
@@ -424,7 +424,6 @@ class _PreparedResponseRuntime:
     session_id: str
     model_prompt: str
     tool_dispatch: ToolDispatchContext
-    request_knowledge_managers: dict[str, Any]
     room_mode: bool = False
 
 
@@ -1091,26 +1090,6 @@ class ResponseRunner:
             ),
         )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
-
-    async def _ensure_request_knowledge_managers(
-        self,
-        agent_names: list[str],
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> dict[str, Any]:
-        """Ensure request-scoped knowledge managers for one response execution."""
-        try:
-            return await ensure_request_knowledge_managers(
-                agent_names,
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
-                execution_identity=execution_identity,
-            )
-        except Exception:
-            self.deps.logger.exception(
-                "Failed to initialize request-scoped knowledge managers",
-                agent_names=agent_names,
-            )
-            return {}
 
     async def generate_team_response_helper(
         self,
@@ -1810,10 +1789,6 @@ class ResponseRunner:
             correlation_id=request.correlation_id,
             source_envelope=request.response_envelope,
         )
-        request_knowledge_managers = await self._ensure_request_knowledge_managers(
-            [self.deps.agent_name],
-            tool_dispatch.execution_identity,
-        )
         return _PreparedResponseRuntime(
             resolved_target=resolved_target,
             response_thread_id=response_thread_id,
@@ -1821,7 +1796,6 @@ class ResponseRunner:
             session_id=session_id,
             model_prompt=resolved_model_prompt,
             tool_dispatch=tool_dispatch,
-            request_knowledge_managers=request_knowledge_managers,
             room_mode=room_mode,
         )
 
@@ -1883,15 +1857,13 @@ class ResponseRunner:
             turn_recorder.set_run_id(current_run_id)
 
         async def build_response_text() -> str:
-            unavailable_bases: dict[str, KnowledgeAvailability] = {}
-            knowledge = self.deps.knowledge_access.for_agent(
+            knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
                 self.deps.agent_name,
-                request_knowledge_managers=runtime.request_knowledge_managers,
-                on_unavailable_bases=unavailable_bases.update,
+                execution_identity=runtime.tool_dispatch.execution_identity,
             )
             system_enrichment_items = _append_knowledge_availability_enrichment(
                 request.system_enrichment_items,
-                unavailable_bases,
+                knowledge_resolution.unavailable,
             )
             matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
             return await ai_response(
@@ -1904,7 +1876,7 @@ class ResponseRunner:
                 model_prompt=runtime.model_prompt,
                 thread_id=runtime.resolved_target.resolved_thread_id,
                 room_id=request.room_id,
-                knowledge=knowledge,
+                knowledge=knowledge_resolution.knowledge,
                 user_id=request.user_id,
                 run_id=run_id,
                 run_id_callback=note_attempt_run_id,
@@ -1918,8 +1890,8 @@ class ResponseRunner:
                 compaction_outcomes_collector=compaction_outcomes,
                 post_response_compaction_checks_collector=post_response_compaction_checks,
                 compaction_lifecycle=compaction_lifecycle,
-                refresh_owner=(
-                    self.deps.runtime.orchestrator.knowledge_refresh_owner
+                refresh_scheduler=(
+                    self.deps.runtime.orchestrator.knowledge_refresh_scheduler
                     if self.deps.runtime.orchestrator is not None
                     else None
                 ),
@@ -1975,15 +1947,13 @@ class ResponseRunner:
         def note_visible_response_event_id(response_event_id: str) -> None:
             turn_recorder.set_response_event_id(response_event_id)
 
-        unavailable_bases: dict[str, KnowledgeAvailability] = {}
-        knowledge = self.deps.knowledge_access.for_agent(
+        knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
             self.deps.agent_name,
-            request_knowledge_managers=runtime.request_knowledge_managers,
-            on_unavailable_bases=unavailable_bases.update,
+            execution_identity=runtime.tool_dispatch.execution_identity,
         )
         system_enrichment_items = _append_knowledge_availability_enrichment(
             request.system_enrichment_items,
-            unavailable_bases,
+            knowledge_resolution.unavailable,
         )
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         response_stream = stream_agent_response(
@@ -1996,7 +1966,7 @@ class ResponseRunner:
             model_prompt=runtime.model_prompt,
             thread_id=runtime.resolved_target.resolved_thread_id,
             room_id=request.room_id,
-            knowledge=knowledge,
+            knowledge=knowledge_resolution.knowledge,
             user_id=request.user_id,
             run_id=run_id,
             run_id_callback=note_attempt_run_id,
@@ -2009,8 +1979,8 @@ class ResponseRunner:
             compaction_outcomes_collector=compaction_outcomes,
             post_response_compaction_checks_collector=post_response_compaction_checks,
             compaction_lifecycle=compaction_lifecycle,
-            refresh_owner=(
-                self.deps.runtime.orchestrator.knowledge_refresh_owner
+            refresh_scheduler=(
+                self.deps.runtime.orchestrator.knowledge_refresh_scheduler
                 if self.deps.runtime.orchestrator is not None
                 else None
             ),

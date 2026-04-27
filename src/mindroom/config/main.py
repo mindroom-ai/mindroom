@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from urllib.parse import urlparse, urlunparse
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
@@ -309,6 +310,61 @@ def _effective_static_compaction_enabled(
 def _relative_paths_overlap(left: Path, right: Path) -> bool:
     """Return whether two relative paths overlap by equality, ancestry, or descent."""
     return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
+@dataclass(frozen=True)
+class KnowledgeBaseSourceSemantics:
+    """Source ownership semantics that must match for exact duplicate roots."""
+
+    git_enabled: bool
+    git_repo_identity: str
+    git_branch: str
+    git_credentials_service: str | None
+    git_lfs: bool
+
+
+def _credential_free_repo_url_for_config_validation(repo_url: str) -> str:
+    """Return a comparable Git URL identity without credential-bearing URL fields."""
+    parsed = urlparse(repo_url)
+    if not parsed.scheme or not parsed.netloc:
+        return repo_url
+    path = parsed.path.split(";", 1)[0]
+    if parsed.scheme == "ssh" and "@" in parsed.netloc and parsed.password is None:
+        userinfo, host = parsed.netloc.rsplit("@", 1)
+        if userinfo and ":" not in userinfo:
+            return urlunparse(
+                parsed._replace(
+                    netloc=f"{userinfo}@{host}",
+                    path=path,
+                    params="",
+                    query="",
+                    fragment="",
+                ),
+            )
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunparse(
+        parsed._replace(
+            netloc=netloc,
+            path=path,
+            params="",
+            query="",
+            fragment="",
+        ),
+    )
+
+
+def _knowledge_base_source_semantics(base_config: KnowledgeBaseConfig) -> KnowledgeBaseSourceSemantics:
+    """Return the source semantics for duplicate-path compatibility checks."""
+    git_config = base_config.git
+    return KnowledgeBaseSourceSemantics(
+        git_enabled=git_config is not None,
+        git_repo_identity=_credential_free_repo_url_for_config_validation(git_config.repo_url)
+        if git_config is not None
+        else "",
+        git_branch=git_config.branch if git_config is not None else "",
+        git_credentials_service=git_config.credentials_service if git_config is not None else None,
+        git_lfs=git_config.lfs if git_config is not None else False,
+    )
 
 
 def _template_contains_overlapping_subtree(template_dir: Path, target_path: Path) -> bool:
@@ -691,6 +747,37 @@ class Config(BaseModel):
                 f"or dot segments; invalid keys: {formatted}"
             )
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_knowledge_base_paths_do_not_overlap(self, info: ValidationInfo) -> Config:
+        """Reject parent/child top-level knowledge roots while allowing exact aliases."""
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        if runtime_paths is None or len(self.knowledge_bases) < 2:
+            return self
+
+        resolved_paths = [
+            (base_id, resolve_config_relative_path(base_config.path, runtime_paths).resolve())
+            for base_id, base_config in self.knowledge_bases.items()
+        ]
+        for index, (base_id, root) in enumerate(resolved_paths):
+            for other_base_id, other_root in resolved_paths[index + 1 :]:
+                if root == other_root:
+                    semantics = _knowledge_base_source_semantics(self.knowledge_bases[base_id])
+                    other_semantics = _knowledge_base_source_semantics(self.knowledge_bases[other_base_id])
+                    if semantics != other_semantics:
+                        msg = (
+                            "knowledge_bases exact duplicate aliases must use compatible source configuration; "
+                            f"'{base_id}' and '{other_base_id}' both resolve to '{root}'"
+                        )
+                        raise ValueError(msg)
+                    continue
+                if root.is_relative_to(other_root) or other_root.is_relative_to(root):
+                    msg = (
+                        "knowledge_bases paths must not overlap unless they are exact duplicate aliases; "
+                        f"'{base_id}' resolves to '{root}' and '{other_base_id}' resolves to '{other_root}'"
+                    )
+                    raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

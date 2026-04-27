@@ -15,6 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.knowledge import KnowledgeResolution
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
@@ -254,7 +255,7 @@ async def test_agent_ignores_other_agents(
 
 
 @pytest.mark.asyncio
-@patch("mindroom.teams.get_agent_knowledge")
+@patch("mindroom.teams.resolve_agent_knowledge_access")
 @patch("mindroom.teams.create_agent")
 @patch("mindroom.teams.Team.arun")
 async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR0915
@@ -268,7 +269,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     # Create the config first to get the actual domain
     mock_config = _make_config(tmp_path)
     mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")}
-    mock_get_agent_knowledge.return_value = None
+    mock_get_agent_knowledge.return_value = KnowledgeResolution(knowledge=None)
     fake_member = MagicMock()
     fake_member.name = "MockAgent"
     fake_member.instructions = []

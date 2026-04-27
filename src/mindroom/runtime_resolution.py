@@ -83,8 +83,7 @@ class ResolvedKnowledgeBinding:
     base_id: str
     storage_root: Path
     knowledge_path: Path
-    request_scoped: bool
-    start_background_watchers: bool
+    private_agent_knowledge: bool
     incremental_sync_on_access: bool
 
 
@@ -196,7 +195,7 @@ def resolve_agent_runtime(
         config,
         execution_identity=execution_identity,
     )
-    if resolved_execution.policy.request_scoped_workspace_enabled:
+    if resolved_execution.policy.private_workspace_enabled:
         worker_key = resolved_execution.worker_key
         if worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key"
@@ -217,7 +216,7 @@ def resolve_agent_runtime(
         config,
         runtime_paths=runtime_paths,
         state_storage_path=state_root,
-        use_state_storage_path=resolved_execution.policy.request_scoped_workspace_enabled,
+        use_state_storage_path=resolved_execution.policy.private_workspace_enabled,
         create=create,
     )
     if workspace is not None and (create or workspace.root.exists()):
@@ -293,9 +292,9 @@ def resolve_knowledge_binding(
             base_id=base_id,
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
             knowledge_path=knowledge_path,
-            request_scoped=False,
-            start_background_watchers=start_watchers and refresh_enabled,
-            incremental_sync_on_access=False,
+            private_agent_knowledge=False,
+            # Shared Git bases poll through STALE scheduling after their interval, not READY access scheduling.
+            incremental_sync_on_access=base_config.watch and base_config.git is None and not start_watchers,
         )
 
     agent_runtime = resolve_agent_runtime(
@@ -317,12 +316,9 @@ def resolve_knowledge_binding(
             base_config.path,
             field_name=f"knowledge base '{base_id}' path",
         ),
-        request_scoped=agent_runtime.policy.request_scoped_knowledge_enabled,
-        start_background_watchers=(
-            start_watchers and refresh_enabled and not agent_runtime.policy.request_scoped_knowledge_enabled
-        ),
+        private_agent_knowledge=agent_runtime.policy.private_agent_knowledge_enabled,
         incremental_sync_on_access=(
-            refresh_enabled and (agent_runtime.policy.request_scoped_knowledge_enabled or not start_watchers)
+            refresh_enabled and (agent_runtime.policy.private_agent_knowledge_enabled or not start_watchers)
         ),
     )
 

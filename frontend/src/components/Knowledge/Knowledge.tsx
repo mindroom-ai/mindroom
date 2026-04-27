@@ -13,7 +13,7 @@ import {
   getCoreRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { API_ENDPOINTS } from "@/lib/api";
+import { apiErrorMessageFromPayload, API_ENDPOINTS } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useConfigStore } from "@/store/configStore";
 import type { KnowledgeBaseConfig, KnowledgeGitConfig } from "@/types/config";
@@ -29,13 +29,6 @@ import {
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   FolderOpen,
@@ -62,18 +55,21 @@ interface KnowledgeStatus {
   watch: boolean;
   file_count: number;
   indexed_count: number;
+  refreshing?: boolean;
+  refresh_state?: "none" | "stale" | "refreshing" | "refresh_failed";
+  last_error?: string | null;
+  file_listing_degraded?: boolean;
+  file_listing_error?: string | null;
   git?: {
     repo_url: string;
     branch: string;
     lfs: boolean;
-    startup_behavior: "blocking" | "background";
     syncing: boolean;
     repo_present: boolean;
     initial_sync_complete: boolean;
     last_successful_sync_at: string | null;
     last_successful_commit: string | null;
     last_error: string | null;
-    pending_startup_mode: "resume" | "incremental" | null;
   };
 }
 
@@ -82,6 +78,8 @@ interface KnowledgeFilesResponse {
   files: KnowledgeFile[];
   total_size: number;
   file_count: number;
+  file_listing_degraded?: boolean;
+  file_listing_error?: string | null;
 }
 
 const MIN_CHUNK_SIZE = 128;
@@ -99,11 +97,11 @@ const DEFAULT_GIT_SETTINGS: KnowledgeGitConfig = {
   repo_url: "",
   branch: "main",
   poll_interval_seconds: 300,
-  startup_behavior: "blocking",
   lfs: false,
   sync_timeout_seconds: 3600,
   skip_hidden: true,
 };
+const REDACTED_CREDENTIALS_SENTINEL = "***";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -118,13 +116,38 @@ function formatModifiedDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-function formatStartupMode(value: "resume" | "incremental"): string {
-  switch (value) {
-    case "resume":
-      return "Resume";
-    case "incremental":
-      return "Incremental";
+function stripPathParams(pathname: string): string {
+  return pathname.split(";", 1)[0] ?? "";
+}
+
+function stripFallbackPathParams(value: string): string {
+  return value.replace(
+    /^([a-z][a-z0-9+.-]*:\/\/[^/\s?#]*)(\/[^?#;]*);[^?#]*/i,
+    "$1$2",
+  );
+}
+
+function redactUrlCredentials(value: string): string {
+  try {
+    const parsed = new URL(value);
+    const authority =
+      parsed.username || parsed.password
+        ? `${REDACTED_CREDENTIALS_SENTINEL}@${parsed.host}`
+        : parsed.host;
+    return `${parsed.protocol}//${authority}${stripPathParams(parsed.pathname)}`;
+  } catch {
+    const withoutQueryOrFragment = stripFallbackPathParams(
+      value.replace(/[?#].*$/, ""),
+    );
+    return withoutQueryOrFragment.replace(
+      /^([a-z][a-z0-9+.-]*:\/\/)([^@\s/?#]+)@/i,
+      `$1${REDACTED_CREDENTIALS_SENTINEL}@`,
+    );
   }
+}
+
+function gitRepoUrlHasRedactionSentinel(value: string): boolean {
+  return value.includes(REDACTED_CREDENTIALS_SENTINEL);
 }
 
 function defaultPathForBase(baseName: string): string {
@@ -173,8 +196,6 @@ function normalizeGitConfig(gitConfig: KnowledgeGitConfig): KnowledgeGitConfig {
         ? gitConfig.poll_interval_seconds
         : DEFAULT_GIT_SETTINGS.poll_interval_seconds,
     credentials_service: gitConfig.credentials_service?.trim() || undefined,
-    startup_behavior:
-      gitConfig.startup_behavior === "background" ? "background" : "blocking",
     lfs: gitConfig.lfs ?? DEFAULT_GIT_SETTINGS.lfs,
     sync_timeout_seconds:
       typeof gitConfig.sync_timeout_seconds === "number" &&
@@ -221,9 +242,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
     let detail = response.statusText;
     try {
       const payload = await response.json();
-      if (typeof payload?.detail === "string") {
-        detail = payload.detail;
-      }
+      detail = apiErrorMessageFromPayload(payload, detail);
     } catch {
       // Keep fallback detail
     }
@@ -253,6 +272,7 @@ export function Knowledge() {
   const [settings, setSettings] = useState<KnowledgeBaseConfig>(
     DEFAULT_BASE_SETTINGS,
   );
+  const [gitRepoUrlReplacement, setGitRepoUrlReplacement] = useState("");
   const [totalSize, setTotalSize] = useState(0);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -265,11 +285,16 @@ export function Knowledge() {
   const [error, setError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const loadRequestIdRef = useRef(0);
 
   const knowledgeBases = useMemo(
     () => config?.knowledge_bases ?? {},
     [config?.knowledge_bases],
   );
+  const selectedBaseConfig = selectedBase
+    ? knowledgeBases[selectedBase]
+    : undefined;
+  const selectedBaseIsGitBacked = Boolean(selectedBaseConfig?.git);
   const baseNames = useMemo(
     () => Object.keys(knowledgeBases).sort(),
     [knowledgeBases],
@@ -315,14 +340,20 @@ export function Knowledge() {
   }, [knowledgeBases, selectedBase]);
 
   const loadData = useCallback(async (baseId: string | null) => {
+    const requestId = loadRequestIdRef.current + 1;
+    loadRequestIdRef.current = requestId;
+    const isCurrentRequest = () => loadRequestIdRef.current === requestId;
+
     setLoading(true);
     setError(null);
 
     try {
       if (!baseId) {
-        setFiles([]);
-        setStatus(null);
-        setTotalSize(0);
+        if (isCurrentRequest()) {
+          setFiles([]);
+          setStatus(null);
+          setTotalSize(0);
+        }
         return;
       }
 
@@ -333,15 +364,40 @@ export function Knowledge() {
         ),
       ]);
 
-      setStatus(statusData);
-      setFiles(filesData.files);
-      setTotalSize(filesData.total_size);
+      if (!isCurrentRequest()) {
+        return;
+      }
+
+      if (statusData.base_id !== baseId || filesData.base_id !== baseId) {
+        throw new Error(
+          "Loaded knowledge data did not match the selected base",
+        );
+      }
+
+      if (isCurrentRequest()) {
+        setStatus({
+          ...statusData,
+          file_listing_degraded:
+            filesData.file_listing_degraded ?? statusData.file_listing_degraded,
+          file_listing_error:
+            filesData.file_listing_error ??
+            statusData.file_listing_error ??
+            null,
+        });
+        setFiles(filesData.files);
+        setTotalSize(filesData.total_size);
+      }
     } catch (err) {
+      if (!isCurrentRequest()) {
+        return;
+      }
       const message =
         err instanceof Error ? err.message : "Failed to load knowledge data";
       setError(message);
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -367,6 +423,13 @@ export function Knowledge() {
   const settingsSourceType: KnowledgeSourceType = settings.git
     ? "git"
     : "local";
+  const hasGitRepoUrlReplacement =
+    settingsSourceType === "git" && gitRepoUrlReplacement.trim().length > 0;
+  const canSaveSettings = isDirty || hasGitRepoUrlReplacement;
+
+  useEffect(() => {
+    setGitRepoUrlReplacement("");
+  }, [selectedBase, settingsSourceType]);
 
   const updateGitSettings = useCallback(
     (updates: Partial<KnowledgeGitConfig>) => {
@@ -398,8 +461,20 @@ export function Knowledge() {
       return;
     }
 
-    if (settings.git && !settings.git.repo_url.trim()) {
+    const repoUrlReplacement = gitRepoUrlReplacement.trim();
+    const gitSettings = settings.git
+      ? {
+          ...settings.git,
+          repo_url: repoUrlReplacement || settings.git.repo_url,
+        }
+      : undefined;
+
+    if (gitSettings && !gitSettings.repo_url.trim()) {
       setError("Repository URL is required when Git source is enabled");
+      return;
+    }
+    if (gitSettings && gitRepoUrlHasRedactionSentinel(gitSettings.repo_url)) {
+      setError("Repository URL contains a redacted credential placeholder");
       return;
     }
 
@@ -407,11 +482,11 @@ export function Knowledge() {
       settings.chunk_size,
       settings.chunk_overlap,
     );
-    const nextSettings: KnowledgeBaseConfig = settings.git
+    const nextSettings: KnowledgeBaseConfig = gitSettings
       ? {
           ...settings,
           ...normalizedChunking,
-          git: normalizeGitConfig(settings.git),
+          git: normalizeGitConfig(gitSettings),
         }
       : {
           ...settings,
@@ -439,6 +514,7 @@ export function Knowledge() {
         return;
       }
       await loadData(selectedBase);
+      setGitRepoUrlReplacement("");
       toast({
         title: "Knowledge settings saved",
         description: "Configuration has been updated.",
@@ -462,6 +538,7 @@ export function Knowledge() {
     saveConfig,
     selectedBase,
     settings,
+    gitRepoUrlReplacement,
     toast,
     updateKnowledgeBase,
   ]);
@@ -612,6 +689,16 @@ export function Knowledge() {
       if (selectedFiles.length === 0 || !selectedBase) {
         return;
       }
+      if (isDirty) {
+        setDragActive(false);
+        return;
+      }
+      if (selectedBaseIsGitBacked) {
+        setError(
+          "Git-backed knowledge bases sync from the repository. Update the repository and reindex instead.",
+        );
+        return;
+      }
 
       const formData = new FormData();
       selectedFiles.forEach((file) => {
@@ -649,12 +736,18 @@ export function Knowledge() {
         setUploading(false);
       }
     },
-    [loadData, selectedBase, toast],
+    [isDirty, loadData, selectedBase, selectedBaseIsGitBacked, toast],
   );
 
   const handleDeleteFile = useCallback(
     async (path: string) => {
       if (!selectedBase) {
+        return;
+      }
+      if (selectedBaseIsGitBacked) {
+        setError(
+          "Git-backed knowledge bases sync from the repository. Update the repository and reindex instead.",
+        );
         return;
       }
 
@@ -690,7 +783,7 @@ export function Knowledge() {
         setDeletingPath(null);
       }
     },
-    [loadData, selectedBase, toast],
+    [loadData, selectedBase, selectedBaseIsGitBacked, toast],
   );
 
   const handleReindex = useCallback(async () => {
@@ -729,8 +822,8 @@ export function Knowledge() {
     }
   }, [loadData, selectedBase, toast]);
 
-  const columns: ColumnDef<KnowledgeFile>[] = useMemo(
-    () => [
+  const columns: ColumnDef<KnowledgeFile>[] = useMemo(() => {
+    const baseColumns: ColumnDef<KnowledgeFile>[] = [
       {
         accessorKey: "name",
         header: () => <span className="font-medium">Name</span>,
@@ -758,6 +851,14 @@ export function Knowledge() {
         header: () => <span className="font-medium">Modified</span>,
         cell: ({ row }) => formatModifiedDate(row.original.modified),
       },
+    ];
+
+    if (selectedBaseIsGitBacked) {
+      return baseColumns;
+    }
+
+    return [
+      ...baseColumns,
       {
         id: "actions",
         header: () => <span className="font-medium">Actions</span>,
@@ -769,15 +870,15 @@ export function Knowledge() {
               onClick={() => handleDeleteFile(row.original.path)}
               disabled={deletingPath === row.original.path || isDirty}
               title="Delete file"
+              aria-label={`Delete ${row.original.path}`}
             >
               <Trash2 className="h-4 w-4 text-destructive" />
             </Button>
           </div>
         ),
       },
-    ],
-    [deletingPath, handleDeleteFile, isDirty],
-  );
+    ];
+  }, [deletingPath, handleDeleteFile, isDirty, selectedBaseIsGitBacked]);
 
   const table = useReactTable({
     data: files,
@@ -796,6 +897,9 @@ export function Knowledge() {
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragActive(false);
+    if (isDirty) {
+      return;
+    }
     const droppedFiles = Array.from(event.dataTransfer.files || []);
     void uploadFiles(droppedFiles);
   };
@@ -877,8 +981,11 @@ export function Knowledge() {
                           {baseSourceType === "git" ? (
                             <>
                               <p className="mt-1 truncate text-xs font-mono text-muted-foreground">
-                                {baseConfig?.git?.repo_url ||
-                                  "Repository URL not configured"}
+                                {baseConfig?.git?.repo_url
+                                  ? redactUrlCredentials(
+                                      baseConfig.git.repo_url,
+                                    )
+                                  : "Repository URL not configured"}
                               </p>
                               <p className="mt-1 text-xs text-muted-foreground">
                                 Branch: {baseConfig?.git?.branch || "main"}
@@ -892,8 +999,8 @@ export function Knowledge() {
                               </p>
                               <p className="mt-1 text-xs text-muted-foreground">
                                 {baseConfig?.watch
-                                  ? "Watching for changes"
-                                  : "Manual reindex only"}
+                                  ? "Advisory refresh on access"
+                                  : "External edits need reindex"}
                               </p>
                             </>
                           )}
@@ -1099,20 +1206,23 @@ export function Knowledge() {
                   />
                 </div>
 
-                <div className="flex items-center justify-between rounded-md border p-3">
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium">Watch Folder</p>
-                    <p className="text-xs text-muted-foreground">
-                      Automatically index file additions and updates.
-                    </p>
+                {settingsSourceType === "local" ? (
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium">Refresh on Access</p>
+                      <p className="text-xs text-muted-foreground">
+                        Local folders only. Schedule a background refresh when
+                        assigned agents access this base.
+                      </p>
+                    </div>
+                    <Checkbox
+                      checked={settings.watch}
+                      onCheckedChange={(checked) =>
+                        updateSettings({ watch: checked === true })
+                      }
+                    />
                   </div>
-                  <Checkbox
-                    checked={settings.watch}
-                    onCheckedChange={(checked) =>
-                      updateSettings({ watch: checked === true })
-                    }
-                  />
-                </div>
+                ) : null}
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
@@ -1188,15 +1298,30 @@ export function Knowledge() {
                     <div className="space-y-2">
                       <label
                         className="text-sm font-medium"
-                        htmlFor="knowledge-git-repo-url"
+                        htmlFor="knowledge-git-current-repo-url"
                       >
-                        Repository URL
+                        Current Repository URL
                       </label>
                       <Input
-                        id="knowledge-git-repo-url"
-                        value={settings.git.repo_url}
+                        id="knowledge-git-current-repo-url"
+                        value={redactUrlCredentials(settings.git.repo_url)}
+                        readOnly
+                        placeholder="https://github.com/org/repo"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="knowledge-git-replacement-repo-url"
+                      >
+                        Replacement Repository URL
+                      </label>
+                      <Input
+                        id="knowledge-git-replacement-repo-url"
+                        value={gitRepoUrlReplacement}
                         onChange={(event) =>
-                          updateGitSettings({ repo_url: event.target.value })
+                          setGitRepoUrlReplacement(event.target.value)
                         }
                         placeholder="https://github.com/org/repo"
                       />
@@ -1247,39 +1372,8 @@ export function Knowledge() {
                         }}
                       />
                       <p className="text-xs text-muted-foreground">
-                        Check for updates every X seconds.
-                      </p>
-                    </div>
-
-                    <div className="space-y-2">
-                      <label
-                        className="text-sm font-medium"
-                        htmlFor="knowledge-git-startup-behavior"
-                      >
-                        Startup Behavior
-                      </label>
-                      <Select
-                        value={settings.git.startup_behavior ?? "blocking"}
-                        onValueChange={(value) =>
-                          updateGitSettings({
-                            startup_behavior:
-                              value === "background"
-                                ? "background"
-                                : "blocking",
-                          })
-                        }
-                      >
-                        <SelectTrigger id="knowledge-git-startup-behavior">
-                          <SelectValue placeholder="Select startup behavior" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="blocking">Blocking</SelectItem>
-                          <SelectItem value="background">Background</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <p className="text-xs text-muted-foreground">
-                        Blocking waits for the initial sync. Background serves
-                        the current index and syncs later.
+                        Minimum snapshot age before checking for Git updates on
+                        access.
                       </p>
                     </div>
 
@@ -1426,8 +1520,9 @@ export function Knowledge() {
                     </div>
 
                     <p className="text-xs text-muted-foreground">
-                      Uploaded files remain supported and are combined with
-                      Git-synced content.
+                      File upload and delete actions are disabled for Git
+                      sources. Update the repository and reindex to refresh
+                      content.
                     </p>
                   </div>
                 ) : null}
@@ -1436,7 +1531,7 @@ export function Knowledge() {
                   <Button
                     variant="outline"
                     onClick={handleSaveSettings}
-                    disabled={savingSettings || !isDirty}
+                    disabled={savingSettings || !canSaveSettings}
                   >
                     {savingSettings ? "Saving..." : "Save Settings"}
                   </Button>
@@ -1456,15 +1551,26 @@ export function Knowledge() {
                   <Badge variant="outline">
                     Total Size: {formatBytes(totalSize)}
                   </Badge>
+                  {status?.refreshing ||
+                  status?.refresh_state === "refreshing" ? (
+                    <Badge variant="default">Refresh Running</Badge>
+                  ) : null}
+                  {status?.refresh_state === "stale" ? (
+                    <Badge variant="secondary">Refresh Pending</Badge>
+                  ) : null}
+                  {status?.refresh_state === "refresh_failed" ||
+                  status?.last_error ? (
+                    <Badge variant="destructive">Refresh Failed</Badge>
+                  ) : null}
+                  {status?.file_listing_degraded ? (
+                    <Badge variant="destructive">File Listing Degraded</Badge>
+                  ) : null}
                   {status?.git ? (
                     <>
-                      <Badge variant="outline">
-                        Git: {status.git.startup_behavior}
-                      </Badge>
                       <Badge
                         variant={status.git.syncing ? "default" : "outline"}
                       >
-                        {status.git.syncing ? "Syncing" : "Idle"}
+                        {status.git.syncing ? "Refreshing" : "Idle"}
                       </Badge>
                       <Badge variant="outline">
                         {status.git.repo_present
@@ -1473,15 +1579,9 @@ export function Knowledge() {
                       </Badge>
                       <Badge variant="outline">
                         {status.git.initial_sync_complete
-                          ? "Initial Sync Complete"
-                          : "Initial Sync Pending"}
+                          ? "Snapshot Ready"
+                          : "Snapshot Pending"}
                       </Badge>
-                      {status.git.pending_startup_mode ? (
-                        <Badge variant="secondary">
-                          Pending:{" "}
-                          {formatStartupMode(status.git.pending_startup_mode)}
-                        </Badge>
-                      ) : null}
                       {status.git.lfs ? (
                         <Badge variant="secondary">LFS</Badge>
                       ) : null}
@@ -1494,10 +1594,23 @@ export function Knowledge() {
                 <p className="text-sm text-muted-foreground mt-2">
                   Folder: <code>{status?.folder_path ?? "-"}</code>
                 </p>
+                {status?.last_error ? (
+                  <p className="mt-2 text-sm text-destructive">
+                    Refresh Error: {status.last_error}
+                  </p>
+                ) : null}
+                {status?.file_listing_degraded ? (
+                  <p className="mt-2 text-sm text-destructive">
+                    File Listing:{" "}
+                    {status.file_listing_error ??
+                      "Knowledge file listing is incomplete."}
+                  </p>
+                ) : null}
                 {status?.git ? (
                   <div className="mt-2 space-y-1 text-sm text-muted-foreground">
                     <p>
-                      Repo: <code>{status.git.repo_url}</code> (
+                      Repo:{" "}
+                      <code>{redactUrlCredentials(status.git.repo_url)}</code> (
                       {status.git.branch})
                     </p>
                     {status.git.last_successful_commit ? (
@@ -1540,47 +1653,17 @@ export function Knowledge() {
 
         {selectedBase && (
           <>
-            <Card
-              className={cn(
-                "border-dashed transition-colors",
-                dragActive ? "border-primary bg-primary/5" : "border-border",
-              )}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragActive(true);
-              }}
-              onDragLeave={(event) => {
-                event.preventDefault();
-                setDragActive(false);
-              }}
-              onDrop={onDrop}
-            >
-              <CardContent className="py-6">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <div>
-                    <p className="font-medium">
-                      Drop files here or upload manually
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      Supported formats are auto-detected by agno readers.
-                    </p>
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      className="hidden"
-                      multiple
-                      onChange={onFileInputChange}
-                    />
-                    <Button
-                      variant="outline"
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={uploading || isDirty}
-                    >
-                      <Upload className="h-4 w-4 mr-2" />
-                      {uploading ? "Uploading..." : "Upload"}
-                    </Button>
+            {selectedBaseIsGitBacked ? (
+              <Card>
+                <CardContent className="py-6">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="font-medium">Repository-managed files</p>
+                      <p className="text-sm text-muted-foreground">
+                        Update the configured repository, then reindex to sync
+                        and rebuild this base.
+                      </p>
+                    </div>
                     <Button
                       variant="outline"
                       onClick={handleReindex}
@@ -1595,9 +1678,74 @@ export function Knowledge() {
                       {reindexing ? "Reindexing..." : "Reindex"}
                     </Button>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            ) : (
+              <Card
+                className={cn(
+                  "border-dashed transition-colors",
+                  dragActive && !isDirty
+                    ? "border-primary bg-primary/5"
+                    : "border-border",
+                )}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  if (isDirty) {
+                    setDragActive(false);
+                    return;
+                  }
+                  setDragActive(true);
+                }}
+                onDragLeave={(event) => {
+                  event.preventDefault();
+                  setDragActive(false);
+                }}
+                onDrop={onDrop}
+              >
+                <CardContent className="py-6">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div>
+                      <p className="font-medium">
+                        Drop files here or upload manually
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Supported formats are auto-detected by agno readers.
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        className="hidden"
+                        multiple
+                        onChange={onFileInputChange}
+                      />
+                      <Button
+                        variant="outline"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploading || isDirty}
+                      >
+                        <Upload className="h-4 w-4 mr-2" />
+                        {uploading ? "Uploading..." : "Upload"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={handleReindex}
+                        disabled={reindexing || isDirty}
+                      >
+                        <RefreshCw
+                          className={cn(
+                            "h-4 w-4 mr-2",
+                            reindexing && "animate-spin",
+                          )}
+                        />
+                        {reindexing ? "Reindexing..." : "Reindex"}
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             <Card>
               <CardHeader className="pb-3">
@@ -1635,7 +1783,9 @@ export function Knowledge() {
                             colSpan={columns.length}
                             className="px-4 py-8 text-center text-muted-foreground"
                           >
-                            No files uploaded yet.
+                            {selectedBaseIsGitBacked
+                              ? "No repository files available yet."
+                              : "No files uploaded yet."}
                           </td>
                         </tr>
                       ) : (

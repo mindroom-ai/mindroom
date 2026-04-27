@@ -1197,7 +1197,6 @@ async def test_request_config_reload_ignores_changes_while_startup_is_in_progres
     ("task_attr", "cancel_method_name", "task_name"),
     [
         ("_config_reload_task", "_cancel_config_reload_task", "config_reload"),
-        ("_knowledge_refresh_task", "_cancel_knowledge_refresh_task", "knowledge_refresh"),
     ],
 )
 async def test_detached_task_cancel_logs_exception_instead_of_suppressing_silently(

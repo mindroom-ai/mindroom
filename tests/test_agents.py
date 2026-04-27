@@ -988,7 +988,7 @@ def test_resolve_agent_runtime_skips_workspace_knowledge_links_for_external_shar
 
 
 def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bases(tmp_path: Path) -> None:
-    """Private requester-local knowledge should also surface through workspace-local symlinks."""
+    """PrivateAgentKnowledge should also surface through workspace-local symlinks."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     config.agents["general"].memory_backend = "file"
@@ -2442,6 +2442,17 @@ def test_config_rejects_legacy_agent_knowledge_base_field() -> None:
                     path="./knowledge_docs/research",
                     watch=False,
                 ),
+            },
+        )
+
+
+def test_config_rejects_removed_knowledge_git_startup_behavior_field() -> None:
+    """Removed Git startup behavior field must fail fast to avoid inert config."""
+    with pytest.raises(ValidationError, match="startup_behavior"):
+        KnowledgeGitConfig.model_validate(
+            {
+                "repo_url": "https://github.com/example/repo",
+                "startup_behavior": "background",
             },
         )
 

@@ -3680,7 +3680,7 @@ requires-dist = [
     { name = "matrix-nio", specifier = ">=0.25" },
     { name = "matrix-nio", extras = ["e2e"], marker = "extra == 'matrix-e2ee'", specifier = ">=0.25" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.12.4" },
-    { name = "mdit-py-plugins", specifier = ">=0.5.0" },
+    { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },

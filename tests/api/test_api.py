@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
-from mindroom.api import config_lifecycle, google_integration, main
+from mindroom.api import auth, config_lifecycle, frontend, google_integration, main
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
@@ -132,9 +132,9 @@ class _ContextSwapLock:
 def test_init_supabase_auth_returns_none_without_credentials(tmp_path: Path) -> None:
     """Supabase auth should stay disabled when credentials are incomplete."""
     runtime_paths = _runtime_paths(tmp_path)
-    assert main._init_supabase_auth(runtime_paths, None, None) is None
-    assert main._init_supabase_auth(runtime_paths, "https://supabase.test", None) is None
-    assert main._init_supabase_auth(runtime_paths, None, "anon-key") is None
+    assert auth._init_supabase_auth(runtime_paths, None, None) is None
+    assert auth._init_supabase_auth(runtime_paths, "https://supabase.test", None) is None
+    assert auth._init_supabase_auth(runtime_paths, None, "anon-key") is None
 
 
 def test_init_supabase_auth_raises_when_auto_install_disabled(
@@ -153,12 +153,12 @@ def test_init_supabase_auth_raises_when_auto_install_disabled(
         install_calls.append(extra_name)
         return False
 
-    monkeypatch.setattr(main.importlib, "import_module", _missing_supabase)
-    monkeypatch.setattr(main, "auto_install_enabled", lambda _runtime_paths: False)
-    monkeypatch.setattr(main, "auto_install_tool_extra", _auto_install)
+    monkeypatch.setattr(auth.importlib, "import_module", _missing_supabase)
+    monkeypatch.setattr(auth, "auto_install_enabled", lambda _runtime_paths: False)
+    monkeypatch.setattr(auth, "auto_install_tool_extra", _auto_install)
 
     with pytest.raises(ImportError, match="MINDROOM_NO_AUTO_INSTALL_TOOLS"):
-        main._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+        auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
 
     assert install_calls == ["supabase"]
 
@@ -176,12 +176,12 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
         install_calls.append(extra_name)
         return False
 
-    monkeypatch.setattr(main.importlib, "import_module", _missing_supabase)
-    monkeypatch.setattr(main, "auto_install_enabled", lambda _runtime_paths: True)
-    monkeypatch.setattr(main, "auto_install_tool_extra", _auto_install)
+    monkeypatch.setattr(auth.importlib, "import_module", _missing_supabase)
+    monkeypatch.setattr(auth, "auto_install_enabled", lambda _runtime_paths: True)
+    monkeypatch.setattr(auth, "auto_install_tool_extra", _auto_install)
 
     with pytest.raises(ImportError, match=r"mindroom\[supabase\]") as err:
-        main._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+        auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
 
     assert install_calls == ["supabase"]
     assert "MINDROOM_NO_AUTO_INSTALL_TOOLS" not in str(err.value)
@@ -333,7 +333,7 @@ def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
     assert main._app_runtime_paths(fresh_app) == runtime_paths
     assert main._app_config_data(fresh_app) == {}
     assert hasattr(main._app_config_lock(fresh_app), "acquire")
-    assert main._app_auth_state(fresh_app).runtime_paths == runtime_paths
+    assert auth.app_auth_state(fresh_app).runtime_paths == runtime_paths
 
 
 def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
@@ -346,11 +346,11 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     )
 
     main.initialize_api_app(fresh_app, initial_runtime)
-    assert main._app_auth_state(fresh_app).settings.mindroom_api_key is None
+    assert auth.app_auth_state(fresh_app).settings.mindroom_api_key is None
 
     main.initialize_api_app(fresh_app, refreshed_runtime)
 
-    assert main._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
+    assert auth.app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
 
 def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_path: Path) -> None:
@@ -2198,9 +2198,9 @@ def test_spotify_connect_uses_pending_oauth_state(
             },
         ),
     )
-    main._app_context(main.app).auth_state = main._ApiAuthState(
+    main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
-        settings=main._ApiAuthSettings(
+        settings=auth.ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
@@ -2248,9 +2248,9 @@ def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: 
             },
         ),
     )
-    main._app_context(main.app).auth_state = main._ApiAuthState(
+    main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
-        settings=main._ApiAuthSettings(
+        settings=auth.ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
@@ -2322,9 +2322,9 @@ def test_spotify_callback_preserves_runtime_validation_error(
             },
         ),
     )
-    main._app_context(main.app).auth_state = main._ApiAuthState(
+    main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
-        settings=main._ApiAuthSettings(
+        settings=auth.ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
@@ -3199,7 +3199,7 @@ def test_frontend_root_serves_index(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     response = test_client.get("/")
     assert response.status_code == 200
@@ -3216,7 +3216,7 @@ def test_frontend_spa_routes_fall_back_to_index(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     response = test_client.get("/agents")
     assert response.status_code == 200
@@ -3233,7 +3233,7 @@ def test_frontend_does_not_shadow_unknown_api_routes(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     response = test_client.get("/api/not-real")
     assert response.status_code == 404
@@ -3251,7 +3251,7 @@ def test_frontend_blocks_path_traversal(
     secret = tmp_path / "secret.txt"
     secret.write_text("do-not-leak")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     # Starlette normalizes bare `..` segments, so percent-encoded traversal
     # is the real attack vector that _resolve_frontend_asset must block.
@@ -3271,7 +3271,7 @@ def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     response = api_key_client.get("/", follow_redirects=False)
     assert response.status_code == 307
@@ -3307,7 +3307,7 @@ def test_frontend_serves_after_api_key_login(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
@@ -3373,8 +3373,8 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "dashboard_credentials_supported": True,
                 "team_eligibility_reason": None,
                 "private_knowledge_base_id": None,
-                "request_scoped_workspace_enabled": False,
-                "request_scoped_knowledge_enabled": False,
+                "private_workspace_enabled": False,
+                "private_agent_knowledge_enabled": False,
             },
             "leader": {
                 "agent_name": "leader",
@@ -3385,8 +3385,8 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "dashboard_credentials_supported": True,
                 "team_eligibility_reason": "Delegates to private agent 'mind', so it cannot participate in teams yet.",
                 "private_knowledge_base_id": None,
-                "request_scoped_workspace_enabled": False,
-                "request_scoped_knowledge_enabled": False,
+                "private_workspace_enabled": False,
+                "private_agent_knowledge_enabled": False,
             },
             "mind": {
                 "agent_name": "mind",
@@ -3397,8 +3397,8 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "dashboard_credentials_supported": False,
                 "team_eligibility_reason": "Private agents cannot participate in teams yet.",
                 "private_knowledge_base_id": None,
-                "request_scoped_workspace_enabled": True,
-                "request_scoped_knowledge_enabled": False,
+                "private_workspace_enabled": True,
+                "private_agent_knowledge_enabled": False,
             },
         },
     }
@@ -3624,9 +3624,9 @@ def api_key_client(temp_config_file: Path) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
-    main._app_context(main.app).auth_state = main._ApiAuthState(
+    main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
-        settings=main._ApiAuthSettings(
+        settings=auth.ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
@@ -3977,11 +3977,13 @@ def _set_platform_auth(
     *,
     valid_tokens: set[str],
     platform_login_url: str = "https://platform.example.com/login",
+    account_id: str | None = None,
+    user_id: str = "user-123",
 ) -> None:
     """Configure the API module for platform-managed cookie auth tests."""
 
     class _FakeUser:
-        id = "user-123"
+        id = user_id
         email = "user@example.com"
 
     class _FakeResponse:
@@ -3997,13 +3999,13 @@ def _set_platform_auth(
     class _FakeClient:
         auth = _FakeAuth()
 
-    main._app_context(main.app).auth_state = main._ApiAuthState(
+    main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
-        settings=main._ApiAuthSettings(
+        settings=auth.ApiAuthSettings(
             platform_login_url=platform_login_url,
             supabase_url="https://supabase.example.com",
             supabase_anon_key="anon-key",
-            account_id=None,
+            account_id=account_id,
             mindroom_api_key=None,
         ),
         supabase_auth=_FakeClient(),
@@ -4034,7 +4036,7 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
         platform_login_url="https://app.example.com/auth/login",
@@ -4055,7 +4057,7 @@ def test_platform_frontend_redirects_to_login_when_cookie_invalid(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens={"valid-cookie-token"},
         platform_login_url="https://app.example.com/auth/login",
@@ -4081,7 +4083,7 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens={valid_cookie_token},
         platform_login_url="https://app.example.com/auth/login",
@@ -4093,6 +4095,34 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
     )
     assert response.status_code == 200
     assert "MindRoom Dashboard" in response.text
+
+
+def test_platform_frontend_redirects_when_cookie_account_mismatches(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Platform frontend access must enforce the instance account id."""
+    valid_cookie_token = "valid-cookie-token"  # noqa: S105
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    _set_platform_auth(
+        valid_tokens={valid_cookie_token},
+        platform_login_url="https://app.example.com/auth/login",
+        account_id="account-owner",
+        user_id="other-account",
+    )
+
+    response = test_client.get(
+        "/",
+        cookies={"mindroom_jwt": valid_cookie_token},
+        follow_redirects=False,
+    )
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
 
 
 def test_health_startup_grace_expires_after_stale_threshold(

@@ -140,10 +140,11 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 On `orchestrator.stop()`:
 
 1. Set `self.running = False`
+1. Cancel config reload task
 1. Stop memory auto-flush worker
-1. Cancel knowledge refresh task
+1. Shut down the per-binding knowledge refresh scheduler
 1. Cancel pending bot start tasks
-1. Shut down knowledge managers (`shutdown_shared_knowledge_managers()`)
+1. Stop the MCP manager
 1. Cancel all sync tasks
 1. Signal all bots to stop (`bot.running = False`)
 1. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)

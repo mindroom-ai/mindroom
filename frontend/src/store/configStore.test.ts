@@ -19,8 +19,8 @@ function makeAgentPolicy(
     dashboard_credentials_supported: true,
     team_eligibility_reason: null,
     private_knowledge_base_id: null,
-    request_scoped_workspace_enabled: false,
-    request_scoped_knowledge_enabled: false,
+    private_workspace_enabled: false,
+    private_agent_knowledge_enabled: false,
     ...overrides,
   };
 }
@@ -334,7 +334,7 @@ describe("configStore", () => {
               dashboard_credentials_supported: false,
               team_eligibility_reason:
                 "Private agents cannot participate in teams yet.",
-              request_scoped_workspace_enabled: true,
+              private_workspace_enabled: true,
             }),
           },
         }),
@@ -1325,7 +1325,7 @@ describe("configStore", () => {
               dashboard_credentials_supported: false,
               team_eligibility_reason:
                 "Private agents cannot participate in teams yet.",
-              request_scoped_workspace_enabled: true,
+              private_workspace_enabled: true,
             }),
           },
         }),
@@ -1381,7 +1381,7 @@ describe("configStore", () => {
           dashboard_credentials_supported: false,
           team_eligibility_reason:
             "Private agents cannot participate in teams yet.",
-          request_scoped_workspace_enabled: true,
+          private_workspace_enabled: true,
         }),
       });
     });
@@ -2784,7 +2784,7 @@ describe("configStore", () => {
               dashboard_credentials_supported: false,
               team_eligibility_reason:
                 "Private agents cannot participate in teams yet.",
-              request_scoped_workspace_enabled: true,
+              private_workspace_enabled: true,
             }),
             helper: makeAgentPolicy("helper"),
           },
@@ -2809,7 +2809,7 @@ describe("configStore", () => {
             dashboard_credentials_supported: false,
             team_eligibility_reason:
               "Private agents cannot participate in teams yet.",
-            request_scoped_workspace_enabled: true,
+            private_workspace_enabled: true,
           }),
           helper: makeAgentPolicy("helper"),
         });
@@ -2968,7 +2968,7 @@ describe("configStore", () => {
             dashboard_credentials_supported: false,
             team_eligibility_reason:
               "Private agents cannot participate in teams yet.",
-            request_scoped_workspace_enabled: true,
+            private_workspace_enabled: true,
           }),
         },
       });
@@ -2990,7 +2990,7 @@ describe("configStore", () => {
               dashboard_credentials_supported: false,
               team_eligibility_reason:
                 "Private agents cannot participate in teams yet.",
-              request_scoped_workspace_enabled: true,
+              private_workspace_enabled: true,
             }),
           },
         }),
@@ -3019,7 +3019,7 @@ describe("configStore", () => {
             dashboard_credentials_supported: false,
             team_eligibility_reason:
               "Private agents cannot participate in teams yet.",
-            request_scoped_workspace_enabled: true,
+            private_workspace_enabled: true,
           }),
         });
       });
@@ -3078,7 +3078,7 @@ describe("configStore", () => {
             dashboard_credentials_supported: false,
             team_eligibility_reason:
               "Private agents cannot participate in teams yet.",
-            request_scoped_workspace_enabled: true,
+            private_workspace_enabled: true,
           }),
         },
       });
@@ -3106,7 +3106,7 @@ describe("configStore", () => {
               dashboard_credentials_supported: false,
               team_eligibility_reason:
                 "Private agents cannot participate in teams yet.",
-              request_scoped_workspace_enabled: true,
+              private_workspace_enabled: true,
             }),
           },
         }),
@@ -3126,7 +3126,7 @@ describe("configStore", () => {
             dashboard_credentials_supported: false,
             team_eligibility_reason:
               "Private agents cannot participate in teams yet.",
-            request_scoped_workspace_enabled: true,
+            private_workspace_enabled: true,
           }),
         });
       });
@@ -3313,7 +3313,7 @@ describe("configStore", () => {
               dashboard_credentials_supported: false,
               team_eligibility_reason:
                 "Private agents cannot participate in teams yet.",
-              request_scoped_workspace_enabled: true,
+              private_workspace_enabled: true,
             }),
           },
         }),
@@ -3339,7 +3339,7 @@ describe("configStore", () => {
             dashboard_credentials_supported: false,
             team_eligibility_reason:
               "Private agents cannot participate in teams yet.",
-            request_scoped_workspace_enabled: true,
+            private_workspace_enabled: true,
           }),
         });
       });
@@ -3629,7 +3629,7 @@ describe("configStore", () => {
             dashboard_credentials_supported: false,
             team_eligibility_reason:
               "Private agents cannot participate in teams yet.",
-            request_scoped_workspace_enabled: true,
+            private_workspace_enabled: true,
           }),
         },
       });

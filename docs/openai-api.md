@@ -173,7 +173,8 @@ Parallel Claude sub-sessions are supported by using different `session_label` va
 ### Knowledge bases
 
 Agents with configured `knowledge_bases` in `config.yaml` get RAG support automatically. No additional API configuration needed.
-For Git-backed knowledge bases, API-only deployments auto-clone/sync/index on manager initialization.
+For Git-backed knowledge bases, missing or stale published indexes schedule the same per-binding refresh flow used by the Matrix runtime.
+Explicit dashboard/API reindex runs Git sync first and then rebuilds a candidate index.
 
 ## What's ignored
 

@@ -746,8 +746,7 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
         patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
         patch.object(orchestrator, "_cleanup_stale_streams_after_restart", new=AsyncMock(return_value=[])),
         patch.object(orchestrator, "_auto_resume_after_restart", new=AsyncMock()),
-        patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
-        patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_completed_sync_task),
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())

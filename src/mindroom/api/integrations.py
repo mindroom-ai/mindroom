@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from mindroom.api.auth import verify_user
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
     consume_pending_oauth_request,
@@ -176,8 +177,6 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
     state = request.query_params.get("state")
     if not state:
         raise HTTPException(status_code=400, detail="No OAuth state received")
-
-    from mindroom.api.main import verify_user  # noqa: PLC0415
 
     await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
     pending = consume_pending_oauth_request(request, "spotify", state)
