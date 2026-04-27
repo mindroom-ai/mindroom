@@ -269,6 +269,7 @@ def _git_manager(
     tmp_path: Path,
     *,
     lfs: bool = False,
+    include_extensions: list[str] | None = None,
     sync_timeout_seconds: int = 3600,
 ) -> KnowledgeManager:
     knowledge_path = tmp_path / "knowledge"
@@ -285,6 +286,8 @@ def _git_manager(
             ),
         },
     )
+    if include_extensions is not None:
+        config.knowledge_bases["docs"].include_extensions = include_extensions
     return KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
 
@@ -5531,6 +5534,7 @@ async def test_sync_git_source_once_pulls_lfs_after_reset(
     """LFS-enabled repos should explicitly pull LFS objects after resetting to the remote branch."""
     manager = _git_manager(tmp_path, lfs=True)
     git_calls: list[list[str]] = []
+    git_envs: list[tuple[list[str], dict[str, str] | None]] = []
 
     async def _fake_ensure_git_repository(_git_config: object) -> bool:
         return False
@@ -5547,8 +5551,14 @@ async def test_sync_git_source_once_pulls_lfs_after_reset(
     async def _fake_git_list_tracked_files() -> set[str]:
         return next(list_tracked_files_results)
 
-    async def _fake_run_git(args: list[str], **_: object) -> str:
+    async def _fake_run_git(
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        **_: object,
+    ) -> str:
         git_calls.append(args)
+        git_envs.append((args, env))
         if args[:3] == ["diff", "--name-only", "--no-renames"]:
             return "doc.md\n"
         return ""
@@ -5563,6 +5573,35 @@ async def test_sync_git_source_once_pulls_lfs_after_reset(
     assert updated is True
     assert changed_files == {"doc.md"}
     assert removed_files == set()
+    assert ["lfs", "pull", "origin", "main"] in git_calls
+    assert (
+        ["checkout", "--force", "-B", "main", "origin/main"],
+        {"GIT_LFS_SKIP_SMUDGE": "1"},
+    ) in git_envs
+    assert (["reset", "--hard", "origin/main"], {"GIT_LFS_SKIP_SMUDGE": "1"}) in git_envs
+
+
+@pytest.mark.asyncio
+async def test_hydrate_git_lfs_worktree_ignores_index_extension_filters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Index extension filters must not make the Git checkout incomplete."""
+    manager = _git_manager(tmp_path, lfs=True, include_extensions=[".md", ".mdx", ".rst"])
+    git_calls: list[list[str]] = []
+
+    async def _fake_run_git(args: list[str], **_: object) -> str:
+        git_calls.append(args)
+        return ""
+
+    async def _fake_git_rev_parse(_ref: str) -> str | None:
+        return "head"
+
+    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
+
+    await manager._hydrate_git_lfs_worktree(manager._git_config())
+
     assert ["lfs", "pull", "origin", "main"] in git_calls
 
 

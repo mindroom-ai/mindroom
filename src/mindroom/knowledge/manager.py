@@ -1096,6 +1096,14 @@ class KnowledgeManager:
         await self._run_git(["lfs", "install", "--local"], cwd=repo_root)
         self._git_lfs_repository_ready = True
 
+    def _git_lfs_skip_smudge_env(self, git_config: KnowledgeGitConfig) -> dict[str, str] | None:
+        if not git_config.lfs:
+            return None
+        return {"GIT_LFS_SKIP_SMUDGE": "1"}
+
+    def _git_lfs_pull_args(self, git_config: KnowledgeGitConfig) -> list[str]:
+        return ["lfs", "pull", "origin", git_config.branch]
+
     async def _hydrate_git_lfs_worktree(
         self,
         git_config: KnowledgeGitConfig,
@@ -1111,7 +1119,7 @@ class KnowledgeManager:
             if hydrated_head == resolved_head:
                 return
         await self._run_git(
-            ["lfs", "pull", "origin", git_config.branch],
+            self._git_lfs_pull_args(git_config),
             cwd=repo_root or self._knowledge_source_path(),
             env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
         )
@@ -1173,7 +1181,7 @@ class KnowledgeManager:
             cwd=knowledge_root.parent,
             env=_merge_git_env(
                 _git_auth_env(git_config.repo_url, git_config.credentials_service, runtime_paths),
-                {"GIT_LFS_SKIP_SMUDGE": "1"} if git_config.lfs else None,
+                self._git_lfs_skip_smudge_env(git_config),
             ),
         )
         self._git_repo_present = True
@@ -1207,19 +1215,25 @@ class KnowledgeManager:
                 await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
                 return set(), set(), False
 
-            await self._run_git(["checkout", "--force", "-B", git_config.branch, remote_ref])
+            await self._run_git(
+                ["checkout", "--force", "-B", git_config.branch, remote_ref],
+                env=self._git_lfs_skip_smudge_env(git_config),
+            )
             # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
             # intentional way to realign it with the configured remote state.
-            await self._run_git(["reset", "--hard", remote_ref])
+            await self._run_git(["reset", "--hard", remote_ref], env=self._git_lfs_skip_smudge_env(git_config))
             await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
             after_files = await self._git_list_tracked_files()
             changed_files = {path for path in dirty_tracked_files if path in after_files}
             return changed_files, set(), True
 
-        await self._run_git(["checkout", "--force", "-B", git_config.branch, remote_ref])
+        await self._run_git(
+            ["checkout", "--force", "-B", git_config.branch, remote_ref],
+            env=self._git_lfs_skip_smudge_env(git_config),
+        )
         # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
         # intentional way to realign it with the configured remote state.
-        await self._run_git(["reset", "--hard", remote_ref])
+        await self._run_git(["reset", "--hard", remote_ref], env=self._git_lfs_skip_smudge_env(git_config))
         await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
 
         after_files = await self._git_list_tracked_files()

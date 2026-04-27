@@ -206,7 +206,7 @@ knowledge_bases:
 | `branch` | string | `main` | Branch to track |
 | `poll_interval_seconds` | int | `300` | Interval for scheduling background Git refreshes |
 | `credentials_service` | string | `null` | Service name in CredentialsManager for private repos |
-| `lfs` | bool | `false` | Enable Git LFS support and run `git lfs pull` after sync. Requires `git-lfs` on the machine running MindRoom |
+| `lfs` | bool | `false` | Enable Git LFS support and hydrate the checkout after sync. Requires `git-lfs` on the machine running MindRoom |
 | `sync_timeout_seconds` | int | `3600` | Abort one Git command if it exceeds this timeout |
 | `skip_hidden` | bool | `true` | Skip files/folders starting with `.` |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns to include |
@@ -220,7 +220,7 @@ Bundled container images already include it.
 - Chat and runtime requests never wait for Git sync or indexing.
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
 - Explicit dashboard/API reindex runs Git sync first for Git-backed bases and then rebuilds a candidate index.
-- When `lfs: true`, MindRoom runs `git lfs pull origin <branch>` when a checkout is first hydrated or when sync advances to a new Git head.
+- When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
