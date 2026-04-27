@@ -7,7 +7,7 @@ import hashlib
 import hmac
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
@@ -51,6 +51,15 @@ class KnowledgeAvailabilityDetail:
     snapshot_attached: bool
 
 
+@dataclass(frozen=True)
+class KnowledgeResolution:
+    """Resolved knowledge plus availability diagnostics for one agent."""
+
+    knowledge: Knowledge | None
+    missing: tuple[str, ...] = ()
+    unavailable: Mapping[str, KnowledgeAvailabilityDetail] = field(default_factory=dict)
+
+
 class _KnowledgeVectorDb(Protocol):
     """Subset of vector DB interface this module requires."""
 
@@ -82,11 +91,10 @@ def _lookup_knowledge_for_base(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-    on_availability: Callable[[KnowledgeAvailability], None] | None = None,
 ) -> KnowledgeSnapshotLookup | None:
     """Resolve one configured base ID to its current Knowledge instance."""
     try:
-        lookup = get_published_snapshot(
+        return get_published_snapshot(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -94,13 +102,7 @@ def _lookup_knowledge_for_base(
         )
     except Exception:
         logger.exception("Knowledge snapshot lookup failed", base_id=base_id)
-        if on_availability is not None:
-            on_availability(KnowledgeAvailability.INITIALIZING)
         return None
-
-    if on_availability is not None:
-        on_availability(lookup.availability)
-    return lookup
 
 
 def _refresh_schedule_due(
@@ -363,36 +365,27 @@ def _schedule_refresh_for_availability(
     return availability
 
 
-def get_agent_knowledge(
+def resolve_agent_knowledge_access(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    on_missing_bases: Callable[[list[str]], None] | None = None,
-    on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
-    on_unavailable_base_details: Callable[[Mapping[str, KnowledgeAvailabilityDetail]], None] | None = None,
     refresh_owner: KnowledgeRefreshOwner | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> Knowledge | None:
-    """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
+) -> KnowledgeResolution:
+    """Resolve configured knowledge base(s) with diagnostics for one agent."""
     resolved_knowledge: dict[str, tuple[Knowledge | None, KnowledgeAvailability]] = {}
 
     def _resolve(base_id: str) -> tuple[Knowledge | None, KnowledgeAvailability]:
         if base_id in resolved_knowledge:
             return resolved_knowledge[base_id]
 
-        availability = KnowledgeAvailability.READY
-
-        def _set_availability(value: KnowledgeAvailability) -> None:
-            nonlocal availability
-            availability = value
-
         lookup = _lookup_knowledge_for_base(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
-            on_availability=_set_availability,
         )
+        availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
         if lookup is not None and availability is KnowledgeAvailability.READY:
             availability = _ready_snapshot_effective_availability(lookup, config)
         knowledge = lookup.snapshot.knowledge if lookup is not None and lookup.snapshot is not None else None
@@ -413,11 +406,37 @@ def get_agent_knowledge(
         agent_name,
         config,
         lambda base_id: _resolve(base_id)[0],
-        on_missing_bases=on_missing_bases,
         get_availability=lambda base_id: _resolve(base_id)[1],
-        on_unavailable_bases=on_unavailable_bases,
-        on_unavailable_base_details=on_unavailable_base_details,
     )
+
+
+def get_agent_knowledge(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    on_missing_bases: Callable[[list[str]], None] | None = None,
+    on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
+    on_unavailable_base_details: Callable[[Mapping[str, KnowledgeAvailabilityDetail]], None] | None = None,
+    refresh_owner: KnowledgeRefreshOwner | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> Knowledge | None:
+    """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
+    resolution = resolve_agent_knowledge_access(
+        agent_name,
+        config,
+        runtime_paths,
+        refresh_owner=refresh_owner,
+        execution_identity=execution_identity,
+    )
+    if resolution.missing and on_missing_bases is not None:
+        on_missing_bases(list(resolution.missing))
+    if resolution.unavailable and on_unavailable_bases is not None:
+        on_unavailable_bases(
+            {base_id: detail.availability for base_id, detail in resolution.unavailable.items()},
+        )
+    if resolution.unavailable and on_unavailable_base_details is not None:
+        on_unavailable_base_details(resolution.unavailable)
+    return resolution.knowledge
 
 
 def _stale_availability_notice(base_id: str, *, snapshot_attached: bool) -> str:
@@ -493,27 +512,34 @@ class KnowledgeAccessSupport:
         agent_name: str,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-        on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
-        on_unavailable_base_details: Callable[[Mapping[str, KnowledgeAvailabilityDetail]], None] | None = None,
     ) -> Knowledge | None:
         """Return the current knowledge assigned to one or more agent bases."""
+        return self.resolve_for_agent(agent_name, execution_identity=execution_identity).knowledge
+
+    def resolve_for_agent(
+        self,
+        agent_name: str,
+        *,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> KnowledgeResolution:
+        """Return current knowledge and availability diagnostics for one agent."""
         orchestrator = self.runtime.orchestrator
         refresh_owner = orchestrator.knowledge_refresh_owner if orchestrator is not None else None
 
-        return get_agent_knowledge(
+        resolution = resolve_agent_knowledge_access(
             agent_name,
             self.runtime.config,
             self.runtime_paths,
-            on_missing_bases=lambda missing_base_ids: self.logger.warning(
-                "Knowledge bases not available for agent",
-                agent_name=agent_name,
-                knowledge_bases=missing_base_ids,
-            ),
-            on_unavailable_bases=on_unavailable_bases,
-            on_unavailable_base_details=on_unavailable_base_details,
             refresh_owner=refresh_owner,
             execution_identity=execution_identity,
         )
+        if resolution.missing:
+            self.logger.warning(
+                "Knowledge bases not available for agent",
+                agent_name=agent_name,
+                knowledge_bases=list(resolution.missing),
+            )
+        return resolution
 
 
 @dataclass
@@ -648,18 +674,14 @@ def resolve_agent_knowledge(
     config: Config,
     get_knowledge: Callable[[str], Knowledge | None],
     *,
-    on_missing_bases: Callable[[list[str]], None] | None = None,
     get_availability: Callable[[str], KnowledgeAvailability] | None = None,
-    on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
-    on_unavailable_base_details: Callable[[Mapping[str, KnowledgeAvailabilityDetail]], None] | None = None,
-) -> Knowledge | None:
-    """Resolve configured knowledge base(s) for an agent into one Knowledge instance."""
+) -> KnowledgeResolution:
+    """Resolve configured knowledge base(s) for an agent with diagnostics."""
     base_ids = config.get_agent_knowledge_base_ids(agent_name)
     if not base_ids:
-        return None
+        return KnowledgeResolution(knowledge=None)
 
     missing_base_ids: list[str] = []
-    unavailable_base_ids: dict[str, KnowledgeAvailability] = {}
     unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] = {}
     knowledges: list[Knowledge] = []
     for base_id in base_ids:
@@ -667,7 +689,6 @@ def resolve_agent_knowledge(
         if get_availability is not None:
             availability = get_availability(base_id)
             if availability is not KnowledgeAvailability.READY:
-                unavailable_base_ids[base_id] = availability
                 unavailable_base_details[base_id] = KnowledgeAvailabilityDetail(
                     availability=availability,
                     snapshot_attached=knowledge is not None,
@@ -677,11 +698,8 @@ def resolve_agent_knowledge(
             continue
         knowledges.append(knowledge)
 
-    if missing_base_ids and on_missing_bases is not None:
-        on_missing_bases(missing_base_ids)
-    if unavailable_base_ids and on_unavailable_bases is not None:
-        on_unavailable_bases(unavailable_base_ids)
-    if unavailable_base_details and on_unavailable_base_details is not None:
-        on_unavailable_base_details(unavailable_base_details)
-
-    return _merge_knowledge(agent_name, knowledges)
+    return KnowledgeResolution(
+        knowledge=_merge_knowledge(agent_name, knowledges),
+        missing=tuple(missing_base_ids),
+        unavailable=unavailable_base_details,
+    )

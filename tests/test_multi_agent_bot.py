@@ -76,7 +76,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
-from mindroom.knowledge import KnowledgeAvailability
+from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
 from mindroom.knowledge.utils import MultiKnowledgeVectorDb
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -9589,7 +9589,7 @@ class TestAgentBot:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.config.main.Config.from_yaml")
-    @patch("mindroom.teams.get_agent_knowledge")
+    @patch("mindroom.teams.resolve_agent_knowledge_access")
     @patch("mindroom.teams.create_agent")
     @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.teams.Team.arun")
@@ -9624,7 +9624,7 @@ class TestAgentBot:
         # Mock get_model_instance to return a mock model
         mock_model = Ollama(id="test-model")
         mock_get_model_instance.return_value = mock_model
-        mock_get_agent_knowledge.return_value = None
+        mock_get_agent_knowledge.return_value = KnowledgeResolution(knowledge=None)
         fake_member = MagicMock()
         fake_member.name = "MockAgent"
         fake_member.instructions = []

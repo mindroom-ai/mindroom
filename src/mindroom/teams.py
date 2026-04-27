@@ -53,7 +53,7 @@ from mindroom.knowledge import (
     KnowledgeAvailability,
     KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
-    get_agent_knowledge,
+    resolve_agent_knowledge_access,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
@@ -1184,25 +1184,25 @@ def materialize_exact_team_members(
         raise ValueError(_NO_AGENTS_RESPONSE)
 
     def _build_member(agent_name: str) -> Agent:
-        def _on_missing_agent_bases(missing_base_ids: list[str]) -> None:
-            logger.warning(
-                "Knowledge bases not available for team agent",
-                agent_name=agent_name,
-                knowledge_bases=missing_base_ids,
-            )
-
-        knowledge = get_agent_knowledge(
+        knowledge_resolution = resolve_agent_knowledge_access(
             agent_name,
             config,
             runtime_paths,
-            on_missing_bases=_on_missing_agent_bases,
-            on_unavailable_bases=unavailable_bases.update if unavailable_bases is not None else None,
-            on_unavailable_base_details=(
-                unavailable_base_details.update if unavailable_base_details is not None else None
-            ),
             refresh_owner=refresh_owner,
             execution_identity=execution_identity,
         )
+        if knowledge_resolution.missing:
+            logger.warning(
+                "Knowledge bases not available for team agent",
+                agent_name=agent_name,
+                knowledge_bases=list(knowledge_resolution.missing),
+            )
+        if unavailable_bases is not None:
+            unavailable_bases.update(
+                {base_id: detail.availability for base_id, detail in knowledge_resolution.unavailable.items()},
+            )
+        if unavailable_base_details is not None:
+            unavailable_base_details.update(knowledge_resolution.unavailable)
         return create_agent(
             agent_name,
             config,
@@ -1213,7 +1213,7 @@ def materialize_exact_team_members(
             else execution_identity.session_id
             if execution_identity
             else None,
-            knowledge=knowledge,
+            knowledge=knowledge_resolution.knowledge,
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
             refresh_owner=refresh_owner,

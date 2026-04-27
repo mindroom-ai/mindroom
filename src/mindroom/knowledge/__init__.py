@@ -13,8 +13,10 @@ from mindroom.knowledge.refresh_owner import (
 from mindroom.knowledge.utils import (
     KnowledgeAccessSupport,
     KnowledgeAvailabilityDetail,
+    KnowledgeResolution,
     format_knowledge_availability_notice,
     get_agent_knowledge,
+    resolve_agent_knowledge_access,
 )
 
 __all__ = [
@@ -23,8 +25,10 @@ __all__ = [
     "KnowledgeAccessSupport",
     "KnowledgeAvailability",
     "KnowledgeAvailabilityDetail",
+    "KnowledgeResolution",
     "format_knowledge_availability_notice",
     "KnowledgeRefreshOwner",
+    "resolve_agent_knowledge_access",
     "OrchestratorKnowledgeRefreshOwner",
     "PerBindingKnowledgeRefreshOwner",
     "StandaloneKnowledgeRefreshOwner",

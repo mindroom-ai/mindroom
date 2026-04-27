@@ -49,6 +49,7 @@ from mindroom.history.interrupted_replay import render_interrupted_replay_conten
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.knowledge import KnowledgeResolution
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
 from mindroom.team_exact_members import (
@@ -217,7 +218,7 @@ def test_materialize_exact_team_members_closes_partial_agents_on_failure() -> No
 
     with (
         patch("mindroom.teams.create_agent", side_effect=[built_agent, RuntimeError("boom")]),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams.close_team_runtime_sqlite_dbs") as mock_close,
         pytest.raises(ValueError, match="research"),
     ):
@@ -258,7 +259,7 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
@@ -305,7 +306,7 @@ async def test_team_response_retries_errored_plain_run_output_with_fresh_run_id(
     callback_run_ids: list[str] = []
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
@@ -398,7 +399,7 @@ async def test_team_response_retry_scrubs_queued_notice_before_second_attempt() 
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
             "mindroom.teams.prepare_bound_team_run_context",
@@ -447,7 +448,7 @@ async def test_team_response_fallback_run_output_cleans_queued_notice_before_for
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
@@ -488,7 +489,7 @@ async def test_team_response_fallback_run_output_error_uses_friendly_error() -> 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
     ):
@@ -521,7 +522,7 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
     ):
@@ -564,7 +565,7 @@ async def test_team_response_prefers_persisted_history_over_thread_context_fallb
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
     ):
@@ -628,7 +629,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
     ):
@@ -741,7 +742,7 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
             "mindroom.teams.prepare_bound_team_run_context",
@@ -1003,7 +1004,7 @@ async def test_team_response_scrubs_queued_notices_after_run_exception() -> None
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
             "mindroom.teams.prepare_bound_team_run_context",
@@ -1097,7 +1098,7 @@ async def test_team_response_stream_scrubs_queued_notices_after_stream_exception
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
             "mindroom.teams.prepare_bound_team_run_context",
@@ -1162,7 +1163,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
     ):
@@ -1220,7 +1221,7 @@ async def test_team_response_passes_run_id_to_team_arun() -> None:
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
@@ -1258,7 +1259,7 @@ async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         pytest.raises(asyncio.CancelledError),
     ):
@@ -1313,7 +1314,7 @@ async def test_team_response_records_interrupted_snapshot_for_cancelled_runs() -
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         pytest.raises(asyncio.CancelledError),
     ):
@@ -1381,7 +1382,7 @@ async def test_team_response_records_incomplete_cancelled_tools_as_interrupted()
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         pytest.raises(asyncio.CancelledError),
     ):
@@ -1427,7 +1428,7 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
             "mindroom.teams.get_user_friendly_error_message",
@@ -1481,7 +1482,7 @@ async def test_team_response_with_turn_recorder_defers_interrupted_persistence_t
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         pytest.raises(asyncio.CancelledError),
     ):
@@ -1540,7 +1541,7 @@ async def test_team_response_with_turn_recorder_preserves_unseen_event_ids_on_ca
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
     ):
@@ -1589,7 +1590,7 @@ async def test_team_response_retries_errored_run_output_with_fresh_run_id() -> N
     callback_run_ids: list[str] = []
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
@@ -1640,7 +1641,7 @@ async def test_team_response_tracks_retry_run_id_after_hard_cancellation() -> No
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         pytest.raises(asyncio.CancelledError),
     ):
@@ -1703,7 +1704,10 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
     recorder = TurnRecorder(user_message="Analyze this.")
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -1780,7 +1784,10 @@ async def test_team_response_stream_records_hidden_interrupted_tool_state() -> N
     recorder = TurnRecorder(user_message="Analyze this.")
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -1861,7 +1868,10 @@ async def test_team_response_stream_records_interrupted_snapshot_after_external_
             first_chunk_seen.set()
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -1947,7 +1957,10 @@ async def test_team_response_stream_preserves_pending_tool_scope_for_same_named_
     recorder = TurnRecorder(user_message="Analyze this.")
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2028,7 +2041,10 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
     recorder = TurnRecorder(user_message="Analyze this.")
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2103,7 +2119,10 @@ async def test_team_response_stream_does_not_retry_after_hidden_tool_progress_on
     ]
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2169,7 +2188,10 @@ async def test_team_response_stream_does_not_retry_after_hidden_tool_progress_on
     ]
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2227,7 +2249,10 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
     ]
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2289,7 +2314,10 @@ async def test_team_response_stream_emits_plain_run_output_fallback_with_team_fo
     ]
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2344,7 +2372,10 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
     ]
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2393,7 +2424,10 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     ]
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2445,7 +2479,10 @@ async def test_team_response_stream_returns_friendly_error_for_errored_plain_run
     ]
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2504,7 +2541,10 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
     ]
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2573,7 +2613,10 @@ async def test_team_response_stream_tracks_retry_run_id_after_hard_cancellation(
     ]
 
     with (
-        patch("mindroom.teams.get_agent_knowledge", new=MagicMock(return_value=None)),
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
@@ -2672,7 +2715,7 @@ async def test_team_response_stream_retry_scrubs_queued_notice_before_second_att
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
             "mindroom.teams.prepare_bound_team_run_context",
@@ -2717,7 +2760,7 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         team_members = _materialize_team_members(["general"], orchestrator, None)
@@ -2786,7 +2829,7 @@ async def test_team_response_stream_uses_compaction_aware_member_execution() -> 
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
         patch(
@@ -2840,7 +2883,7 @@ async def test_team_response_stream_prefers_persisted_history_over_thread_contex
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
         patch(
@@ -2908,7 +2951,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
         patch(
@@ -2965,7 +3008,7 @@ async def test_team_response_stream_preserves_assistant_context_in_team_prompt()
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
         patch(
@@ -3068,7 +3111,7 @@ async def test_team_response_rejects_request_time_materialization_failure() -> N
             "mindroom.teams.create_agent",
             side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
         ),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance") as mock_create_team,
     ):
         response = await team_response(
@@ -3148,7 +3191,7 @@ async def test_team_stream_rejects_request_time_materialization_failure() -> Non
             "mindroom.teams.create_agent",
             side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
         ),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance") as mock_create_team,
     ):
         chunks = [
@@ -3193,7 +3236,7 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         chunks = [
@@ -3248,7 +3291,7 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         chunks = [
@@ -3439,7 +3482,7 @@ async def test_team_response_ignores_router_in_direct_team_member_list() -> None
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
@@ -3473,7 +3516,7 @@ async def test_team_response_stream_ignores_router_in_direct_team_member_list() 
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         chunks = [
@@ -3515,7 +3558,7 @@ async def test_team_response_forwards_session_and_user_id_to_team_run() -> None:
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(
@@ -3567,7 +3610,7 @@ async def test_team_response_materializes_members_with_request_execution_identit
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent) as mock_create_agent,
-        patch("mindroom.teams.get_agent_knowledge", return_value=None),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         response = await team_response(

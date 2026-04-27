@@ -17,9 +17,8 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import ai_response
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge import (
-    KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
-    get_agent_knowledge,
+    resolve_agent_knowledge_access,
 )
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import (
@@ -107,17 +106,15 @@ class DelegateTools(Toolkit):
                 else None
             )
 
-            unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
-            knowledge = get_agent_knowledge(
+            knowledge_resolution = resolve_agent_knowledge_access(
                 agent_name,
                 self._config,
                 self._runtime_paths,
-                on_unavailable_base_details=unavailable_bases.update,
                 refresh_owner=self._refresh_owner,
                 execution_identity=execution_identity,
             )
             system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-            notice = format_knowledge_availability_notice(unavailable_bases)
+            notice = format_knowledge_availability_notice(knowledge_resolution.unavailable)
             if notice is not None:
                 system_enrichment_items = (
                     EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
@@ -147,7 +144,7 @@ class DelegateTools(Toolkit):
                     session_id=session_id,
                     runtime_paths=self._runtime_paths,
                     config=self._config,
-                    knowledge=knowledge,
+                    knowledge=knowledge_resolution.knowledge,
                     user_id=execution_identity.requester_id if execution_identity is not None else None,
                     room_id=room_id,
                     include_interactive_questions=False,

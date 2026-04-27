@@ -15,6 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
+from mindroom.knowledge import KnowledgeResolution
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -262,7 +263,10 @@ class TestDelegateKnowledge:
 
         mock_knowledge = MagicMock()
         with (
-            patch("mindroom.custom_tools.delegate.get_agent_knowledge", return_value=mock_knowledge) as mock_get,
+            patch(
+                "mindroom.custom_tools.delegate.resolve_agent_knowledge_access",
+                return_value=KnowledgeResolution(knowledge=mock_knowledge),
+            ) as mock_get,
             patch(
                 "mindroom.custom_tools.delegate.ai_response",
                 new_callable=AsyncMock,

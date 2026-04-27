@@ -53,7 +53,7 @@ from mindroom.knowledge import (
     KnowledgeAvailability,
     KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
-    get_agent_knowledge,
+    resolve_agent_knowledge_access,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -965,20 +965,23 @@ async def chat_completions(  # noqa: C901, PLR0912
                     )
         else:
             # Resolve knowledge base for this agent
-            unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
             try:
-                knowledge = get_agent_knowledge(
+                knowledge_resolution = resolve_agent_knowledge_access(
                     agent_name,
                     config,
                     runtime_paths,
-                    on_missing_bases=_log_missing_knowledge_bases(agent_name),
-                    on_unavailable_base_details=unavailable_bases.update,
                     refresh_owner=knowledge_refresh_owner,
                     execution_identity=execution_identity,
                 )
             except Exception:
                 logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
                 knowledge = None
+                unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+            else:
+                if knowledge_resolution.missing:
+                    _log_missing_knowledge_bases(agent_name)(list(knowledge_resolution.missing))
+                knowledge = knowledge_resolution.knowledge
+                unavailable_bases = dict(knowledge_resolution.unavailable)
             availability_hint = _knowledge_availability_system_message(unavailable_bases)
             if availability_hint:
                 prompt = f"{availability_hint}\n\n{prompt}"

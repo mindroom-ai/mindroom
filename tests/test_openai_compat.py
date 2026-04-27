@@ -52,7 +52,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
 )
-from mindroom.knowledge import KnowledgeAvailability
+from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
@@ -3861,7 +3861,7 @@ class TestTeamCompletion:
         """Configured team failures should surface the user-facing materialization error."""
         with (
             patch("mindroom.model_loading.get_model_instance", return_value=MagicMock()),
-            patch("mindroom.teams.get_agent_knowledge", return_value=None),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
             patch(
                 "mindroom.teams.create_agent",
                 side_effect=[_make_test_agent("GeneralAgent"), RuntimeError("boom")],
@@ -4530,7 +4530,10 @@ class TestTeamCompletion:
         with (
             patch("mindroom.teams.create_agent") as mock_create,
             patch("mindroom.model_loading.get_model_instance"),
-            patch("mindroom.teams.get_agent_knowledge", return_value=mock_knowledge),
+            patch(
+                "mindroom.teams.resolve_agent_knowledge_access",
+                return_value=KnowledgeResolution(knowledge=mock_knowledge),
+            ),
             patch("agno.team.Team.__init__", return_value=None),
         ):
             mock_create.return_value = MagicMock(name="Research")
@@ -4842,7 +4845,7 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
-                "mindroom.api.openai_compat.get_agent_knowledge",
+                "mindroom.api.openai_compat.resolve_agent_knowledge_access",
                 side_effect=RuntimeError("DB connection failed"),
             ),
         ):

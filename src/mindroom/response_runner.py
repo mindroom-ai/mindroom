@@ -1857,15 +1857,13 @@ class ResponseRunner:
             turn_recorder.set_run_id(current_run_id)
 
         async def build_response_text() -> str:
-            unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
-            knowledge = self.deps.knowledge_access.for_agent(
+            knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
                 self.deps.agent_name,
                 execution_identity=runtime.tool_dispatch.execution_identity,
-                on_unavailable_base_details=unavailable_bases.update,
             )
             system_enrichment_items = _append_knowledge_availability_enrichment(
                 request.system_enrichment_items,
-                unavailable_bases,
+                knowledge_resolution.unavailable,
             )
             matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
             return await ai_response(
@@ -1878,7 +1876,7 @@ class ResponseRunner:
                 model_prompt=runtime.model_prompt,
                 thread_id=runtime.resolved_target.resolved_thread_id,
                 room_id=request.room_id,
-                knowledge=knowledge,
+                knowledge=knowledge_resolution.knowledge,
                 user_id=request.user_id,
                 run_id=run_id,
                 run_id_callback=note_attempt_run_id,
@@ -1949,15 +1947,13 @@ class ResponseRunner:
         def note_visible_response_event_id(response_event_id: str) -> None:
             turn_recorder.set_response_event_id(response_event_id)
 
-        unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
-        knowledge = self.deps.knowledge_access.for_agent(
+        knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
             self.deps.agent_name,
             execution_identity=runtime.tool_dispatch.execution_identity,
-            on_unavailable_base_details=unavailable_bases.update,
         )
         system_enrichment_items = _append_knowledge_availability_enrichment(
             request.system_enrichment_items,
-            unavailable_bases,
+            knowledge_resolution.unavailable,
         )
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         response_stream = stream_agent_response(
@@ -1970,7 +1966,7 @@ class ResponseRunner:
             model_prompt=runtime.model_prompt,
             thread_id=runtime.resolved_target.resolved_thread_id,
             room_id=request.room_id,
-            knowledge=knowledge,
+            knowledge=knowledge_resolution.knowledge,
             user_id=request.user_id,
             run_id=run_id,
             run_id_callback=note_attempt_run_id,

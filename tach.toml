@@ -1819,8 +1819,10 @@ expose = [
     "get_agent_knowledge",
     "KnowledgeAvailability",
     "KnowledgeAvailabilityDetail",
+    "KnowledgeResolution",
     "OrchestratorKnowledgeRefreshOwner",
     "PerBindingKnowledgeRefreshOwner",
+    "resolve_agent_knowledge_access",
     "StandaloneKnowledgeRefreshOwner",
 ]
 from = ["mindroom.knowledge"]
