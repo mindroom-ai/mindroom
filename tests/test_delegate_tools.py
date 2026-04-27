@@ -295,7 +295,7 @@ class TestDelegateKnowledge:
         mock_storage: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """Delegation should trigger the shared-base initial load when the snapshot is still initializing."""
+        """Delegation should trigger the shared-base initial load when the published index is still initializing."""
         from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
 
         assert mock_storage is not None

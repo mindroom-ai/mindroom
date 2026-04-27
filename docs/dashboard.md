@@ -110,7 +110,7 @@ Git-backed knowledge bases are managed from the dashboard, but file mutations st
 - Private HTTPS repo auth can be managed in the **Credentials** tab, then referenced by `knowledge_bases.<id>.git.credentials_service`.
 - `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases before rebuilding the index.
 - `POST /api/knowledge/bases/{base_id}/upload` and `DELETE /api/knowledge/bases/{base_id}/files/{path}` reject Git-backed bases with `409`; update the repository and reindex instead.
-- Chat/runtime requests use already-published last-good published indexes and do not wait for indexing or Git sync.
+- Chat/runtime requests use last successfully published indexes and do not wait for indexing or Git sync.
 
 ### Credentials
 

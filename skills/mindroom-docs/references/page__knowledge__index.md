@@ -195,7 +195,7 @@ When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` fl
 - When `lfs: true`, MindRoom runs `git lfs pull origin <branch>` when a checkout is first hydrated or when sync advances to a new Git head.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and reindex instead.
-- Successful refresh publishes a new last-good published index while failed refresh preserves the previous one and records the error in status metadata.
+- Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
 
 ### File Filtering with Patterns
 
@@ -312,4 +312,4 @@ See the [Dashboard API reference](https://docs.mindroom.chat/dashboard/#knowledg
 
 ## Hot Reload
 
-Knowledge base configuration supports hot reload. Changing `config.yaml` does not initialize every configured knowledge base. Agents keep using already-published last-good published indexes until a refresh for their resolved binding succeeds. Changed settings make existing published indexes stale or unavailable depending on query compatibility, and scheduled refresh rebuilds the affected binding in the background.
+Knowledge base configuration supports hot reload. Changing `config.yaml` does not initialize every configured knowledge base. Agents keep using last successfully published indexes until a refresh for their resolved binding succeeds. Changed settings make existing published indexes stale or unavailable depending on query compatibility, and scheduled refresh rebuilds the affected binding in the background.

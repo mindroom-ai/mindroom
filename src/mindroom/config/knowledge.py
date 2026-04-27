@@ -15,7 +15,7 @@ class KnowledgeGitConfig(BaseModel):
     poll_interval_seconds: int = Field(
         default=300,
         ge=5,
-        description="Minimum age before READY Git snapshots schedule a background on-access refresh",
+        description="Minimum age before a READY Git-backed published index schedules a background on-access refresh",
     )
     credentials_service: str | None = Field(
         default=None,
@@ -50,7 +50,7 @@ class KnowledgeBaseConfig(BaseModel):
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(
         default=True,
-        description="When true, shared local folders watch filesystem changes and schedule background snapshot refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
+        description="When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
     )
     chunk_size: int = Field(
         default=5000,
