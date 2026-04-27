@@ -14,7 +14,7 @@ import pytest
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache.sqlite_event_cache as event_cache_module
-from mindroom.matrix.cache import sqlite_event_cache_events, sqlite_event_cache_threads
+from mindroom.matrix.cache import event_normalization, sqlite_event_cache_events, sqlite_event_cache_threads
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.conversation_cache import _cached_room_get_event as cached_room_get_event
@@ -150,9 +150,9 @@ async def _seed_thread_cache(
     await cache.replace_thread(room_id, thread_id, events)
 
 
-def test_event_lookup_normalization_lives_with_event_storage() -> None:
-    """Event lookup ownership should normalize stored payloads without runtime-only keys."""
-    normalized_event = sqlite_event_cache_events.normalize_event_source_for_cache(
+def test_event_cache_normalization_is_backend_neutral() -> None:
+    """Cache payload normalization should stay backend-neutral."""
+    normalized_event = event_normalization.normalize_event_source_for_cache(
         {
             "type": "m.room.message",
             "content": {"body": "hello"},

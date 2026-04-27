@@ -2,8 +2,9 @@
 
 Developer note:
 - `event_cache.py` owns the storage-agnostic durable cache protocol.
+- `event_normalization.py` owns storage-agnostic event payload shaping before backend writes.
 - `sqlite_event_cache.py` owns the SQLite implementation, runtime, locking, and schema lifecycle.
-- `sqlite_event_cache_events.py` owns event lookup normalization, lookup/index rows, edits, and redaction tombstones.
+- `sqlite_event_cache_events.py` owns SQLite lookup/index rows, edits, and redaction tombstones.
 - `sqlite_event_cache_threads.py` owns thread snapshot rows, cache-state reads, and thread/room invalidation state.
 - `sqlite_agent_message_snapshot.py` owns SQLite reads for latest cached agent message snapshots.
 - `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_bookkeeping.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
@@ -24,7 +25,7 @@ from .agent_message_snapshot import (
     AgentMessageSnapshotUnavailable,
 )
 from .event_cache import ConversationEventCache, ThreadCacheState
-from .sqlite_event_cache_events import normalize_nio_event_for_cache
+from .event_normalization import normalize_event_source_for_cache, normalize_nio_event_for_cache
 from .thread_cache_helpers import thread_cache_rejection_reason, thread_cache_state_is_usable
 from .thread_history_result import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
@@ -53,6 +54,7 @@ __all__ = [
     "EventCacheWriteCoordinator",
     "ThreadCacheState",
     "ThreadHistoryResult",
+    "normalize_event_source_for_cache",
     "normalize_nio_event_for_cache",
     "thread_cache_rejection_reason",
     "thread_cache_state_is_usable",

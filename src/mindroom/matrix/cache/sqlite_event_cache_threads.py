@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from .event_cache import ThreadCacheState
+from .event_normalization import normalize_event_source_for_cache
 from .sqlite_event_cache_events import (
     delete_cached_events,
     delete_event_edit_rows,
@@ -14,7 +15,6 @@ from .sqlite_event_cache_events import (
     event_id_for_cache,
     event_or_original_is_redacted,
     filter_cacheable_events,
-    normalize_event_source_for_cache,
     serialize_cacheable_events,
     serialize_cached_event,
     write_lookup_index_rows,

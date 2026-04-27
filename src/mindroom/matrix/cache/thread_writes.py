@@ -21,7 +21,7 @@ from mindroom.matrix.thread_bookkeeping import (
 )
 from mindroom.timing import emit_timing_event, timing_enabled
 
-from .sqlite_event_cache_events import (
+from .event_normalization import (
     normalize_event_source_for_cache,
     normalize_nio_event_for_cache,
 )
