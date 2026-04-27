@@ -21,7 +21,7 @@ from mindroom.media_inputs import MediaInputs
 
 if TYPE_CHECKING:
     from agno.agent import Agent
-    from agno.db.sqlite import SqliteDb
+    from agno.db.base import BaseDb
     from agno.models.base import Model
 
     from mindroom.history import ScopeSessionContext
@@ -196,7 +196,7 @@ def _strip_queued_notice_from_session(session: AgentSession | TeamSession) -> bo
 
 
 def _strip_queued_notice_from_session_storage(
-    storage: SqliteDb,
+    storage: BaseDb,
     session_id: str,
     *,
     session_type: SessionType = SessionType.AGENT,
@@ -220,7 +220,7 @@ def _strip_queued_notice_from_session_storage(
 def cleanup_queued_notice_state(
     *,
     run_output: RunOutput | TeamRunOutput | None,
-    storage: SqliteDb | None,
+    storage: BaseDb | None,
     session_id: str | None,
     session_type: SessionType,
     entity_name: str,

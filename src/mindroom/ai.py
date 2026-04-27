@@ -45,7 +45,7 @@ from mindroom.history import (
     PreparedHistoryState,
     ScopeSessionContext,
     apply_replay_plan,
-    close_agent_runtime_sqlite_dbs,
+    close_agent_runtime_state_dbs,
     compute_prompt_token_breakdown,
     open_resolved_scope_session_context,
 )
@@ -1231,7 +1231,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             )
         raise
     finally:
-        close_agent_runtime_sqlite_dbs(
+        close_agent_runtime_state_dbs(
             agent,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
@@ -1725,7 +1725,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             )
         raise
     finally:
-        close_agent_runtime_sqlite_dbs(
+        close_agent_runtime_state_dbs(
             agent,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )

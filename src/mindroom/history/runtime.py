@@ -16,8 +16,8 @@ from agno.session.team import TeamSession
 from mindroom import model_loading
 from mindroom.agent_storage import (
     create_session_storage,
-    create_state_storage_db,
-    get_agent_runtime_sqlite_dbs,
+    create_state_storage,
+    get_agent_runtime_state_dbs,
     get_agent_session,
     get_team_session,
 )
@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from agno.agent import Agent
-    from agno.db.sqlite import SqliteDb
+    from agno.db.base import BaseDb
     from agno.models.base import Model
     from agno.team import Team
 
@@ -98,7 +98,7 @@ class ScopeSessionContext:
     """Resolved storage/session context for one logical history scope."""
 
     scope: HistoryScope
-    storage: SqliteDb
+    storage: BaseDb
     session: AgentSession | TeamSession | None
     session_id: str | None = None
 
@@ -561,7 +561,7 @@ async def prepare_history_for_run(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    storage: SqliteDb | None = None,
+    storage: BaseDb | None = None,
     session: AgentSession | TeamSession | None = None,
     history_settings: ResolvedHistorySettings | None = None,
     compaction_config: CompactionConfig | None = None,
@@ -960,8 +960,8 @@ def open_scope_storage(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-) -> Iterator[SqliteDb]:
-    """Open the canonical SQLite storage for one persisted history scope."""
+) -> Iterator[BaseDb]:
+    """Open the canonical storage for one persisted history scope."""
     storage = create_scope_session_storage(
         agent_name=agent_name,
         scope=scope,
@@ -979,7 +979,7 @@ def _build_scope_session_context(
     *,
     scope: HistoryScope | None,
     session_id: str | None,
-    storage: SqliteDb,
+    storage: BaseDb,
     create_session_if_missing: bool = False,
 ) -> ScopeSessionContext | None:
     """Build one scope/session context from an already-open storage handle."""
@@ -1126,8 +1126,8 @@ def create_scope_session_storage(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-) -> SqliteDb:
-    """Create the canonical SQLite storage for one persisted history scope."""
+) -> BaseDb:
+    """Create the canonical storage for one persisted history scope."""
     if scope.kind == "agent":
         return create_session_storage(
             agent_name,
@@ -1137,7 +1137,7 @@ def create_scope_session_storage(
         )
 
     storage_name = _scope_session_storage_name(scope)
-    return create_state_storage_db(
+    return create_state_storage(
         storage_name=storage_name,
         state_root=runtime_paths.storage_root / _TEAM_STATE_ROOT_DIRNAME / storage_name,
         subdir="sessions",
@@ -1145,8 +1145,8 @@ def create_scope_session_storage(
     )
 
 
-def close_unique_sqlite_dbs(*storages: SqliteDb | None) -> None:
-    """Close each distinct SQLite handle at most once."""
+def close_unique_state_dbs(*storages: BaseDb | None) -> None:
+    """Close each distinct state DB handle at most once."""
     seen: set[int] = set()
     for storage in storages:
         if storage is None:
@@ -1158,31 +1158,31 @@ def close_unique_sqlite_dbs(*storages: SqliteDb | None) -> None:
         storage.close()
 
 
-def close_agent_runtime_sqlite_dbs(
+def close_agent_runtime_state_dbs(
     agent: Agent | None,
     *,
-    shared_scope_storage: SqliteDb | None = None,
+    shared_scope_storage: BaseDb | None = None,
 ) -> None:
-    """Close one agent's runtime-owned SQLite handles except a shared scope storage."""
+    """Close one agent's runtime-owned state DB handles except a shared scope storage."""
     if agent is None:
         return
-    close_unique_sqlite_dbs(
-        *(storage for storage in get_agent_runtime_sqlite_dbs(agent) if storage is not shared_scope_storage),
+    close_unique_state_dbs(
+        *(storage for storage in get_agent_runtime_state_dbs(agent) if storage is not shared_scope_storage),
     )
 
 
-def close_team_runtime_sqlite_dbs(
+def close_team_runtime_state_dbs(
     *,
     agents: list[Agent],
-    team_db: SqliteDb | None,
-    shared_scope_storage: SqliteDb | None = None,
+    team_db: BaseDb | None,
+    shared_scope_storage: BaseDb | None = None,
 ) -> None:
-    """Close all runtime-owned SQLite handles for one team request."""
-    close_unique_sqlite_dbs(
+    """Close all runtime-owned state DB handles for one team request."""
+    close_unique_state_dbs(
         *(
             storage
             for agent in agents
-            for storage in get_agent_runtime_sqlite_dbs(agent)
+            for storage in get_agent_runtime_state_dbs(agent)
             if storage is not shared_scope_storage
         ),
         team_db if team_db is not shared_scope_storage else None,
@@ -1338,7 +1338,7 @@ def _resolve_preparation_inputs(
 
 def _prepare_scope_state_for_run(
     *,
-    storage: SqliteDb,
+    storage: BaseDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     execution_plan: ResolvedHistoryExecutionPlan,

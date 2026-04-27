@@ -20,7 +20,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_WARMUP_SUFFIX_KEY
 from mindroom.matrix.cache import ThreadHistoryResult
-from mindroom.matrix.cache.event_cache import ThreadCacheState, _EventCache
+from mindroom.matrix.cache.event_cache import ThreadCacheState
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -2158,7 +2159,7 @@ class TestThreadHistoryCache:
 
     @staticmethod
     async def _seed_thread_cache(
-        cache: _EventCache,
+        cache: SqliteEventCache,
         *,
         room_id: str,
         thread_id: str,
@@ -2171,7 +2172,7 @@ class TestThreadHistoryCache:
         *,
         tmp_path: Path,
         client: nio.AsyncClient,
-        event_cache: _EventCache,
+        event_cache: SqliteEventCache,
         runtime_started_at: float,
     ) -> tuple[MatrixConversationCache, _EventCacheWriteCoordinator]:
         runtime_paths = test_runtime_paths(tmp_path)
@@ -2218,7 +2219,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_uses_durable_raw_snapshot_cache_when_fresh(self, tmp_path: Path) -> None:
         """Direct history fetches should reuse fresh durable thread snapshots."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2270,7 +2271,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_snapshot_uses_durable_raw_snapshot_cache_when_fresh(self, tmp_path: Path) -> None:
         """Snapshot reads should reuse fresh durable thread snapshots without sidecar hydration."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = TestThreadHistory._make_audio_event(
@@ -2329,7 +2330,7 @@ class TestThreadHistoryCache:
         tmp_path: Path,
     ) -> None:
         """Snapshot reads should still expose canonical body for trusted streaming previews."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2379,7 +2380,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_dispatch_thread_history_uses_fresh_durable_cache(self, tmp_path: Path) -> None:
         """Strict dispatch history should reuse fresh durable cache instead of refetching."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2431,7 +2432,7 @@ class TestThreadHistoryCache:
         tmp_path: Path,
     ) -> None:
         """A cached thread snapshot without its root is incomplete and must not drive prompts."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2482,7 +2483,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_dispatch_thread_snapshot_uses_fresh_durable_cache(self, tmp_path: Path) -> None:
         """Strict dispatch snapshots should reuse fresh durable cache instead of refetching."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_audio_event(
@@ -2532,7 +2533,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_cache_miss_populates_cache(self, tmp_path: Path) -> None:
         """Cache misses should fall through to the homeserver and persist the result."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2575,7 +2576,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_dispatch_thread_history_includes_cache_reject_reason(self, tmp_path: Path) -> None:
         """Strict dispatch refetches should explain why durable cache reuse was rejected."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2630,7 +2631,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_reuses_pre_runtime_thread_cache_after_restart(self, tmp_path: Path) -> None:
         """Restarted runtimes may reuse pre-runtime snapshots unless a stale marker exists."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
         runtime_started_at = time.time()
 
@@ -2687,7 +2688,7 @@ class TestThreadHistoryCache:
         tmp_path: Path,
     ) -> None:
         """Thread cache reads should not reject old snapshots by process age."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
         runtime_started_at = time.time()
 
@@ -2744,7 +2745,7 @@ class TestThreadHistoryCache:
         tmp_path: Path,
     ) -> None:
         """Thread cache trust should depend on explicit stale markers, not process age."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
         runtime_started_at = time.time()
 
@@ -2801,7 +2802,7 @@ class TestThreadHistoryCache:
         tmp_path: Path,
     ) -> None:
         """Fresh room-scan snapshots should store same-timestamp reference descendants after their parent."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2869,7 +2870,7 @@ class TestThreadHistoryCache:
     @pytest.mark.asyncio
     async def test_fetch_thread_history_refetches_after_durable_room_invalidation(self, tmp_path: Path) -> None:
         """A durable room-level stale marker should force the next read to refetch from Matrix."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -2944,7 +2945,7 @@ class TestThreadHistoryCache:
         tmp_path: Path,
     ) -> None:
         """Failed refetches should degrade once, then recover to a fresh refetch when the network returns."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(
@@ -3061,7 +3062,7 @@ class TestThreadHistoryCache:
                 self._relation_key("$reply", RelationshipType.replacement): [],
             },
         )
-        broken_cache = MagicMock(spec=_EventCache)
+        broken_cache = MagicMock(spec=SqliteEventCache)
         broken_cache.get_thread_cache_state = AsyncMock(
             side_effect=cache_state_side_effect,
             return_value=(
@@ -3088,7 +3089,7 @@ class TestThreadHistoryCache:
         tmp_path: Path,
     ) -> None:
         """Incremental append refresh should trust old caches unless room state is stale."""
-        cache = _EventCache(tmp_path / "event_cache.db")
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
 
         root_event = self._make_text_event(

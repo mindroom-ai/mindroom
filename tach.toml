@@ -956,7 +956,7 @@ path = "mindroom.matrix.cache"
 depends_on = [
     "mindroom.matrix.cache.agent_message_snapshot",
     "mindroom.matrix.cache.event_cache",
-    "mindroom.matrix.cache.event_cache_events",
+    "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.cache.write_coordinator",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
@@ -964,23 +964,33 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.cache.agent_message_snapshot"
-depends_on = [
-    "mindroom.matrix.cache.event_cache_events",
-    "mindroom.matrix.cache.event_cache_threads",
-    "mindroom.matrix.cache.thread_cache_helpers",
-]
+depends_on = []
 
 [[modules]]
-path = "mindroom.matrix.cache.event_cache_threads"
-depends_on = ["mindroom.matrix.cache.event_cache_events"]
+path = "mindroom.matrix.cache.sqlite_agent_message_snapshot"
+depends_on = [
+    "mindroom.matrix.cache.agent_message_snapshot",
+    "mindroom.matrix.cache.sqlite_event_cache_events",
+    "mindroom.matrix.cache.sqlite_event_cache_threads",
+    "mindroom.matrix.cache.thread_cache_helpers",
+]
+visibility = ["mindroom.matrix.cache.sqlite_event_cache"]
+
+[[modules]]
+path = "mindroom.matrix.cache.sqlite_event_cache_threads"
+depends_on = [
+    "mindroom.matrix.cache.event_cache",
+    "mindroom.matrix.cache.event_normalization",
+    "mindroom.matrix.cache.sqlite_event_cache_events",
+]
 
 [[modules]]
 path = "mindroom.matrix.cache.event_cache"
-depends_on = [
-    "mindroom.matrix.cache.agent_message_snapshot",
-    "mindroom.matrix.cache.event_cache_events",
-    "mindroom.matrix.cache.event_cache_threads",
-]
+depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.cache.event_normalization"
+depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.cache.thread_reads"
@@ -1002,8 +1012,21 @@ path = "mindroom.matrix.cache.thread_write_cache_ops"
 depends_on = [ "mindroom.matrix.thread_bookkeeping"]
 
 [[modules]]
-path = "mindroom.matrix.cache.event_cache_events"
-depends_on = ["mindroom.matrix.event_info"]
+path = "mindroom.matrix.cache.sqlite_event_cache_events"
+depends_on = [
+    "mindroom.matrix.event_info",
+]
+
+[[modules]]
+path = "mindroom.matrix.cache.sqlite_event_cache"
+depends_on = [
+    "mindroom.matrix.cache.event_normalization",
+    "mindroom.logging_config",
+    "mindroom.matrix.cache.sqlite_agent_message_snapshot",
+    "mindroom.matrix.cache.sqlite_event_cache_events",
+    "mindroom.matrix.cache.sqlite_event_cache_threads",
+]
+visibility = ["mindroom.runtime_support"]
 
 [[modules]]
 path = "mindroom.matrix.cache.write_coordinator"
@@ -1012,7 +1035,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.cache.thread_writes"
 depends_on = [
-    "mindroom.matrix.cache.event_cache_events",
+    "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.event_info",
     "mindroom.matrix.thread_bookkeeping",
 ]
@@ -1037,7 +1060,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.runtime_support"
 depends_on = [
-    "mindroom.matrix.cache.event_cache",
+    "mindroom.matrix.cache.sqlite_event_cache",
     "mindroom.matrix.cache.write_coordinator",
 ]
 
@@ -1752,8 +1775,8 @@ from = ["mindroom.agents"]
 [[interfaces]]
 expose = [
     "create_session_storage",
-    "create_state_storage_db",
-    "get_agent_runtime_sqlite_dbs",
+    "create_state_storage",
+    "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
 ]
@@ -1919,8 +1942,8 @@ visibility = ["mindroom.matrix.cache"]
 exclusive = true
 
 [[interfaces]]
-expose = ["_EventCache"]
-from = ["mindroom.matrix.cache.event_cache"]
+expose = ["SqliteEventCache"]
+from = ["mindroom.matrix.cache.sqlite_event_cache"]
 visibility = ["mindroom.runtime_support"]
 exclusive = true
 
@@ -2332,8 +2355,8 @@ expose = [
     "ScopeSessionContext",
     "add_pending_force_compaction_scope",
     "apply_replay_plan",
-    "close_agent_runtime_sqlite_dbs",
-    "close_team_runtime_sqlite_dbs",
+    "close_agent_runtime_state_dbs",
+    "close_team_runtime_state_dbs",
     "compute_prompt_token_breakdown",
     "create_scope_session_storage",
     "estimate_preparation_static_tokens",

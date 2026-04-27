@@ -21,7 +21,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.matrix.cache.event_cache import _EventCache
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
@@ -234,7 +234,7 @@ def delivered_matrix_side_effect(event_id: str) -> Callable[..., Awaitable[Deliv
 
 def make_event_cache_mock() -> AsyncMock:
     """Return an async mock shaped like the event cache protocol."""
-    event_cache = AsyncMock(spec=_EventCache)
+    event_cache = AsyncMock(spec=SqliteEventCache)
     event_cache.durable_writes_available = True
     event_cache.get_event.return_value = None
     event_cache.get_latest_edit.return_value = None

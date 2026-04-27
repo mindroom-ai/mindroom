@@ -45,7 +45,7 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history import (
     ScopeSessionContext,
-    close_team_runtime_sqlite_dbs,
+    close_team_runtime_state_dbs,
     open_bound_scope_session_context,
     run_post_response_compaction_check,
 )
@@ -87,7 +87,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
     from agno.agent import Agent
-    from agno.db.sqlite import SqliteDb
+    from agno.db.base import BaseDb
     from agno.knowledge.knowledge import Knowledge
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutputEvent
@@ -1452,7 +1452,7 @@ def _build_team(
             scope_context=scope_context,
         )
     except Exception:
-        close_team_runtime_sqlite_dbs(
+        close_team_runtime_state_dbs(
             agents=team_members.agents,
             team_db=None,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
@@ -1618,9 +1618,9 @@ async def _non_stream_team_completion(
                 ),
             )
     finally:
-        close_team_runtime_sqlite_dbs(
+        close_team_runtime_state_dbs(
             agents=agents,
-            team_db=cast("SqliteDb | None", team.db) if team is not None else None,
+            team_db=cast("BaseDb | None", team.db) if team is not None else None,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
 
@@ -1650,9 +1650,9 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         if stream is not None:
             await stream.aclose()
         stack.close()
-        close_team_runtime_sqlite_dbs(
+        close_team_runtime_state_dbs(
             agents=agents,
-            team_db=cast("SqliteDb | None", team.db) if team is not None else None,
+            team_db=cast("BaseDb | None", team.db) if team is not None else None,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
 
@@ -1783,9 +1783,9 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         response.completion_predicate = lambda: stream_completed and not stream_failed
     except Exception:
         stack.close()
-        close_team_runtime_sqlite_dbs(
+        close_team_runtime_state_dbs(
             agents=agents,
-            team_db=cast("SqliteDb | None", team.db) if team is not None else None,
+            team_db=cast("BaseDb | None", team.db) if team is not None else None,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
         raise

@@ -556,7 +556,7 @@ class TestUpdateOwnConfig:
 class TestAgentCreationInjection:
     """Tests for allow_self_config injection in create_agent."""
 
-    @patch("mindroom.agents.SqliteDb")
+    @patch("mindroom.agent_storage.SqliteDb")
     def test_allow_self_config_true_injects_tool(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Agent with allow_self_config=True should have self_config tool."""
         config, _ = _make_config(
@@ -566,7 +566,7 @@ class TestAgentCreationInjection:
         tool_names = [t.name for t in agent.tools]
         assert "self_config" in tool_names
 
-    @patch("mindroom.agents.SqliteDb")
+    @patch("mindroom.agent_storage.SqliteDb")
     def test_allow_self_config_false_no_tool(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Agent with allow_self_config=False should not have self_config tool."""
         config, _ = _make_config(
@@ -576,7 +576,7 @@ class TestAgentCreationInjection:
         tool_names = [t.name for t in agent.tools]
         assert "self_config" not in tool_names
 
-    @patch("mindroom.agents.SqliteDb")
+    @patch("mindroom.agent_storage.SqliteDb")
     def test_defaults_fallback_true(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """When agent omits allow_self_config, defaults.allow_self_config=True should inject."""
         config, _ = _make_config(
@@ -587,7 +587,7 @@ class TestAgentCreationInjection:
         tool_names = [t.name for t in agent.tools]
         assert "self_config" in tool_names
 
-    @patch("mindroom.agents.SqliteDb")
+    @patch("mindroom.agent_storage.SqliteDb")
     def test_defaults_fallback_false(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """When agent omits allow_self_config, defaults.allow_self_config=False should not inject."""
         config, _ = _make_config(
@@ -598,7 +598,7 @@ class TestAgentCreationInjection:
         tool_names = [t.name for t in agent.tools]
         assert "self_config" not in tool_names
 
-    @patch("mindroom.agents.SqliteDb")
+    @patch("mindroom.agent_storage.SqliteDb")
     def test_agent_override_beats_default(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Agent-level allow_self_config should override default."""
         config, _ = _make_config(
@@ -609,7 +609,7 @@ class TestAgentCreationInjection:
         tool_names = [t.name for t in agent.tools]
         assert "self_config" not in tool_names
 
-    @patch("mindroom.agents.SqliteDb")
+    @patch("mindroom.agent_storage.SqliteDb")
     def test_manual_self_config_tool_loads(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Explicitly configured self_config tool should be loadable."""
         config, _ = _make_config(
@@ -626,7 +626,7 @@ class TestAgentCreationInjection:
         tool_names = [t.name for t in agent.tools]
         assert "self_config" in tool_names
 
-    @patch("mindroom.agents.SqliteDb")
+    @patch("mindroom.agent_storage.SqliteDb")
     def test_self_config_not_duplicated_when_manual_and_auto(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Manual self_config plus allow_self_config should still produce one tool instance."""
         config, _ = _make_config(
@@ -643,7 +643,7 @@ class TestAgentCreationInjection:
         tool_names = [t.name for t in agent.tools]
         assert tool_names.count("self_config") == 1
 
-    @patch("mindroom.agents.SqliteDb")
+    @patch("mindroom.agent_storage.SqliteDb")
     def test_config_path_threaded_to_self_config_auto(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Auto-injected self_config tool should use the config_path from create_agent."""
         config, config_path = _make_config(
@@ -664,7 +664,7 @@ class TestAgentCreationInjection:
         finally:
             config_path.unlink(missing_ok=True)
 
-    @patch("mindroom.agents.SqliteDb")
+    @patch("mindroom.agent_storage.SqliteDb")
     def test_config_path_threaded_to_self_config_manual(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Manually listed self_config tool should use the config_path from create_agent."""
         config, config_path = _make_config(
@@ -684,7 +684,7 @@ class TestAgentCreationInjection:
         finally:
             config_path.unlink(missing_ok=True)
 
-    @patch("mindroom.agents.SqliteDb")
+    @patch("mindroom.agent_storage.SqliteDb")
     def test_config_path_threaded_to_config_manager(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Generic tool loading should thread config_path into config_manager as well."""
         config, config_path = _make_config(

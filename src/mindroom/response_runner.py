@@ -99,7 +99,7 @@ if TYPE_CHECKING:
 
     import nio
     import structlog
-    from agno.db.sqlite import SqliteDb
+    from agno.db.base import BaseDb
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
@@ -749,7 +749,7 @@ class ResponseRunner:
         *,
         session_id: str,
         session_type: SessionType,
-        create_storage: Callable[[], SqliteDb],
+        create_storage: Callable[[], BaseDb],
     ) -> Callable[[str, str], None]:
         """Build the response-event persistence callback for one session-backed response."""
 
@@ -771,7 +771,7 @@ class ResponseRunner:
     def _session_exists(
         self,
         *,
-        storage: SqliteDb,
+        storage: BaseDb,
         session_id: str,
         session_type: SessionType,
     ) -> bool:
@@ -785,7 +785,7 @@ class ResponseRunner:
         tool_context: ToolRuntimeContext | None,
         session_id: str,
         session_type: SessionType,
-        create_storage: Callable[[], SqliteDb],
+        create_storage: Callable[[], BaseDb],
     ) -> bool:
         if tool_context is None or not tool_context.hook_registry.has_hooks(EVENT_SESSION_STARTED):
             return False
@@ -819,7 +819,7 @@ class ResponseRunner:
         thread_id: str | None,
         session_type: SessionType,
         correlation_id: str,
-        create_storage: Callable[[], SqliteDb],
+        create_storage: Callable[[], BaseDb],
     ) -> None:
         if tool_context is None or not should_watch_session_started:
             return
@@ -862,7 +862,7 @@ class ResponseRunner:
         thread_id: str | None,
         session_type: SessionType,
         correlation_id: str,
-        create_storage: Callable[[], SqliteDb],
+        create_storage: Callable[[], BaseDb],
     ) -> None:
         """Emit session:started without aborting delivery on ordinary failures."""
         try:
@@ -1229,7 +1229,7 @@ class ResponseRunner:
         session_scope = self.deps.state_writer.team_history_scope(list(team_request.team_agents))
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
-        def team_storage_factory() -> SqliteDb:
+        def team_storage_factory() -> BaseDb:
             return self.deps.state_writer.create_storage(tool_dispatch.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
@@ -2060,7 +2060,7 @@ class ResponseRunner:
         session_scope = self.deps.state_writer.history_scope()
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
-        def history_storage_factory() -> SqliteDb:
+        def history_storage_factory() -> BaseDb:
             return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
@@ -2205,7 +2205,7 @@ class ResponseRunner:
         session_scope = self.deps.state_writer.history_scope()
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
-        def history_storage_factory() -> SqliteDb:
+        def history_storage_factory() -> BaseDb:
             return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
