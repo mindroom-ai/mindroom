@@ -19,10 +19,6 @@ def _strip_path_params(path: str) -> str:
     return path.split(";", 1)[0]
 
 
-def _replace_text(value: str, old: str, new: str) -> str:
-    return value.replace(old, new)
-
-
 def redact_url_credentials(value: str) -> str:
     """Redact URL credentials for any parsed URL scheme."""
     parsed = urlparse(value)
@@ -70,7 +66,7 @@ def redact_credentials_in_text(value: str) -> str:
     unique_decoded_values = list(set(decoded_basic_values))
     unique_decoded_values.sort(key=len, reverse=True)
     for decoded_value in unique_decoded_values:
-        redacted = _replace_text(redacted, decoded_value, "***")
+        redacted = redacted.replace(decoded_value, "***")
     return _URL_PATTERN.sub(lambda match: redact_url_credentials(match.group(0)), redacted)
 
 

@@ -96,7 +96,6 @@ async def _list_file_info(
     config: Config,
     base_id: str,
     root: Path,
-    file_paths: list[Path] | None = None,
 ) -> _FileListInfo:
     files: list[dict[str, Any]] = []
     total_size = 0
@@ -108,10 +107,7 @@ async def _list_file_info(
     managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root)
     if error is not None:
         return _FileListInfo(files=[], total_size=0, degraded=True, error=error)
-    paths = (
-        sorted(managed_paths) if file_paths is None else sorted(path for path in file_paths if path in managed_paths)
-    )
-    for file_path in paths:
+    for file_path in sorted(managed_paths):
         try:
             stat = file_path.stat()
             relative_path = file_path.relative_to(resolved_root).as_posix()
@@ -231,6 +227,7 @@ async def _mark_committed_mutation_and_schedule_refresh(
     request: Request,
     reason: str,
 ) -> bool:
+    base_ids_to_refresh = _same_source_base_ids(config, base_id, runtime_paths)
     try:
         affected_base_ids, cancelled_after_source_changed = await _mark_source_changed_after_committed_mutation(
             base_id,
@@ -238,15 +235,9 @@ async def _mark_committed_mutation_and_schedule_refresh(
             runtime_paths=runtime_paths,
             reason=reason,
         )
-    except Exception:
-        _schedule_refreshes(
-            config,
-            _same_source_base_ids(config, base_id, runtime_paths),
-            runtime_paths,
-            request=request,
-        )
-        raise
-    _schedule_refreshes(config, (base_id, *affected_base_ids), runtime_paths, request=request)
+        base_ids_to_refresh = (base_id, *affected_base_ids)
+    finally:
+        _schedule_refreshes(config, base_ids_to_refresh, runtime_paths, request=request)
     return cancelled_after_source_changed
 
 

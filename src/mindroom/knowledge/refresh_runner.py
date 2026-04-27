@@ -121,28 +121,20 @@ async def _acquire_refresh_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]
         _release_refresh_lock_for_key(key, entry)
 
 
-def _mark_refresh_active(key: KnowledgeRefreshTarget) -> None:
+def mark_refresh_active(key: KnowledgeRefreshTarget) -> None:
+    """Record scheduler-level refresh activity before a task reaches the runner."""
     with _active_refresh_counts_guard:
         _active_refresh_counts[key] = _active_refresh_counts.get(key, 0) + 1
 
 
-def _mark_refresh_inactive(key: KnowledgeRefreshTarget) -> None:
+def mark_refresh_inactive(key: KnowledgeRefreshTarget) -> None:
+    """Clear scheduler-level refresh activity after a scheduled task finishes."""
     with _active_refresh_counts_guard:
         count = _active_refresh_counts.get(key, 0)
         if count <= 1:
             _active_refresh_counts.pop(key, None)
         else:
             _active_refresh_counts[key] = count - 1
-
-
-def mark_refresh_active(key: KnowledgeRefreshTarget) -> None:
-    """Record scheduler-level refresh activity before a task reaches the runner."""
-    _mark_refresh_active(key)
-
-
-def mark_refresh_inactive(key: KnowledgeRefreshTarget) -> None:
-    """Clear scheduler-level refresh activity after a scheduled task finishes."""
-    _mark_refresh_inactive(key)
 
 
 def is_refresh_active(key: KnowledgeRefreshTarget) -> bool:
@@ -210,7 +202,7 @@ async def refresh_knowledge_binding(
         create=True,
     )
     refresh_target = refresh_target_for_published_index_key(key)
-    _mark_refresh_active(refresh_target)
+    mark_refresh_active(refresh_target)
     try:
         initial_state = await asyncio.to_thread(
             load_published_index_state,
@@ -235,7 +227,7 @@ async def refresh_knowledge_binding(
             )
             raise
     finally:
-        _mark_refresh_inactive(refresh_target)
+        mark_refresh_inactive(refresh_target)
         prune_private_index_bookkeeping()
 
 
@@ -288,7 +280,7 @@ async def _refresh_knowledge_binding_locked(
         )
         if unchanged_result is not None:
             return unchanged_result
-        indexed_count = await _reindex_manager_index(manager, key)
+        indexed_count = await manager.reindex_all()
         if manager._last_refresh_error is not None:
             error = redact_credentials_in_text(manager._last_refresh_error)
             await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
@@ -300,10 +292,8 @@ async def _refresh_knowledge_binding_locked(
                 last_error=error,
             )
     except Exception as exc:
-        if manager is None:
-            await _mark_refresh_setup_failed(key, config=config, runtime_paths=runtime_paths, error=str(exc))
-        else:
-            await _mark_refresh_failed(manager, key, config=config, runtime_paths=runtime_paths, error=str(exc))
+        error = redact_credentials_in_text(str(exc))
+        await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
         raise
     if manager._git_config() is not None:
         manager._mark_git_initial_sync_complete()
@@ -548,38 +538,3 @@ async def _reconcile_cancelled_refresh(
             await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
             return
     await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
-
-
-async def _reindex_manager_index(manager: KnowledgeManager, key: PublishedIndexKey) -> int:
-    _ = key
-    return await manager.reindex_all()
-
-
-async def _mark_refresh_failed(
-    manager: KnowledgeManager,
-    key: PublishedIndexKey,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    error: str,
-) -> None:
-    """Record refresh failure while preserving any last complete collection."""
-    _ = (manager, config, runtime_paths)
-    await asyncio.to_thread(
-        mark_published_index_refresh_failed_preserving_last_good,
-        key,
-        error=redact_credentials_in_text(error),
-    )
-
-
-async def _mark_refresh_setup_failed(
-    key: PublishedIndexKey,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    error: str,
-) -> None:
-    """Record refresh failure before a KnowledgeManager can be constructed."""
-    redacted_error = redact_credentials_in_text(error)
-    _ = (config, runtime_paths)
-    await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=redacted_error)

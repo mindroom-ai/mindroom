@@ -988,20 +988,15 @@ class KnowledgeManager:
         vector_db = self._knowledge.vector_db
         return isinstance(vector_db, ChromaDb) and vector_db.exists()
 
-    def _startup_index_mode(self) -> Literal["full_reindex", "resume", "incremental"]:
+    def _needs_full_reindex_on_create(self) -> bool:
         if self._persisted_collection_missing_on_init:
-            return "full_reindex"
+            return True
         persisted_state = self._load_persisted_index_state()
         if persisted_state is None:
-            return "full_reindex" if self._indexing_settings_path.exists() and self._has_existing_index() else "resume"
-        if persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING:
-            return "full_reindex"
-        if persisted_state.status == _INDEXING_STATUS_INDEXING or not self._has_existing_index():
-            return "resume"
-        return "incremental"
-
-    def _needs_full_reindex_on_create(self) -> bool:
-        return self._startup_index_mode() == "full_reindex"
+            return self._indexing_settings_path.exists() and self._has_existing_index()
+        return (
+            persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING
+        )
 
     def get_knowledge(self) -> Knowledge:
         """Return the agno Knowledge instance."""
@@ -1381,7 +1376,7 @@ class KnowledgeManager:
             if collection_name == active_collection or not same_base_collection:
                 continue
             try:
-                self._delete_vector_db(self._build_vector_db(collection_name))
+                self._build_vector_db(collection_name).delete()
             except Exception:
                 logger.warning(
                     "Failed to clean superseded knowledge collection",
@@ -1403,11 +1398,8 @@ class KnowledgeManager:
         vector_db.delete()
         vector_db.create()
 
-    def _delete_vector_db(self, vector_db: ChromaDb) -> None:
-        vector_db.delete()
-
     async def _delete_unpublished_candidate_vector_db(self, vector_db: ChromaDb) -> None:
-        cleanup_task = asyncio.create_task(asyncio.to_thread(self._delete_vector_db, vector_db))
+        cleanup_task = asyncio.create_task(asyncio.to_thread(vector_db.delete))
         try:
             await asyncio.shield(cleanup_task)
         except asyncio.CancelledError:
