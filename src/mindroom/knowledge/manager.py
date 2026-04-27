@@ -1227,10 +1227,7 @@ class KnowledgeManager:
             changed_paths = {path for path in diff_output.splitlines() if self._include_semantic_relative_path(path)}
 
         removed_files = before_files - after_files
-        changed_files = (
-            {path for path in changed_paths if path in after_files}
-            | (after_files - before_files)
-        )
+        changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
         return changed_files, removed_files, True
 
     def list_files(self) -> list[Path]:

@@ -430,7 +430,6 @@ def _reload_api_runtime_config(
     mutate_runtime: Callable[[constants.RuntimePaths], constants.RuntimePaths] | None = None,
 ) -> None:
     """Rebind the API app to one runtime and surface structured config reload failures."""
-    clear_worker_validation_snapshot_cache()
     app_state = config_lifecycle.app_state(api_app)
     api_state = config_lifecycle.require_api_state(api_app)
     with api_state.config_lock:
@@ -472,6 +471,7 @@ def _reload_api_runtime_config(
             config_load_result=result,
         )
     config_lifecycle.raise_for_config_load_result(result)
+    clear_worker_validation_snapshot_cache()
 
 
 def _sanitize_entity_payload(entity_data: dict[str, Any]) -> dict[str, Any]:

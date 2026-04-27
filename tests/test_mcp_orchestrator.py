@@ -110,6 +110,7 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
             new=AsyncMock(return_value=EntityStartResults(retryable_entities=["code"])),
         ) as mock_create_and_start,
         patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
+        patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
     ):
         await orchestrator._handle_mcp_catalog_change("demo")
 
@@ -119,6 +120,7 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
     assert mock_create_and_start.await_args.kwargs["start_sync_tasks"] is True
     assert {args.args[0] for args in mock_cancel.await_args_list} == {"code", "dev_team"}
     mock_schedule_retry.assert_awaited_once_with("code")
+    mock_clear_snapshot_cache.assert_called_once_with()
 
 
 @pytest.mark.asyncio

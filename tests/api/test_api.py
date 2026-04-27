@@ -589,6 +589,24 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
     assert main._app_context(fresh_app).config_load_result == main.ConfigLoadResult(success=True)
 
 
+def test_reload_api_runtime_config_does_not_clear_worker_snapshot_on_failed_load(tmp_path: Path) -> None:
+    """Failed API config loads should keep the last-good worker validation cache."""
+    fresh_app = FastAPI()
+    runtime_paths = _runtime_paths(tmp_path)
+    main.initialize_api_app(fresh_app, runtime_paths)
+    failure = main.ConfigLoadResult(success=False, error_status_code=422, error_detail="bad config")
+
+    with (
+        patch.object(config_lifecycle, "_load_config_result", return_value=(failure, None, None)),
+        patch("mindroom.api.main.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        main._reload_api_runtime_config(fresh_app, runtime_paths)
+
+    assert exc_info.value.status_code == 422
+    mock_clear_snapshot_cache.assert_not_called()
+
+
 def test_read_app_committed_config_uses_current_context_after_runtime_swap(tmp_path: Path) -> None:
     """Read helpers should use the runtime context that is current after locking."""
     fresh_app = FastAPI()

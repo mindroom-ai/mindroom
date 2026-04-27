@@ -742,7 +742,6 @@ class MultiAgentOrchestrator:
                 source=source,
                 changed_paths=[str(path) for path in changed_paths],
             )
-            clear_worker_validation_snapshot_cache()
             try:
                 result = reload_plugins(config, self.runtime_paths)
             except Exception:
@@ -751,10 +750,12 @@ class MultiAgentOrchestrator:
                     self.runtime_paths,
                 )
                 self._activate_hook_registry(recovery_result.hook_registry)
+                clear_worker_validation_snapshot_cache()
                 self._refresh_plugin_watch_state(config)
                 logger.warning(warning_message, source=source, **warning_kwargs)
                 raise
             self._activate_hook_registry(result.hook_registry)
+            clear_worker_validation_snapshot_cache()
             self._refresh_plugin_watch_state(config)
             logger.info(
                 "Plugin reload complete",
@@ -795,6 +796,7 @@ class MultiAgentOrchestrator:
                 prepared_plugin_root_snapshots,
             )
             self._activate_hook_registry(new_hook_registry)
+            clear_worker_validation_snapshot_cache()
             return pre_stopped_mcp_entities
 
     async def _start_entities_once(
@@ -1067,6 +1069,7 @@ class MultiAgentOrchestrator:
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
+        clear_worker_validation_snapshot_cache()
         return False
 
     async def _update_unchanged_bots(self, plan: ConfigUpdatePlan) -> None:
@@ -1191,6 +1194,7 @@ class MultiAgentOrchestrator:
         async with self._mcp_catalog_change_lock:
             if not self.running or self.config is None:
                 return
+            clear_worker_validation_snapshot_cache()
             changed_entities = self.config.get_entities_referencing_tools({mcp_tool_name(server_id)})
             if not changed_entities:
                 return
@@ -1233,7 +1237,6 @@ class MultiAgentOrchestrator:
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
         new_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
-        clear_worker_validation_snapshot_cache()
 
         if not self.config:
             return await self._load_initial_config(new_config, self._build_hook_registry(new_config))
@@ -1269,6 +1272,7 @@ class MultiAgentOrchestrator:
             self.config = new_config
             self._sync_plugin_watch_roots(new_config)
             self._activate_hook_registry(self.hook_registry)
+            clear_worker_validation_snapshot_cache()
         changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
         await self._sync_event_cache_service(new_config)
         logger.info(
