@@ -5,6 +5,7 @@ on:
     branches: [main]
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -12,7 +13,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Create release
+        id: create_release
         uses: basnijholt/calver-auto-release@v1
         with:
-          # A PAT ensures downstream `on: release` workflows are triggered.
-          github_token: ${{ secrets.PAT || secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dispatch release publishers
+        if: steps.create_release.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_WORKFLOW_REF: ${{ github.ref_name }}
+          RELEASE_REF: ${{ steps.create_release.outputs.version }}
+        run: |
+          gh workflow run build-mindroom.yml --ref "$PUBLISH_WORKFLOW_REF" --field release_ref="$RELEASE_REF"
+          gh workflow run build-platform.yml --ref "$PUBLISH_WORKFLOW_REF" --field release_ref="$RELEASE_REF"
+          gh workflow run release.yml --ref "$PUBLISH_WORKFLOW_REF" --field release_ref="$RELEASE_REF"

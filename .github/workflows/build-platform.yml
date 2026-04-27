@@ -7,16 +7,13 @@ on:
     paths:
       - 'saas-platform/**'
       - '.github/workflows/build-platform.yml'
-  # Push images only on releases
-  release:
-    types: [published]
-  # Manual trigger with push option
+  # Publish release images when dispatched by the CalVer release workflow.
   workflow_dispatch:
     inputs:
-      push_images:
-        description: 'Push images to registry'
-        type: boolean
-        default: false
+      release_ref:
+        description: 'Release tag to publish, for example v2026.4.261'
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -41,6 +38,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
+
+      - name: Validate release ref
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [[ "${{ inputs.release_ref }}" != v* ]]; then
+            echo "release_ref must be a tag starting with 'v', got '${{ inputs.release_ref }}'" >&2
+            exit 1
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -65,8 +72,9 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
             type=sha,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=amd64,enable={{is_default_branch}}
+            type=raw,value=${{ inputs.release_ref }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=amd64,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -74,7 +82,7 @@ jobs:
           context: ${{ matrix.service.context }}
           file: ${{ matrix.service.context }}/${{ matrix.service.dockerfile }}
           platforms: linux/amd64
-          push: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images) }}
+          push: ${{ github.event_name == 'workflow_dispatch' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

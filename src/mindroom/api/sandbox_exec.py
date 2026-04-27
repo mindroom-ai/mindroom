@@ -358,7 +358,7 @@ def source_workspace_env_hook(
     Bash sources the script without `set -a`, so agents must write
     `export FOO=bar` for values to overlay; bare `FOO=bar` does not persist.
     A high-entropy capture marker separates anything the script printed to
-    stdout from the NUL-separated `printenv -0` block we read afterwards. The
+    stdout from the NUL-separated exported environment block we read afterwards. The
     runner keeps only entries whose name passes
     `constants.is_workspace_env_overlay_name_allowed` and whose value differs
     from `base_env`.
@@ -368,7 +368,11 @@ def source_workspace_env_hook(
     """
     bash_path = _resolve_bash(base_env)
     capture_marker = secrets.token_hex(16)
-    bash_script = '. "$1"; printf "%s\\0" "$2"; printenv -0'
+    bash_script = (
+        '. "$1"; '
+        'printf "%s\\0" "$2"; '
+        'while IFS= read -r name; do printf "%s=%s\\0" "$name" "${!name}"; done < <(compgen -e)'
+    )
     try:
         process = subprocess.Popen(
             [bash_path, "-c", bash_script, "bash", str(hook_path), capture_marker],

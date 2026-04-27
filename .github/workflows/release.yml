@@ -1,8 +1,12 @@
 name: Upload Python Package
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: 'Release tag to publish, for example v2026.4.261'
+        required: true
+        type: string
 
 jobs:
   deploy:
@@ -11,9 +15,13 @@ jobs:
       name: pypi
       url: https://pypi.org/p/mindroom
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_ref }}
+          fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: Set up Bun

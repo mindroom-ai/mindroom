@@ -2,7 +2,7 @@ name: Build MindRoom
 # Builds MindRoom instance images in parallel using native ARM64 runners
 
 on:
-  # Publish branch-tagged images on direct pushes to main.
+  # Validate MindRoom images on direct pushes to main.
   push:
     branches: [ main ]
   # Build (no push) on PRs to validate Dockerfiles
@@ -15,16 +15,13 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/build-mindroom.yml'
-  # Push images on releases
-  release:
-    types: [ published ]
-  # Manual trigger with push option
+  # Publish release images when dispatched by the CalVer release workflow.
   workflow_dispatch:
     inputs:
-      push_images:
-        description: 'Push images to registry'
-        type: boolean
-        default: false
+      release_ref:
+        description: 'Release tag to publish, for example v2026.4.261'
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -65,6 +62,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
         lfs: true
 
     - name: Pull Git LFS objects
@@ -87,15 +85,25 @@ jobs:
     - name: Set build vars
       id: vars
       run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          ref_name="${{ inputs.release_ref }}"
+          if [[ "$ref_name" != v* ]]; then
+            echo "release_ref must be a tag starting with 'v', got '$ref_name'" >&2
+            exit 1
+          fi
+          version="${ref_name#v}"
+        elif [[ "${{ github.event_name }}" == "pull_request" || "${{ github.event_name }}" == "push" ]]; then
+          ref_name="$GITHUB_REF_NAME"
+          version="0.0.0"
+        else
+          echo "Unsupported event for Build MindRoom: ${{ github.event_name }}" >&2
+          exit 1
+        fi
+
         echo "timestamp=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
         # Sanitize ref for Docker tag usage (e.g. pull/123/merge -> pull-123-merge)
-        echo "safe_ref=${GITHUB_REF_NAME//\//-}" >> $GITHUB_OUTPUT
-        # Extract version from tag (strip 'v' prefix) or use 0.0.0 for non-release builds
-        if [[ "${{ github.ref_name }}" == v* ]]; then
-          echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-        else
-          echo "version=0.0.0" >> $GITHUB_OUTPUT
-        fi
+        echo "safe_ref=${ref_name//\//-}" >> $GITHUB_OUTPUT
+        echo "version=$version" >> $GITHUB_OUTPUT
 
     - name: Build and push image
       uses: docker/build-push-action@v5
@@ -103,7 +111,7 @@ jobs:
         context: .
         file: ${{ matrix.target.dockerfile }}
         platforms: ${{ matrix.platform }}
-        push: ${{ github.event_name == 'push' || github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images) }}
+        push: ${{ github.event_name == 'workflow_dispatch' }}
         tags: |
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ matrix.platform_suffix }}
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}-${{ matrix.platform_suffix }}
@@ -118,7 +126,7 @@ jobs:
   # Create multi-arch manifests after all builds complete when publishing is enabled.
   manifest:
     needs: build
-    if: github.event_name == 'push' || github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -140,13 +148,16 @@ jobs:
     - name: Set safe ref
       id: vars
       run: |
-        echo "safe_ref=${GITHUB_REF_NAME//\//-}" >> $GITHUB_OUTPUT
+        ref_name="${{ inputs.release_ref }}"
+        if [[ "$ref_name" != v* ]]; then
+          echo "release_ref must be a tag starting with 'v', got '$ref_name'" >&2
+          exit 1
+        fi
+        echo "safe_ref=${ref_name//\//-}" >> $GITHUB_OUTPUT
 
     - name: Create and push latest manifest
-      if: github.event_name != 'release'
       run: |
-        # Keep latest aligned with direct branch/manual publishes instead of
-        # rebuilding it again during release fan-out.
+        # Keep latest aligned with explicit publishes.
         docker manifest create \
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:latest \
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:amd64 \
