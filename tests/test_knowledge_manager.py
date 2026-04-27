@@ -3210,6 +3210,63 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
     scheduler.schedule_refresh.assert_called_once()
 
 
+def test_published_index_handle_open_failure_degrades_and_schedules_repair_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken read handle should not break reply-path knowledge resolution."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    collection = "broken_collection"
+    metadata_path = published_index_metadata_path(key)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "settings": list(key.indexing_settings),
+                "status": "complete",
+                "collection": collection,
+                "indexed_count": 1,
+                "source_signature": "test-source-signature",
+            },
+        ),
+        encoding="utf-8",
+    )
+    _VectorDb.collections[collection] = [
+        {
+            "content": "last good content",
+            "metadata": {"path": "guide.md"},
+        },
+    ]
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    scheduler.schedule_refresh = MagicMock()
+
+    def _broken_vector_db(*_args: object, **_kwargs: object) -> object:
+        msg = "cannot open collection"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("mindroom.knowledge.registry._build_published_index_vector_db", _broken_vector_db)
+
+    resolution = resolve_agent_knowledge_access(
+        "helper",
+        config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
+    )
+
+    assert resolution.knowledge is None
+    assert resolution.unavailable == {
+        "docs": KnowledgeAvailabilityDetail(
+            availability=KnowledgeAvailability.REFRESH_FAILED,
+            search_available=False,
+        ),
+    }
+    scheduler.schedule_refresh.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_first_time_partial_refresh_does_not_publish_ready_index(
     tmp_path: Path,

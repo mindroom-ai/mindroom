@@ -481,6 +481,60 @@ describe("Knowledge", () => {
     expect(gitCard).toHaveTextContent("Branch: release");
   });
 
+  it("keeps scp-style git repo URLs visible in git knowledge UI", async () => {
+    mockStore({
+      git_docs: {
+        path: "./knowledge_docs/git_docs",
+        watch: true,
+        git: {
+          repo_url: "git@github.com:org/git-docs.git",
+          branch: "release",
+        },
+      },
+    });
+    setKnowledgeApiMock({
+      git_docs: {
+        status: {
+          base_id: "git_docs",
+          folder_path: "./knowledge_docs/git_docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+          git: {
+            repo_url: "git@github.com:org/git-docs.git",
+            branch: "release",
+            lfs: false,
+            syncing: false,
+            repo_present: true,
+            initial_sync_complete: true,
+            last_successful_sync_at: null,
+            last_successful_commit: null,
+            last_error: null,
+          },
+        },
+        files: {
+          base_id: "git_docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: git_docs");
+
+    const gitCard = screen.getByRole("button", { name: /git_docs/i });
+    expect(gitCard).toHaveTextContent("git@github.com:org/git-docs.git");
+    expect(
+      (screen.getByLabelText("Current Repository URL") as HTMLInputElement)
+        .value,
+    ).toBe("git@github.com:org/git-docs.git");
+    expect(
+      screen.getAllByText("git@github.com:org/git-docs.git").length,
+    ).toBeGreaterThan(0);
+  });
+
   it("does not render stored git URL credentials in the settings input", async () => {
     mockStore({
       git_docs: {

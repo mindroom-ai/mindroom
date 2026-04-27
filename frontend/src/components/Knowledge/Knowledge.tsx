@@ -120,6 +120,13 @@ function stripPathParams(pathname: string): string {
   return pathname.split(";", 1)[0] ?? "";
 }
 
+function stripFallbackPathParams(value: string): string {
+  return value.replace(
+    /^([a-z][a-z0-9+.-]*:\/\/[^/\s?#]*)(\/[^?#;]*);[^?#]*/i,
+    "$1$2",
+  );
+}
+
 function redactUrlCredentials(value: string): string {
   try {
     const parsed = new URL(value);
@@ -129,7 +136,13 @@ function redactUrlCredentials(value: string): string {
         : parsed.host;
     return `${parsed.protocol}//${authority}${stripPathParams(parsed.pathname)}`;
   } catch {
-    return REDACTED_CREDENTIALS_SENTINEL;
+    const withoutQueryOrFragment = stripFallbackPathParams(
+      value.replace(/[?#].*$/, ""),
+    );
+    return withoutQueryOrFragment.replace(
+      /^([a-z][a-z0-9+.-]*:\/\/)([^@\s/?#]+)@/i,
+      `$1${REDACTED_CREDENTIALS_SENTINEL}@`,
+    );
   }
 }
 

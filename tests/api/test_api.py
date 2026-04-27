@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from typing import Any, NoReturn, cast
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -199,6 +199,45 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
 
     assert install_calls == ["supabase"]
     assert "MINDROOM_NO_AUTO_INSTALL_TOOLS" not in str(err.value)
+
+
+def test_validate_supabase_token_catches_supabase_auth_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Invalid Supabase tokens should fail auth instead of surfacing optional-package internals."""
+
+    class _FakeAuthError(Exception):
+        pass
+
+    class _FakeAuth:
+        @staticmethod
+        def get_user(_token: str) -> NoReturn:
+            msg = "invalid jwt"
+            raise _FakeAuthError(msg)
+
+    class _FakeClient:
+        auth = _FakeAuth()
+
+    imported_modules: list[str] = []
+
+    def _fake_import_module(module_name: str) -> SimpleNamespace:
+        imported_modules.append(module_name)
+        assert module_name == "supabase_auth.errors"
+        return SimpleNamespace(AuthError=_FakeAuthError)
+
+    monkeypatch.setattr(auth.importlib, "import_module", _fake_import_module)
+    auth_state = auth.ApiAuthState(
+        runtime_paths=_runtime_paths(tmp_path),
+        settings=auth.ApiAuthSettings(
+            platform_login_url="https://platform.example.com/login",
+            supabase_url="https://supabase.example.com",
+            supabase_anon_key="anon-key",
+            account_id=None,
+            mindroom_api_key=None,
+        ),
+        supabase_auth=_FakeClient(),
+    )
+
+    assert auth._validate_supabase_token("bad-token", auth_state) is None
+    assert imported_modules == ["supabase_auth.errors"]
 
 
 def test_ensure_frontend_dist_dir_builds_repo_checkout(

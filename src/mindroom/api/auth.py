@@ -165,7 +165,7 @@ def _get_request_token(
 
 def _supabase_auth_error_class() -> type[Exception]:
     """Return Supabase's AuthError class for narrow exception handling at the auth boundary."""
-    return cast("type[Exception]", importlib.import_module("gotrue.errors").AuthError)
+    return cast("type[Exception]", importlib.import_module("supabase_auth.errors").AuthError)
 
 
 def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseUserProtocol | None:
