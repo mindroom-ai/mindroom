@@ -245,6 +245,25 @@ knowledge_bases:
 - If `include_patterns` is set, a file must match at least one pattern
 - `exclude_patterns` are applied last and remove matching files
 
+Multiple knowledge bases may point at the same root when they use the same source ownership settings.
+This is the preferred way to expose separate views of a large repository without cloning it more than once.
+
+```yaml
+knowledge_bases:
+  project_docs:
+    path: ./knowledge_docs/project
+    git:
+      repo_url: https://github.com/org/project
+      branch: main
+      include_patterns: ["docs/**"]
+  project_source:
+    path: ./knowledge_docs/project
+    git:
+      repo_url: https://github.com/org/project
+      branch: main
+      include_patterns: ["src/**"]
+```
+
 ### Private Repository Authentication
 
 For private HTTPS repositories, store credentials and reference them in the config.

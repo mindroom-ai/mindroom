@@ -77,6 +77,7 @@ class PerBindingKnowledgeRefreshOwner:
     """Run at most one best-effort background refresh per binding."""
 
     _tasks: dict[KnowledgeRefreshKey, asyncio.Task[None]] = field(default_factory=dict, init=False)
+    _pending: dict[KnowledgeRefreshKey, _ScheduledRefresh] = field(default_factory=dict, init=False)
     _shutting_down: bool = field(default=False, init=False)
 
     def schedule_refresh(
@@ -139,6 +140,7 @@ class PerBindingKnowledgeRefreshOwner:
         self._shutting_down = True
         tasks = list(self._tasks.values())
         self._tasks.clear()
+        self._pending.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -156,9 +158,6 @@ class PerBindingKnowledgeRefreshOwner:
         if self._shutting_down:
             logger.debug("Skipping knowledge refresh schedule after shutdown", base_id=base_id)
             return
-        loop = _running_loop_for_schedule(base_id)
-        if loop is None:
-            return
         try:
             key = resolve_refresh_key(
                 base_id,
@@ -170,8 +169,6 @@ class PerBindingKnowledgeRefreshOwner:
         except Exception:
             logger.exception("Could not resolve knowledge binding for refresh", base_id=base_id)
             return
-        if key in self._tasks:
-            return
 
         request = _ScheduledRefresh(
             base_id=base_id,
@@ -179,8 +176,17 @@ class PerBindingKnowledgeRefreshOwner:
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         )
+        if key in self._tasks:
+            self._pending[key] = request
+            return
+        self._start_task(key, request)
+
+    def _start_task(self, key: KnowledgeRefreshKey, request: _ScheduledRefresh) -> None:
+        loop = _running_loop_for_schedule(key.base_id)
+        if loop is None:
+            return
         mark_refresh_active(key)
-        task = loop.create_task(self._run_refresh(key, request), name=f"knowledge_refresh:{base_id}")
+        task = loop.create_task(self._run_refresh(key, request), name=f"knowledge_refresh:{key.base_id}")
         self._tasks[key] = task
         task.add_done_callback(lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed))
 
@@ -188,12 +194,19 @@ class PerBindingKnowledgeRefreshOwner:
         mark_refresh_inactive(key)
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
+        cancelled = False
         try:
             task.result()
         except asyncio.CancelledError:
-            return
+            cancelled = True
         except Exception:
             logger.exception("Background knowledge refresh failed", base_id=key.base_id)
+        if cancelled or self._shutting_down:
+            self._pending.pop(key, None)
+            return
+        pending_request = self._pending.pop(key, None)
+        if pending_request is not None:
+            self._start_task(key, pending_request)
 
     async def _run_refresh(self, key: KnowledgeRefreshKey, request: _ScheduledRefresh) -> None:
         await refresh_knowledge_binding(

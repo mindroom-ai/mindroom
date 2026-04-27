@@ -316,16 +316,11 @@ def _relative_paths_overlap(left: Path, right: Path) -> bool:
 class KnowledgeBaseSourceSemantics:
     """Source ownership semantics that must match for exact duplicate roots."""
 
-    include_extensions: tuple[str, ...] | None
-    exclude_extensions: tuple[str, ...]
     git_enabled: bool
     git_repo_identity: str
     git_branch: str
     git_credentials_service: str | None
     git_lfs: bool
-    git_skip_hidden: bool
-    git_include_patterns: tuple[str, ...]
-    git_exclude_patterns: tuple[str, ...]
 
 
 def _credential_free_repo_url_for_config_validation(repo_url: str) -> str:
@@ -362,10 +357,6 @@ def _knowledge_base_source_semantics(base_config: KnowledgeBaseConfig) -> Knowle
     """Return the source semantics for duplicate-path compatibility checks."""
     git_config = base_config.git
     return KnowledgeBaseSourceSemantics(
-        include_extensions=tuple(base_config.include_extensions)
-        if base_config.include_extensions is not None
-        else None,
-        exclude_extensions=tuple(base_config.exclude_extensions),
         git_enabled=git_config is not None,
         git_repo_identity=_credential_free_repo_url_for_config_validation(git_config.repo_url)
         if git_config is not None
@@ -373,9 +364,6 @@ def _knowledge_base_source_semantics(base_config: KnowledgeBaseConfig) -> Knowle
         git_branch=git_config.branch if git_config is not None else "",
         git_credentials_service=git_config.credentials_service if git_config is not None else None,
         git_lfs=git_config.lfs if git_config is not None else False,
-        git_skip_hidden=git_config.skip_hidden if git_config is not None else False,
-        git_include_patterns=tuple(git_config.include_patterns) if git_config is not None else (),
-        git_exclude_patterns=tuple(git_config.exclude_patterns) if git_config is not None else (),
     )
 
 

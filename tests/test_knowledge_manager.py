@@ -1581,6 +1581,56 @@ def test_config_allows_exact_duplicate_roots_with_compatible_source_semantics(tm
     assert sorted(config.knowledge_bases) == ["alpha", "beta"]
 
 
+def test_config_allows_exact_duplicate_git_roots_with_different_filters(tmp_path: Path) -> None:
+    """One Git checkout may back multiple filtered knowledge views."""
+    docs = tmp_path / "docs"
+
+    config = _config(
+        tmp_path,
+        bases={"docs": docs, "source": docs},
+        agent_bases=["docs", "source"],
+        git_configs={
+            "docs": KnowledgeGitConfig(
+                repo_url="https://example.com/org/repo.git",
+                branch="main",
+                include_patterns=["docs/**"],
+            ),
+            "source": KnowledgeGitConfig(
+                repo_url="https://example.com/org/repo.git",
+                branch="main",
+                include_patterns=["src/**"],
+            ),
+        },
+    )
+
+    assert sorted(config.knowledge_bases) == ["docs", "source"]
+
+
+def test_config_allows_exact_duplicate_local_roots_with_different_filters(tmp_path: Path) -> None:
+    """One local folder may back multiple filtered knowledge views."""
+    docs = tmp_path / "docs"
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    knowledge_bases=["markdown", "python"],
+                ),
+            },
+            models={},
+            knowledge_bases={
+                "markdown": KnowledgeBaseConfig(path=str(docs), include_extensions=[".md"]),
+                "python": KnowledgeBaseConfig(path=str(docs), include_extensions=[".py"]),
+            },
+        ),
+        runtime_paths,
+    )
+
+    assert sorted(config.knowledge_bases) == ["markdown", "python"]
+
+
 def test_raw_git_url_snapshot_metadata_is_config_mismatch(tmp_path: Path) -> None:
     """Raw Git URLs in persisted settings are stale-format metadata, not a compatible identity."""
     docs_path = tmp_path / "docs"
@@ -3384,41 +3434,56 @@ async def test_refresh_owner_runs_independent_per_binding_tasks(
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_drops_duplicate_schedule_while_active(
+async def test_refresh_owner_coalesces_duplicate_schedule_while_active(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Best-effort schedules do not queue duplicate work for an already active binding."""
+    """Best-effort schedules run one follow-up refresh with the latest request."""
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    older_pending_config = config.model_copy(deep=True)
+    older_pending_config.knowledge_bases["docs"].chunk_size = 2048
+    latest_pending_config = config.model_copy(deep=True)
+    latest_pending_config.knowledge_bases["docs"].chunk_size = 4096
     runtime_paths = runtime_paths_for(config)
     owner = PerBindingKnowledgeRefreshOwner()
-    started_count = 0
+    seen_chunk_sizes: list[int] = []
     first_started = asyncio.Event()
     release_first = asyncio.Event()
+    second_started = asyncio.Event()
 
-    async def _fake_refresh(_base_id: str, **_kwargs: object) -> object:
+    async def _fake_refresh(_base_id: str, **kwargs: object) -> object:
         _ = _base_id
-        nonlocal started_count
-        started_count += 1
-        first_started.set()
-        await release_first.wait()
+        refresh_config = kwargs["config"]
+        assert isinstance(refresh_config, Config)
+        seen_chunk_sizes.append(refresh_config.knowledge_bases["docs"].chunk_size)
+        if len(seen_chunk_sizes) == 1:
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_started.set()
         return object()
 
     monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
 
     owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await first_started.wait()
-    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
-    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    owner.schedule_refresh("docs", config=older_pending_config, runtime_paths=runtime_paths)
+    owner.schedule_refresh("docs", config=latest_pending_config, runtime_paths=runtime_paths)
     await asyncio.sleep(0)
 
-    assert started_count == 1
+    assert seen_chunk_sizes == [5000]
 
     release_first.set()
-    await owner.shutdown()
+    await asyncio.wait_for(second_started.wait(), timeout=1)
+    for _attempt in range(50):
+        if not owner._tasks:
+            break
+        await asyncio.sleep(0)
+    else:
+        pytest.fail("coalesced refresh task did not finish")
 
-    assert started_count == 1
+    assert seen_chunk_sizes == [5000, 4096]
 
 
 @pytest.mark.asyncio
