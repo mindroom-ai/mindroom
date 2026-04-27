@@ -280,7 +280,10 @@ _patch_agno_async_tool_hook_chain()
 
 
 async def _call_tool(func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
-    result = func(**args)
+    if inspect.iscoroutinefunction(func):
+        result = await func(**args)
+    else:
+        result = await asyncio.to_thread(func, **args)
     if inspect.isawaitable(result):
         return await result
     return result
