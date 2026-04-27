@@ -28,6 +28,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Identity levels:
+# - KnowledgeSourceKey: one physical source root. It gates source mutation locks and alias fanout.
+# - KnowledgeRefreshKey: one refresh target. It coalesces background work for a source and base ID.
+# - KnowledgeSnapshotKey: one published, query-compatible index. It includes indexing settings for read paths.
+
 
 @dataclass(frozen=True)
 class KnowledgeSnapshotKey:
