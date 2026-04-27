@@ -40,17 +40,6 @@ class KnowledgeRefreshOwner(Protocol):
         """Schedule a background refresh for one resolved knowledge binding."""
         ...
 
-    def schedule_initial_load(
-        self,
-        base_id: str,
-        *,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> None:
-        """Schedule the first background load for one resolved knowledge binding."""
-        ...
-
     def is_refreshing(
         self,
         base_id: str,
@@ -100,22 +89,6 @@ class PerBindingKnowledgeRefreshOwner:
     ) -> None:
         """Schedule a background refresh for one resolved knowledge binding."""
         self._schedule(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-
-    def schedule_initial_load(
-        self,
-        base_id: str,
-        *,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> None:
-        """Schedule the first background load for one resolved knowledge binding."""
-        self.schedule_refresh(
             base_id,
             config=config,
             runtime_paths=runtime_paths,

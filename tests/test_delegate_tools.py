@@ -299,9 +299,6 @@ class TestDelegateKnowledge:
 
         class _FakeRefreshOwner:
             def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
             def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:

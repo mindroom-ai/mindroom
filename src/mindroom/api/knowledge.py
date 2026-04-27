@@ -38,7 +38,6 @@ from mindroom.knowledge.registry import (
     mark_snapshot_dirty_async,
     resolve_snapshot_key,
     snapshot_availability_for_state,
-    snapshot_collection_exists_for_state,
     snapshot_metadata_path,
     snapshot_refresh_state,
 )
@@ -213,22 +212,21 @@ async def _mark_dirty_after_committed_mutation(
         return await dirty_task, True
 
 
-def _snapshot_status_sync(
+def _snapshot_indexed_count_sync(
     config: Config,
     base_id: str,
     runtime_paths: constants.RuntimePaths,
-) -> tuple[bool, int]:
+) -> int:
     key, state, _metadata_exists = _snapshot_state_info(config, base_id, runtime_paths)
     if key is None:
-        return False, 0
+        return 0
     if state is None:
-        return False, 0
+        return 0
     if state.status != "complete":
-        return False, 0
+        return 0
     if not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings):
-        return False, 0
-    available = snapshot_collection_exists_for_state(key, state)
-    return available, state.indexed_count or 0
+        return 0
+    return state.indexed_count or 0
 
 
 def _snapshot_state_info(
@@ -250,12 +248,12 @@ def _snapshot_state_info(
         return None, None, False
 
 
-async def _snapshot_status(
+async def _snapshot_indexed_count(
     config: Config,
     base_id: str,
     runtime_paths: constants.RuntimePaths,
-) -> tuple[bool, int]:
-    return await asyncio.to_thread(_snapshot_status_sync, config, base_id, runtime_paths)
+) -> int:
+    return await asyncio.to_thread(_snapshot_indexed_count_sync, config, base_id, runtime_paths)
 
 
 def _snapshot_state(
@@ -505,7 +503,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
         file_info = await _list_file_info(config, base_id, root)
-        snapshot_available, indexed_count = await _snapshot_status(config, base_id, runtime_paths)
+        indexed_count = await _snapshot_indexed_count(config, base_id, runtime_paths)
         state = _snapshot_state(config, base_id, runtime_paths)
         refresh_state = _snapshot_refresh_state(config, base_id, runtime_paths)
         git_status = await _git_status(config, base_id, runtime_paths, request=request)
@@ -517,10 +515,8 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
             "watch": base_config.watch,
             "file_count": len(file_info.files),
             "indexed_count": indexed_count,
-            "manager_available": snapshot_available,
             "refreshing": refreshing,
             "refresh_state": refresh_state,
-            "refresh_job": state.refresh_job if state is not None else "idle",
             "file_listing_degraded": file_info.degraded,
         }
         if state is not None and state.last_error is not None:
@@ -542,7 +538,6 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
     """List all managed files currently present in one knowledge base folder."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
-    snapshot_available, _indexed_count = await _snapshot_status(config, base_id, runtime_paths)
     file_info = await _list_file_info(config, base_id, root)
 
     return {
@@ -550,7 +545,6 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
         "files": file_info.files,
         "total_size": file_info.total_size,
         "file_count": len(file_info.files),
-        "manager_available": snapshot_available,
         "file_listing_degraded": file_info.degraded,
         "file_listing_error": file_info.error,
     }
@@ -640,7 +634,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     """Return current indexing status for one knowledge base."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
-    snapshot_available, indexed_count = await _snapshot_status(config, base_id, runtime_paths)
+    indexed_count = await _snapshot_indexed_count(config, base_id, runtime_paths)
     state = _snapshot_state(config, base_id, runtime_paths)
     refresh_state = _snapshot_refresh_state(config, base_id, runtime_paths)
     file_info = await _list_file_info(config, base_id, root)
@@ -653,10 +647,8 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "watch": config.knowledge_bases[base_id].watch,
         "file_count": len(file_info.files),
         "indexed_count": indexed_count,
-        "manager_available": snapshot_available,
         "refreshing": refreshing,
         "refresh_state": refresh_state,
-        "refresh_job": state.refresh_job if state is not None else "idle",
         "last_error": _redacted_last_error(state.last_error if state is not None else None),
         "file_listing_degraded": file_info.degraded,
         "file_listing_error": file_info.error,

@@ -156,7 +156,8 @@ def test_knowledge_status_reads_snapshot_metadata_without_initializing(tmp_path:
     payload = response.json()
     assert payload["file_count"] == 1
     assert payload["indexed_count"] == 0
-    assert payload["manager_available"] is False
+    assert "manager_available" not in payload
+    assert "refresh_job" not in payload
     refresh.assert_not_awaited()
 
 
@@ -175,7 +176,8 @@ def test_knowledge_bases_list_does_not_initialize_unused_configured_bases(tmp_pa
     payload = response.json()
     assert payload["count"] == 2
     assert {base["name"] for base in payload["bases"]} == {"research", "unused"}
-    assert all(base["manager_available"] is False for base in payload["bases"])
+    assert all("manager_available" not in base for base in payload["bases"])
+    assert all("refresh_job" not in base for base in payload["bases"])
     refresh.assert_not_awaited()
 
 
@@ -203,14 +205,14 @@ def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: P
     assert files_response.status_code == 200
     assert status_response.json()["indexed_count"] == 9
     assert list_response.json()["bases"][0]["indexed_count"] == 9
-    assert status_response.json()["manager_available"] is False
-    assert list_response.json()["bases"][0]["manager_available"] is False
-    assert files_response.json()["manager_available"] is False
+    assert "manager_available" not in status_response.json()
+    assert "manager_available" not in list_response.json()["bases"][0]
+    assert "manager_available" not in files_response.json()
     refresh.assert_not_awaited()
 
 
-def test_status_treats_collection_probe_failure_as_unavailable(tmp_path: Path) -> None:
-    """Routine status endpoints should not fail when persisted vector metadata is corrupt."""
+def test_status_reports_persisted_count_without_loading_collection(tmp_path: Path) -> None:
+    """Routine status endpoints should not load Chroma collection handles."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -236,12 +238,12 @@ def test_status_treats_collection_probe_failure_as_unavailable(tmp_path: Path) -
 
     assert response.status_code == 200
     assert response.json()["indexed_count"] == 4
-    assert response.json()["manager_available"] is False
-    assert seen_embedders == ["_CollectionExistenceEmbedder"]
+    assert "manager_available" not in response.json()
+    assert seen_embedders == []
 
 
-def test_status_collection_probe_runs_off_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Collection existence probes should not run on the async API handler thread."""
+def test_status_does_not_probe_collection_availability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Status endpoints should report metadata without probing Chroma collection availability."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -249,38 +251,29 @@ def test_status_collection_probe_runs_off_event_loop(tmp_path: Path, monkeypatch
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     _write_snapshot_metadata(config, runtime_paths, indexed_count=4)
-    saw_running_loop = True
 
     def _offloaded_collection_probe(*_args: object) -> bool:
-        nonlocal saw_running_loop
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            saw_running_loop = False
-        else:
-            saw_running_loop = True
-        return False
+        msg = "status should not probe collection availability"
+        raise AssertionError(msg)
 
-    monkeypatch.setattr(knowledge_api, "snapshot_collection_exists_for_state", _offloaded_collection_probe)
+    monkeypatch.setattr(knowledge_registry, "snapshot_collection_exists_for_state", _offloaded_collection_probe)
 
     response = client.get("/api/knowledge/bases/research/status")
 
     assert response.status_code == 200
-    assert response.json()["manager_available"] is False
-    assert saw_running_loop is False
+    assert response.json()["indexed_count"] == 4
 
 
 @pytest.mark.parametrize(
-    ("refresh_state", "expected_refresh_job"),
+    "refresh_state",
     [
-        ("stale", "pending"),
-        ("refresh_failed", "failed"),
+        "stale",
+        "refresh_failed",
     ],
 )
 def test_status_reports_queryable_last_good_snapshot_when_refresh_state_is_not_ready(
     tmp_path: Path,
     refresh_state: str,
-    expected_refresh_job: str,
 ) -> None:
     """Refresh state should not hide a valid queryable snapshot."""
     client = _test_client(tmp_path)
@@ -296,10 +289,7 @@ def test_status_reports_queryable_last_good_snapshot_when_refresh_state_is_not_r
     else:
         knowledge_registry.save_snapshot_refresh_failed_state(key, error="refresh failed")
 
-    with (
-        patch("mindroom.api.knowledge.snapshot_collection_exists_for_state", return_value=True),
-        patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
-    ):
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         status_response = client.get("/api/knowledge/bases/research/status")
         list_response = client.get("/api/knowledge/bases")
 
@@ -309,17 +299,17 @@ def test_status_reports_queryable_last_good_snapshot_when_refresh_state_is_not_r
     list_payload = list_response.json()["bases"][0]
     assert status_payload["indexed_count"] == 7
     assert list_payload["indexed_count"] == 7
-    assert status_payload["manager_available"] is True
-    assert list_payload["manager_available"] is True
     assert status_payload["refresh_state"] == refresh_state
     assert list_payload["refresh_state"] == refresh_state
-    assert status_payload["refresh_job"] == expected_refresh_job
-    assert list_payload["refresh_job"] == expected_refresh_job
+    assert "manager_available" not in status_payload
+    assert "manager_available" not in list_payload
+    assert "refresh_job" not in status_payload
+    assert "refresh_job" not in list_payload
     refresh.assert_not_awaited()
 
 
 def test_status_rejects_query_incompatible_published_snapshot(tmp_path: Path) -> None:
-    """Dashboard availability should still fail closed for snapshots unsafe to query."""
+    """Dashboard indexed counts should still fail closed for snapshots unsafe to query."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -334,14 +324,14 @@ def test_status_rejects_query_incompatible_published_snapshot(tmp_path: Path) ->
     _publish_committed_runtime_config(client.app, config)
 
     with patch(
-        "mindroom.api.knowledge.snapshot_collection_exists_for_state",
+        "mindroom.knowledge.registry.snapshot_collection_exists_for_state",
         side_effect=AssertionError("query-incompatible snapshots should not probe collection availability"),
     ):
         response = client.get("/api/knowledge/bases/research/status")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["manager_available"] is False
+    assert "manager_available" not in payload
     assert payload["indexed_count"] == 0
 
 
@@ -571,7 +561,7 @@ def test_api_lifespan_does_not_schedule_all_configured_knowledge_bases(tmp_path:
     main.initialize_api_app(main.app, runtime_paths)
 
     with (
-        patch("mindroom.knowledge.refresh_owner.StandaloneKnowledgeRefreshOwner.schedule_initial_load") as schedule,
+        patch("mindroom.knowledge.refresh_owner.StandaloneKnowledgeRefreshOwner.schedule_refresh") as schedule,
         TestClient(main.app) as client,
     ):
         assert client.get("/api/health").status_code == 200
@@ -1724,4 +1714,4 @@ def test_status_degrades_gracefully_when_snapshot_key_resolution_fails(tmp_path:
     payload = response.json()
     assert payload["file_count"] == 1
     assert payload["indexed_count"] == 0
-    assert payload["manager_available"] is False
+    assert "manager_available" not in payload

@@ -343,7 +343,6 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
         agent_bases=["docs"],
     )
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
 
     knowledge = get_agent_knowledge(
@@ -354,10 +353,9 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
     )
 
     assert knowledge is None
-    owner.schedule_initial_load.assert_called_once()
-    assert owner.schedule_initial_load.call_args.args == ("docs",)
-    assert owner.schedule_initial_load.call_args.kwargs["config"] is config
-    assert owner.schedule_refresh.call_count == 0
+    owner.schedule_refresh.assert_called_once()
+    assert owner.schedule_refresh.call_args.args == ("docs",)
+    assert owner.schedule_refresh.call_args.kwargs["config"] is config
 
 
 def test_initializing_knowledge_skips_duplicate_initial_load_when_owner_is_active(tmp_path: Path) -> None:
@@ -370,14 +368,12 @@ def test_initializing_knowledge_skips_duplicate_initial_load_when_owner_is_activ
     runtime_paths = runtime_paths_for(config)
     owner = MagicMock()
     owner.is_refreshing = MagicMock(return_value=True)
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
 
     knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
 
     assert knowledge is None
     owner.is_refreshing.assert_called_once()
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_not_called()
 
 
@@ -459,7 +455,6 @@ async def test_ready_snapshot_access_does_not_refresh_unchanged_sources(tmp_path
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
 
     knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
@@ -468,7 +463,6 @@ async def test_ready_snapshot_access_does_not_refresh_unchanged_sources(tmp_path
     assert knowledge is not None
     assert second_knowledge is not None
     assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["ready snapshot"]
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_not_called()
     assert len(_VectorDb.collections) == 1
 
@@ -515,7 +509,6 @@ async def test_shared_local_watch_ready_refresh_on_access_is_throttled(tmp_path:
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
@@ -584,7 +577,6 @@ async def test_shared_local_watch_ready_refresh_on_access_is_throttled(tmp_path:
     assert unavailable == {}
     assert unavailable_details == {}
 
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
 
@@ -657,7 +649,6 @@ async def test_ready_refresh_on_access_reports_stale_while_owner_is_active(tmp_p
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     owner = MagicMock()
     owner.is_refreshing = MagicMock(return_value=True)
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
@@ -680,7 +671,6 @@ async def test_ready_refresh_on_access_reports_stale_while_owner_is_active(tmp_p
             snapshot_attached=True,
         ),
     }
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_not_called()
 
 
@@ -699,7 +689,6 @@ async def test_stale_snapshot_metadata_schedules_refresh_without_source_scan(tmp
     knowledge_registry.save_snapshot_dirty_state(key, reason="test_dirty")
     clear_published_snapshots()
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -722,7 +711,6 @@ async def test_stale_snapshot_metadata_schedules_refresh_without_source_scan(tmp
     assert second_knowledge is not None
     assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["ready snapshot"]
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
     assert owner.schedule_refresh.call_args.args == ("docs",)
 
@@ -743,7 +731,6 @@ async def test_stale_snapshot_skips_duplicate_refresh_when_owner_is_active(tmp_p
     clear_published_snapshots()
     owner = MagicMock()
     owner.is_refreshing = MagicMock(return_value=True)
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -759,7 +746,6 @@ async def test_stale_snapshot_skips_duplicate_refresh_when_owner_is_active(tmp_p
     assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["ready snapshot"]
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
     owner.is_refreshing.assert_called_once()
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_not_called()
 
 
@@ -980,7 +966,6 @@ async def test_snapshot_metadata_without_source_signature_is_unavailable_and_sch
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     clear_published_snapshots()
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -994,7 +979,6 @@ async def test_snapshot_metadata_without_source_signature_is_unavailable_and_sch
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
 
@@ -1679,7 +1663,6 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
         git_configs={"docs": KnowledgeGitConfig(repo_url="ssh://deploy@example.com/org/repo.git")},
     )
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -1696,7 +1679,6 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
     assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
 
@@ -1792,7 +1774,6 @@ async def test_git_ready_snapshot_schedules_refresh_after_poll_interval(
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     clear_published_snapshots()
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -1813,7 +1794,6 @@ async def test_git_ready_snapshot_schedules_refresh_after_poll_interval(
     assert knowledge is not None
     assert [document.content for document in knowledge.search("git", max_results=5)] == ["git snapshot"]
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
 
@@ -1864,7 +1844,6 @@ async def test_private_git_ready_refresh_on_access_honors_poll_interval(
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -1879,7 +1858,6 @@ async def test_private_git_ready_refresh_on_access_honors_poll_interval(
 
     assert knowledge is not None
     assert unavailable == {}
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_not_called()
 
     metadata_path = snapshot_metadata_path(key)
@@ -1889,7 +1867,6 @@ async def test_private_git_ready_refresh_on_access_honors_poll_interval(
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     clear_published_snapshots()
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable = {}
 
@@ -1904,7 +1881,6 @@ async def test_private_git_ready_refresh_on_access_honors_poll_interval(
 
     assert stale_knowledge is not None
     assert unavailable == {base_id: KnowledgeAvailability.STALE}
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
 
@@ -2600,7 +2576,6 @@ async def test_embedder_config_mismatch_returns_no_incompatible_snapshot(tmp_pat
     changed_config = config.model_copy(deep=True)
     changed_config.memory.embedder.config.model = "text-embedding-3-large"
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -2614,7 +2589,6 @@ async def test_embedder_config_mismatch_returns_no_incompatible_snapshot(tmp_pat
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
 
@@ -2632,7 +2606,6 @@ async def test_config_mismatch_refresh_cooldown_is_settings_aware(tmp_path: Path
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
 
     assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_owner=owner) is not None
@@ -2655,16 +2628,14 @@ async def test_initializing_refresh_cooldown_is_settings_aware(tmp_path: Path) -
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
 
     assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_owner=owner) is None
     assert get_agent_knowledge("helper", newer_config, runtime_paths, refresh_owner=owner) is None
 
-    assert owner.schedule_initial_load.call_count == 2
-    assert owner.schedule_initial_load.call_args_list[0].kwargs["config"] is changed_config
-    assert owner.schedule_initial_load.call_args_list[1].kwargs["config"] is newer_config
-    owner.schedule_refresh.assert_not_called()
+    assert owner.schedule_refresh.call_count == 2
+    assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
+    assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
 
 
 @pytest.mark.asyncio
@@ -2681,7 +2652,6 @@ async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) ->
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -2735,7 +2705,6 @@ async def test_failed_git_refresh_cooldown_is_credentials_service_aware(tmp_path
     assert changed_git_config is not None
     changed_git_config.credentials_service = "new_service"
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
 
     assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is None
@@ -2768,7 +2737,6 @@ async def test_failed_git_refresh_cooldown_is_embedded_userinfo_aware(tmp_path: 
     assert changed_git_config is not None
     changed_git_config.repo_url = "https://git-user:new-secret@example.com/org/private.git"
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
 
     assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is None
@@ -2806,7 +2774,6 @@ async def test_stale_or_failed_snapshot_reports_chunking_config_mismatch_before_
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -2883,7 +2850,6 @@ async def test_corpus_changing_config_mismatch_returns_no_snapshot(
     changed_config = config.model_copy(deep=True)
     mutate(changed_config)
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -2897,7 +2863,6 @@ async def test_corpus_changing_config_mismatch_returns_no_snapshot(
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
 
@@ -3004,7 +2969,6 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
     )
     knowledge_registry.save_snapshot_refresh_success_state(key)
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -3024,7 +2988,6 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
 
@@ -3191,7 +3154,6 @@ async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
 
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     first = get_agent_knowledge(
@@ -3212,7 +3174,6 @@ async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
     assert first is None
     assert second is None
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
 
@@ -3685,7 +3646,6 @@ async def test_private_request_scoped_knowledge_schedules_refresh_when_source_ch
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
     note.write_text("alice private new", encoding="utf-8")
     owner = MagicMock()
-    owner.schedule_initial_load = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
@@ -3716,7 +3676,6 @@ async def test_private_request_scoped_knowledge_schedules_refresh_when_source_ch
             snapshot_attached=True,
         ),
     }
-    owner.schedule_initial_load.assert_not_called()
     owner.schedule_refresh.assert_called_once()
 
 

@@ -30,7 +30,6 @@ type KnowledgeApiPayloads = {
     indexed_count: number;
     refreshing?: boolean;
     refresh_state?: "none" | "stale" | "refreshing" | "refresh_failed";
-    refresh_job?: "idle" | "pending" | "running" | "failed";
     last_error?: string | null;
     file_listing_degraded?: boolean;
     file_listing_error?: string | null;
@@ -662,7 +661,6 @@ describe("Knowledge", () => {
           indexed_count: 1,
           refreshing: true,
           refresh_state: "refreshing",
-          refresh_job: "running",
         },
         files: {
           base_id: "docs",
@@ -693,7 +691,6 @@ describe("Knowledge", () => {
           indexed_count: 1,
           refreshing: false,
           refresh_state: "refresh_failed",
-          refresh_job: "failed",
           last_error: "Git command failed: https://***@example.com/repo.git",
         },
         files: {

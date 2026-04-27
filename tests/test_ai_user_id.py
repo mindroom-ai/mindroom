@@ -300,7 +300,6 @@ def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNam
     matrix_admin = object()
     knowledge_refresh_owner = SimpleNamespace(
         schedule_refresh=lambda _base_id: None,
-        schedule_initial_load=lambda _base_id: None,
         is_refreshing=lambda _base_id: False,
     )
     return SimpleNamespace(
@@ -767,7 +766,6 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
                 _hook_room_state_putter=MagicMock(return_value=None),
                 knowledge_refresh_owner=SimpleNamespace(
                     schedule_refresh=lambda _base_id: None,
-                    schedule_initial_load=lambda _base_id: None,
                     is_refreshing=lambda _base_id: False,
                 ),
             ),

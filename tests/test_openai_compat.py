@@ -2857,9 +2857,6 @@ class TestTeamCompletion:
 
         class _FakeRefreshOwner:
             def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
             def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
@@ -2879,7 +2876,7 @@ class TestTeamCompletion:
             assert unavailable_bases is not None
             assert refresh_owner is team_app_client.app.state.knowledge_refresh_owner
             unavailable_bases["docs"] = KnowledgeAvailability.INITIALIZING
-            refresh_owner.schedule_initial_load("docs")
+            refresh_owner.schedule_refresh("docs")
             return ResolvedExactTeamMembers(
                 requested_agent_names=requested_agent_names,
                 agents=mock_agents,
@@ -3215,9 +3212,6 @@ class TestTeamCompletion:
 
         class _FakeRefreshOwner:
             def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
             def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
@@ -3274,7 +3268,7 @@ class TestTeamCompletion:
             "Knowledge base `docs` is refreshing against newer config and may be stale this turn."
             in mock_prepare.await_args.kwargs["prompt"]
         )
-        assert scheduled_base_ids == ["refresh:docs"]
+        assert scheduled_base_ids == ["docs"]
 
     def test_team_streaming_falls_back_to_final_team_run_output(self, team_app_client: TestClient) -> None:
         """Providers that yield a final TeamRunOutput in stream mode should still emit content."""
@@ -4717,9 +4711,6 @@ class TestKnowledgeIntegration:
 
         class _FakeRefreshOwner:
             def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-                scheduled_base_ids.append(f"refresh:{base_id}")
-
-            def schedule_initial_load(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
             def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:

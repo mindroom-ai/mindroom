@@ -336,7 +336,7 @@ def _schedule_refresh_for_availability(
             availability,
             settings=lookup.key.indexing_settings,
         ):
-            refresh_owner.schedule_initial_load(
+            refresh_owner.schedule_refresh(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
