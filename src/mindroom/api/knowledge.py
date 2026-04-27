@@ -140,7 +140,7 @@ async def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> 
             root,
             timeout_seconds=_DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS,
         )
-    except Exception as exc:
+    except (RuntimeError, ValueError) as exc:
         error = redact_credentials_in_text(str(exc)) or "Git file listing timed out"
         logger.warning("Could not list Git-backed knowledge files", base_id=base_id, error=error)
         return set(), error
@@ -148,11 +148,7 @@ async def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> 
 
 
 def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | None:
-    try:
-        refresh_scheduler = request.app.state.knowledge_refresh_scheduler
-    except AttributeError:
-        return None
-    return refresh_scheduler
+    return config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
 
 
 def _schedule_refresh(
@@ -253,7 +249,7 @@ def _index_status_sync(
             runtime_paths=runtime_paths,
             create=False,
         )
-    except Exception:
+    except ValueError:
         logger.warning("Could not resolve published knowledge index state", base_id=base_id, exc_info=True)
         return KnowledgeIndexStatus()
 

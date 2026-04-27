@@ -146,10 +146,6 @@ function redactUrlCredentials(value: string): string {
   }
 }
 
-function gitRepoUrlHasRedactionSentinel(value: string): boolean {
-  return value.includes(REDACTED_CREDENTIALS_SENTINEL);
-}
-
 function defaultPathForBase(baseName: string): string {
   return `./knowledge_docs/${baseName}`;
 }
@@ -376,10 +372,8 @@ export function Knowledge() {
 
       setStatus({
         ...statusData,
-        file_listing_degraded:
-          filesData.file_listing_degraded ?? statusData.file_listing_degraded,
-        file_listing_error:
-          filesData.file_listing_error ?? statusData.file_listing_error ?? null,
+        file_listing_degraded: filesData.file_listing_degraded,
+        file_listing_error: filesData.file_listing_error ?? null,
       });
       setFiles(filesData.files);
       setTotalSize(filesData.total_size);
@@ -469,7 +463,10 @@ export function Knowledge() {
       setError("Repository URL is required when Git source is enabled");
       return;
     }
-    if (gitSettings && gitRepoUrlHasRedactionSentinel(gitSettings.repo_url)) {
+    if (
+      gitSettings &&
+      gitSettings.repo_url.includes(REDACTED_CREDENTIALS_SENTINEL)
+    ) {
       setError("Repository URL contains a redacted credential placeholder");
       return;
     }

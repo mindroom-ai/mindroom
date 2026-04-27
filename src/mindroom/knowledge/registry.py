@@ -671,7 +671,21 @@ def get_published_index(
             schedule_refresh_on_access=binding.incremental_sync_on_access,
         )
 
-    knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
+    try:
+        knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
+    except Exception:
+        logger.warning(
+            "Published knowledge index handle could not be opened",
+            base_id=base_id,
+            exc_info=True,
+        )
+        return PublishedIndexResolution(
+            key=key,
+            index=None,
+            state=state,
+            availability=KnowledgeAvailability.REFRESH_FAILED,
+            schedule_refresh_on_access=binding.incremental_sync_on_access,
+        )
     if knowledge is None:
         return PublishedIndexResolution(
             key=key,

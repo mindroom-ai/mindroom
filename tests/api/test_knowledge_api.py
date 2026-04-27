@@ -19,8 +19,8 @@ from starlette.requests import Request
 
 import mindroom.knowledge.registry as knowledge_registry
 from mindroom import constants
+from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
-from mindroom.api import main
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge import KnowledgeAvailability
@@ -113,7 +113,7 @@ def _init_git_checkout(path: Path, *tracked_paths: str) -> None:
 def _test_client(tmp_path: Path) -> TestClient:
     runtime_paths = _runtime_paths(tmp_path)
     main.initialize_api_app(main.app, runtime_paths)
-    main.app.state.knowledge_refresh_scheduler = None
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
     return TestClient(main.app)
 
 
@@ -578,7 +578,7 @@ def test_api_lifespan_prefers_orchestrator_refresh_scheduler(tmp_path: Path) -> 
     runtime_paths = _runtime_paths(tmp_path)
     scheduler = _RecordingRefreshScheduler()
     main.initialize_api_app(main.app, runtime_paths)
-    main.app.state.orchestrator_knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(main.app).orchestrator_knowledge_refresh_scheduler = scheduler
 
     try:
         with (
@@ -586,12 +586,12 @@ def test_api_lifespan_prefers_orchestrator_refresh_scheduler(tmp_path: Path) -> 
             TestClient(main.app) as client,
         ):
             assert client.get("/api/health").status_code == 200
-            assert client.app.state.knowledge_refresh_scheduler is scheduler
+            assert config_lifecycle.app_state(client.app).knowledge_refresh_scheduler is scheduler
         api_owned_scheduler.assert_not_called()
     finally:
-        main.app.state.knowledge_refresh_scheduler = None
+        config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
         with suppress(AttributeError):
-            del main.app.state.orchestrator_knowledge_refresh_scheduler
+            config_lifecycle.app_state(main.app).orchestrator_knowledge_refresh_scheduler = None
 
 
 def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> None:
@@ -601,7 +601,7 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -625,7 +625,7 @@ def test_upload_rejects_default_unsupported_extension_before_writing(tmp_path: P
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -659,7 +659,7 @@ def test_upload_rejects_configured_extension_filter_exclusions(
     config = Config(agents={}, models={}, knowledge_bases={"research": base_config})
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -681,7 +681,7 @@ def test_upload_rejects_duplicate_normalized_multipart_filenames(tmp_path: Path)
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -708,7 +708,7 @@ async def test_empty_upload_parts_are_noop_without_source_change_mark_or_refresh
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with (
         patch("mindroom.api.knowledge.mark_knowledge_source_changed_async", side_effect=AssertionError("no mutation")),
@@ -744,7 +744,7 @@ def test_upload_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     _write_index_metadata(config, runtime_paths, base_id="research")
     _write_index_metadata(config, runtime_paths, base_id="summary", collection="summary_collection")
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -773,7 +773,7 @@ def test_upload_source_change_mark_write_runs_off_event_loop(
     _publish_committed_runtime_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
     saw_running_loop: bool | None = None
     original_save = knowledge_registry.mark_published_index_stale
 
@@ -814,7 +814,7 @@ def test_upload_source_change_mark_failure_leaves_source_unchanged_and_schedules
     _publish_committed_runtime_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     async def _fail_source_change_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         msg = "source change mark failed"
@@ -848,7 +848,7 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     async def _cancel_stream(_upload: UploadFile, destination: Path, _filename: str) -> None:
         destination.write_text("partial", encoding="utf-8")
@@ -889,7 +889,7 @@ async def test_replacement_upload_cancellation_preserves_existing_file(
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     async def _cancel_stream(_upload: UploadFile, destination: Path, _filename: str) -> None:
         destination.write_text("partial", encoding="utf-8")
@@ -930,7 +930,7 @@ async def test_upload_cancellation_after_source_change_mark_finalizes_backup_and
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
     source_change_started = asyncio.Event()
     release_source_change = asyncio.Event()
 
@@ -982,7 +982,7 @@ def test_upload_write_failure_leaves_ready_index_unchanged_and_skips_refresh(
     _publish_committed_runtime_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     async def _fail_write(*_args: object, **_kwargs: object) -> None:
         msg = "write failed"
@@ -1026,7 +1026,7 @@ def test_upload_replace_failure_schedules_refresh_for_partial_commit(
     _publish_committed_runtime_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
     original_replace = type(docs).replace
     replace_count = 0
 
@@ -1067,7 +1067,7 @@ def test_git_backed_upload_is_rejected_before_creating_cold_checkout(tmp_path: P
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     response = client.post(
         "/api/knowledge/bases/research/upload",
@@ -1098,7 +1098,7 @@ def test_upload_to_local_base_sharing_git_source_is_rejected(tmp_path: Path) -> 
     )
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     response = client.post(
         "/api/knowledge/bases/research/upload",
@@ -1130,7 +1130,7 @@ def test_upload_to_child_of_git_source_is_rejected(tmp_path: Path) -> None:
     )
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     response = client.post(
         "/api/knowledge/bases/research/upload",
@@ -1162,7 +1162,7 @@ def test_upload_to_parent_alias_over_git_source_path_is_rejected(tmp_path: Path)
     )
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     response = client.post(
         "/api/knowledge/bases/research/upload",
@@ -1185,7 +1185,7 @@ def test_upload_over_existing_directory_is_rejected_before_mutation(tmp_path: Pa
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -1211,7 +1211,7 @@ def test_delete_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.delete("/api/knowledge/bases/research/files/guide.md")
@@ -1252,7 +1252,7 @@ async def test_delete_uses_once_decoded_route_path_for_percent_bearing_filenames
     _publish_committed_runtime_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = await knowledge_api.delete_knowledge_file(
@@ -1291,7 +1291,7 @@ def test_delete_rejects_default_unsupported_extension_without_mutation(tmp_path:
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.delete("/api/knowledge/bases/research/files/diagram.png")
@@ -1325,7 +1325,7 @@ def test_delete_rejects_configured_extension_filter_exclusions(
     config = Config(agents={}, models={}, knowledge_bases={"research": base_config})
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.delete(f"/api/knowledge/bases/research/files/{filename}")
@@ -1349,7 +1349,7 @@ def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     _write_index_metadata(config, runtime_paths, base_id="research")
     _write_index_metadata(config, runtime_paths, base_id="summary", collection="summary_collection")
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.delete("/api/knowledge/bases/research/files/guide.md")
@@ -1373,7 +1373,7 @@ def test_delete_source_change_mark_failure_keeps_source_change_and_schedules_ref
     _publish_committed_runtime_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     async def _fail_source_change_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         msg = "source change mark failed"
@@ -1406,7 +1406,7 @@ async def test_delete_cancellation_after_source_change_mark_removes_backup_and_s
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
     source_change_started = asyncio.Event()
     release_source_change = asyncio.Event()
 
@@ -1458,7 +1458,7 @@ def test_delete_filesystem_failure_leaves_ready_index_unchanged_and_skips_refres
     _publish_committed_runtime_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     def _fail_delete_stage(*_args: object, **_kwargs: object) -> object:
         msg = "unlink failed"
@@ -1494,7 +1494,7 @@ def test_git_backed_delete_is_rejected_without_mutating_checkout(tmp_path: Path)
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     response = client.delete("/api/knowledge/bases/research/files/guide.md")
 
@@ -1524,7 +1524,7 @@ def test_delete_from_local_base_sharing_git_source_is_rejected(tmp_path: Path) -
     )
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     response = client.delete("/api/knowledge/bases/research/files/guide.md")
 
@@ -1555,7 +1555,7 @@ def test_delete_from_child_of_git_source_is_rejected(tmp_path: Path) -> None:
     )
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     response = client.delete("/api/knowledge/bases/research/files/guide.md")
 
@@ -1586,7 +1586,7 @@ def test_delete_from_parent_alias_inside_git_source_is_rejected(tmp_path: Path) 
     )
     _publish_committed_runtime_config(client.app, config)
     scheduler = _RecordingRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     response = client.delete("/api/knowledge/bases/research/files/repo/guide.md")
 
@@ -1658,7 +1658,7 @@ def test_explicit_reindex_uses_refresh_scheduler_when_available(tmp_path: Path) 
             )
 
     scheduler = _ManualRefreshScheduler()
-    client.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post("/api/knowledge/bases/research/reindex")

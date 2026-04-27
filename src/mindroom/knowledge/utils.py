@@ -100,7 +100,7 @@ def _lookup_knowledge_for_base(
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         )
-    except Exception:
+    except ValueError:
         logger.exception("Published knowledge index lookup failed", base_id=base_id)
         return None
 
@@ -259,28 +259,6 @@ def _schedule_refresh_on_access_due(lookup: PublishedIndexResolution, config: Co
     return _git_poll_due(lookup, config)
 
 
-def _refresh_scheduler_is_refreshing(
-    refresh_scheduler: KnowledgeRefreshScheduler,
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> bool:
-    """Return whether the scheduler reports an active refresh without requiring a concrete implementation."""
-    try:
-        active = refresh_scheduler.is_refreshing(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-    except Exception:
-        logger.debug("Knowledge refresh active check failed", base_id=base_id, exc_info=True)
-        return False
-    return active is True
-
-
 def _schedule_refresh_for_availability(
     refresh_scheduler: KnowledgeRefreshScheduler,
     base_id: str,
@@ -299,8 +277,7 @@ def _schedule_refresh_for_availability(
         if not lookup.schedule_refresh_on_access or not _schedule_refresh_on_access_due(lookup, config):
             return availability
 
-        scheduler_is_refreshing = _refresh_scheduler_is_refreshing(
-            refresh_scheduler,
+        scheduler_is_refreshing = refresh_scheduler.is_refreshing(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -326,8 +303,7 @@ def _schedule_refresh_for_availability(
         return KnowledgeAvailability.STALE if schedule_due or scheduler_is_refreshing else KnowledgeAvailability.READY
 
     if availability is KnowledgeAvailability.INITIALIZING:
-        scheduler_is_refreshing = _refresh_scheduler_is_refreshing(
-            refresh_scheduler,
+        scheduler_is_refreshing = refresh_scheduler.is_refreshing(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -344,8 +320,7 @@ def _schedule_refresh_for_availability(
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             )
-    elif not _refresh_scheduler_is_refreshing(
-        refresh_scheduler,
+    elif not refresh_scheduler.is_refreshing(
         base_id,
         config=config,
         runtime_paths=runtime_paths,

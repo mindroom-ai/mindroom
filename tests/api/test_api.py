@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from typing import Any, NoReturn, cast
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -201,6 +201,45 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
     assert "MINDROOM_NO_AUTO_INSTALL_TOOLS" not in str(err.value)
 
 
+def test_validate_supabase_token_catches_supabase_auth_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Invalid Supabase tokens should fail auth instead of surfacing optional-package internals."""
+
+    class _FakeAuthError(Exception):
+        pass
+
+    class _FakeAuth:
+        @staticmethod
+        def get_user(_token: str) -> NoReturn:
+            msg = "invalid jwt"
+            raise _FakeAuthError(msg)
+
+    class _FakeClient:
+        auth = _FakeAuth()
+
+    imported_modules: list[str] = []
+
+    def _fake_import_module(module_name: str) -> SimpleNamespace:
+        imported_modules.append(module_name)
+        assert module_name == "supabase_auth.errors"
+        return SimpleNamespace(AuthError=_FakeAuthError)
+
+    monkeypatch.setattr(auth.importlib, "import_module", _fake_import_module)
+    auth_state = auth.ApiAuthState(
+        runtime_paths=_runtime_paths(tmp_path),
+        settings=auth.ApiAuthSettings(
+            platform_login_url="https://platform.example.com/login",
+            supabase_url="https://supabase.example.com",
+            supabase_anon_key="anon-key",
+            account_id=None,
+            mindroom_api_key=None,
+        ),
+        supabase_auth=_FakeClient(),
+    )
+
+    assert auth._validate_supabase_token("bad-token", auth_state) is None
+    assert imported_modules == ["supabase_auth.errors"]
+
+
 def test_ensure_frontend_dist_dir_builds_repo_checkout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -346,7 +385,7 @@ def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
 
     assert main._app_runtime_paths(fresh_app) == runtime_paths
     assert main._app_context(fresh_app).config_data == {}
-    assert hasattr(main._app_state(fresh_app).config_lock, "acquire")
+    assert hasattr(config_lifecycle.require_api_state(fresh_app).config_lock, "acquire")
     assert auth.app_auth_state(fresh_app).runtime_paths == runtime_paths
 
 
@@ -574,12 +613,13 @@ def test_read_app_committed_config_uses_current_context_after_runtime_swap(tmp_p
         config_data=_validated_authored_payload(second_runtime, "new"),
         config_load_result=main.ConfigLoadResult(success=True),
     )
-    fresh_app.state.api_state = main.ApiState(
+    fresh_app_state = config_lifecycle.ensure_app_state(fresh_app)
+    fresh_app_state.api_state = main.ApiState(
         config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
         snapshot=first_snapshot,
     )
     swap_lock.on_enter = lambda: setattr(
-        fresh_app.state,
+        fresh_app_state,
         "api_state",
         main.ApiState(
             config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
@@ -627,12 +667,13 @@ def test_write_app_committed_config_uses_current_context_after_runtime_swap(tmp_
         config_data=_validated_authored_payload(second_runtime, "new"),
         config_load_result=main.ConfigLoadResult(success=True),
     )
-    fresh_app.state.api_state = main.ApiState(
+    fresh_app_state = config_lifecycle.ensure_app_state(fresh_app)
+    fresh_app_state.api_state = main.ApiState(
         config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
         snapshot=first_snapshot,
     )
     swap_lock.on_enter = lambda: setattr(
-        fresh_app.state,
+        fresh_app_state,
         "api_state",
         main.ApiState(
             config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
@@ -2844,7 +2885,7 @@ def test_write_app_committed_config_restores_original_config_before_releasing_lo
                 assert context.config_data == original_config
             return False
 
-    app_state = main._app_state(main.app)
+    app_state = config_lifecycle.require_api_state(main.app)
     original_lock = app_state.config_lock
     app_state.config_lock = _AssertingLock()
     try:
@@ -2936,7 +2977,7 @@ def test_write_app_committed_config_checks_current_config_load_result_after_acqu
             return False
 
     signaling_lock = _SignalingLock()
-    app_state = main._app_state(main.app)
+    app_state = config_lifecycle.require_api_state(main.app)
     original_lock = app_state.config_lock
     app_state.config_lock = signaling_lock
     error_detail = [{"loc": ("config",), "msg": "current config is invalid", "type": "value_error"}]
