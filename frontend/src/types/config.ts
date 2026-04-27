@@ -295,7 +295,7 @@ export interface AgentPolicy {
   dashboard_credentials_supported: boolean;
   team_eligibility_reason: string | null;
   private_knowledge_base_id: string | null;
-  request_scoped_workspace_enabled: boolean;
+  private_workspace_enabled: boolean;
   private_agent_knowledge_enabled: boolean;
 }
 

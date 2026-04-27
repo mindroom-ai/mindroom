@@ -106,7 +106,7 @@ describe("TeamEditor", () => {
       dashboard_credentials_supported: true,
       team_eligibility_reason: null,
       private_knowledge_base_id: null,
-      request_scoped_workspace_enabled: false,
+      private_workspace_enabled: false,
       private_agent_knowledge_enabled: false,
     },
     shell: {
@@ -118,7 +118,7 @@ describe("TeamEditor", () => {
       dashboard_credentials_supported: true,
       team_eligibility_reason: null,
       private_knowledge_base_id: null,
-      request_scoped_workspace_enabled: false,
+      private_workspace_enabled: false,
       private_agent_knowledge_enabled: false,
     },
     research: {
@@ -130,7 +130,7 @@ describe("TeamEditor", () => {
       dashboard_credentials_supported: true,
       team_eligibility_reason: null,
       private_knowledge_base_id: null,
-      request_scoped_workspace_enabled: false,
+      private_workspace_enabled: false,
       private_agent_knowledge_enabled: false,
     },
     leader: {
@@ -143,7 +143,7 @@ describe("TeamEditor", () => {
       team_eligibility_reason:
         "Delegates to private agent 'mind', so it cannot participate in teams yet.",
       private_knowledge_base_id: null,
-      request_scoped_workspace_enabled: false,
+      private_workspace_enabled: false,
       private_agent_knowledge_enabled: false,
     },
     mind: {
@@ -156,7 +156,7 @@ describe("TeamEditor", () => {
       team_eligibility_reason:
         "Private agents cannot participate in teams yet.",
       private_knowledge_base_id: null,
-      request_scoped_workspace_enabled: true,
+      private_workspace_enabled: true,
       private_agent_knowledge_enabled: false,
     },
   };

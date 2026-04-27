@@ -42,7 +42,7 @@ class ResolvedAgentPolicy:
     dashboard_credentials_supported: bool
     team_eligibility_reason: str | None
     private_knowledge_base_id: str | None
-    request_scoped_workspace_enabled: bool
+    private_workspace_enabled: bool
     private_agent_knowledge_enabled: bool
 
 
@@ -159,7 +159,7 @@ def _resolve_agent_policy(
     private_knowledge_base_id = None
     if seed.is_private and seed.private_knowledge_enabled:
         private_knowledge_base_id = f"{private_knowledge_base_id_prefix}{seed.agent_name}"
-    request_scoped_workspace_enabled = seed.is_private and execution_scope not in {None, "shared"}
+    private_workspace_enabled = seed.is_private and execution_scope not in {None, "shared"}
     private_agent_knowledge_enabled = private_knowledge_base_id is not None and execution_scope not in {
         None,
         "shared",
@@ -173,7 +173,7 @@ def _resolve_agent_policy(
         dashboard_credentials_supported=dashboard_credentials_supported_for_scope(execution_scope),
         team_eligibility_reason=team_eligibility_reason,
         private_knowledge_base_id=private_knowledge_base_id,
-        request_scoped_workspace_enabled=request_scoped_workspace_enabled,
+        private_workspace_enabled=private_workspace_enabled,
         private_agent_knowledge_enabled=private_agent_knowledge_enabled,
     )
 

@@ -112,7 +112,7 @@ function makeAgentPolicy(
     dashboard_credentials_supported: true,
     team_eligibility_reason: null,
     private_knowledge_base_id: null,
-    request_scoped_workspace_enabled: false,
+    private_workspace_enabled: false,
     private_agent_knowledge_enabled: false,
     ...overrides,
   };
@@ -612,7 +612,7 @@ describe("Integrations", () => {
           scope_label: "private.per=user_agent",
           scope_source: "private.per",
           dashboard_credentials_supported: false,
-          request_scoped_workspace_enabled: true,
+          private_workspace_enabled: true,
         }),
       },
     });
@@ -727,7 +727,7 @@ describe("Integrations", () => {
           scope_label: "private.per=user",
           scope_source: "private.per",
           dashboard_credentials_supported: false,
-          request_scoped_workspace_enabled: true,
+          private_workspace_enabled: true,
         }),
       },
     });
@@ -838,7 +838,7 @@ describe("Integrations", () => {
           scope_label: "private.per=user",
           scope_source: "private.per",
           dashboard_credentials_supported: false,
-          request_scoped_workspace_enabled: true,
+          private_workspace_enabled: true,
         }),
       },
     });
@@ -898,7 +898,7 @@ describe("Integrations", () => {
           scope_label: "private.per=user",
           scope_source: "private.per",
           dashboard_credentials_supported: false,
-          request_scoped_workspace_enabled: true,
+          private_workspace_enabled: true,
         }),
       },
     });
@@ -975,7 +975,7 @@ describe("Integrations", () => {
           scope_label: "private.per=user",
           scope_source: "private.per",
           dashboard_credentials_supported: false,
-          request_scoped_workspace_enabled: true,
+          private_workspace_enabled: true,
         }),
       },
     });

@@ -80,7 +80,7 @@ describe("AgentEditor", () => {
       dashboard_credentials_supported: true,
       team_eligibility_reason: null,
       private_knowledge_base_id: null,
-      request_scoped_workspace_enabled: false,
+      private_workspace_enabled: false,
       private_agent_knowledge_enabled: false,
       ...overrides,
     },

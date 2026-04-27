@@ -195,7 +195,7 @@ def resolve_agent_runtime(
         config,
         execution_identity=execution_identity,
     )
-    if resolved_execution.policy.request_scoped_workspace_enabled:
+    if resolved_execution.policy.private_workspace_enabled:
         worker_key = resolved_execution.worker_key
         if worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key"
@@ -216,7 +216,7 @@ def resolve_agent_runtime(
         config,
         runtime_paths=runtime_paths,
         state_storage_path=state_root,
-        use_state_storage_path=resolved_execution.policy.request_scoped_workspace_enabled,
+        use_state_storage_path=resolved_execution.policy.private_workspace_enabled,
         create=create,
     )
     if workspace is not None and (create or workspace.root.exists()):

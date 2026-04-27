@@ -37,7 +37,7 @@ def test_resolve_agent_policy_uses_private_scope_and_private_label() -> None:
     assert policy.scope_label == "private.per=user"
     assert policy.scope_source == "private.per"
     assert policy.dashboard_credentials_supported is False
-    assert policy.request_scoped_workspace_enabled is True
+    assert policy.private_workspace_enabled is True
 
 
 def test_resolve_agent_policy_inherits_default_worker_scope_without_private_workspace() -> None:
@@ -51,7 +51,7 @@ def test_resolve_agent_policy_inherits_default_worker_scope_without_private_work
     assert policy.effective_execution_scope == "user"
     assert policy.scope_label == "worker_scope=user"
     assert policy.scope_source == "defaults.worker_scope"
-    assert policy.request_scoped_workspace_enabled is False
+    assert policy.private_workspace_enabled is False
     assert policy.private_agent_knowledge_enabled is False
 
 
