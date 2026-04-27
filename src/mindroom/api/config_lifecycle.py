@@ -85,9 +85,6 @@ class MindroomAppState:
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
 
 
-_APP_STATE_ATTR = "mindroom_app_state"
-
-
 def ensure_app_state(api_app: FastAPI) -> MindroomAppState:
     """Bind (or return) the :class:`MindroomAppState` for ``api_app``."""
     existing = getattr(api_app.state, "mindroom_app_state", None)

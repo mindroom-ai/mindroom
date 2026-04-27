@@ -869,7 +869,6 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
-    scheduler.is_refreshing = MagicMock(return_value=False)
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
         response = TestClient(main.app).delete("/api/knowledge/bases/docs/files/guide.md")
@@ -914,7 +913,6 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
-    scheduler.is_refreshing = MagicMock(return_value=False)
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
         response = TestClient(main.app).post(
@@ -978,7 +976,6 @@ async def test_dashboard_delete_stale_write_failure_keeps_best_effort_source_cha
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
-    scheduler.is_refreshing = MagicMock(return_value=False)
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
         with pytest.raises(RuntimeError, match="same-source stale write failed"):
