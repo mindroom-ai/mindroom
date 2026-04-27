@@ -22,7 +22,7 @@ import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
-from mindroom.api import main
+from mindroom.api import config_lifecycle, main
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
@@ -341,6 +341,7 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
         agent_bases=["docs"],
     )
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
 
     knowledge = resolve_agent_knowledge_access(
@@ -463,6 +464,7 @@ async def test_ready_index_access_does_not_refresh_unchanged_sources(tmp_path: P
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
 
     knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler).knowledge
@@ -527,6 +529,7 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
@@ -782,6 +785,7 @@ async def test_stale_index_metadata_schedules_refresh_without_source_scan(tmp_pa
     knowledge_registry.mark_published_index_stale(key, reason="test_stale")
     clear_published_indexes()
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     _resolution = resolve_agent_knowledge_access(
@@ -863,13 +867,14 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
-    main.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
         response = TestClient(main.app).delete("/api/knowledge/bases/docs/files/guide.md")
     finally:
-        main.app.state.knowledge_refresh_scheduler = None
+        config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
     assert response.status_code == 200
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -907,16 +912,17 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
-    main.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
         response = TestClient(main.app).post(
             "/api/knowledge/bases/docs/upload",
             files=[("files", ("guide.md", b"replacement content", "text/markdown"))],
         )
     finally:
-        main.app.state.knowledge_refresh_scheduler = None
+        config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
     assert response.status_code == 200
 
     pending_knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
@@ -970,14 +976,15 @@ async def test_dashboard_delete_stale_write_failure_keeps_best_effort_source_cha
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
-    main.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
         with pytest.raises(RuntimeError, match="same-source stale write failed"):
             TestClient(main.app).delete("/api/knowledge/bases/research/files/guide.md")
     finally:
-        main.app.state.knowledge_refresh_scheduler = None
+        config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
 
     assert stale_write_count == 2
     assert not (docs_path / "guide.md").exists()
@@ -1067,6 +1074,7 @@ async def test_index_metadata_without_source_signature_is_unavailable_and_schedu
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     clear_published_indexes()
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     _resolution = resolve_agent_knowledge_access(
@@ -1813,6 +1821,7 @@ def test_passwordless_ssh_username_change_invalidates_published_index(tmp_path: 
         git_configs={"docs": KnowledgeGitConfig(repo_url="ssh://deploy@example.com/org/repo.git")},
     )
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -1924,6 +1933,7 @@ async def test_git_ready_index_schedules_refresh_after_poll_interval(
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     clear_published_indexes()
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -1993,6 +2003,7 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     _resolution = resolve_agent_knowledge_access(
@@ -2016,6 +2027,7 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     clear_published_indexes()
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable = {}
     _resolution = resolve_agent_knowledge_access(
@@ -2765,6 +2777,7 @@ async def test_embedder_config_mismatch_returns_no_incompatible_index(tmp_path: 
     changed_config = config.model_copy(deep=True)
     changed_config.memory.embedder.config.model = "text-embedding-3-large"
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     _resolution = resolve_agent_knowledge_access(
@@ -2795,6 +2808,7 @@ async def test_config_mismatch_refresh_cooldown_is_settings_aware(tmp_path: Path
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
 
     assert (
@@ -2823,6 +2837,7 @@ async def test_initializing_refresh_cooldown_is_settings_aware(tmp_path: Path) -
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
 
     assert (
@@ -2853,6 +2868,7 @@ async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) ->
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     _resolution = resolve_agent_knowledge_access(
@@ -2899,6 +2915,7 @@ async def test_failed_git_refresh_cooldown_is_credentials_service_aware(tmp_path
     assert changed_git_config is not None
     changed_git_config.credentials_service = "new_service"
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
 
     assert (
@@ -2936,6 +2953,7 @@ async def test_failed_git_refresh_cooldown_is_embedded_userinfo_aware(tmp_path: 
     assert changed_git_config is not None
     changed_git_config.repo_url = "https://git-user:new-secret@example.com/org/private.git"
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
 
     assert (
@@ -2978,6 +2996,7 @@ async def test_stale_or_failed_index_reports_chunking_config_mismatch_before_coo
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     _resolution = resolve_agent_knowledge_access(
@@ -3048,6 +3067,7 @@ async def test_corpus_changing_config_mismatch_returns_no_index(
     changed_config = config.model_copy(deep=True)
     mutate(changed_config)
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     _resolution = resolve_agent_knowledge_access(
@@ -3167,6 +3187,7 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
     )
     knowledge_registry.mark_published_index_refresh_succeeded(key)
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
@@ -3352,6 +3373,7 @@ async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
 
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     _resolution = resolve_agent_knowledge_access(
@@ -3419,8 +3441,9 @@ async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_
     assert [document.content for document in before_delete.search("delete", max_results=5)] == ["delete me now"]
 
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
-    main.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     client = TestClient(main.app)
 
     response = client.delete("/api/knowledge/bases/docs/files/guide.md")
@@ -3454,8 +3477,9 @@ async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best
     _publish_api_config(main.app, config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
-    main.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     client = TestClient(main.app)
 
     response = client.post(
@@ -3494,8 +3518,9 @@ async def test_api_upload_failure_does_not_commit_earlier_staged_writes(
     _publish_api_config(main.app, config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
-    main.app.state.knowledge_refresh_scheduler = scheduler
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     monkeypatch.setattr("mindroom.api.knowledge._MAX_UPLOAD_BYTES", 5)
     client = TestClient(main.app)
 
@@ -3539,7 +3564,7 @@ async def test_api_status_reports_direct_refresh_runner_reindex(
     runtime_paths = runtime_paths_for(config)
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    main.app.state.knowledge_refresh_scheduler = None
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -3891,6 +3916,7 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
     note.write_text("alice private new", encoding="utf-8")
     scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}

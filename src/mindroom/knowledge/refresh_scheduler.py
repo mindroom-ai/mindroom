@@ -75,7 +75,7 @@ class KnowledgeRefreshScheduler:
                 execution_identity=execution_identity,
                 create=False,
             )
-        except Exception:
+        except ValueError:
             return False
         return is_refresh_active(key)
 
@@ -89,7 +89,7 @@ class KnowledgeRefreshScheduler:
         force_reindex: bool = False,
     ) -> KnowledgeRefreshResult:
         """Run a refresh immediately and wait for it."""
-        with suppress(Exception):
+        with suppress(ValueError):
             key = resolve_refresh_target(
                 base_id,
                 config=config,
@@ -137,7 +137,7 @@ class KnowledgeRefreshScheduler:
                 execution_identity=execution_identity,
                 create=False,
             )
-        except Exception:
+        except ValueError:
             logger.exception("Could not resolve knowledge binding for refresh", base_id=base_id)
             return
 

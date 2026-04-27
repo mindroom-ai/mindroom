@@ -159,7 +159,7 @@ def is_refresh_active_for_binding(
             execution_identity=execution_identity,
             create=False,
         )
-    except Exception:
+    except ValueError:
         return False
     return is_refresh_active(key)
 

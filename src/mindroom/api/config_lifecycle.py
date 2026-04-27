@@ -11,7 +11,7 @@ from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
@@ -27,6 +27,10 @@ from mindroom.config.main import (
 from mindroom.config.main import load_config as load_runtime_config_model
 from mindroom.file_watcher import watch_file
 from mindroom.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.watch import KnowledgeSourceWatcher
 
 logger = get_logger(__name__)
 _UNSET = object()
@@ -68,6 +72,48 @@ class ApiState:
 
     config_lock: threading.Lock
     snapshot: ApiSnapshot
+
+
+@dataclass
+class MindroomAppState:
+    """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
+
+    api_state: ApiState | None = None
+    api_auth_account_id: str | None = None
+    orchestrator_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
+    knowledge_source_watcher: KnowledgeSourceWatcher | None = None
+    knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
+
+
+_APP_STATE_ATTR = "mindroom_app_state"
+
+
+def ensure_app_state(api_app: FastAPI) -> MindroomAppState:
+    """Bind (or return) the :class:`MindroomAppState` for ``api_app``."""
+    existing = getattr(api_app.state, "mindroom_app_state", None)
+    if isinstance(existing, MindroomAppState):
+        return existing
+    state = MindroomAppState()
+    api_app.state.mindroom_app_state = state
+    return state
+
+
+def app_state(api_app: FastAPI) -> MindroomAppState:
+    """Return the :class:`MindroomAppState` bound to ``api_app``."""
+    state = getattr(api_app.state, "mindroom_app_state", None)
+    if not isinstance(state, MindroomAppState):
+        msg = "MindRoom app state is not initialized"
+        raise TypeError(msg)
+    return state
+
+
+def require_api_state(api_app: FastAPI) -> ApiState:
+    """Return the published :class:`ApiState`, raising ``TypeError`` if not initialized."""
+    api_state = app_state(api_app).api_state
+    if api_state is None:
+        msg = "API context is not initialized"
+        raise TypeError(msg)
+    return api_state
 
 
 def _config_error_detail(
@@ -213,18 +259,6 @@ def _validated_config_payload(
     return validated_config, validated_config.authored_model_dump()
 
 
-def _app_config_state(api_app: FastAPI) -> ApiState:
-    """Return the app-bound API config state."""
-    try:
-        state = api_app.state.api_state
-    except AttributeError:
-        state = None
-    if not isinstance(state, ApiState):
-        msg = "API context is not initialized"
-        raise TypeError(msg)
-    return state
-
-
 def register_api_app(api_app: FastAPI) -> None:
     """Register one live API app so external config writers can advance its snapshot."""
     with _REGISTERED_API_APPS_LOCK:
@@ -238,7 +272,7 @@ def _registered_api_states() -> list[ApiState]:
     states: list[ApiState] = []
     for api_app in apps:
         try:
-            states.append(_app_config_state(api_app))
+            states.append(require_api_state(api_app))
         except TypeError:
             continue
     return states
@@ -261,7 +295,7 @@ def bind_current_request_snapshot(request: Request) -> ApiSnapshot:
     existing = request_snapshot(request)
     if existing is not None:
         return existing
-    app_state = _app_config_state(request.app)
+    app_state = require_api_state(request.app)
     with app_state.config_lock:
         return store_request_snapshot(request, app_state.snapshot)
 
@@ -271,7 +305,7 @@ def _request_or_current_snapshot(request: Request) -> ApiSnapshot:
     bound_snapshot = request_snapshot(request)
     if bound_snapshot is not None:
         return bound_snapshot
-    return _app_config_state(request.app).snapshot
+    return require_api_state(request.app).snapshot
 
 
 def _published_snapshot(
@@ -353,7 +387,7 @@ def _commit_mutated_snapshot[T](
 ) -> T:
     """Commit one previously validated mutation if the targeted snapshot is still current."""
     with initial_state.config_lock:
-        current_state = _app_config_state(api_app)
+        current_state = require_api_state(api_app)
         current = current_state.snapshot
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise_for_config_load_result(current.config_load_result)
@@ -410,7 +444,7 @@ def _commit_replaced_snapshot(
 ) -> int:
     """Commit one previously validated replacement payload if the snapshot is still current."""
     with initial_state.config_lock:
-        current_state = _app_config_state(api_app)
+        current_state = require_api_state(api_app)
         current = current_state.snapshot
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
@@ -436,7 +470,7 @@ def _commit_raw_replaced_snapshot(
 ) -> int:
     """Commit one raw replacement payload if the targeted snapshot is still current."""
     with initial_state.config_lock:
-        current_state = _app_config_state(api_app)
+        current_state = require_api_state(api_app)
         current = current_state.snapshot
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
@@ -458,10 +492,10 @@ def _build_and_commit_mutation[T](
     initial_snapshot: ApiSnapshot | None = None,
 ) -> T:
     """Build one config mutation off-lock and commit it only if still current."""
-    initial_state = _app_config_state(api_app)
+    initial_state = require_api_state(api_app)
     if initial_snapshot is None:
         with initial_state.config_lock:
-            snapshot = _app_config_state(api_app).snapshot
+            snapshot = require_api_state(api_app).snapshot
     else:
         snapshot = initial_snapshot
     try:
@@ -498,10 +532,10 @@ def _build_and_commit_replacement(
     expected_generation: int | None = None,
 ) -> int:
     """Build one replacement payload off-lock and commit it only if still current."""
-    initial_state = _app_config_state(api_app)
+    initial_state = require_api_state(api_app)
     if initial_snapshot is None:
         with initial_state.config_lock:
-            snapshot = _app_config_state(api_app).snapshot
+            snapshot = require_api_state(api_app).snapshot
     else:
         snapshot = initial_snapshot
     try:
@@ -534,10 +568,10 @@ def _build_and_commit_raw_replacement(
     expected_generation: int | None = None,
 ) -> int:
     """Build one raw replacement payload off-lock and commit it only if still current."""
-    initial_state = _app_config_state(api_app)
+    initial_state = require_api_state(api_app)
     if initial_snapshot is None:
         with initial_state.config_lock:
-            snapshot = _app_config_state(api_app).snapshot
+            snapshot = require_api_state(api_app).snapshot
     else:
         snapshot = initial_snapshot
     try:
@@ -577,11 +611,11 @@ def load_config_from_file(
 
 def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> bool:
     """Load config from disk into one API app's committed config cache."""
-    initial_state = _app_config_state(api_app)
+    initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
     result, validated_payload, runtime_config = _load_config_result(runtime_paths)
     with initial_state.config_lock:
-        current_state = _app_config_state(api_app)
+        current_state = require_api_state(api_app)
         current = current_state.snapshot
         if current.generation != snapshot.generation or current.runtime_paths != runtime_paths:
             logger.info(
@@ -604,9 +638,9 @@ def read_app_committed_config[T](
     reader: Callable[[dict[str, Any]], T],
 ) -> T:
     """Read committed API config for one app only when the current file is valid."""
-    initial_state = _app_config_state(api_app)
+    initial_state = require_api_state(api_app)
     with initial_state.config_lock:
-        snapshot = _app_config_state(api_app).snapshot
+        snapshot = require_api_state(api_app).snapshot
         raise_for_config_load_result(snapshot.config_load_result)
         if not snapshot.config_data:
             _raise_missing_loaded_config()
@@ -618,9 +652,9 @@ def read_app_committed_config_and_runtime[T](
     reader: Callable[[dict[str, Any]], T],
 ) -> tuple[T, constants.RuntimePaths]:
     """Read committed API config and runtime from one coherent published snapshot."""
-    initial_state = _app_config_state(api_app)
+    initial_state = require_api_state(api_app)
     with initial_state.config_lock:
-        snapshot = _app_config_state(api_app).snapshot
+        snapshot = require_api_state(api_app).snapshot
         raise_for_config_load_result(snapshot.config_load_result)
         if not snapshot.config_data:
             _raise_missing_loaded_config()
@@ -631,9 +665,9 @@ def read_app_committed_runtime_config(
     api_app: FastAPI,
 ) -> tuple[Config, constants.RuntimePaths]:
     """Read one validated runtime config and runtime from the same published snapshot."""
-    initial_state = _app_config_state(api_app)
+    initial_state = require_api_state(api_app)
     with initial_state.config_lock:
-        snapshot = _app_config_state(api_app).snapshot
+        snapshot = require_api_state(api_app).snapshot
         raise_for_config_load_result(snapshot.config_load_result)
         if not snapshot.config_data:
             _raise_missing_loaded_config()

@@ -32,7 +32,7 @@ from starlette.requests import ClientDisconnect
 
 from mindroom import constants
 from mindroom.ai_runtime import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.api import openai_compat
+from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_compat import (
     _ChatMessage,
@@ -259,7 +259,7 @@ def test_load_config_requires_runtime_paths() -> None:
         },
     )
 
-    with pytest.raises(TypeError, match="API context is not initialized"):
+    with pytest.raises(TypeError, match="MindRoom app state is not initialized"):
         openai_compat._load_config(request)
 
 
@@ -2884,7 +2884,8 @@ class TestTeamCompletion:
             )
             refresh_scheduler = kwargs["refresh_scheduler"]
             assert unavailable_bases is not None
-            assert refresh_scheduler is team_app_client.app.state.knowledge_refresh_scheduler
+            assert isinstance(refresh_scheduler, _FakeRefreshScheduler)
+            assert refresh_scheduler is config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler
             unavailable_bases["docs"] = KnowledgeAvailabilityDetail(
                 availability=KnowledgeAvailability.INITIALIZING,
                 search_available=False,
@@ -2898,7 +2899,7 @@ class TestTeamCompletion:
                 failed_agent_names=[],
             )
 
-        team_app_client.app.state.knowledge_refresh_scheduler = _FakeRefreshScheduler()
+        config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
@@ -3249,7 +3250,8 @@ class TestTeamCompletion:
             )
             refresh_scheduler = kwargs["refresh_scheduler"]
             assert unavailable_bases is not None
-            assert refresh_scheduler is team_app_client.app.state.knowledge_refresh_scheduler
+            assert isinstance(refresh_scheduler, _FakeRefreshScheduler)
+            assert refresh_scheduler is config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler
             unavailable_bases["docs"] = KnowledgeAvailabilityDetail(
                 availability=KnowledgeAvailability.CONFIG_MISMATCH,
                 search_available=True,
@@ -3263,7 +3265,7 @@ class TestTeamCompletion:
                 failed_agent_names=[],
             )
 
-        team_app_client.app.state.knowledge_refresh_scheduler = _FakeRefreshScheduler()
+        config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
@@ -4751,7 +4753,7 @@ class TestKnowledgeIntegration:
                 on_availability(KnowledgeAvailability.INITIALIZING)
             return _knowledge_lookup(None, base_id=base_id, availability=KnowledgeAvailability.INITIALIZING)
 
-        knowledge_app_client.app.state.knowledge_refresh_scheduler = _FakeRefreshScheduler()
+        config_lifecycle.app_state(knowledge_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),

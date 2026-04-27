@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle
-from mindroom.api.config_lifecycle import ApiSnapshot, ApiState
+from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
@@ -76,27 +76,6 @@ class ApiAuthState:
     supabase_auth: _SupabaseClientProtocol | None
 
 
-def _app_state(api_app: FastAPI) -> ApiState:
-    """Return the committed API state holder for one app instance."""
-    try:
-        state = api_app.state.api_state
-    except AttributeError:
-        state = None
-    if not isinstance(state, ApiState):
-        msg = "API context is not initialized"
-        raise TypeError(msg)
-    return state
-
-
-def _app_account_id(api_app: FastAPI) -> str | None:
-    """Return the API ingress-bound account id, when platform auth is configured."""
-    try:
-        account_id = api_app.state.api_auth_account_id
-    except AttributeError:
-        return None
-    return cast("str | None", account_id)
-
-
 def build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
     return ApiAuthSettings(
@@ -110,13 +89,14 @@ def build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None =
 
 def app_auth_state(api_app: FastAPI) -> ApiAuthState:
     """Return the committed auth state for one API app instance."""
-    app_state = _app_state(api_app)
-    with app_state.config_lock:
-        snapshot = app_state.snapshot
+    app_state = config_lifecycle.app_state(api_app)
+    api_state = config_lifecycle.require_api_state(api_app)
+    with api_state.config_lock:
+        snapshot = api_state.snapshot
         state = cast("ApiAuthState | None", snapshot.auth_state)
         if state is not None and state.runtime_paths == snapshot.runtime_paths:
             return state
-        settings = build_auth_settings(snapshot.runtime_paths, account_id=_app_account_id(api_app))
+        settings = build_auth_settings(snapshot.runtime_paths, account_id=app_state.api_auth_account_id)
         state = ApiAuthState(
             runtime_paths=snapshot.runtime_paths,
             settings=settings,
@@ -126,7 +106,7 @@ def app_auth_state(api_app: FastAPI) -> ApiAuthState:
                 settings.supabase_anon_key,
             ),
         )
-        app_state.snapshot = replace(snapshot, auth_state=state)
+        api_state.snapshot = replace(snapshot, auth_state=state)
         return state
 
 
@@ -183,6 +163,11 @@ def _get_request_token(
     return None
 
 
+def _supabase_auth_error_class() -> type[Exception]:
+    """Return Supabase's AuthError class for narrow exception handling at the auth boundary."""
+    return cast("type[Exception]", importlib.import_module("gotrue.errors").AuthError)
+
+
 def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseUserProtocol | None:
     """Validate a Supabase access token and return the authenticated user."""
     if auth_state.supabase_auth is None:
@@ -190,7 +175,7 @@ def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseU
 
     try:
         response = auth_state.supabase_auth.auth.get_user(token)
-    except Exception:
+    except _supabase_auth_error_class():
         return None
 
     if not response or not response.user:
@@ -210,12 +195,13 @@ def bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
     ):
         return existing
 
-    app_state = _app_state(request.app)
-    with app_state.config_lock:
-        current = app_state.snapshot
+    app_state = config_lifecycle.app_state(request.app)
+    api_state = config_lifecycle.require_api_state(request.app)
+    with api_state.config_lock:
+        current = api_state.snapshot
         auth_state = cast("ApiAuthState | None", current.auth_state)
         if auth_state is None or auth_state.runtime_paths != current.runtime_paths:
-            settings = build_auth_settings(current.runtime_paths, account_id=_app_account_id(request.app))
+            settings = build_auth_settings(current.runtime_paths, account_id=app_state.api_auth_account_id)
             auth_state = ApiAuthState(
                 runtime_paths=current.runtime_paths,
                 settings=settings,
@@ -226,7 +212,7 @@ def bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
                 ),
             )
             current = replace(current, auth_state=auth_state)
-            app_state.snapshot = current
+            api_state.snapshot = current
         return store_request_api_snapshot(request, current)
 
 

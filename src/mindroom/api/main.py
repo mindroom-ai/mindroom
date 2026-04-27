@@ -207,18 +207,6 @@ def api_runtime_paths(request: Request) -> constants.RuntimePaths:
     return config_lifecycle.api_runtime_paths(request)
 
 
-def _app_state(api_app: FastAPI) -> ApiState:
-    """Return the committed API state holder for one app instance."""
-    try:
-        state = api_app.state.api_state
-    except AttributeError:
-        state = None
-    if not isinstance(state, ApiState):
-        msg = "API context is not initialized"
-        raise TypeError(msg)
-    return state
-
-
 def _published_snapshot(
     snapshot: ApiSnapshot,
     *,
@@ -251,7 +239,7 @@ def _published_snapshot(
 
 def _app_context(api_app: FastAPI) -> ApiSnapshot:
     """Return the committed API snapshot for one app instance."""
-    return _app_state(api_app).snapshot
+    return config_lifecycle.require_api_state(api_app).snapshot
 
 
 def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
@@ -259,20 +247,13 @@ def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
     return _app_context(api_app).runtime_paths
 
 
-def _bind_api_auth_ingress_context(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
-    """Bind tenant/account auth context at the API ingress boundary."""
-    api_app.state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
-
-
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Initialize one API app instance with explicit runtime-bound state."""
-    _bind_api_auth_ingress_context(api_app, runtime_paths)
-    try:
-        previous_state = api_app.state.api_state
-    except AttributeError:
-        previous_state = None
-    if not isinstance(previous_state, ApiState):
-        api_app.state.api_state = ApiState(
+    app_state = config_lifecycle.ensure_app_state(api_app)
+    app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
+    previous_state = app_state.api_state
+    if previous_state is None:
+        app_state.api_state = ApiState(
             config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
                 generation=0,
@@ -286,22 +267,15 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         config_lifecycle.register_api_app(api_app)
         return
 
-    config_lock = previous_state.config_lock
-    with config_lock:
-        try:
-            current_state = api_app.state.api_state
-        except AttributeError:
-            current_state = previous_state
-        if not isinstance(current_state, ApiState):
-            current_state = previous_state
-        current_snapshot = current_state.snapshot
+    with previous_state.config_lock:
+        current_snapshot = previous_state.snapshot
         auth_state = current_snapshot.auth_state if current_snapshot.runtime_paths == runtime_paths else None
         config_data = current_snapshot.config_data if current_snapshot.runtime_paths == runtime_paths else {}
         runtime_config = current_snapshot.runtime_config if current_snapshot.runtime_paths == runtime_paths else None
         config_load_result = (
             current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
         )
-        current_state.snapshot = _published_snapshot(
+        previous_state.snapshot = _published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
             config_data=config_data,
@@ -309,31 +283,12 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             auth_state=auth_state,
             config_load_result=config_load_result,
         )
-        api_app.state.api_state = current_state
     config_lifecycle.register_api_app(api_app)
-
-
-def _orchestrator_knowledge_refresh_scheduler(api_app: FastAPI) -> KnowledgeRefreshScheduler | None:
-    """Return an orchestrator-provided refresh scheduler when the bundled API is running."""
-    try:
-        refresh_scheduler = api_app.state.orchestrator_knowledge_refresh_scheduler
-    except AttributeError:
-        return None
-    return cast("KnowledgeRefreshScheduler | None", refresh_scheduler)
-
-
-def _standalone_knowledge_source_watcher(api_app: FastAPI) -> KnowledgeSourceWatcher | None:
-    """Return the API-owned filesystem watcher, when running without the orchestrator."""
-    try:
-        source_watcher = api_app.state.knowledge_source_watcher
-    except AttributeError:
-        return None
-    return cast("KnowledgeSourceWatcher | None", source_watcher)
 
 
 async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
     """Align API-owned knowledge filesystem watchers with the committed config."""
-    source_watcher = _standalone_knowledge_source_watcher(api_app)
+    source_watcher = config_lifecycle.app_state(api_app).knowledge_source_watcher
     if source_watcher is None:
         return
     snapshot = _app_context(api_app)
@@ -404,15 +359,16 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("Syncing API credentials from runtime env")
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
+    app_state = config_lifecycle.app_state(_app)
     api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
-    knowledge_refresh_scheduler = _orchestrator_knowledge_refresh_scheduler(_app)
+    knowledge_refresh_scheduler = app_state.orchestrator_knowledge_refresh_scheduler
     if knowledge_refresh_scheduler is None:
         api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
         standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler)
-        _app.state.knowledge_source_watcher = standalone_knowledge_source_watcher
-    _app.state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
+        app_state.knowledge_source_watcher = standalone_knowledge_source_watcher
+    app_state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
     await _sync_standalone_knowledge_watchers(_app)
     logger.info(
         "Published knowledge index refresh is scheduled by Git polling, filesystem watch, on access, or explicit API actions",
@@ -435,6 +391,14 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await standalone_knowledge_source_watcher.shutdown()
     if api_owned_knowledge_refresh_scheduler is not None:
         await api_owned_knowledge_refresh_scheduler.shutdown()
+
+
+def bind_orchestrator_knowledge_refresh_scheduler(
+    api_app: FastAPI,
+    scheduler: KnowledgeRefreshScheduler,
+) -> None:
+    """Attach the orchestrator-owned background refresh scheduler to the bundled API app."""
+    config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = scheduler
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
@@ -465,10 +429,10 @@ def _reload_api_runtime_config(
     mutate_runtime: Callable[[constants.RuntimePaths], constants.RuntimePaths] | None = None,
 ) -> None:
     """Rebind the API app to one runtime and surface structured config reload failures."""
-    app_state = _app_state(api_app)
-    with app_state.config_lock:
-        current_state = _app_state(api_app)
-        current_snapshot = current_state.snapshot
+    app_state = config_lifecycle.app_state(api_app)
+    api_state = config_lifecycle.require_api_state(api_app)
+    with api_state.config_lock:
+        current_snapshot = api_state.snapshot
         if expected_snapshot is not None and (
             current_snapshot.generation != expected_snapshot.generation
             or current_snapshot.runtime_paths != expected_snapshot.runtime_paths
@@ -478,7 +442,7 @@ def _reload_api_runtime_config(
                 detail="Configuration changed while request was in progress. Retry the operation.",
             )
         target_runtime_paths = runtime_paths if mutate_runtime is None else mutate_runtime(runtime_paths)
-        _bind_api_auth_ingress_context(api_app, target_runtime_paths)
+        app_state.api_auth_account_id = target_runtime_paths.env_value("ACCOUNT_ID")
         auth_state = current_snapshot.auth_state if current_snapshot.runtime_paths == target_runtime_paths else None
         config_data = current_snapshot.config_data if current_snapshot.runtime_paths == target_runtime_paths else {}
         runtime_config = (
@@ -495,9 +459,9 @@ def _reload_api_runtime_config(
             auth_state=auth_state,
             config_load_result=config_load_result,
         )
-        current_state.snapshot = refreshed_snapshot
+        api_state.snapshot = refreshed_snapshot
         result, validated_payload, loaded_runtime_config = config_lifecycle._load_config_result(target_runtime_paths)
-        current_state.snapshot = _published_snapshot(
+        api_state.snapshot = _published_snapshot(
             refreshed_snapshot,
             config_data=validated_payload if validated_payload is not None else refreshed_snapshot.config_data,
             runtime_config=loaded_runtime_config

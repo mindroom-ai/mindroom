@@ -120,13 +120,6 @@ function stripPathParams(pathname: string): string {
   return pathname.split(";", 1)[0] ?? "";
 }
 
-function stripFallbackPathParams(value: string): string {
-  return value.replace(
-    /^([a-z][a-z0-9+.-]*:\/\/[^/\s?#]*)(\/[^?#;]*);[^?#]*/i,
-    "$1$2",
-  );
-}
-
 function redactUrlCredentials(value: string): string {
   try {
     const parsed = new URL(value);
@@ -136,18 +129,8 @@ function redactUrlCredentials(value: string): string {
         : parsed.host;
     return `${parsed.protocol}//${authority}${stripPathParams(parsed.pathname)}`;
   } catch {
-    const withoutQueryOrFragment = stripFallbackPathParams(
-      value.replace(/[?#].*$/, ""),
-    );
-    return withoutQueryOrFragment.replace(
-      /^([a-z][a-z0-9+.-]*:\/\/)([^@\s/?#]+)@/i,
-      `$1${REDACTED_CREDENTIALS_SENTINEL}@`,
-    );
+    return REDACTED_CREDENTIALS_SENTINEL;
   }
-}
-
-function gitRepoUrlHasRedactionSentinel(value: string): boolean {
-  return value.includes(REDACTED_CREDENTIALS_SENTINEL);
 }
 
 function defaultPathForBase(baseName: string): string {
@@ -376,10 +359,8 @@ export function Knowledge() {
 
       setStatus({
         ...statusData,
-        file_listing_degraded:
-          filesData.file_listing_degraded ?? statusData.file_listing_degraded,
-        file_listing_error:
-          filesData.file_listing_error ?? statusData.file_listing_error ?? null,
+        file_listing_degraded: filesData.file_listing_degraded,
+        file_listing_error: filesData.file_listing_error ?? null,
       });
       setFiles(filesData.files);
       setTotalSize(filesData.total_size);
@@ -469,7 +450,10 @@ export function Knowledge() {
       setError("Repository URL is required when Git source is enabled");
       return;
     }
-    if (gitSettings && gitRepoUrlHasRedactionSentinel(gitSettings.repo_url)) {
+    if (
+      gitSettings &&
+      gitSettings.repo_url.includes(REDACTED_CREDENTIALS_SENTINEL)
+    ) {
       setError("Repository URL contains a redacted credential placeholder");
       return;
     }

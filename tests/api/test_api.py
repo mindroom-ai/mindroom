@@ -346,7 +346,7 @@ def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
 
     assert main._app_runtime_paths(fresh_app) == runtime_paths
     assert main._app_context(fresh_app).config_data == {}
-    assert hasattr(main._app_state(fresh_app).config_lock, "acquire")
+    assert hasattr(config_lifecycle.require_api_state(fresh_app).config_lock, "acquire")
     assert auth.app_auth_state(fresh_app).runtime_paths == runtime_paths
 
 
@@ -574,12 +574,13 @@ def test_read_app_committed_config_uses_current_context_after_runtime_swap(tmp_p
         config_data=_validated_authored_payload(second_runtime, "new"),
         config_load_result=main.ConfigLoadResult(success=True),
     )
-    fresh_app.state.api_state = main.ApiState(
+    fresh_app_state = config_lifecycle.ensure_app_state(fresh_app)
+    fresh_app_state.api_state = main.ApiState(
         config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
         snapshot=first_snapshot,
     )
     swap_lock.on_enter = lambda: setattr(
-        fresh_app.state,
+        fresh_app_state,
         "api_state",
         main.ApiState(
             config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
@@ -627,12 +628,13 @@ def test_write_app_committed_config_uses_current_context_after_runtime_swap(tmp_
         config_data=_validated_authored_payload(second_runtime, "new"),
         config_load_result=main.ConfigLoadResult(success=True),
     )
-    fresh_app.state.api_state = main.ApiState(
+    fresh_app_state = config_lifecycle.ensure_app_state(fresh_app)
+    fresh_app_state.api_state = main.ApiState(
         config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
         snapshot=first_snapshot,
     )
     swap_lock.on_enter = lambda: setattr(
-        fresh_app.state,
+        fresh_app_state,
         "api_state",
         main.ApiState(
             config_lock=cast("config_lifecycle.ApiConfigLock", swap_lock),
@@ -2844,7 +2846,7 @@ def test_write_app_committed_config_restores_original_config_before_releasing_lo
                 assert context.config_data == original_config
             return False
 
-    app_state = main._app_state(main.app)
+    app_state = config_lifecycle.require_api_state(main.app)
     original_lock = app_state.config_lock
     app_state.config_lock = _AssertingLock()
     try:
@@ -2936,7 +2938,7 @@ def test_write_app_committed_config_checks_current_config_load_result_after_acqu
             return False
 
     signaling_lock = _SignalingLock()
-    app_state = main._app_state(main.app)
+    app_state = config_lifecycle.require_api_state(main.app)
     original_lock = app_state.config_lock
     app_state.config_lock = signaling_lock
     error_detail = [{"loc": ("config",), "msg": "current config is invalid", "type": "value_error"}]

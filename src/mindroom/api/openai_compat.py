@@ -775,11 +775,7 @@ async def _resolve_auto_route(
 
 def _request_knowledge_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | None:
     """Return the app-scoped background knowledge refresh scheduler, if configured."""
-    try:
-        refresh_scheduler = request.app.state.knowledge_refresh_scheduler
-    except AttributeError:
-        return None
-    return cast("KnowledgeRefreshScheduler | None", refresh_scheduler)
+    return config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
 
 
 def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]:
