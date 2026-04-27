@@ -84,7 +84,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history import CompactionLifecycle, CompactionOutcome, PostResponseCompactionCheck
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
@@ -1176,7 +1176,7 @@ def materialize_exact_team_members(
     materializable_agent_names: set[str] | None = None,
     unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
     unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] | None = None,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     reason_prefix: str = "Team request",
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact team-member set without silent fallback."""
@@ -1188,7 +1188,7 @@ def materialize_exact_team_members(
             agent_name,
             config,
             runtime_paths,
-            refresh_owner=refresh_owner,
+            refresh_scheduler=refresh_scheduler,
             execution_identity=execution_identity,
         )
         if knowledge_resolution.missing:
@@ -1216,7 +1216,7 @@ def materialize_exact_team_members(
             knowledge=knowledge_resolution.knowledge,
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
-            refresh_owner=refresh_owner,
+            refresh_scheduler=refresh_scheduler,
         )
 
     team_members = materialize_exact_requested_team_members(
@@ -1264,7 +1264,7 @@ def _materialize_team_members(
         materializable_agent_names=resolve_live_shared_agent_names(orchestrator),
         unavailable_bases=unavailable_bases,
         unavailable_base_details=unavailable_base_details,
-        refresh_owner=orchestrator.knowledge_refresh_owner,
+        refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
         reason_prefix=reason_prefix,
     )
 

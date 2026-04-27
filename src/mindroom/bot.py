@@ -830,7 +830,7 @@ class AgentBot:
             knowledge=knowledge,
             execution_identity=None,
             hook_registry=self.hook_registry,
-            refresh_owner=self.orchestrator.knowledge_refresh_owner,
+            refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
         )
 
     def _should_accept_invite(self) -> bool:

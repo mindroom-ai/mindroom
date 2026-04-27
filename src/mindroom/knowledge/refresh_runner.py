@@ -136,12 +136,12 @@ def _mark_refresh_inactive(key: KnowledgeRefreshTarget) -> None:
 
 
 def mark_refresh_active(key: KnowledgeRefreshTarget) -> None:
-    """Record owner-level refresh activity before a task reaches the runner."""
+    """Record scheduler-level refresh activity before a task reaches the runner."""
     _mark_refresh_active(key)
 
 
 def mark_refresh_inactive(key: KnowledgeRefreshTarget) -> None:
-    """Clear owner-level refresh activity after a scheduled task finishes."""
+    """Clear scheduler-level refresh activity after a scheduled task finishes."""
     _mark_refresh_inactive(key)
 
 
@@ -209,8 +209,8 @@ async def refresh_knowledge_binding(
         execution_identity=execution_identity,
         create=True,
     )
-    refresh_key = refresh_target_for_published_index_key(key)
-    _mark_refresh_active(refresh_key)
+    refresh_target = refresh_target_for_published_index_key(key)
+    _mark_refresh_active(refresh_target)
     try:
         initial_state = await asyncio.to_thread(
             load_published_indexing_state,
@@ -235,7 +235,7 @@ async def refresh_knowledge_binding(
             )
             raise
     finally:
-        _mark_refresh_inactive(refresh_key)
+        _mark_refresh_inactive(refresh_target)
         prune_private_index_bookkeeping()
 
 

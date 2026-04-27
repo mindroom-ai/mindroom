@@ -83,7 +83,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.history import CompactionLifecycle, PostResponseCompactionCheck
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -763,7 +763,7 @@ async def _prepare_agent_and_prompt(
     post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     current_sender_id: str | None = None,
     include_openai_compat_guidance: bool = False,
@@ -812,7 +812,7 @@ async def _prepare_agent_and_prompt(
         include_openai_compat_guidance=include_openai_compat_guidance,
         execution_identity=execution_identity,
         delegation_depth=delegation_depth,
-        refresh_owner=refresh_owner,
+        refresh_scheduler=refresh_scheduler,
         timing_scope=timing_scope,
     )
     if system_enrichment_items:
@@ -917,7 +917,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     turn_recorder: TurnRecorder | None = None,
@@ -965,7 +965,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         compaction_lifecycle: Optional lifecycle sink for ordered foreground
             compaction notices.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
-        refresh_owner: Optional runtime-owned shared knowledge refresh scheduler
+        refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
         matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
@@ -1030,7 +1030,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     post_response_compaction_checks_collector=post_response_compaction_checks_collector,
                     compaction_lifecycle=compaction_lifecycle,
                     delegation_depth=delegation_depth,
-                    refresh_owner=refresh_owner,
+                    refresh_scheduler=refresh_scheduler,
                     system_enrichment_items=system_enrichment_items,
                     current_sender_id=_prompt_current_sender_id(
                         user_id,
@@ -1366,7 +1366,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     turn_recorder: TurnRecorder | None = None,
@@ -1412,7 +1412,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         compaction_lifecycle: Optional lifecycle sink for ordered foreground
             compaction notices.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
-        refresh_owner: Optional runtime-owned shared knowledge refresh scheduler
+        refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
         matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
             for unseen-message tracking, coalesced edit regeneration, and cleanup.
@@ -1480,7 +1480,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     post_response_compaction_checks_collector=post_response_compaction_checks_collector,
                     compaction_lifecycle=compaction_lifecycle,
                     delegation_depth=delegation_depth,
-                    refresh_owner=refresh_owner,
+                    refresh_scheduler=refresh_scheduler,
                     system_enrichment_items=system_enrichment_items,
                     current_sender_id=_prompt_current_sender_id(
                         user_id,

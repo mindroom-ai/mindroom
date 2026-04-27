@@ -22,7 +22,7 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 
 logger = get_logger(__name__)
 
@@ -56,13 +56,13 @@ def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> 
         if config.get_private_knowledge_base_agent(base_id) is not None:
             continue
 
-        refresh_key = resolve_refresh_target(
+        refresh_target = resolve_refresh_target(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             create=True,
         )
-        targets_by_key.setdefault(source_root_for_refresh_target(refresh_key), []).append(base_id)
+        targets_by_key.setdefault(source_root_for_refresh_target(refresh_target), []).append(base_id)
 
     targets: dict[KnowledgeSourceRoot, _WatchTarget] = {}
     for key, base_ids in targets_by_key.items():
@@ -96,11 +96,11 @@ def _changes_include_indexable_path(
     return False
 
 
-class KnowledgeFilesystemWatchOwner:
+class KnowledgeSourceWatcher:
     """Own filesystem watchers that schedule atomic published index refreshes."""
 
-    def __init__(self, refresh_owner: KnowledgeRefreshOwner) -> None:
-        self._refresh_owner = refresh_owner
+    def __init__(self, refresh_scheduler: KnowledgeRefreshScheduler) -> None:
+        self._refresh_scheduler = refresh_scheduler
         self._tasks: dict[KnowledgeSourceRoot, _WatchTask] = {}
 
     async def sync(self, *, config: Config | None, runtime_paths: RuntimePaths) -> None:
@@ -182,7 +182,7 @@ class KnowledgeFilesystemWatchOwner:
                 if not dirty_config.watch or dirty_config.git is not None:
                     continue
                 scheduled_base_ids.add(dirty_base_id)
-                self._refresh_owner.schedule_refresh(
+                self._refresh_scheduler.schedule_refresh(
                     dirty_base_id,
                     config=config,
                     runtime_paths=runtime_paths,

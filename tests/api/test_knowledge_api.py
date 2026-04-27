@@ -72,7 +72,7 @@ def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     context.config_load_result = main.ConfigLoadResult(success=True)
 
 
-def _write_snapshot_metadata(
+def _write_index_metadata(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
@@ -113,11 +113,11 @@ def _init_git_checkout(path: Path, *tracked_paths: str) -> None:
 def _test_client(tmp_path: Path) -> TestClient:
     runtime_paths = _runtime_paths(tmp_path)
     main.initialize_api_app(main.app, runtime_paths)
-    main.app.state.knowledge_refresh_owner = None
+    main.app.state.knowledge_refresh_scheduler = None
     return TestClient(main.app)
 
 
-class _RecordingRefreshOwner:
+class _RecordingRefreshScheduler:
     def __init__(self) -> None:
         self.scheduled: list[tuple[str, Config, RuntimePaths]] = []
 
@@ -144,7 +144,7 @@ class _RecordingRefreshOwner:
         return False
 
 
-def test_knowledge_status_reads_snapshot_metadata_without_initializing(tmp_path: Path) -> None:
+def test_knowledge_status_reads_index_metadata_without_initializing(tmp_path: Path) -> None:
     """Status for a cold base should read files only and avoid refresh/index work."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
@@ -194,7 +194,7 @@ def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: P
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, indexed_count=9)
+    _write_index_metadata(config, runtime_paths, indexed_count=9)
 
     with (
         patch("mindroom.knowledge.manager._create_embedder", side_effect=AssertionError("embedder should not load")),
@@ -223,7 +223,7 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
     docs.mkdir()
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, indexed_count=4)
+    _write_index_metadata(config, runtime_paths, indexed_count=4)
     seen_embedders: list[str] = []
 
     class _BrokenVectorDb:
@@ -254,7 +254,7 @@ def test_status_does_not_probe_collection_availability(tmp_path: Path, monkeypat
     docs.mkdir()
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, indexed_count=4)
+    _write_index_metadata(config, runtime_paths, indexed_count=4)
 
     def _offloaded_collection_probe(*_args: object) -> bool:
         msg = "status should not probe collection availability"
@@ -275,18 +275,18 @@ def test_status_does_not_probe_collection_availability(tmp_path: Path, monkeypat
         "refresh_failed",
     ],
 )
-def test_status_reports_queryable_last_good_snapshot_when_refresh_state_is_not_ready(
+def test_status_reports_queryable_last_good_index_when_refresh_state_is_not_ready(
     tmp_path: Path,
     refresh_state: str,
 ) -> None:
-    """Refresh state should not hide a valid queryable snapshot."""
+    """Refresh state should not hide a valid queryable index."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, indexed_count=7)
+    _write_index_metadata(config, runtime_paths, indexed_count=7)
     key = resolve_published_index_key("research", config=config, runtime_paths=runtime_paths)
     if refresh_state == "stale":
         knowledge_registry.mark_published_index_stale(key, reason="source_changed")
@@ -312,14 +312,14 @@ def test_status_reports_queryable_last_good_snapshot_when_refresh_state_is_not_r
     refresh.assert_not_awaited()
 
 
-def test_status_rejects_query_incompatible_published_snapshot(tmp_path: Path) -> None:
-    """Dashboard indexed counts should still fail closed for snapshots unsafe to query."""
+def test_status_rejects_query_incompatible_published_index(tmp_path: Path) -> None:
+    """Dashboard indexed counts should still fail closed for indexes unsafe to query."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs)
-    _write_snapshot_metadata(config, runtime_paths, indexed_count=9)
+    _write_index_metadata(config, runtime_paths, indexed_count=9)
     key = resolve_published_index_key("research", config=config, runtime_paths=runtime_paths)
     metadata_path = published_index_metadata_path(key)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -329,7 +329,7 @@ def test_status_rejects_query_incompatible_published_snapshot(tmp_path: Path) ->
 
     with patch(
         "mindroom.knowledge.registry.published_index_collection_exists_for_state",
-        side_effect=AssertionError("query-incompatible snapshots should not probe collection availability"),
+        side_effect=AssertionError("query-incompatible indexes should not probe collection availability"),
     ):
         response = client.get("/api/knowledge/bases/research/status")
 
@@ -459,8 +459,8 @@ def test_git_file_listing_timeout_degrades_status(
     assert payload["file_listing_error"] == "Git command timed out after 0.01s: git ls-files -z"
 
 
-def test_git_status_reads_disk_and_snapshot_metadata(tmp_path: Path) -> None:
-    """Git status should expose cheap disk/snapshot facts without constructing a manager."""
+def test_git_status_reads_disk_and_index_metadata(tmp_path: Path) -> None:
+    """Git status should expose cheap disk/index facts without constructing a manager."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -468,7 +468,7 @@ def test_git_status_reads_disk_and_snapshot_metadata(tmp_path: Path) -> None:
     _init_git_checkout(docs)
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(
+    _write_index_metadata(
         config,
         runtime_paths,
         revision="abc123",
@@ -493,7 +493,7 @@ def test_git_status_redacts_last_refresh_error_from_metadata(tmp_path: Path) -> 
     docs = tmp_path / "docs"
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(
+    _write_index_metadata(
         config,
         runtime_paths,
         last_error="Git command failed: https://token:secret@example.com/repo.git?token=query-secret#frag-secret",
@@ -565,7 +565,7 @@ def test_api_lifespan_does_not_schedule_all_configured_knowledge_bases(tmp_path:
     main.initialize_api_app(main.app, runtime_paths)
 
     with (
-        patch("mindroom.knowledge.refresh_owner.StandaloneKnowledgeRefreshOwner.schedule_refresh") as schedule,
+        patch("mindroom.knowledge.refresh_scheduler.StandaloneKnowledgeRefreshScheduler.schedule_refresh") as schedule,
         TestClient(main.app) as client,
     ):
         assert client.get("/api/health").status_code == 200
@@ -573,25 +573,25 @@ def test_api_lifespan_does_not_schedule_all_configured_knowledge_bases(tmp_path:
     schedule.assert_not_called()
 
 
-def test_api_lifespan_prefers_orchestrator_refresh_owner(tmp_path: Path) -> None:
-    """Bundled API should share the orchestrator owner instead of creating a second scheduler."""
+def test_api_lifespan_prefers_orchestrator_refresh_scheduler(tmp_path: Path) -> None:
+    """Bundled API should share the orchestrator scheduler instead of creating a second scheduler."""
     runtime_paths = _runtime_paths(tmp_path)
-    owner = _RecordingRefreshOwner()
+    scheduler = _RecordingRefreshScheduler()
     main.initialize_api_app(main.app, runtime_paths)
-    main.app.state.orchestrator_knowledge_refresh_owner = owner
+    main.app.state.orchestrator_knowledge_refresh_scheduler = scheduler
 
     try:
         with (
-            patch("mindroom.api.main.StandaloneKnowledgeRefreshOwner") as standalone_owner,
+            patch("mindroom.api.main.StandaloneKnowledgeRefreshScheduler") as standalone_scheduler,
             TestClient(main.app) as client,
         ):
             assert client.get("/api/health").status_code == 200
-            assert client.app.state.knowledge_refresh_owner is owner
-        standalone_owner.assert_not_called()
+            assert client.app.state.knowledge_refresh_scheduler is scheduler
+        standalone_scheduler.assert_not_called()
     finally:
-        main.app.state.knowledge_refresh_owner = None
+        main.app.state.knowledge_refresh_scheduler = None
         with suppress(AttributeError):
-            del main.app.state.orchestrator_knowledge_refresh_owner
+            del main.app.state.orchestrator_knowledge_refresh_scheduler
 
 
 def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> None:
@@ -600,8 +600,8 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -612,7 +612,9 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     assert response.status_code == 200
     assert response.json()["uploaded"] == ["guide.md"]
     assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
-    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
+        ("research", config),
+    ]
     refresh.assert_not_awaited()
 
 
@@ -622,8 +624,8 @@ def test_upload_rejects_default_unsupported_extension_before_writing(tmp_path: P
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -634,7 +636,7 @@ def test_upload_rejects_default_unsupported_extension_before_writing(tmp_path: P
     assert response.status_code == 415
     assert "not supported" in response.json()["detail"]
     assert not docs.exists()
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -656,8 +658,8 @@ def test_upload_rejects_configured_extension_filter_exclusions(
     base_config.path = str(docs)
     config = Config(agents={}, models={}, knowledge_bases={"research": base_config})
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -668,7 +670,7 @@ def test_upload_rejects_configured_extension_filter_exclusions(
     assert response.status_code == 415
     assert "managed file filters" in response.json()["detail"]
     assert not docs.exists()
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -678,8 +680,8 @@ def test_upload_rejects_duplicate_normalized_multipart_filenames(tmp_path: Path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -693,7 +695,7 @@ def test_upload_rejects_duplicate_normalized_multipart_filenames(tmp_path: Path)
     assert response.status_code == 409
     assert "duplicate destination 'guide.md'" in response.json()["detail"]
     assert not (docs / "guide.md").exists()
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -705,8 +707,8 @@ async def test_empty_upload_parts_are_noop_without_dirty_mark_or_refresh(tmp_pat
     docs.mkdir()
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with (
         patch("mindroom.api.knowledge.mark_source_dirty_async", side_effect=AssertionError("no mutation")),
@@ -727,7 +729,7 @@ async def test_empty_upload_parts_are_noop_without_dirty_mark_or_refresh(tmp_pat
         )
 
     assert response == {"base_id": "research", "uploaded": [], "count": 0}
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -739,10 +741,10 @@ def test_upload_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     docs.mkdir()
     config = _knowledge_config(docs, duplicate_source_base=True)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, base_id="research")
-    _write_snapshot_metadata(config, runtime_paths, base_id="summary", collection="summary_collection")
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    _write_index_metadata(config, runtime_paths, base_id="research")
+    _write_index_metadata(config, runtime_paths, base_id="summary", collection="summary_collection")
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -751,7 +753,7 @@ def test_upload_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
         )
 
     assert response.status_code == 200
-    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
         ("research", config),
         ("summary", config),
     ]
@@ -769,9 +771,9 @@ def test_upload_dirty_mark_write_runs_off_event_loop(
     docs.mkdir()
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, base_id="research")
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    _write_index_metadata(config, runtime_paths, base_id="research")
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
     saw_running_loop: bool | None = None
     original_save = knowledge_registry.mark_published_index_stale
 
@@ -795,7 +797,9 @@ def test_upload_dirty_mark_write_runs_off_event_loop(
 
     assert response.status_code == 200
     assert saw_running_loop is False
-    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
+        ("research", config),
+    ]
     refresh.assert_not_awaited()
 
 
@@ -807,8 +811,8 @@ def test_upload_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_pat
     (docs / "guide.md").write_text("old", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     async def _fail_dirty_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         msg = "dirty mark failed"
@@ -825,7 +829,7 @@ def test_upload_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_pat
         )
 
     assert (docs / "guide.md").read_text(encoding="utf-8") == "new"
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -839,8 +843,8 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     async def _cancel_stream(_upload: UploadFile, destination: Path, _filename: str) -> None:
         destination.write_text("partial", encoding="utf-8")
@@ -865,7 +869,7 @@ async def test_upload_cancellation_during_write_removes_temp_file(
 
     assert not (docs / "guide.md").exists()
     assert list(docs.glob(".*.upload.tmp")) == []
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
 
 
 @pytest.mark.asyncio
@@ -880,8 +884,8 @@ async def test_replacement_upload_cancellation_preserves_existing_file(
     (docs / "guide.md").write_text("old", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     async def _cancel_stream(_upload: UploadFile, destination: Path, _filename: str) -> None:
         destination.write_text("partial", encoding="utf-8")
@@ -906,7 +910,7 @@ async def test_replacement_upload_cancellation_preserves_existing_file(
 
     assert (docs / "guide.md").read_text(encoding="utf-8") == "old"
     assert list(docs.glob(".*.upload.tmp")) == []
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
 
 
 @pytest.mark.asyncio
@@ -921,8 +925,8 @@ async def test_upload_cancellation_after_dirty_mark_finalizes_backup_and_schedul
     (docs / "guide.md").write_text("old", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
     dirty_started = asyncio.Event()
     release_dirty = asyncio.Event()
 
@@ -956,13 +960,15 @@ async def test_upload_cancellation_after_dirty_mark_finalizes_backup_and_schedul
         await upload_task
 
     assert (docs / "guide.md").read_text(encoding="utf-8") == "new"
-    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
+        ("research", config),
+    ]
 
 
-def test_upload_write_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
+def test_upload_write_failure_leaves_ready_index_unchanged_and_skips_refresh(
     tmp_path: Path,
 ) -> None:
-    """Failed upload writes must not pre-mark unchanged snapshots stale."""
+    """Failed upload writes must not pre-mark unchanged indexes stale."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -970,9 +976,9 @@ def test_upload_write_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
     (docs / "guide.md").write_text("old", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, base_id="research")
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    _write_index_metadata(config, runtime_paths, base_id="research")
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     async def _fail_write(*_args: object, **_kwargs: object) -> None:
         msg = "write failed"
@@ -995,7 +1001,7 @@ def test_upload_write_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert "availability" not in metadata
     assert (docs / "guide.md").read_text(encoding="utf-8") == "old"
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -1005,8 +1011,8 @@ def test_git_backed_upload_is_rejected_before_creating_cold_checkout(tmp_path: P
     docs = tmp_path / "docs"
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     response = client.post(
         "/api/knowledge/bases/research/upload",
@@ -1016,7 +1022,7 @@ def test_git_backed_upload_is_rejected_before_creating_cold_checkout(tmp_path: P
     assert response.status_code == 409
     assert "Git-backed" in response.json()["detail"]
     assert not docs.exists()
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
 
 
 def test_upload_to_local_base_sharing_git_source_is_rejected(tmp_path: Path) -> None:
@@ -1036,8 +1042,8 @@ def test_upload_to_local_base_sharing_git_source_is_rejected(tmp_path: Path) -> 
         },
     )
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     response = client.post(
         "/api/knowledge/bases/research/upload",
@@ -1047,7 +1053,7 @@ def test_upload_to_local_base_sharing_git_source_is_rejected(tmp_path: Path) -> 
     assert response.status_code == 409
     assert "Git-backed" in response.json()["detail"]
     assert not docs.exists()
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
 
 
 def test_upload_to_child_of_git_source_is_rejected(tmp_path: Path) -> None:
@@ -1068,8 +1074,8 @@ def test_upload_to_child_of_git_source_is_rejected(tmp_path: Path) -> None:
         },
     )
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     response = client.post(
         "/api/knowledge/bases/research/upload",
@@ -1079,7 +1085,7 @@ def test_upload_to_child_of_git_source_is_rejected(tmp_path: Path) -> None:
     assert response.status_code == 409
     assert "Git-backed" in response.json()["detail"]
     assert not (child / "guide.md").exists()
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
 
 
 def test_upload_to_parent_alias_over_git_source_path_is_rejected(tmp_path: Path) -> None:
@@ -1100,8 +1106,8 @@ def test_upload_to_parent_alias_over_git_source_path_is_rejected(tmp_path: Path)
         },
     )
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     response = client.post(
         "/api/knowledge/bases/research/upload",
@@ -1111,7 +1117,7 @@ def test_upload_to_parent_alias_over_git_source_path_is_rejected(tmp_path: Path)
     assert response.status_code == 409
     assert "Git-backed" in response.json()["detail"]
     assert not repo.exists()
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
 
 
 def test_upload_over_existing_directory_is_rejected_before_mutation(tmp_path: Path) -> None:
@@ -1123,8 +1129,8 @@ def test_upload_over_existing_directory_is_rejected_before_mutation(tmp_path: Pa
     (target_dir / "nested.txt").write_text("keep me", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -1137,7 +1143,7 @@ def test_upload_over_existing_directory_is_rejected_before_mutation(tmp_path: Pa
     assert target_dir.is_dir()
     assert (target_dir / "nested.txt").read_text(encoding="utf-8") == "keep me"
     assert list(docs.glob("*.upload.*")) == []
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -1149,15 +1155,17 @@ def test_delete_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.delete("/api/knowledge/bases/research/files/guide.md")
 
     assert response.status_code == 200
     assert not (docs / "guide.md").exists()
-    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
+        ("research", config),
+    ]
     refresh.assert_not_awaited()
 
 
@@ -1187,9 +1195,9 @@ async def test_delete_uses_once_decoded_route_path_for_percent_bearing_filenames
     decoded_file.write_text("decoded", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, base_id="research")
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    _write_index_metadata(config, runtime_paths, base_id="research")
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = await knowledge_api.delete_knowledge_file(
@@ -1212,7 +1220,9 @@ async def test_delete_uses_once_decoded_route_path_for_percent_bearing_filenames
     key = resolve_published_index_key("research", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(published_index_metadata_path(key))
     assert knowledge_registry.published_index_refresh_state(state) == "stale"
-    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
+        ("research", config),
+    ]
     refresh.assert_not_awaited()
 
 
@@ -1225,8 +1235,8 @@ def test_delete_rejects_default_unsupported_extension_without_mutation(tmp_path:
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.delete("/api/knowledge/bases/research/files/diagram.png")
@@ -1234,7 +1244,7 @@ def test_delete_rejects_default_unsupported_extension_without_mutation(tmp_path:
     assert response.status_code == 415
     assert "managed file filters" in response.json()["detail"]
     assert image.read_bytes() == b"\x89PNG\r\n\x1a\n"
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -1259,8 +1269,8 @@ def test_delete_rejects_configured_extension_filter_exclusions(
     base_config.path = str(docs)
     config = Config(agents={}, models={}, knowledge_bases={"research": base_config})
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.delete(f"/api/knowledge/bases/research/files/{filename}")
@@ -1268,7 +1278,7 @@ def test_delete_rejects_configured_extension_filter_exclusions(
     assert response.status_code == 415
     assert "managed file filters" in response.json()["detail"]
     assert target.read_text(encoding="utf-8") == "hello"
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -1281,16 +1291,16 @@ def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs, duplicate_source_base=True)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, base_id="research")
-    _write_snapshot_metadata(config, runtime_paths, base_id="summary", collection="summary_collection")
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    _write_index_metadata(config, runtime_paths, base_id="research")
+    _write_index_metadata(config, runtime_paths, base_id="summary", collection="summary_collection")
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.delete("/api/knowledge/bases/research/files/guide.md")
 
     assert response.status_code == 200
-    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
         ("research", config),
         ("summary", config),
     ]
@@ -1305,8 +1315,8 @@ def test_delete_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_pat
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     async def _fail_dirty_mark(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         msg = "dirty mark failed"
@@ -1320,7 +1330,7 @@ def test_delete_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_pat
         client.delete("/api/knowledge/bases/research/files/guide.md")
 
     assert not (docs / "guide.md").exists()
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -1336,8 +1346,8 @@ async def test_delete_cancellation_after_dirty_mark_removes_backup_and_schedules
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
     dirty_started = asyncio.Event()
     release_dirty = asyncio.Event()
 
@@ -1371,13 +1381,15 @@ async def test_delete_cancellation_after_dirty_mark_removes_backup_and_schedules
         await delete_task
 
     assert not (docs / "guide.md").exists()
-    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
+    assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in scheduler.scheduled] == [
+        ("research", config),
+    ]
 
 
-def test_delete_filesystem_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
+def test_delete_filesystem_failure_leaves_ready_index_unchanged_and_skips_refresh(
     tmp_path: Path,
 ) -> None:
-    """Failed delete mutations must not pre-mark unchanged snapshots stale."""
+    """Failed delete mutations must not pre-mark unchanged indexes stale."""
     client = _test_client(tmp_path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
@@ -1385,9 +1397,9 @@ def test_delete_filesystem_failure_leaves_ready_snapshot_unchanged_and_skips_ref
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(config, runtime_paths, base_id="research")
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    _write_index_metadata(config, runtime_paths, base_id="research")
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     def _fail_delete_stage(*_args: object, **_kwargs: object) -> object:
         msg = "unlink failed"
@@ -1407,7 +1419,7 @@ def test_delete_filesystem_failure_leaves_ready_snapshot_unchanged_and_skips_ref
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert "availability" not in metadata
     assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
     refresh.assert_not_awaited()
 
 
@@ -1419,15 +1431,15 @@ def test_git_backed_delete_is_rejected_without_mutating_checkout(tmp_path: Path)
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     response = client.delete("/api/knowledge/bases/research/files/guide.md")
 
     assert response.status_code == 409
     assert "Git-backed" in response.json()["detail"]
     assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
 
 
 def test_delete_from_local_base_sharing_git_source_is_rejected(tmp_path: Path) -> None:
@@ -1449,15 +1461,15 @@ def test_delete_from_local_base_sharing_git_source_is_rejected(tmp_path: Path) -
         },
     )
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     response = client.delete("/api/knowledge/bases/research/files/guide.md")
 
     assert response.status_code == 409
     assert "Git-backed" in response.json()["detail"]
     assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
 
 
 def test_delete_from_child_of_git_source_is_rejected(tmp_path: Path) -> None:
@@ -1480,15 +1492,15 @@ def test_delete_from_child_of_git_source_is_rejected(tmp_path: Path) -> None:
         },
     )
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     response = client.delete("/api/knowledge/bases/research/files/guide.md")
 
     assert response.status_code == 409
     assert "Git-backed" in response.json()["detail"]
     assert (child / "guide.md").read_text(encoding="utf-8") == "hello"
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
 
 
 def test_delete_from_parent_alias_inside_git_source_is_rejected(tmp_path: Path) -> None:
@@ -1511,15 +1523,15 @@ def test_delete_from_parent_alias_inside_git_source_is_rejected(tmp_path: Path) 
         },
     )
     _publish_committed_runtime_config(client.app, config)
-    owner = _RecordingRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _RecordingRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     response = client.delete("/api/knowledge/bases/research/files/repo/guide.md")
 
     assert response.status_code == 409
     assert "Git-backed" in response.json()["detail"]
     assert (repo / "guide.md").read_text(encoding="utf-8") == "hello"
-    assert owner.scheduled == []
+    assert scheduler.scheduled == []
 
 
 def test_explicit_reindex_uses_refresh_runner(tmp_path: Path) -> None:
@@ -1552,15 +1564,15 @@ def test_explicit_reindex_uses_refresh_runner(tmp_path: Path) -> None:
     )
 
 
-def test_explicit_reindex_uses_refresh_owner_when_available(tmp_path: Path) -> None:
-    """Admin reindex should replace stale queued owner work instead of bypassing the owner."""
+def test_explicit_reindex_uses_refresh_scheduler_when_available(tmp_path: Path) -> None:
+    """Admin reindex should replace stale queued scheduler work instead of bypassing the scheduler."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     runtime_paths = main._app_context(client.app).runtime_paths
 
-    class _ManualRefreshOwner(_RecordingRefreshOwner):
+    class _ManualRefreshScheduler(_RecordingRefreshScheduler):
         def __init__(self) -> None:
             super().__init__()
             self.manual_calls: list[tuple[str, Config, RuntimePaths, bool]] = []
@@ -1583,20 +1595,20 @@ def test_explicit_reindex_uses_refresh_owner_when_available(tmp_path: Path) -> N
                 last_error=None,
             )
 
-    owner = _ManualRefreshOwner()
-    client.app.state.knowledge_refresh_owner = owner
+    scheduler = _ManualRefreshScheduler()
+    client.app.state.knowledge_refresh_scheduler = scheduler
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post("/api/knowledge/bases/research/reindex")
 
     assert response.status_code == 200
     assert response.json()["indexed_count"] == 11
-    assert owner.manual_calls == [("research", config, runtime_paths, True)]
+    assert scheduler.manual_calls == [("research", config, runtime_paths, True)]
     refresh.assert_not_awaited()
 
 
-def test_explicit_reindex_returns_conflict_when_no_snapshot_is_published(tmp_path: Path) -> None:
-    """Admin reindex must not report success when refresh leaves no usable snapshot."""
+def test_explicit_reindex_returns_conflict_when_no_index_is_published(tmp_path: Path) -> None:
+    """Admin reindex must not report success when refresh leaves no usable index."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
@@ -1623,7 +1635,7 @@ def test_explicit_reindex_returns_conflict_when_no_snapshot_is_published(tmp_pat
 
 
 def test_explicit_reindex_returns_conflict_when_last_good_is_not_ready(tmp_path: Path) -> None:
-    """Admin reindex success requires a newly READY snapshot, not only preserved last-good vectors."""
+    """Admin reindex success requires a newly READY index, not only preserved last-good vectors."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
@@ -1680,7 +1692,7 @@ def test_explicit_reindex_redacts_metadata_last_error_on_failure(tmp_path: Path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
-    _write_snapshot_metadata(
+    _write_index_metadata(
         config,
         runtime_paths,
         last_error="Git failed https://token:secret@example.com/repo.git?token=query-secret#frag-secret",
@@ -1702,8 +1714,8 @@ def test_explicit_reindex_redacts_metadata_last_error_on_failure(tmp_path: Path)
     assert "frag-secret" not in json.dumps(detail)
 
 
-def test_status_degrades_gracefully_when_snapshot_key_resolution_fails(tmp_path: Path) -> None:
-    """Status should still return file facts when snapshot metadata cannot be resolved."""
+def test_status_degrades_gracefully_when_index_key_resolution_fails(tmp_path: Path) -> None:
+    """Status should still return file facts when index metadata cannot be resolved."""
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()

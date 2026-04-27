@@ -25,8 +25,8 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
-from mindroom.knowledge import OrchestratorKnowledgeRefreshOwner
-from mindroom.knowledge.watch import KnowledgeFilesystemWatchOwner
+from mindroom.knowledge import OrchestratorKnowledgeRefreshScheduler
+from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
@@ -225,8 +225,8 @@ class MultiAgentOrchestrator:
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     _plugin_watch_last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict, init=False)
     _plugin_watch_state_revision: int = field(default=0, init=False)
-    _knowledge_refresh_owner: OrchestratorKnowledgeRefreshOwner = field(init=False)
-    _knowledge_watch_owner: KnowledgeFilesystemWatchOwner = field(init=False)
+    _knowledge_refresh_scheduler: OrchestratorKnowledgeRefreshScheduler = field(init=False)
+    _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
 
@@ -239,13 +239,13 @@ class MultiAgentOrchestrator:
             logger=logger,
             background_task_owner=self._event_cache_write_task_owner,
         )
-        self._knowledge_refresh_owner = OrchestratorKnowledgeRefreshOwner()
-        self._knowledge_watch_owner = KnowledgeFilesystemWatchOwner(self._knowledge_refresh_owner)
+        self._knowledge_refresh_scheduler = OrchestratorKnowledgeRefreshScheduler()
+        self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
 
     @property
-    def knowledge_refresh_owner(self) -> OrchestratorKnowledgeRefreshOwner:
+    def knowledge_refresh_scheduler(self) -> OrchestratorKnowledgeRefreshScheduler:
         """Return the orchestrator-owned background knowledge refresh scheduler."""
-        return self._knowledge_refresh_owner
+        return self._knowledge_refresh_scheduler
 
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""
@@ -604,7 +604,7 @@ class MultiAgentOrchestrator:
         start_watcher: bool,
     ) -> None:
         """Refresh runtime support services that depend on the active config."""
-        await self._knowledge_watch_owner.sync(
+        await self._knowledge_source_watcher.sync(
             config=config if start_watcher else None,
             runtime_paths=self.runtime_paths,
         )
@@ -1573,8 +1573,8 @@ class MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         await self._cancel_config_reload_task()
         await self._stop_memory_auto_flush_worker()
-        await self._knowledge_watch_owner.shutdown()
-        await self._knowledge_refresh_owner.shutdown()
+        await self._knowledge_source_watcher.shutdown()
+        await self._knowledge_refresh_scheduler.shutdown()
         await self._cancel_bot_start_tasks()
         await self._stop_mcp_manager()
 
@@ -1645,15 +1645,15 @@ async def _run_api_server(
     port: int,
     log_level: str,
     runtime_paths: RuntimePaths,
-    knowledge_refresh_owner: OrchestratorKnowledgeRefreshOwner | None = None,
+    knowledge_refresh_scheduler: OrchestratorKnowledgeRefreshScheduler | None = None,
     shutdown_requested: asyncio.Event | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
 
     api_main.initialize_api_app(api_main.app, runtime_paths)
-    if knowledge_refresh_owner is not None:
-        api_main.app.state.orchestrator_knowledge_refresh_owner = knowledge_refresh_owner
+    if knowledge_refresh_scheduler is not None:
+        api_main.app.state.orchestrator_knowledge_refresh_scheduler = knowledge_refresh_scheduler
     config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
     server = _SignalAwareUvicornServer(config, shutdown_requested)
     await server.serve()
@@ -1746,7 +1746,7 @@ async def main(
                         api_port,
                         log_level,
                         runtime_paths,
-                        orchestrator.knowledge_refresh_owner,
+                        orchestrator.knowledge_refresh_scheduler,
                         shutdown_requested,
                     ),
                     "api_server_supervisor",

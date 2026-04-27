@@ -39,7 +39,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
-    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 logger = get_logger(__name__)
@@ -149,12 +149,12 @@ async def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> 
     return set(paths), None
 
 
-def _request_refresh_owner(request: Request) -> KnowledgeRefreshOwner | None:
+def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | None:
     try:
-        owner = request.app.state.knowledge_refresh_owner
+        refresh_scheduler = request.app.state.knowledge_refresh_scheduler
     except AttributeError:
         return None
-    return owner
+    return refresh_scheduler
 
 
 def _schedule_refresh(
@@ -164,10 +164,10 @@ def _schedule_refresh(
     *,
     request: Request,
 ) -> None:
-    owner = _request_refresh_owner(request)
-    if owner is None:
+    refresh_scheduler = _request_refresh_scheduler(request)
+    if refresh_scheduler is None:
         return
-    owner.schedule_refresh(
+    refresh_scheduler.schedule_refresh(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -244,9 +244,9 @@ def _is_refreshing(
     *,
     request: Request,
 ) -> bool:
-    owner = _request_refresh_owner(request)
-    if owner is not None:
-        return owner.is_refreshing(
+    refresh_scheduler = _request_refresh_scheduler(request)
+    if refresh_scheduler is not None:
+        return refresh_scheduler.is_refreshing(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -630,9 +630,9 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     _ensure_base_exists(config, base_id)
 
     try:
-        owner = _request_refresh_owner(request)
-        if owner is not None:
-            result = await owner.refresh_now(
+        refresh_scheduler = _request_refresh_scheduler(request)
+        if refresh_scheduler is not None:
+            result = await refresh_scheduler.refresh_now(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,

@@ -1,4 +1,4 @@
-"""Internal published knowledge collection registry.
+"""Internal published knowledge index registry.
 
 Code outside ``mindroom.knowledge`` should use package facades such as
 ``mindroom.knowledge.status`` or ``mindroom.knowledge.utils`` instead of
@@ -68,7 +68,7 @@ class KnowledgeSourceRoot:
 
 @dataclass(frozen=True)
 class PublishedIndexingState:
-    """Persisted state for the active knowledge collection."""
+    """Persisted state for the published knowledge index."""
 
     settings: tuple[str, ...]
     status: Literal["resetting", "indexing", "complete", "failed"]
@@ -86,7 +86,7 @@ class PublishedIndexingState:
 
 @dataclass(frozen=True)
 class PublishedKnowledgeIndex:
-    """Read handle for the active published knowledge collection."""
+    """Read handle for the published knowledge index."""
 
     key: PublishedIndexKey
     knowledge: Knowledge
@@ -96,7 +96,7 @@ class PublishedKnowledgeIndex:
 
 @dataclass(frozen=True)
 class KnowledgeIndexLookup:
-    """Result of resolving the active collection for one knowledge base."""
+    """Result of resolving the published index for one knowledge base."""
 
     key: PublishedIndexKey
     index: PublishedKnowledgeIndex | None
@@ -186,7 +186,7 @@ def resolve_published_index_key(
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
 ) -> PublishedIndexKey:
-    """Resolve one base ID to its current collection metadata key."""
+    """Resolve one base ID to its current published index key."""
     key, _binding = _resolve_published_index_key_and_binding(
         base_id,
         config=config,
@@ -278,7 +278,7 @@ def _optional_str(value: object) -> str | None:
 
 
 def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState | None:
-    """Load active collection metadata."""
+    """Load published index metadata."""
     if not metadata_path.exists():
         return None
     try:
@@ -316,7 +316,7 @@ def load_published_indexing_state(metadata_path: Path) -> PublishedIndexingState
 
 
 def save_published_indexing_state(metadata_path: Path, state: PublishedIndexingState) -> None:
-    """Atomically persist active collection metadata."""
+    """Atomically persist published index metadata."""
     payload: dict[str, object] = {
         "settings": list(state.settings),
         "status": state.status,
@@ -404,7 +404,7 @@ def mark_published_index_stale(
     reason: str,
     refresh_job: Literal["idle", "pending", "running", "failed"] = "pending",
 ) -> None:
-    """Mark the active collection stale without changing the published pointer."""
+    """Mark the published index stale without changing the last queryable index."""
     save_published_indexing_state(
         published_index_metadata_path(key),
         _state_with_refresh_fields(
@@ -417,7 +417,7 @@ def mark_published_index_stale(
 
 
 def mark_published_index_refresh_running(key: PublishedIndexKey, *, reason: str = "refreshing") -> None:
-    """Mark refresh work running while keeping the old active collection readable."""
+    """Mark refresh work running while keeping the last queryable index readable."""
     save_published_indexing_state(
         published_index_metadata_path(key),
         _state_with_refresh_fields(
@@ -430,7 +430,7 @@ def mark_published_index_refresh_running(key: PublishedIndexKey, *, reason: str 
 
 
 def mark_published_index_refresh_failed_preserving_last_good(key: PublishedIndexKey, *, error: str) -> None:
-    """Record refresh failure while keeping any old active collection pointer."""
+    """Record refresh failure while keeping any last queryable index readable."""
     current = load_published_indexing_state(published_index_metadata_path(key))
     state = _state_with_refresh_fields(
         key,
@@ -501,7 +501,7 @@ def _build_published_index_knowledge(
 
 
 def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexingState) -> bool:
-    """Return whether persisted metadata points at an existing active collection."""
+    """Return whether persisted metadata points at an existing Chroma collection."""
     if state.status != "complete" or state.collection is None:
         return False
     try:
@@ -550,7 +550,7 @@ def published_index_settings_compatible(
     published_settings: tuple[str, ...],
     current_settings: tuple[str, ...],
 ) -> bool:
-    """Return whether a published collection can be queried under the current config."""
+    """Return whether a published index can be queried under the current config."""
     return indexing_settings_query_compatible(
         published_settings,
         current_settings,
@@ -602,7 +602,7 @@ def published_index_availability_for_state(
     state: PublishedIndexingState | None,
     metadata_exists: bool = False,
 ) -> KnowledgeAvailability:
-    """Return the public availability value for active collection state."""
+    """Return the public availability value for published index state."""
     return _published_index_availability(
         key=key,
         state=state,
@@ -638,7 +638,7 @@ def get_published_index(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeIndexLookup:
-    """Return the currently active collection, if one is usable."""
+    """Return the currently published index, if one is usable."""
     key, binding = _resolve_published_index_key_and_binding(
         base_id,
         config=config,
@@ -738,11 +738,11 @@ def published_indexed_count(index: PublishedKnowledgeIndex) -> int:
     return index.state.indexed_count or 0
 
 
-def _same_physical_binding(key: PublishedIndexKey, refresh_key: KnowledgeRefreshTarget) -> bool:
+def _same_physical_binding(key: PublishedIndexKey, refresh_target: KnowledgeRefreshTarget) -> bool:
     return (
-        key.base_id == refresh_key.base_id
-        and key.storage_root == refresh_key.storage_root
-        and key.knowledge_path == refresh_key.knowledge_path
+        key.base_id == refresh_target.base_id
+        and key.storage_root == refresh_target.storage_root
+        and key.knowledge_path == refresh_target.knowledge_path
     )
 
 
@@ -766,9 +766,9 @@ def _cache_published_index(index: PublishedKnowledgeIndex) -> None:
     prune_private_index_bookkeeping()
 
 
-def _evict_published_indexes_for_refresh_target(refresh_key: KnowledgeRefreshTarget) -> None:
+def _evict_published_indexes_for_refresh_target(refresh_target: KnowledgeRefreshTarget) -> None:
     for cached_key in tuple(_published_indexes):
-        if _same_physical_binding(cached_key, refresh_key):
+        if _same_physical_binding(cached_key, refresh_target):
             _published_indexes.pop(cached_key, None)
 
 

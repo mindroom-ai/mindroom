@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -259,17 +259,17 @@ def _schedule_refresh_on_access_due(lookup: KnowledgeIndexLookup, config: Config
     return _git_poll_due(lookup, config)
 
 
-def _refresh_owner_is_refreshing(
-    refresh_owner: KnowledgeRefreshOwner,
+def _refresh_scheduler_is_refreshing(
+    refresh_scheduler: KnowledgeRefreshScheduler,
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> bool:
-    """Return whether the owner reports an active refresh without requiring a concrete implementation."""
+    """Return whether the scheduler reports an active refresh without requiring a concrete implementation."""
     try:
-        active = refresh_owner.is_refreshing(
+        active = refresh_scheduler.is_refreshing(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -282,7 +282,7 @@ def _refresh_owner_is_refreshing(
 
 
 def _schedule_refresh_for_availability(
-    refresh_owner: KnowledgeRefreshOwner,
+    refresh_scheduler: KnowledgeRefreshScheduler,
     base_id: str,
     *,
     config: Config,
@@ -294,13 +294,13 @@ def _schedule_refresh_for_availability(
     if lookup is None:
         return availability
 
-    refresh_key = refresh_target_for_published_index_key(lookup.key)
+    refresh_target = refresh_target_for_published_index_key(lookup.key)
     if availability is KnowledgeAvailability.READY:
         if not lookup.schedule_refresh_on_access or not _schedule_refresh_on_access_due(lookup, config):
             return availability
 
-        owner_is_refreshing = _refresh_owner_is_refreshing(
-            refresh_owner,
+        scheduler_is_refreshing = _refresh_scheduler_is_refreshing(
+            refresh_scheduler,
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -308,55 +308,55 @@ def _schedule_refresh_for_availability(
         )
         schedule_due = (
             False
-            if owner_is_refreshing
+            if scheduler_is_refreshing
             else _refresh_schedule_due(
-                refresh_key,
+                refresh_target,
                 KnowledgeAvailability.READY,
                 settings=lookup.key.indexing_settings,
                 cooldown_seconds=_schedule_refresh_on_access_cooldown_seconds(lookup, config),
             )
         )
         if schedule_due:
-            refresh_owner.schedule_refresh(
+            refresh_scheduler.schedule_refresh(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             )
-        return KnowledgeAvailability.STALE if schedule_due or owner_is_refreshing else KnowledgeAvailability.READY
+        return KnowledgeAvailability.STALE if schedule_due or scheduler_is_refreshing else KnowledgeAvailability.READY
 
     if availability is KnowledgeAvailability.INITIALIZING:
-        owner_is_refreshing = _refresh_owner_is_refreshing(
-            refresh_owner,
+        scheduler_is_refreshing = _refresh_scheduler_is_refreshing(
+            refresh_scheduler,
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         )
-        if not owner_is_refreshing and _refresh_schedule_due(
-            refresh_key,
+        if not scheduler_is_refreshing and _refresh_schedule_due(
+            refresh_target,
             availability,
             settings=lookup.key.indexing_settings,
         ):
-            refresh_owner.schedule_refresh(
+            refresh_scheduler.schedule_refresh(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             )
-    elif not _refresh_owner_is_refreshing(
-        refresh_owner,
+    elif not _refresh_scheduler_is_refreshing(
+        refresh_scheduler,
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     ) and _refresh_schedule_due(
-        refresh_key,
+        refresh_target,
         availability,
         settings=_refresh_retry_settings(lookup, config, runtime_paths, availability),
         cooldown_seconds=_refresh_cooldown_seconds(lookup, config, availability),
     ):
-        refresh_owner.schedule_refresh(
+        refresh_scheduler.schedule_refresh(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -369,7 +369,7 @@ def resolve_agent_knowledge_access(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeResolution:
     """Resolve configured knowledge base(s) with diagnostics for one agent."""
@@ -389,9 +389,9 @@ def resolve_agent_knowledge_access(
         if lookup is not None and availability is KnowledgeAvailability.READY:
             availability = _ready_index_effective_availability(lookup, config)
         knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
-        if refresh_owner is not None:
+        if refresh_scheduler is not None:
             availability = _schedule_refresh_for_availability(
-                refresh_owner,
+                refresh_scheduler,
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -417,7 +417,7 @@ def get_agent_knowledge(
     on_missing_bases: Callable[[list[str]], None] | None = None,
     on_unavailable_bases: Callable[[Mapping[str, KnowledgeAvailability]], None] | None = None,
     on_unavailable_base_details: Callable[[Mapping[str, KnowledgeAvailabilityDetail]], None] | None = None,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
@@ -425,7 +425,7 @@ def get_agent_knowledge(
         agent_name,
         config,
         runtime_paths,
-        refresh_owner=refresh_owner,
+        refresh_scheduler=refresh_scheduler,
         execution_identity=execution_identity,
     )
     if resolution.missing and on_missing_bases is not None:
@@ -524,13 +524,13 @@ class KnowledgeAccessSupport:
     ) -> KnowledgeResolution:
         """Return current knowledge and availability diagnostics for one agent."""
         orchestrator = self.runtime.orchestrator
-        refresh_owner = orchestrator.knowledge_refresh_owner if orchestrator is not None else None
+        refresh_scheduler = orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
 
         resolution = resolve_agent_knowledge_access(
             agent_name,
             self.runtime.config,
             self.runtime_paths,
-            refresh_owner=refresh_owner,
+            refresh_scheduler=refresh_scheduler,
             execution_identity=execution_identity,
         )
         if resolution.missing:

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class KnowledgeRefreshOwner(Protocol):
+class KnowledgeRefreshScheduler(Protocol):
     """Owns best-effort background refresh tasks keyed by resolved knowledge binding."""
 
     def schedule_refresh(
@@ -73,7 +73,7 @@ class _ScheduledRefresh:
 
 
 @dataclass(slots=True)
-class PerBindingKnowledgeRefreshOwner:
+class PerBindingKnowledgeRefreshScheduler:
     """Run at most one best-effort background refresh per binding."""
 
     _tasks: dict[KnowledgeRefreshTarget, asyncio.Task[None]] = field(default_factory=dict, init=False)
@@ -225,5 +225,5 @@ def _running_loop_for_schedule(base_id: str) -> asyncio.AbstractEventLoop | None
         return None
 
 
-StandaloneKnowledgeRefreshOwner = PerBindingKnowledgeRefreshOwner
-OrchestratorKnowledgeRefreshOwner = PerBindingKnowledgeRefreshOwner
+StandaloneKnowledgeRefreshScheduler = PerBindingKnowledgeRefreshScheduler
+OrchestratorKnowledgeRefreshScheduler = PerBindingKnowledgeRefreshScheduler

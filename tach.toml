@@ -1647,7 +1647,7 @@ path = "mindroom.knowledge"
 depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
-    "mindroom.knowledge.refresh_owner",
+    "mindroom.knowledge.refresh_scheduler",
     "mindroom.knowledge.utils",
 ]
 
@@ -1687,7 +1687,7 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.knowledge.refresh_owner"
+path = "mindroom.knowledge.refresh_scheduler"
 depends_on = [
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
@@ -1821,21 +1821,21 @@ from = ["mindroom.model_loading"]
 expose = [
     "KnowledgeAccessSupport",
     "KnowledgeManager",
-    "KnowledgeRefreshOwner",
+    "KnowledgeRefreshScheduler",
     "format_knowledge_availability_notice",
     "get_agent_knowledge",
     "KnowledgeAvailability",
     "KnowledgeAvailabilityDetail",
     "KnowledgeResolution",
-    "OrchestratorKnowledgeRefreshOwner",
-    "PerBindingKnowledgeRefreshOwner",
+    "OrchestratorKnowledgeRefreshScheduler",
+    "PerBindingKnowledgeRefreshScheduler",
     "resolve_agent_knowledge_access",
-    "StandaloneKnowledgeRefreshOwner",
+    "StandaloneKnowledgeRefreshScheduler",
 ]
 from = ["mindroom.knowledge"]
 
 [[interfaces]]
-expose = ["KnowledgeFilesystemWatchOwner"]
+expose = ["KnowledgeSourceWatcher"]
 from = ["mindroom.knowledge.watch"]
 
 # ARCH-B memory enforcement slice: expose only the config-level memory settings surface.

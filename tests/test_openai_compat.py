@@ -2855,7 +2855,7 @@ class TestTeamCompletion:
 
         scheduled_base_ids: list[str] = []
 
-        class _FakeRefreshOwner:
+        class _FakeRefreshScheduler:
             def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
@@ -2872,11 +2872,11 @@ class TestTeamCompletion:
             **kwargs: object,
         ) -> ResolvedExactTeamMembers:
             unavailable_bases = cast("dict[str, KnowledgeAvailability] | None", kwargs["unavailable_bases"])
-            refresh_owner = kwargs["refresh_owner"]
+            refresh_scheduler = kwargs["refresh_scheduler"]
             assert unavailable_bases is not None
-            assert refresh_owner is team_app_client.app.state.knowledge_refresh_owner
+            assert refresh_scheduler is team_app_client.app.state.knowledge_refresh_scheduler
             unavailable_bases["docs"] = KnowledgeAvailability.INITIALIZING
-            refresh_owner.schedule_refresh("docs")
+            refresh_scheduler.schedule_refresh("docs")
             return ResolvedExactTeamMembers(
                 requested_agent_names=requested_agent_names,
                 agents=mock_agents,
@@ -2885,7 +2885,7 @@ class TestTeamCompletion:
                 failed_agent_names=[],
             )
 
-        team_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
+        team_app_client.app.state.knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
@@ -3210,7 +3210,7 @@ class TestTeamCompletion:
 
         scheduled_base_ids: list[str] = []
 
-        class _FakeRefreshOwner:
+        class _FakeRefreshScheduler:
             def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
@@ -3231,11 +3231,11 @@ class TestTeamCompletion:
             **kwargs: object,
         ) -> ResolvedExactTeamMembers:
             unavailable_bases = cast("dict[str, KnowledgeAvailability] | None", kwargs["unavailable_bases"])
-            refresh_owner = kwargs["refresh_owner"]
+            refresh_scheduler = kwargs["refresh_scheduler"]
             assert unavailable_bases is not None
-            assert refresh_owner is team_app_client.app.state.knowledge_refresh_owner
+            assert refresh_scheduler is team_app_client.app.state.knowledge_refresh_scheduler
             unavailable_bases["docs"] = KnowledgeAvailability.CONFIG_MISMATCH
-            refresh_owner.schedule_refresh("docs")
+            refresh_scheduler.schedule_refresh("docs")
             return ResolvedExactTeamMembers(
                 requested_agent_names=requested_agent_names,
                 agents=mock_agents,
@@ -3244,7 +3244,7 @@ class TestTeamCompletion:
                 failed_agent_names=[],
             )
 
-        team_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
+        team_app_client.app.state.knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
@@ -4712,7 +4712,7 @@ class TestKnowledgeIntegration:
         """Missing published knowledge should inject a system-style degraded hint."""
         scheduled_base_ids: list[str] = []
 
-        class _FakeRefreshOwner:
+        class _FakeRefreshScheduler:
             def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
@@ -4732,7 +4732,7 @@ class TestKnowledgeIntegration:
                 on_availability(KnowledgeAvailability.INITIALIZING)
             return _knowledge_lookup(None, base_id=base_id, availability=KnowledgeAvailability.INITIALIZING)
 
-        knowledge_app_client.app.state.knowledge_refresh_owner = _FakeRefreshOwner()
+        knowledge_app_client.app.state.knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),

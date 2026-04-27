@@ -1890,8 +1890,8 @@ class ResponseRunner:
                 compaction_outcomes_collector=compaction_outcomes,
                 post_response_compaction_checks_collector=post_response_compaction_checks,
                 compaction_lifecycle=compaction_lifecycle,
-                refresh_owner=(
-                    self.deps.runtime.orchestrator.knowledge_refresh_owner
+                refresh_scheduler=(
+                    self.deps.runtime.orchestrator.knowledge_refresh_scheduler
                     if self.deps.runtime.orchestrator is not None
                     else None
                 ),
@@ -1979,8 +1979,8 @@ class ResponseRunner:
             compaction_outcomes_collector=compaction_outcomes,
             post_response_compaction_checks_collector=post_response_compaction_checks,
             compaction_lifecycle=compaction_lifecycle,
-            refresh_owner=(
-                self.deps.runtime.orchestrator.knowledge_refresh_owner
+            refresh_scheduler=(
+                self.deps.runtime.orchestrator.knowledge_refresh_scheduler
                 if self.deps.runtime.orchestrator is not None
                 else None
             ),

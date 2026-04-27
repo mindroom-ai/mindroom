@@ -4,11 +4,11 @@
 
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import KnowledgeManager
-from mindroom.knowledge.refresh_owner import (
-    KnowledgeRefreshOwner,
-    OrchestratorKnowledgeRefreshOwner,
-    PerBindingKnowledgeRefreshOwner,
-    StandaloneKnowledgeRefreshOwner,
+from mindroom.knowledge.refresh_scheduler import (
+    KnowledgeRefreshScheduler,
+    OrchestratorKnowledgeRefreshScheduler,
+    PerBindingKnowledgeRefreshScheduler,
+    StandaloneKnowledgeRefreshScheduler,
 )
 from mindroom.knowledge.utils import (
     KnowledgeAccessSupport,
@@ -27,9 +27,9 @@ __all__ = [
     "KnowledgeAvailabilityDetail",
     "KnowledgeResolution",
     "format_knowledge_availability_notice",
-    "KnowledgeRefreshOwner",
+    "KnowledgeRefreshScheduler",
     "resolve_agent_knowledge_access",
-    "OrchestratorKnowledgeRefreshOwner",
-    "PerBindingKnowledgeRefreshOwner",
-    "StandaloneKnowledgeRefreshOwner",
+    "OrchestratorKnowledgeRefreshScheduler",
+    "PerBindingKnowledgeRefreshScheduler",
+    "StandaloneKnowledgeRefreshScheduler",
 ]

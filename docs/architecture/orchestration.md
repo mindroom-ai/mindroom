@@ -148,7 +148,7 @@ On `orchestrator.stop()`:
 1. Set `self.running = False`
 2. Cancel config reload task
 3. Stop memory auto-flush worker
-4. Shut down the per-binding knowledge refresh owner
+4. Shut down the per-binding knowledge refresh scheduler
 5. Cancel pending bot start tasks
 6. Stop the MCP manager
 7. Cancel all sync tasks

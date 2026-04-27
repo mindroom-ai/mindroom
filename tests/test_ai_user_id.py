@@ -307,14 +307,14 @@ def _knowledge_access_support(knowledge: object | None = None) -> SimpleNamespac
 
 def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
     matrix_admin = object()
-    knowledge_refresh_owner = SimpleNamespace(
+    knowledge_refresh_scheduler = SimpleNamespace(
         schedule_refresh=lambda _base_id: None,
         is_refreshing=lambda _base_id: False,
     )
     return SimpleNamespace(
         config=config,
         runtime_paths=runtime_paths,
-        knowledge_refresh_owner=knowledge_refresh_owner,
+        knowledge_refresh_scheduler=knowledge_refresh_scheduler,
         _hook_matrix_admin=lambda: matrix_admin,
         _hook_room_state_querier=lambda: None,
         _hook_room_state_putter=lambda: None,
@@ -772,7 +772,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
                 _hook_matrix_admin=MagicMock(return_value=object()),
                 _hook_room_state_querier=MagicMock(return_value=None),
                 _hook_room_state_putter=MagicMock(return_value=None),
-                knowledge_refresh_owner=SimpleNamespace(
+                knowledge_refresh_scheduler=SimpleNamespace(
                     schedule_refresh=lambda _base_id: None,
                     is_refreshing=lambda _base_id: False,
                 ),

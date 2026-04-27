@@ -1,4 +1,4 @@
-"""Knowledge snapshot and refresh behavior tests."""
+"""Knowledge index and refresh behavior tests."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge import (
     KnowledgeAvailability,
     KnowledgeAvailabilityDetail,
-    PerBindingKnowledgeRefreshOwner,
+    PerBindingKnowledgeRefreshScheduler,
     get_agent_knowledge,
 )
 from mindroom.knowledge.manager import (
@@ -50,7 +50,7 @@ from mindroom.knowledge.registry import (
     published_indexed_count,
     resolve_published_index_key,
 )
-from mindroom.knowledge.watch import KnowledgeFilesystemWatchOwner
+from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -342,59 +342,59 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
         bases={"docs": tmp_path / "docs", "unused": tmp_path / "unused"},
         agent_bases=["docs"],
     )
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
 
     knowledge = get_agent_knowledge(
         "helper",
         config,
         runtime_paths_for(config),
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
 
     assert knowledge is None
-    owner.schedule_refresh.assert_called_once()
-    assert owner.schedule_refresh.call_args.args == ("docs",)
-    assert owner.schedule_refresh.call_args.kwargs["config"] is config
+    scheduler.schedule_refresh.assert_called_once()
+    assert scheduler.schedule_refresh.call_args.args == ("docs",)
+    assert scheduler.schedule_refresh.call_args.kwargs["config"] is config
 
 
-def test_initializing_knowledge_skips_duplicate_initial_load_when_owner_is_active(tmp_path: Path) -> None:
-    """An active owner refresh is enough for initializing knowledge."""
+def test_initializing_knowledge_skips_duplicate_initial_load_when_scheduler_is_active(tmp_path: Path) -> None:
+    """An active scheduler refresh is enough for initializing knowledge."""
     config = _config(
         tmp_path,
         bases={"docs": tmp_path / "docs", "unused": tmp_path / "unused"},
         agent_bases=["docs"],
     )
     runtime_paths = runtime_paths_for(config)
-    owner = MagicMock()
-    owner.is_refreshing = MagicMock(return_value=True)
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=True)
+    scheduler.schedule_refresh = MagicMock()
 
-    knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
+    knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler)
 
     assert knowledge is None
-    owner.is_refreshing.assert_called_once()
-    owner.schedule_refresh.assert_not_called()
+    scheduler.is_refreshing.assert_called_once()
+    scheduler.schedule_refresh.assert_not_called()
 
 
-def test_real_refresh_owner_without_running_loop_does_not_mark_active(tmp_path: Path) -> None:
+def test_real_refresh_scheduler_without_running_loop_does_not_mark_active(tmp_path: Path) -> None:
     """Synchronous callers should not leave a binding stuck refreshing when no event loop is running."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
+    scheduler = PerBindingKnowledgeRefreshScheduler()
 
-    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is None
-    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
-    refresh_key = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
+    assert get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler) is None
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    refresh_target = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
 
-    assert knowledge_refresh_runner.is_refresh_active(refresh_key) is False
-    assert owner.is_refreshing("docs", config=config, runtime_paths=runtime_paths) is False
+    assert knowledge_refresh_runner.is_refresh_active(refresh_target) is False
+    assert scheduler.is_refreshing("docs", config=config, runtime_paths=runtime_paths) is False
 
 
-def test_failed_notice_without_snapshot_says_unavailable() -> None:
-    """Cold failed knowledge must not be described as stale when no snapshot is attached."""
+def test_failed_notice_without_index_says_unavailable() -> None:
+    """Cold failed knowledge must not be described as stale when no index is attached."""
     notice = knowledge_utils.format_knowledge_availability_notice(
         {
             "docs": KnowledgeAvailabilityDetail(
@@ -410,7 +410,7 @@ def test_failed_notice_without_snapshot_says_unavailable() -> None:
     assert "Do not claim to have searched it." in notice
 
 
-def test_config_mismatch_notice_without_snapshot_says_unavailable() -> None:
+def test_config_mismatch_notice_without_index_says_unavailable() -> None:
     """Cold config-mismatched knowledge must not imply stale semantic search occurred."""
     notice = knowledge_utils.format_knowledge_availability_notice(
         {
@@ -427,8 +427,8 @@ def test_config_mismatch_notice_without_snapshot_says_unavailable() -> None:
     assert "Do not claim to have searched it." in notice
 
 
-def test_stale_notice_without_snapshot_says_unavailable() -> None:
-    """Stale metadata without a loadable snapshot must not imply semantic search occurred."""
+def test_stale_notice_without_index_says_unavailable() -> None:
+    """Stale metadata without a loadable index must not imply semantic search occurred."""
     notice = knowledge_utils.format_knowledge_availability_notice(
         {
             "docs": KnowledgeAvailabilityDetail(
@@ -445,7 +445,7 @@ def test_stale_notice_without_snapshot_says_unavailable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ready_snapshot_access_does_not_refresh_unchanged_sources(tmp_path: Path) -> None:
+async def test_ready_index_access_does_not_refresh_unchanged_sources(tmp_path: Path) -> None:
     """A ready index is returned immediately without churn when sources are unchanged."""
     docs_path = tmp_path / "docs"
     unused_path = tmp_path / "unused"
@@ -454,21 +454,21 @@ async def test_ready_snapshot_access_does_not_refresh_unchanged_sources(tmp_path
     config = _config(tmp_path, bases={"docs": docs_path, "unused": unused_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
 
-    knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
-    second_knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
+    knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    second_knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler)
 
     assert knowledge is not None
     assert second_knowledge is not None
-    assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["ready index"]
-    owner.schedule_refresh.assert_not_called()
+    assert [document.content for document in knowledge.search("index", max_results=5)] == ["ready index"]
+    scheduler.schedule_refresh.assert_not_called()
     assert len(_VectorDb.collections) == 1
 
 
 @pytest.mark.asyncio
-async def test_shared_local_watch_snapshot_refreshes_on_access_without_blocking_read(tmp_path: Path) -> None:
+async def test_shared_local_watch_index_refreshes_on_access_without_blocking_read(tmp_path: Path) -> None:
     """Shared local bases with watch=true schedule refresh on access while serving last-good content."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -478,10 +478,10 @@ async def test_shared_local_watch_snapshot_refreshes_on_access_without_blocking_
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("shared local new", encoding="utf-8")
-    owner = PerBindingKnowledgeRefreshOwner()
+    scheduler = PerBindingKnowledgeRefreshScheduler()
 
     try:
-        knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner)
+        knowledge = get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler)
         assert knowledge is not None
         assert [document.content for document in knowledge.search("shared", max_results=5)] == ["shared local old"]
 
@@ -495,7 +495,7 @@ async def test_shared_local_watch_snapshot_refreshes_on_access_without_blocking_
         else:
             pytest.fail("background on-access refresh did not publish the edited local source")
     finally:
-        await owner.shutdown()
+        await scheduler.shutdown()
 
 
 @pytest.mark.asyncio
@@ -508,8 +508,8 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], watch=True)
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
 
@@ -518,7 +518,7 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
             "helper",
             config,
             runtime_paths,
-            refresh_owner=owner,
+            refresh_scheduler=scheduler,
             on_unavailable_bases=unavailable.update,
             on_unavailable_base_details=unavailable_details.update,
         )
@@ -541,7 +541,7 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
         "helper",
         config,
         runtime_paths,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
         on_unavailable_bases=unavailable.update,
         on_unavailable_base_details=unavailable_details.update,
     )
@@ -557,7 +557,7 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
             "helper",
             config,
             runtime_paths,
-            refresh_owner=owner,
+            refresh_scheduler=scheduler,
             on_unavailable_bases=unavailable.update,
             on_unavailable_base_details=unavailable_details.update,
         )
@@ -568,7 +568,7 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
             "helper",
             config,
             runtime_paths,
-            refresh_owner=owner,
+            refresh_scheduler=scheduler,
             on_unavailable_bases=unavailable.update,
             on_unavailable_base_details=unavailable_details.update,
         )
@@ -577,7 +577,7 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
     assert unavailable == {}
     assert unavailable_details == {}
 
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -606,12 +606,12 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
         await stop_event.wait()
 
     monkeypatch.setattr("mindroom.knowledge.watch.awatch", _fake_awatch)
-    refresh_owner = MagicMock()
-    watch_owner = KnowledgeFilesystemWatchOwner(refresh_owner)
+    refresh_scheduler = MagicMock()
+    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
 
-    await watch_owner.sync(config=config, runtime_paths=runtime_paths)
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
     await asyncio.wait_for(event_delivered.wait(), timeout=1)
-    await watch_owner.shutdown()
+    await source_watcher.shutdown()
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(published_index_metadata_path(key))
@@ -628,8 +628,8 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
         )
         is not None
     )
-    refresh_owner.schedule_refresh.assert_called_once()
-    assert refresh_owner.schedule_refresh.call_args.args == ("docs",)
+    refresh_scheduler.schedule_refresh.assert_called_once()
+    assert refresh_scheduler.schedule_refresh.call_args.args == ("docs",)
     assert unavailable_details == {
         "docs": KnowledgeAvailabilityDetail(
             availability=KnowledgeAvailability.STALE,
@@ -639,17 +639,17 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
 
 
 @pytest.mark.asyncio
-async def test_schedule_refresh_on_access_reports_stale_while_owner_is_active(tmp_path: Path) -> None:
-    """Due refresh-on-access remains visible as STALE even when the owner already has work active."""
+async def test_schedule_refresh_on_access_reports_stale_while_scheduler_is_active(tmp_path: Path) -> None:
+    """Due refresh-on-access remains visible as STALE even when the scheduler already has work active."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("active refresh old", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], watch=True)
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    owner = MagicMock()
-    owner.is_refreshing = MagicMock(return_value=True)
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=True)
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
 
@@ -657,7 +657,7 @@ async def test_schedule_refresh_on_access_reports_stale_while_owner_is_active(tm
         "helper",
         config,
         runtime_paths,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
         on_unavailable_bases=unavailable.update,
         on_unavailable_base_details=unavailable_details.update,
     )
@@ -671,11 +671,11 @@ async def test_schedule_refresh_on_access_reports_stale_while_owner_is_active(tm
             index_attached=True,
         ),
     }
-    owner.schedule_refresh.assert_not_called()
+    scheduler.schedule_refresh.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_stale_snapshot_metadata_schedules_refresh_without_source_scan(tmp_path: Path) -> None:
+async def test_stale_index_metadata_schedules_refresh_without_source_scan(tmp_path: Path) -> None:
     """Ready access only uses persisted metadata/dirty markers, not request-time source scans."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -688,8 +688,8 @@ async def test_stale_snapshot_metadata_schedules_refresh_without_source_scan(tmp
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.mark_published_index_stale(key, reason="test_dirty")
     clear_published_indexes()
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     knowledge = get_agent_knowledge(
@@ -697,27 +697,27 @@ async def test_stale_snapshot_metadata_schedules_refresh_without_source_scan(tmp
         config,
         runtime_paths,
         on_unavailable_bases=unavailable.update,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
     second_knowledge = get_agent_knowledge(
         "helper",
         config,
         runtime_paths,
         on_unavailable_bases=unavailable.update,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
 
     assert knowledge is not None
     assert second_knowledge is not None
-    assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["ready index"]
+    assert [document.content for document in knowledge.search("index", max_results=5)] == ["ready index"]
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    owner.schedule_refresh.assert_called_once()
-    assert owner.schedule_refresh.call_args.args == ("docs",)
+    scheduler.schedule_refresh.assert_called_once()
+    assert scheduler.schedule_refresh.call_args.args == ("docs",)
 
 
 @pytest.mark.asyncio
-async def test_stale_snapshot_skips_duplicate_refresh_when_owner_is_active(tmp_path: Path) -> None:
-    """A stale snapshot should not queue another refresh while the owner is already active."""
+async def test_stale_index_skips_duplicate_refresh_when_scheduler_is_active(tmp_path: Path) -> None:
+    """A stale index should not queue another refresh while the scheduler is already active."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -729,9 +729,9 @@ async def test_stale_snapshot_skips_duplicate_refresh_when_owner_is_active(tmp_p
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.mark_published_index_stale(key, reason="test_dirty")
     clear_published_indexes()
-    owner = MagicMock()
-    owner.is_refreshing = MagicMock(return_value=True)
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=True)
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     knowledge = get_agent_knowledge(
@@ -739,14 +739,14 @@ async def test_stale_snapshot_skips_duplicate_refresh_when_owner_is_active(tmp_p
         config,
         runtime_paths,
         on_unavailable_bases=unavailable.update,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
 
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["ready index"]
+    assert [document.content for document in knowledge.search("index", max_results=5)] == ["ready index"]
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    owner.is_refreshing.assert_called_once()
-    owner.schedule_refresh.assert_not_called()
+    scheduler.is_refreshing.assert_called_once()
+    scheduler.schedule_refresh.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -768,14 +768,14 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
 
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
-    owner.is_refreshing = MagicMock(return_value=False)
-    main.app.state.knowledge_refresh_owner = owner
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    main.app.state.knowledge_refresh_scheduler = scheduler
     try:
         response = TestClient(main.app).delete("/api/knowledge/bases/docs/files/guide.md")
     finally:
-        main.app.state.knowledge_refresh_owner = None
+        main.app.state.knowledge_refresh_scheduler = None
     assert response.status_code == 200
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -790,7 +790,7 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
         "deleted secret",
         "kept public",
     }
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -812,17 +812,17 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
 
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
-    owner.is_refreshing = MagicMock(return_value=False)
-    main.app.state.knowledge_refresh_owner = owner
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    main.app.state.knowledge_refresh_scheduler = scheduler
     try:
         response = TestClient(main.app).post(
             "/api/knowledge/bases/docs/upload",
             files=[("files", ("guide.md", b"replacement content", "text/markdown"))],
         )
     finally:
-        main.app.state.knowledge_refresh_owner = None
+        main.app.state.knowledge_refresh_scheduler = None
     assert response.status_code == 200
 
     pending_knowledge = get_agent_knowledge("helper", config, runtime_paths)
@@ -845,7 +845,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
         "replaced secret",
         "kept public",
     }
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -875,15 +875,15 @@ async def test_dashboard_delete_dirty_write_failure_keeps_best_effort_source_cha
     monkeypatch.setattr(knowledge_registry, "mark_published_index_stale", _fail_second_dirty_write)
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
-    owner.is_refreshing = MagicMock(return_value=False)
-    main.app.state.knowledge_refresh_owner = owner
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    main.app.state.knowledge_refresh_scheduler = scheduler
     try:
         with pytest.raises(RuntimeError, match="same-source dirty write failed"):
             TestClient(main.app).delete("/api/knowledge/bases/research/files/guide.md")
     finally:
-        main.app.state.knowledge_refresh_owner = None
+        main.app.state.knowledge_refresh_scheduler = None
 
     assert dirty_write_count == 2
     assert not (docs_path / "guide.md").exists()
@@ -893,11 +893,11 @@ async def test_dashboard_delete_dirty_write_failure_keeps_best_effort_source_cha
         assert [document.content for document in lookup.index.knowledge.search("anything", max_results=5)] == [
             "restored public",
         ]
-    owner.schedule_refresh.assert_not_called()
+    scheduler.schedule_refresh.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_ready_snapshot_access_never_recomputes_source_signature(
+async def test_ready_index_access_never_recomputes_source_signature(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -955,13 +955,13 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_snapshot_metadata_without_source_signature_is_unavailable_and_schedules_refresh(
+async def test_index_metadata_without_source_signature_is_unavailable_and_schedules_refresh(
     tmp_path: Path,
 ) -> None:
     """Stale-format published metadata is treated as corrupt instead of interpreted."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("stale-format snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("stale-format index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -971,8 +971,8 @@ async def test_snapshot_metadata_without_source_signature_is_unavailable_and_sch
     payload.pop("source_signature", None)
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     clear_published_indexes()
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     knowledge = get_agent_knowledge(
@@ -980,12 +980,12 @@ async def test_snapshot_metadata_without_source_signature_is_unavailable_and_sch
         config,
         runtime_paths,
         on_unavailable_bases=unavailable.update,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -993,7 +993,7 @@ async def test_successful_publish_clears_dirty_refresh_state(tmp_path: Path) -> 
     """A successful publish clears dirty refresh state."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -1004,7 +1004,7 @@ async def test_successful_publish_clears_dirty_refresh_state(tmp_path: Path) -> 
     assert dirty_lookup.index is not None
     assert dirty_lookup.availability is KnowledgeAvailability.STALE
 
-    (docs_path / "doc.md").write_text("snapshot updated", encoding="utf-8")
+    (docs_path / "doc.md").write_text("index updated", encoding="utf-8")
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_indexing_state(published_index_metadata_path(key))
 
@@ -1050,20 +1050,20 @@ async def test_refreshing_state_cancellation_clears_active_refresh_count(
     with pytest.raises(asyncio.CancelledError):
         await refresh_task
 
-    refresh_key = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
-    assert knowledge_refresh_runner.is_refresh_active(refresh_key) is False
+    refresh_target = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
+    assert knowledge_refresh_runner.is_refresh_active(refresh_target) is False
 
 
 @pytest.mark.asyncio
-async def test_cancelled_refresh_after_refreshing_write_keeps_existing_snapshot_stale(
+async def test_cancelled_refresh_after_refreshing_write_keeps_existing_index_stale(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation after the refreshing state write must not clear stale snapshot state."""
+    """Cancellation after the refreshing state write must not clear stale index state."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "guide.md"
-    doc.write_text("stable snapshot", encoding="utf-8")
+    doc.write_text("stable index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -1160,8 +1160,8 @@ async def test_cancelled_source_lock_waiter_does_not_wedge_later_mutation(tmp_pa
     docs_path.mkdir()
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    refresh_key = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
-    source_key = knowledge_registry.source_root_for_refresh_target(refresh_key)
+    refresh_target = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
+    source_root = knowledge_registry.source_root_for_refresh_target(refresh_target)
     holder_entered = asyncio.Event()
     release_holder = asyncio.Event()
     waiter_entered = asyncio.Event()
@@ -1178,7 +1178,7 @@ async def test_cancelled_source_lock_waiter_does_not_wedge_later_mutation(tmp_pa
     holder_task = asyncio.create_task(_hold_lock())
     await holder_entered.wait()
     waiter_task = asyncio.create_task(_queued_waiter())
-    await _wait_for_refresh_lock_borrowers(source_key, 2)
+    await _wait_for_refresh_lock_borrowers(source_root, 2)
 
     waiter_task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1203,8 +1203,8 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     docs_path.mkdir()
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    refresh_key = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
-    source_key = knowledge_registry.source_root_for_refresh_target(refresh_key)
+    refresh_target = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
+    source_root = knowledge_registry.source_root_for_refresh_target(refresh_target)
     holder_entered = asyncio.Event()
     release_holder = asyncio.Event()
     waiter_entered = asyncio.Event()
@@ -1222,8 +1222,8 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     holder_task = asyncio.create_task(_hold_lock())
     await holder_entered.wait()
     waiter_task = asyncio.create_task(_queued_waiter())
-    await _wait_for_refresh_lock_borrowers(source_key, 2)
-    original_entry = knowledge_refresh_runner._refresh_locks[source_key]
+    await _wait_for_refresh_lock_borrowers(source_root, 2)
+    original_entry = knowledge_refresh_runner._refresh_locks[source_root]
 
     for index in range(5):
         _create_idle_refresh_lock(
@@ -1233,7 +1233,7 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
             ),
         )
 
-    assert knowledge_refresh_runner._refresh_locks.get(source_key) is original_entry
+    assert knowledge_refresh_runner._refresh_locks.get(source_root) is original_entry
 
     release_holder.set()
     async with asyncio.timeout(1):
@@ -1421,7 +1421,7 @@ async def test_async_mark_dirty_cancellation_finishes_same_source_aliases(
 
 
 @pytest.mark.asyncio
-async def test_async_mark_dirty_recached_snapshot_reports_refresh_state_after_write(
+async def test_async_mark_dirty_recached_index_reports_refresh_state_after_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1635,7 +1635,7 @@ def test_config_allows_exact_duplicate_local_roots_with_different_filters(tmp_pa
     assert sorted(config.knowledge_bases) == ["markdown", "python"]
 
 
-def test_raw_git_url_snapshot_metadata_is_config_mismatch(tmp_path: Path) -> None:
+def test_raw_git_url_index_metadata_is_config_mismatch(tmp_path: Path) -> None:
     """Raw Git URLs in persisted settings are stale-format metadata, not a compatible identity."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -1678,11 +1678,11 @@ def test_raw_git_url_snapshot_metadata_is_config_mismatch(tmp_path: Path) -> Non
     assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
 
 
-def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_path: Path) -> None:
-    """Passwordless SSH usernames are part of the persisted snapshot identity."""
+def test_passwordless_ssh_username_change_invalidates_published_index(tmp_path: Path) -> None:
+    """Passwordless SSH usernames are part of the persisted index identity."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("git user snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("git user index", encoding="utf-8")
     config = _config(
         tmp_path,
         bases={"docs": docs_path},
@@ -1693,7 +1693,7 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     collection = "ssh_git_user_collection"
     _VectorDb.collections[collection] = [
-        {"content": "git user snapshot", "metadata": {"source_path": "doc.md"}},
+        {"content": "git user index", "metadata": {"source_path": "doc.md"}},
     ]
     metadata_path = published_index_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1716,8 +1716,8 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
         agent_bases=["docs"],
         git_configs={"docs": KnowledgeGitConfig(repo_url="ssh://deploy@example.com/org/repo.git")},
     )
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     lookup = get_published_index("docs", config=changed_config, runtime_paths=runtime_paths)
@@ -1725,7 +1725,7 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
         "helper",
         changed_config,
         runtime_paths,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
         on_unavailable_bases=unavailable.update,
     )
 
@@ -1733,20 +1733,20 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
     assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
-def test_metadata_state_alone_serves_published_snapshot(tmp_path: Path) -> None:
+def test_metadata_state_alone_serves_published_index(tmp_path: Path) -> None:
     """The simplified metadata model keeps active state in the metadata file."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("metadata snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("metadata index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     collection = "metadata_collection"
     _VectorDb.collections[collection] = [
-        {"content": "metadata snapshot", "metadata": {"source_path": "doc.md"}},
+        {"content": "metadata index", "metadata": {"source_path": "doc.md"}},
     ]
     metadata_path = published_index_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1795,14 +1795,14 @@ def test_indexing_settings_layout_constants_match_settings_key(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_git_ready_snapshot_schedules_refresh_after_poll_interval(
+async def test_git_ready_index_schedules_refresh_after_poll_interval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Git READY access polls in the background even when the local checkout signature is unchanged."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("git snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("git index", encoding="utf-8")
     git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=5)
     config = _config(
         tmp_path,
@@ -1827,8 +1827,8 @@ async def test_git_ready_snapshot_schedules_refresh_after_poll_interval(
     payload["last_refresh_at"] = "2000-01-01T00:00:00+00:00"
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     clear_published_indexes()
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     def _unexpected_signature(*_args: object, **_kwargs: object) -> str:
@@ -1842,13 +1842,13 @@ async def test_git_ready_snapshot_schedules_refresh_after_poll_interval(
         config,
         runtime_paths,
         on_unavailable_bases=unavailable.update,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
 
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("git", max_results=5)] == ["git snapshot"]
+    assert [document.content for document in knowledge.search("git", max_results=5)] == ["git index"]
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1897,8 +1897,8 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
 
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_success)
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     knowledge = get_agent_knowledge(
@@ -1906,13 +1906,13 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
         config,
         runtime_paths,
         execution_identity=identity,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
         on_unavailable_bases=unavailable.update,
     )
 
     assert knowledge is not None
     assert unavailable == {}
-    owner.schedule_refresh.assert_not_called()
+    scheduler.schedule_refresh.assert_not_called()
 
     metadata_path = published_index_metadata_path(key)
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -1920,8 +1920,8 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     payload["last_refresh_at"] = "2000-01-01T00:00:00+00:00"
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     clear_published_indexes()
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable = {}
 
     stale_knowledge = get_agent_knowledge(
@@ -1929,13 +1929,13 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
         config,
         runtime_paths,
         execution_identity=identity,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
         on_unavailable_bases=unavailable.update,
     )
 
     assert stale_knowledge is not None
     assert unavailable == {base_id: KnowledgeAvailability.STALE}
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2001,19 +2001,19 @@ async def test_private_git_updated_refresh_preserves_execution_identity(
 
 
 @pytest.mark.asyncio
-async def test_existing_published_snapshot_is_used_while_refresh_runs(
+async def test_existing_published_index_is_used_while_refresh_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Slow refresh builds a candidate while readers continue using the last-good index."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("old snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("old index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    (docs_path / "doc.md").write_text("new snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("new index", encoding="utf-8")
 
     started = asyncio.Event()
     release = asyncio.Event()
@@ -2046,13 +2046,13 @@ async def test_existing_published_snapshot_is_used_while_refresh_runs(
 
     knowledge = get_agent_knowledge("helper", config, runtime_paths)
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["old snapshot"]
+    assert [document.content for document in knowledge.search("index", max_results=5)] == ["old index"]
 
     release.set()
     await refresh_task
     knowledge = get_agent_knowledge("helper", config, runtime_paths)
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["new snapshot"]
+    assert [document.content for document in knowledge.search("index", max_results=5)] == ["new index"]
 
 
 @pytest.mark.asyncio
@@ -2179,11 +2179,11 @@ async def test_refresh_discards_candidate_when_sources_change_before_publish(
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
-    doc.write_text("stable snapshot", encoding="utf-8")
+    doc.write_text("stable index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    doc.write_text("candidate snapshot", encoding="utf-8")
+    doc.write_text("candidate index", encoding="utf-8")
     original_reindex_files_locked = KnowledgeManager._reindex_files_locked
 
     async def _mutate_after_candidate_index(
@@ -2214,8 +2214,8 @@ async def test_refresh_discards_candidate_when_sources_change_before_publish(
     assert result.last_error == "Knowledge source changed during refresh; refresh skipped"
     assert lookup.index is not None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
-    assert [document.content for document in lookup.index.knowledge.search("snapshot", max_results=5)] == [
-        "stable snapshot",
+    assert [document.content for document in lookup.index.knowledge.search("index", max_results=5)] == [
+        "stable index",
     ]
 
 
@@ -2224,10 +2224,10 @@ async def test_same_physical_binding_refreshes_are_serialized_across_config_chan
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refresh writes are serialized by physical storage target, not settings-sensitive snapshot key."""
+    """Refresh writes are serialized by physical storage target, not settings-sensitive index key."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     changed_config = config.model_copy(deep=True)
     changed_config.knowledge_bases["docs"].chunk_size = 1024
@@ -2284,7 +2284,7 @@ async def test_shared_source_mutation_waits_for_duplicate_base_refresh(
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
-    doc.write_text("snapshot", encoding="utf-8")
+    doc.write_text("index", encoding="utf-8")
     config = _config(tmp_path, bases={"alpha": docs_path, "beta": docs_path}, agent_bases=["alpha", "beta"])
     runtime_paths = runtime_paths_for(config)
     refresh_entered = asyncio.Event()
@@ -2324,8 +2324,8 @@ async def test_shared_source_mutation_waits_for_duplicate_base_refresh(
 
 
 @pytest.mark.asyncio
-async def test_refresh_generations_keep_latest_snapshot_without_protecting_old_handles(tmp_path: Path) -> None:
-    """Old read handles are best effort; refresh cleanup only guarantees the next active snapshot."""
+async def test_refresh_generations_keep_latest_index_without_protecting_old_handles(tmp_path: Path) -> None:
+    """Old read handles are best effort; refresh cleanup only guarantees the next active index."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -2351,7 +2351,7 @@ async def test_refresh_generations_keep_latest_snapshot_without_protecting_old_h
 
 
 @pytest.mark.asyncio
-async def test_publish_invalidates_cached_snapshots_for_same_physical_binding(tmp_path: Path) -> None:
+async def test_publish_invalidates_cached_indexes_for_same_physical_binding(tmp_path: Path) -> None:
     """A config transition and revert must not resurrect an older cached handle for the same path."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -2380,8 +2380,8 @@ async def test_publish_invalidates_cached_snapshots_for_same_physical_binding(tm
 
 
 @pytest.mark.asyncio
-async def test_successful_refreshes_keep_only_active_collection(tmp_path: Path) -> None:
-    """Repeated publishes keep the active collection and clean older generations best effort."""
+async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) -> None:
+    """Repeated publishes keep the published index and clean older generations best effort."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -2469,11 +2469,11 @@ async def test_superseded_collection_listing_failure_is_best_effort(
 
 
 @pytest.mark.asyncio
-async def test_failed_refresh_preserves_last_good_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_failed_refresh_preserves_last_good_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed candidate build marks stale availability but keeps serving the old collection."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("stable snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("stable index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -2516,7 +2516,7 @@ async def test_failed_refresh_preserves_last_good_snapshot(tmp_path: Path, monke
 
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("snapshot", max_results=5)] == ["stable snapshot"]
+    assert [document.content for document in knowledge.search("index", max_results=5)] == ["stable index"]
 
 
 @pytest.mark.asyncio
@@ -2528,11 +2528,11 @@ async def test_metadata_save_failure_after_candidate_index_keeps_serving_last_go
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
-    doc.write_text("stable metadata snapshot", encoding="utf-8")
+    doc.write_text("stable metadata index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    doc.write_text("uncommitted candidate snapshot", encoding="utf-8")
+    doc.write_text("uncommitted candidate index", encoding="utf-8")
     original_save = KnowledgeManager._save_persisted_indexing_state
 
     def _fail_candidate_metadata_save(
@@ -2559,17 +2559,17 @@ async def test_metadata_save_failure_after_candidate_index_keeps_serving_last_go
 
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("snapshot", max_results=5)] == [
-        "stable metadata snapshot",
+    assert [document.content for document in knowledge.search("index", max_results=5)] == [
+        "stable metadata index",
     ]
 
 
 @pytest.mark.asyncio
-async def test_partial_refresh_after_cached_snapshot_updates_failed_availability(
+async def test_partial_refresh_after_cached_index_updates_failed_availability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A partial refresh must not leave the process-local READY snapshot hiding failure metadata."""
+    """A partial refresh must not leave the process-local READY index hiding failure metadata."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "good.md").write_text("last good", encoding="utf-8")
@@ -2619,18 +2619,18 @@ async def test_partial_refresh_after_cached_snapshot_updates_failed_availability
 
 
 @pytest.mark.asyncio
-async def test_embedder_config_mismatch_returns_no_incompatible_snapshot(tmp_path: Path) -> None:
+async def test_embedder_config_mismatch_returns_no_incompatible_index(tmp_path: Path) -> None:
     """An embedder-changing config mismatch should not query old vectors with the new embedder."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("old embedder snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("old embedder index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     changed_config = config.model_copy(deep=True)
     changed_config.memory.embedder.config.model = "text-embedding-3-large"
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     knowledge = get_agent_knowledge(
@@ -2638,12 +2638,12 @@ async def test_embedder_config_mismatch_returns_no_incompatible_snapshot(tmp_pat
         changed_config,
         runtime_paths,
         on_unavailable_bases=unavailable.update,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2651,7 +2651,7 @@ async def test_config_mismatch_refresh_cooldown_is_settings_aware(tmp_path: Path
     """A newer config mismatch for the same binding must not be dropped by the request cooldown."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("old snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("old index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -2659,15 +2659,15 @@ async def test_config_mismatch_refresh_cooldown_is_settings_aware(tmp_path: Path
     changed_config.knowledge_bases["docs"].chunk_size = 1024
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
 
-    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_owner=owner) is not None
-    assert get_agent_knowledge("helper", newer_config, runtime_paths, refresh_owner=owner) is not None
+    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_scheduler=scheduler) is not None
+    assert get_agent_knowledge("helper", newer_config, runtime_paths, refresh_scheduler=scheduler) is not None
 
-    assert owner.schedule_refresh.call_count == 2
-    assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
-    assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
+    assert scheduler.schedule_refresh.call_count == 2
+    assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
+    assert scheduler.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
 
 
 @pytest.mark.asyncio
@@ -2681,15 +2681,15 @@ async def test_initializing_refresh_cooldown_is_settings_aware(tmp_path: Path) -
     changed_config.knowledge_bases["docs"].chunk_size = 1024
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
 
-    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_owner=owner) is None
-    assert get_agent_knowledge("helper", newer_config, runtime_paths, refresh_owner=owner) is None
+    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_scheduler=scheduler) is None
+    assert get_agent_knowledge("helper", newer_config, runtime_paths, refresh_scheduler=scheduler) is None
 
-    assert owner.schedule_refresh.call_count == 2
-    assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
-    assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
+    assert scheduler.schedule_refresh.call_count == 2
+    assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
+    assert scheduler.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
 
 
 @pytest.mark.asyncio
@@ -2705,8 +2705,8 @@ async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) ->
     changed_config.knowledge_bases["docs"].chunk_size = 1024
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     assert (
@@ -2714,7 +2714,7 @@ async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) ->
             "helper",
             changed_config,
             runtime_paths,
-            refresh_owner=owner,
+            refresh_scheduler=scheduler,
             on_unavailable_bases=unavailable.update,
         )
         is None
@@ -2724,16 +2724,16 @@ async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) ->
             "helper",
             newer_config,
             runtime_paths,
-            refresh_owner=owner,
+            refresh_scheduler=scheduler,
             on_unavailable_bases=unavailable.update,
         )
         is None
     )
 
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
-    assert owner.schedule_refresh.call_count == 2
-    assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
-    assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
+    assert scheduler.schedule_refresh.call_count == 2
+    assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
+    assert scheduler.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
 
 
 @pytest.mark.asyncio
@@ -2758,15 +2758,15 @@ async def test_failed_git_refresh_cooldown_is_credentials_service_aware(tmp_path
     changed_git_config = changed_config.knowledge_bases["docs"].git
     assert changed_git_config is not None
     changed_git_config.credentials_service = "new_service"
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
 
-    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is None
-    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_owner=owner) is None
+    assert get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler) is None
+    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_scheduler=scheduler) is None
 
-    assert owner.schedule_refresh.call_count == 2
-    assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is config
-    assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is changed_config
+    assert scheduler.schedule_refresh.call_count == 2
+    assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is config
+    assert scheduler.schedule_refresh.call_args_list[1].kwargs["config"] is changed_config
 
 
 @pytest.mark.asyncio
@@ -2790,15 +2790,15 @@ async def test_failed_git_refresh_cooldown_is_embedded_userinfo_aware(tmp_path: 
     changed_git_config = changed_config.knowledge_bases["docs"].git
     assert changed_git_config is not None
     changed_git_config.repo_url = "https://git-user:new-secret@example.com/org/private.git"
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
 
-    assert get_agent_knowledge("helper", config, runtime_paths, refresh_owner=owner) is None
-    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_owner=owner) is None
+    assert get_agent_knowledge("helper", config, runtime_paths, refresh_scheduler=scheduler) is None
+    assert get_agent_knowledge("helper", changed_config, runtime_paths, refresh_scheduler=scheduler) is None
 
-    assert owner.schedule_refresh.call_count == 2
-    assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is config
-    assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is changed_config
+    assert scheduler.schedule_refresh.call_count == 2
+    assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is config
+    assert scheduler.schedule_refresh.call_args_list[1].kwargs["config"] is changed_config
     cooldown_keys = repr(tuple(knowledge_utils._refresh_scheduled_at))
     assert "old-secret" not in cooldown_keys
     assert "new-secret" not in cooldown_keys
@@ -2806,14 +2806,14 @@ async def test_failed_git_refresh_cooldown_is_embedded_userinfo_aware(tmp_path: 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("availability", [KnowledgeAvailability.STALE, KnowledgeAvailability.REFRESH_FAILED])
-async def test_stale_or_failed_snapshot_reports_chunking_config_mismatch_before_cooldown(
+async def test_stale_or_failed_index_reports_chunking_config_mismatch_before_cooldown(
     tmp_path: Path,
     availability: KnowledgeAvailability,
 ) -> None:
     """Stale/failed metadata must not suppress refreshes for newer chunking settings."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("old snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("old index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -2827,8 +2827,8 @@ async def test_stale_or_failed_snapshot_reports_chunking_config_mismatch_before_
     changed_config.knowledge_bases["docs"].chunk_size = 1024
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     assert (
@@ -2836,7 +2836,7 @@ async def test_stale_or_failed_snapshot_reports_chunking_config_mismatch_before_
             "helper",
             changed_config,
             runtime_paths,
-            refresh_owner=owner,
+            refresh_scheduler=scheduler,
             on_unavailable_bases=unavailable.update,
         )
         is not None
@@ -2846,16 +2846,16 @@ async def test_stale_or_failed_snapshot_reports_chunking_config_mismatch_before_
             "helper",
             newer_config,
             runtime_paths,
-            refresh_owner=owner,
+            refresh_scheduler=scheduler,
             on_unavailable_bases=unavailable.update,
         )
         is not None
     )
 
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
-    assert owner.schedule_refresh.call_count == 2
-    assert owner.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
-    assert owner.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
+    assert scheduler.schedule_refresh.call_count == 2
+    assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
+    assert scheduler.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
 
 
 @pytest.mark.asyncio
@@ -2871,7 +2871,7 @@ async def test_stale_or_failed_snapshot_reports_chunking_config_mismatch_before_
         lambda config: setattr(config.knowledge_bases["docs"], "exclude_extensions", [".md"]),
     ],
 )
-async def test_corpus_changing_config_mismatch_returns_no_snapshot(
+async def test_corpus_changing_config_mismatch_returns_no_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mutate: object,
@@ -2879,7 +2879,7 @@ async def test_corpus_changing_config_mismatch_returns_no_snapshot(
     """Source identity and membership filter changes must not serve old content."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("old corpus snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("old corpus index", encoding="utf-8")
     git_config = KnowledgeGitConfig(
         repo_url="https://example.com/org/repo.git",
         include_patterns=["**/*.md"],
@@ -2903,8 +2903,8 @@ async def test_corpus_changing_config_mismatch_returns_no_snapshot(
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     changed_config = config.model_copy(deep=True)
     mutate(changed_config)
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     knowledge = get_agent_knowledge(
@@ -2912,12 +2912,12 @@ async def test_corpus_changing_config_mismatch_returns_no_snapshot(
         changed_config,
         runtime_paths,
         on_unavailable_bases=unavailable.update,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2928,7 +2928,7 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
     """A failed candidate refresh must not rewrite last-good metadata to the attempted settings."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("stable snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("stable index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -2969,7 +2969,7 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
     assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
 
 
-def test_stale_metadata_without_collection_returns_unavailable_snapshot(tmp_path: Path) -> None:
+def test_stale_metadata_without_collection_returns_unavailable_index(tmp_path: Path) -> None:
     """Metadata alone must not create or expose an empty ready collection."""
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
@@ -3022,8 +3022,8 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
         encoding="utf-8",
     )
     knowledge_registry.mark_published_index_refresh_succeeded(key)
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
     def _broken_vector_db(*_args: object, **_kwargs: object) -> object:
@@ -3037,16 +3037,16 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
         config,
         runtime_paths,
         on_unavailable_bases=unavailable.update,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_first_time_partial_refresh_does_not_publish_ready_snapshot(
+async def test_first_time_partial_refresh_does_not_publish_ready_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3103,7 +3103,7 @@ async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Empty managed files should count as scanned without blocking cold snapshot publication."""
+    """Empty managed files should count as scanned without blocking cold index publication."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "useful.md").write_text("useful vectors", encoding="utf-8")
@@ -3143,15 +3143,15 @@ async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
 
 
 @pytest.mark.asyncio
-async def test_embedder_changing_partial_refresh_does_not_publish_old_snapshot_under_new_key(
+async def test_embedder_changing_partial_refresh_does_not_publish_old_index_under_new_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A partial refresh cannot cache old incompatible vectors under a new snapshot key."""
+    """A partial refresh cannot cache old incompatible vectors under a new index key."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
-    doc.write_text("old embedder snapshot", encoding="utf-8")
+    doc.write_text("old embedder index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -3207,28 +3207,28 @@ async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
     assert lookup.index is None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
 
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     first = get_agent_knowledge(
         "helper",
         config,
         runtime_paths,
         on_unavailable_bases=unavailable.update,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
     second = get_agent_knowledge(
         "helper",
         config,
         runtime_paths,
         on_unavailable_bases=unavailable.update,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
     )
 
     assert first is None
     assert second is None
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -3258,7 +3258,7 @@ async def test_refresh_setup_failure_records_failed_availability(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_api_delete_marks_snapshot_stale_and_keeps_last_good_best_effort(tmp_path: Path) -> None:
+async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_path: Path) -> None:
     """DELETE success schedules refresh while old vectors remain usable until refresh publishes."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -3272,9 +3272,9 @@ async def test_api_delete_marks_snapshot_stale_and_keeps_last_good_best_effort(t
     assert before_delete is not None
     assert [document.content for document in before_delete.search("delete", max_results=5)] == ["delete me now"]
 
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
-    main.app.state.knowledge_refresh_owner = owner
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
+    main.app.state.knowledge_refresh_scheduler = scheduler
     client = TestClient(main.app)
 
     response = client.delete("/api/knowledge/bases/docs/files/guide.md")
@@ -3290,11 +3290,11 @@ async def test_api_delete_marks_snapshot_stale_and_keeps_last_good_best_effort(t
     assert after_delete is not None
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
     assert [document.content for document in after_delete.search("delete", max_results=5)] == ["delete me now"]
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_api_replacement_upload_marks_snapshot_stale_and_keeps_last_good_best_effort(
+async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best_effort(
     tmp_path: Path,
 ) -> None:
     """Replacement uploads leave old vectors usable until refresh publishes."""
@@ -3306,9 +3306,9 @@ async def test_api_replacement_upload_marks_snapshot_stale_and_keeps_last_good_b
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
-    main.app.state.knowledge_refresh_owner = owner
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
+    main.app.state.knowledge_refresh_scheduler = scheduler
     client = TestClient(main.app)
 
     response = client.post(
@@ -3328,7 +3328,7 @@ async def test_api_replacement_upload_marks_snapshot_stale_and_keeps_last_good_b
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
     assert [document.content for document in knowledge.search("old upload", max_results=5)] == ["old upload"]
     assert [document.content for document in knowledge.search("new upload", max_results=5)] == ["old upload"]
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 def test_api_upload_failure_keeps_earlier_best_effort_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3340,9 +3340,9 @@ def test_api_upload_failure_keeps_earlier_best_effort_writes(tmp_path: Path, mon
     runtime_paths = runtime_paths_for(config)
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
-    main.app.state.knowledge_refresh_owner = owner
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
+    main.app.state.knowledge_refresh_scheduler = scheduler
     monkeypatch.setattr("mindroom.api.knowledge._MAX_UPLOAD_BYTES", 5)
     client = TestClient(main.app)
 
@@ -3357,7 +3357,7 @@ def test_api_upload_failure_keeps_earlier_best_effort_writes(tmp_path: Path, mon
     assert response.status_code == 413
     assert (docs_path / "guide.md").read_text(encoding="utf-8") == "small"
     assert not (docs_path / "new.md").exists()
-    owner.schedule_refresh.assert_not_called()
+    scheduler.schedule_refresh.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -3365,7 +3365,7 @@ async def test_api_status_reports_direct_refresh_runner_reindex(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Status polling should see explicit refresh_knowledge_binding calls, not only owner-scheduled jobs."""
+    """Status polling should see explicit refresh_knowledge_binding calls, not only scheduler-scheduled jobs."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("refreshing status", encoding="utf-8")
@@ -3373,7 +3373,7 @@ async def test_api_status_reports_direct_refresh_runner_reindex(
     runtime_paths = runtime_paths_for(config)
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    main.app.state.knowledge_refresh_owner = None
+    main.app.state.knowledge_refresh_scheduler = None
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -3400,7 +3400,7 @@ async def test_api_status_reports_direct_refresh_runner_reindex(
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_runs_independent_per_binding_tasks(
+async def test_refresh_scheduler_runs_independent_per_binding_tasks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3409,7 +3409,7 @@ async def test_refresh_owner_runs_independent_per_binding_tasks(
     docs_b = tmp_path / "docs-b"
     config = _config(tmp_path, bases={"a": docs_a, "b": docs_b}, agent_bases=["a", "b"])
     runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
+    scheduler = PerBindingKnowledgeRefreshScheduler()
     started: list[str] = []
     release: dict[str, asyncio.Event] = {"a": asyncio.Event(), "b": asyncio.Event()}
 
@@ -3421,24 +3421,24 @@ async def test_refresh_owner_runs_independent_per_binding_tasks(
             raise RuntimeError(msg)
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
 
-    owner.schedule_refresh("a", config=config, runtime_paths=runtime_paths)
-    owner.schedule_refresh("a", config=config, runtime_paths=runtime_paths)
-    owner.schedule_refresh("b", config=config, runtime_paths=runtime_paths)
+    scheduler.schedule_refresh("a", config=config, runtime_paths=runtime_paths)
+    scheduler.schedule_refresh("a", config=config, runtime_paths=runtime_paths)
+    scheduler.schedule_refresh("b", config=config, runtime_paths=runtime_paths)
     await asyncio.sleep(0)
 
     assert sorted(started) == ["a", "b"]
-    assert len(owner._tasks) == 2
+    assert len(scheduler._tasks) == 2
     release["b"].set()
     await asyncio.sleep(0)
-    assert any(key.base_id == "a" for key in owner._tasks)
+    assert any(key.base_id == "a" for key in scheduler._tasks)
     release["a"].set()
-    await owner.shutdown()
+    await scheduler.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_coalesces_duplicate_schedule_while_active(
+async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3450,7 +3450,7 @@ async def test_refresh_owner_coalesces_duplicate_schedule_while_active(
     latest_pending_config = config.model_copy(deep=True)
     latest_pending_config.knowledge_bases["docs"].chunk_size = 4096
     runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
+    scheduler = PerBindingKnowledgeRefreshScheduler()
     seen_chunk_sizes: list[int] = []
     first_started = asyncio.Event()
     release_first = asyncio.Event()
@@ -3468,12 +3468,12 @@ async def test_refresh_owner_coalesces_duplicate_schedule_while_active(
             second_started.set()
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
 
-    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await first_started.wait()
-    owner.schedule_refresh("docs", config=older_pending_config, runtime_paths=runtime_paths)
-    owner.schedule_refresh("docs", config=latest_pending_config, runtime_paths=runtime_paths)
+    scheduler.schedule_refresh("docs", config=older_pending_config, runtime_paths=runtime_paths)
+    scheduler.schedule_refresh("docs", config=latest_pending_config, runtime_paths=runtime_paths)
     await asyncio.sleep(0)
 
     assert seen_chunk_sizes == [5000]
@@ -3481,7 +3481,7 @@ async def test_refresh_owner_coalesces_duplicate_schedule_while_active(
     release_first.set()
     await asyncio.wait_for(second_started.wait(), timeout=1)
     for _attempt in range(50):
-        if not owner._tasks:
+        if not scheduler._tasks:
             break
         await asyncio.sleep(0)
     else:
@@ -3491,7 +3491,7 @@ async def test_refresh_owner_coalesces_duplicate_schedule_while_active(
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_refresh_now_runs_directly_with_force_reindex(
+async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3499,7 +3499,7 @@ async def test_refresh_owner_refresh_now_runs_directly_with_force_reindex(
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
+    scheduler = PerBindingKnowledgeRefreshScheduler()
     seen_force_reindex: list[bool] = []
 
     async def _fake_refresh(base_id: str, **kwargs: object) -> object:
@@ -3514,16 +3514,16 @@ async def test_refresh_owner_refresh_now_runs_directly_with_force_reindex(
             availability=KnowledgeAvailability.READY,
         )
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
 
-    result = await owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+    result = await scheduler.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
 
     assert result.indexed_count == 1
     assert seen_force_reindex == [True]
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_shutdown_suppresses_completed_refresh_failures(
+async def test_refresh_scheduler_shutdown_suppresses_completed_refresh_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3531,22 +3531,22 @@ async def test_refresh_owner_shutdown_suppresses_completed_refresh_failures(
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
+    scheduler = PerBindingKnowledgeRefreshScheduler()
 
     async def _fake_refresh(base_id: str, **_kwargs: object) -> object:
         _ = base_id
         msg = "refresh failed"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
 
-    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await asyncio.sleep(0)
-    await owner.shutdown()
+    await scheduler.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_does_not_schedule_after_shutdown(
+async def test_refresh_scheduler_does_not_schedule_after_shutdown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3554,7 +3554,7 @@ async def test_refresh_owner_does_not_schedule_after_shutdown(
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
+    scheduler = PerBindingKnowledgeRefreshScheduler()
     calls = 0
 
     async def _fake_refresh(base_id: str, **_kwargs: object) -> object:
@@ -3563,27 +3563,27 @@ async def test_refresh_owner_does_not_schedule_after_shutdown(
         calls += 1
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
 
-    await owner.shutdown()
-    owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await scheduler.shutdown()
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await asyncio.sleep(0)
 
     assert calls == 0
-    assert owner._tasks == {}
+    assert scheduler._tasks == {}
 
 
 @pytest.mark.asyncio
-async def test_refresh_status_is_visible_across_owner_instances(
+async def test_refresh_status_is_visible_across_scheduler_instances(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dashboard status owners should see refreshes started by the Matrix/orchestrator owner."""
+    """Dashboard status schedulers should see refreshes started by the Matrix/orchestrator scheduler."""
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    matrix_owner = PerBindingKnowledgeRefreshOwner()
-    api_owner = PerBindingKnowledgeRefreshOwner()
+    matrix_scheduler = PerBindingKnowledgeRefreshScheduler()
+    api_scheduler = PerBindingKnowledgeRefreshScheduler()
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -3593,20 +3593,20 @@ async def test_refresh_status_is_visible_across_owner_instances(
         await release.wait()
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _blocked_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _blocked_refresh)
 
-    matrix_owner.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    matrix_scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await started.wait()
 
     try:
-        assert api_owner.is_refreshing("docs", config=config, runtime_paths=runtime_paths) is True
+        assert api_scheduler.is_refreshing("docs", config=config, runtime_paths=runtime_paths) is True
     finally:
         release.set()
-        await matrix_owner.shutdown()
-        await api_owner.shutdown()
+        await matrix_scheduler.shutdown()
+        await api_scheduler.shutdown()
 
 
-def test_snapshot_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
+def test_index_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
     """The same base id resolves to separate refresh keys when storage binding differs."""
     path = tmp_path / "docs"
     config_a = _config(tmp_path / "a", bases={"docs": path}, agent_bases=["docs"])
@@ -3620,8 +3620,8 @@ def test_snapshot_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_private_agent_knowledge_publishes_isolated_snapshots(tmp_path: Path) -> None:
-    """Requester-local private knowledge must resolve to separate physical snapshot bindings."""
+async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path) -> None:
+    """Requester-local private knowledge must resolve to separate physical index bindings."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -3679,7 +3679,7 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Requester-local READY snapshots should be served and refreshed without request-time scans."""
+    """Requester-local READY indexes should be served and refreshed without request-time scans."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -3714,8 +3714,8 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
 
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
     note.write_text("alice private new", encoding="utf-8")
-    owner = MagicMock()
-    owner.schedule_refresh = MagicMock()
+    scheduler = MagicMock()
+    scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
     unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
 
@@ -3731,7 +3731,7 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
         config,
         runtime_paths,
         execution_identity=identity,
-        refresh_owner=owner,
+        refresh_scheduler=scheduler,
         on_unavailable_bases=unavailable.update,
         on_unavailable_base_details=unavailable_details.update,
     )
@@ -3745,11 +3745,11 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
             index_attached=True,
         ),
     }
-    owner.schedule_refresh.assert_called_once()
+    scheduler.schedule_refresh.assert_called_once()
 
 
 def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
-    """Private snapshot, lock, and refresh-cooldown registries should be pruned."""
+    """Private index, lock, and refresh-cooldown registries should be pruned."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -3785,7 +3785,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
             create=True,
         )
         collection = f"private_collection_{index}"
-        refresh_key = knowledge_registry.refresh_target_for_published_index_key(key)
+        refresh_target = knowledge_registry.refresh_target_for_published_index_key(key)
         knowledge_registry.publish_knowledge_index(
             key,
             knowledge=_Knowledge(_VectorDb(collection=collection)),
@@ -3798,23 +3798,23 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
             metadata_path=published_index_metadata_path(key),
         )
         knowledge_utils._refresh_schedule_due(
-            refresh_key,
+            refresh_target,
             KnowledgeAvailability.READY,
             settings=key.indexing_settings,
             cooldown_seconds=300,
         )
-        _create_idle_refresh_lock(knowledge_registry.source_root_for_refresh_target(refresh_key))
+        _create_idle_refresh_lock(knowledge_registry.source_root_for_refresh_target(refresh_target))
 
-    private_snapshot_count = sum(
+    private_index_count = sum(
         key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
     )
-    assert private_snapshot_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
+    assert private_index_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
     assert len(knowledge_utils._refresh_scheduled_at) <= knowledge_utils._MAX_REFRESH_SCHEDULED_COOLDOWNS
     assert len(knowledge_refresh_runner._refresh_locks) <= knowledge_refresh_runner._MAX_REFRESH_LOCKS
 
 
-def test_private_snapshot_read_path_cache_insertion_is_bounded(tmp_path: Path) -> None:
-    """Loading persisted private snapshots through the read path should prune old cache entries."""
+def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> None:
+    """Loading persisted private indexes through the read path should prune old cache entries."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -3872,10 +3872,10 @@ def test_private_snapshot_read_path_cache_insertion_is_bounded(tmp_path: Path) -
         )
         assert lookup.index is not None
 
-    private_snapshot_count = sum(
+    private_index_count = sum(
         key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
     )
-    assert private_snapshot_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
+    assert private_index_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
 
 
 def test_publish_knowledge_index_caches_handle_without_collection_leases(tmp_path: Path) -> None:
@@ -3890,7 +3890,7 @@ def test_publish_knowledge_index_caches_handle_without_collection_leases(tmp_pat
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge = _NonWeakrefKnowledge()
 
-    snapshot = knowledge_registry.publish_knowledge_index(
+    index = knowledge_registry.publish_knowledge_index(
         key,
         knowledge=knowledge,
         state=knowledge_registry.PublishedIndexingState(
@@ -3901,7 +3901,7 @@ def test_publish_knowledge_index_caches_handle_without_collection_leases(tmp_pat
         metadata_path=published_index_metadata_path(key),
     )
 
-    assert knowledge_registry._published_indexes[key] is snapshot
+    assert knowledge_registry._published_indexes[key] is index
 
 
 @pytest.mark.asyncio
@@ -3912,7 +3912,7 @@ async def test_published_indexed_count_uses_persisted_metadata_without_collectio
     """Routine status counts come from metadata rather than scanning vector rows."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -3930,11 +3930,11 @@ async def test_published_indexed_count_uses_persisted_metadata_without_collectio
 
 
 @pytest.mark.asyncio
-async def test_local_noop_refresh_reports_published_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unchanged local refresh republishes a usable snapshot and reports it as published."""
+async def test_local_noop_refresh_reports_published_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unchanged local refresh republishes a usable index and reports it as published."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("local snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("local index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     reindex_count = 0
@@ -3967,7 +3967,7 @@ async def test_local_refresh_reindexes_when_content_changes_with_same_mtime_and_
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
-    doc.write_text("old snapshot", encoding="utf-8")
+    doc.write_text("old index", encoding="utf-8")
     initial_stat = doc.stat()
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
@@ -3982,7 +3982,7 @@ async def test_local_refresh_reindexes_when_content_changes_with_same_mtime_and_
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    doc.write_text("new snapshot", encoding="utf-8")
+    doc.write_text("new index", encoding="utf-8")
     os.utime(doc, ns=(initial_stat.st_atime_ns, initial_stat.st_mtime_ns))
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
@@ -3990,8 +3990,8 @@ async def test_local_refresh_reindexes_when_content_changes_with_same_mtime_and_
     assert result.published is True
     assert reindex_count == 2
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("snapshot", max_results=5)] == [
-        "new snapshot",
+    assert [document.content for document in lookup.index.knowledge.search("index", max_results=5)] == [
+        "new index",
     ]
 
 
@@ -4003,7 +4003,7 @@ async def test_refresh_does_not_synthesize_missing_published_metadata(
     """A missing publish pointer after refresh leaves published unavailable instead of creating READY metadata."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("metadata snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("metadata index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     original_reindex = KnowledgeManager.reindex_all
@@ -4074,7 +4074,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
     """Git-backed refresh syncs first, publishes the revision, and persists no URL userinfo."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("git snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("git index", encoding="utf-8")
     git_config = KnowledgeGitConfig(
         repo_url="https://ghp_secret:x-oauth-basic@example.com/org/repo.git",
         branch="main",
@@ -4123,14 +4123,14 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
 
 
 @pytest.mark.asyncio
-async def test_git_noop_refresh_skips_full_reindex_when_snapshot_is_complete(
+async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unchanged Git poll should update sync metadata without rebuilding the collection."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("git snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("git index", encoding="utf-8")
     git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
     config = _config(
         tmp_path,
@@ -4191,7 +4191,7 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     """Git-backed corpora use tracked files only and ignore untracked checkout files."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("git tracked snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("git tracked index", encoding="utf-8")
     git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
     config = _config(
         tmp_path,
@@ -4231,7 +4231,7 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     assert reindex_count == 1
     assert lookup.index is not None
     assert [document.content for document in lookup.index.knowledge.search("git", max_results=5)] == [
-        "git tracked snapshot",
+        "git tracked index",
     ]
 
 
@@ -4306,7 +4306,7 @@ async def test_unchanged_refresh_fails_when_publish_handle_rebuild_returns_none(
     """The no-op path must not claim success without a usable published read handle."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("unchanged snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("unchanged index", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -4439,14 +4439,14 @@ async def test_force_git_reindex_bypasses_noop_fast_path(
 
 
 @pytest.mark.asyncio
-async def test_git_sync_failure_preserves_last_good_snapshot_and_redacts_error(
+async def test_git_sync_failure_preserves_last_good_index_and_redacts_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Git sync failure keeps the last-good index available under stale metadata."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("stable git snapshot", encoding="utf-8")
+    (docs_path / "doc.md").write_text("stable git index", encoding="utf-8")
     git_config = KnowledgeGitConfig(
         repo_url="https://ghp_secret:x-oauth-basic@example.com/org/repo.git",
         branch="main",
@@ -4488,8 +4488,8 @@ async def test_git_sync_failure_preserves_last_good_snapshot_and_redacts_error(
     assert "x-oauth-basic" not in state.last_error
     assert lookup.index is not None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
-    assert [document.content for document in lookup.index.knowledge.search("snapshot", max_results=5)] == [
-        "stable git snapshot",
+    assert [document.content for document in lookup.index.knowledge.search("index", max_results=5)] == [
+        "stable git index",
     ]
 
 
@@ -4616,7 +4616,7 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Git update for one base must not leave sibling snapshots READY for the old checkout."""
+    """A Git update for one base must not leave sibling indexes READY for the old checkout."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -5170,7 +5170,7 @@ async def test_git_updated_stale_registry_mark_uses_async_registry_path(
 
 
 @pytest.mark.asyncio
-async def test_refresh_owner_manual_reindex_runs_without_background_queue(
+async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5180,7 +5180,7 @@ async def test_refresh_owner_manual_reindex_runs_without_background_queue(
     old_config = config.model_copy(deep=True)
     old_config.knowledge_bases["docs"].chunk_size = 1024
     runtime_paths = runtime_paths_for(config)
-    owner = PerBindingKnowledgeRefreshOwner()
+    scheduler = PerBindingKnowledgeRefreshScheduler()
     first_started = asyncio.Event()
     release_first = asyncio.Event()
     seen: list[tuple[int, bool]] = []
@@ -5201,18 +5201,18 @@ async def test_refresh_owner_manual_reindex_runs_without_background_queue(
             availability=KnowledgeAvailability.READY,
         )
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_owner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
 
-    owner.schedule_refresh("docs", config=old_config, runtime_paths=runtime_paths)
+    scheduler.schedule_refresh("docs", config=old_config, runtime_paths=runtime_paths)
     await first_started.wait()
-    owner.schedule_refresh("docs", config=old_config, runtime_paths=runtime_paths)
+    scheduler.schedule_refresh("docs", config=old_config, runtime_paths=runtime_paths)
     manual_task = asyncio.create_task(
-        owner.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
+        scheduler.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
     )
     await asyncio.sleep(0)
     release_first.set()
     await manual_task
-    await owner.shutdown()
+    await scheduler.shutdown()
 
     assert seen == [(1024, False), (5000, True)]
 

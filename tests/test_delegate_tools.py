@@ -301,7 +301,7 @@ class TestDelegateKnowledge:
         assert mock_storage is not None
         scheduled_base_ids: list[str] = []
 
-        class _FakeRefreshOwner:
+        class _FakeRefreshScheduler:
             def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
                 scheduled_base_ids.append(base_id)
 
@@ -351,7 +351,7 @@ class TestDelegateKnowledge:
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
             include_interactive_questions=False,
-            refresh_owner=_FakeRefreshOwner(),
+            refresh_scheduler=_FakeRefreshScheduler(),
         )
         delegate_tool = next(tool for tool in agent.tools if tool.name == "delegate")
 

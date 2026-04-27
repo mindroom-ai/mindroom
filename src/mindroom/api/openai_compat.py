@@ -98,7 +98,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.history import PostResponseCompactionCheck
-    from mindroom.knowledge.refresh_owner import KnowledgeRefreshOwner
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
@@ -774,13 +774,13 @@ async def _resolve_auto_route(
     return routed
 
 
-def _request_knowledge_refresh_owner(request: Request) -> KnowledgeRefreshOwner | None:
-    """Return the app-scoped background knowledge refresh owner, if configured."""
+def _request_knowledge_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | None:
+    """Return the app-scoped background knowledge refresh scheduler, if configured."""
     try:
-        owner = request.app.state.knowledge_refresh_owner
+        refresh_scheduler = request.app.state.knowledge_refresh_scheduler
     except AttributeError:
         return None
-    return cast("KnowledgeRefreshOwner | None", owner)
+    return cast("KnowledgeRefreshScheduler | None", refresh_scheduler)
 
 
 def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]:
@@ -924,7 +924,7 @@ async def chat_completions(  # noqa: C901, PLR0912
         thread_id=None,
         resolved_thread_id=None,
     )
-    knowledge_refresh_owner = _request_knowledge_refresh_owner(request)
+    knowledge_refresh_scheduler = _request_knowledge_refresh_scheduler(request)
     completion_lock = _openai_completion_lock(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
@@ -947,7 +947,7 @@ async def chat_completions(  # noqa: C901, PLR0912
                     thread_history,
                     req.user,
                     execution_identity=execution_identity,
-                    refresh_owner=knowledge_refresh_owner,
+                    refresh_scheduler=knowledge_refresh_scheduler,
                 )
             else:
                 with tool_execution_identity(execution_identity):
@@ -961,7 +961,7 @@ async def chat_completions(  # noqa: C901, PLR0912
                         thread_history,
                         req.user,
                         execution_identity=execution_identity,
-                        refresh_owner=knowledge_refresh_owner,
+                        refresh_scheduler=knowledge_refresh_scheduler,
                     )
         else:
             # Resolve knowledge base for this agent
@@ -970,7 +970,7 @@ async def chat_completions(  # noqa: C901, PLR0912
                     agent_name,
                     config,
                     runtime_paths,
-                    refresh_owner=knowledge_refresh_owner,
+                    refresh_scheduler=knowledge_refresh_scheduler,
                     execution_identity=execution_identity,
                 )
             except Exception:
@@ -996,7 +996,7 @@ async def chat_completions(  # noqa: C901, PLR0912
                     req.user,
                     knowledge,
                     execution_identity=execution_identity,
-                    refresh_owner=knowledge_refresh_owner,
+                    refresh_scheduler=knowledge_refresh_scheduler,
                 )
             else:
                 with tool_execution_identity(execution_identity):
@@ -1010,7 +1010,7 @@ async def chat_completions(  # noqa: C901, PLR0912
                         req.user,
                         knowledge,
                         execution_identity=execution_identity,
-                        refresh_owner=knowledge_refresh_owner,
+                        refresh_scheduler=knowledge_refresh_scheduler,
                     )
     except BaseException:
         _release_openai_completion_lock(completion_lock)
@@ -1034,7 +1034,7 @@ async def _non_stream_completion(
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
     post_response_compaction_checks: list[PostResponseCompactionCheck] = []
@@ -1053,7 +1053,7 @@ async def _non_stream_completion(
         active_event_ids=set(),
         execution_identity=execution_identity,
         post_response_compaction_checks_collector=post_response_compaction_checks,
-        refresh_owner=refresh_owner,
+        refresh_scheduler=refresh_scheduler,
     )
 
     # Detect error responses from ai_response()
@@ -1241,7 +1241,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
     user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     post_response_compaction_checks: list[PostResponseCompactionCheck] = []
@@ -1264,7 +1264,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
                 active_event_ids=set(),
                 execution_identity=execution_identity,
                 post_response_compaction_checks_collector=post_response_compaction_checks,
-                refresh_owner=refresh_owner,
+                refresh_scheduler=refresh_scheduler,
             ),
         ),
     )
@@ -1419,7 +1419,7 @@ def _build_team(
     session_id: str | None = None,
     unavailable_bases: dict[str, KnowledgeAvailability] | None = None,
     unavailable_base_details: dict[str, KnowledgeAvailabilityDetail] | None = None,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> tuple[list[Agent], Team, TeamMode]:
     """Create member agents and build one agno.Team for a configured team.
 
@@ -1440,7 +1440,7 @@ def _build_team(
         include_openai_compat_guidance=True,
         unavailable_bases=unavailable_bases,
         unavailable_base_details=unavailable_base_details,
-        refresh_owner=refresh_owner,
+        refresh_scheduler=refresh_scheduler,
         reason_prefix=f"Team '{team_name}'",
     )
     try:
@@ -1531,7 +1531,7 @@ async def _non_stream_team_completion(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
     agents: list[Agent] = []
@@ -1560,7 +1560,7 @@ async def _non_stream_team_completion(
                     session_id,
                     unavailable_bases,
                     unavailable_base_details,
-                    refresh_owner,
+                    refresh_scheduler,
                 )
             except ValueError as e:
                 return _error_response(500, str(e), error_type="server_error")
@@ -1651,7 +1651,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-    refresh_owner: KnowledgeRefreshOwner | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     stack = ExitStack()
@@ -1695,7 +1695,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                     session_id,
                     unavailable_bases,
                     unavailable_base_details,
-                    refresh_owner,
+                    refresh_scheduler,
                 )
         except ValueError as e:
             await _cleanup()

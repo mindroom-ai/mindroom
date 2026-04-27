@@ -43,8 +43,8 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.knowledge import StandaloneKnowledgeRefreshOwner
-from mindroom.knowledge.watch import KnowledgeFilesystemWatchOwner
+from mindroom.knowledge import StandaloneKnowledgeRefreshScheduler
+from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
-    from mindroom.knowledge import KnowledgeRefreshOwner
+    from mindroom.knowledge import KnowledgeRefreshScheduler
 
 logger = get_logger(__name__)
 _UNSET = object()
@@ -335,31 +335,31 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     config_lifecycle.register_api_app(api_app)
 
 
-def _orchestrator_knowledge_refresh_owner(api_app: FastAPI) -> KnowledgeRefreshOwner | None:
-    """Return an orchestrator-provided refresh owner when the bundled API is running."""
+def _orchestrator_knowledge_refresh_scheduler(api_app: FastAPI) -> KnowledgeRefreshScheduler | None:
+    """Return an orchestrator-provided refresh scheduler when the bundled API is running."""
     try:
-        owner = api_app.state.orchestrator_knowledge_refresh_owner
+        refresh_scheduler = api_app.state.orchestrator_knowledge_refresh_scheduler
     except AttributeError:
         return None
-    return cast("KnowledgeRefreshOwner | None", owner)
+    return cast("KnowledgeRefreshScheduler | None", refresh_scheduler)
 
 
-def _standalone_knowledge_watch_owner(api_app: FastAPI) -> KnowledgeFilesystemWatchOwner | None:
+def _standalone_knowledge_source_watcher(api_app: FastAPI) -> KnowledgeSourceWatcher | None:
     """Return the API-owned filesystem watcher, when running without the orchestrator."""
     try:
-        owner = api_app.state.knowledge_watch_owner
+        source_watcher = api_app.state.knowledge_source_watcher
     except AttributeError:
         return None
-    return cast("KnowledgeFilesystemWatchOwner | None", owner)
+    return cast("KnowledgeSourceWatcher | None", source_watcher)
 
 
 async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
     """Align API-owned knowledge filesystem watchers with the committed config."""
-    owner = _standalone_knowledge_watch_owner(api_app)
-    if owner is None:
+    source_watcher = _standalone_knowledge_source_watcher(api_app)
+    if source_watcher is None:
         return
     snapshot = _app_context(api_app)
-    await owner.sync(config=snapshot.runtime_config, runtime_paths=snapshot.runtime_paths)
+    await source_watcher.sync(config=snapshot.runtime_config, runtime_paths=snapshot.runtime_paths)
 
 
 async def _watch_config(
@@ -426,15 +426,15 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("Syncing API credentials from runtime env")
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
-    standalone_knowledge_refresh_owner: StandaloneKnowledgeRefreshOwner | None = None
-    standalone_knowledge_watch_owner: KnowledgeFilesystemWatchOwner | None = None
-    knowledge_refresh_owner = _orchestrator_knowledge_refresh_owner(_app)
-    if knowledge_refresh_owner is None:
-        standalone_knowledge_refresh_owner = StandaloneKnowledgeRefreshOwner()
-        knowledge_refresh_owner = standalone_knowledge_refresh_owner
-        standalone_knowledge_watch_owner = KnowledgeFilesystemWatchOwner(knowledge_refresh_owner)
-        _app.state.knowledge_watch_owner = standalone_knowledge_watch_owner
-    _app.state.knowledge_refresh_owner = knowledge_refresh_owner
+    standalone_knowledge_refresh_scheduler: StandaloneKnowledgeRefreshScheduler | None = None
+    standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
+    knowledge_refresh_scheduler = _orchestrator_knowledge_refresh_scheduler(_app)
+    if knowledge_refresh_scheduler is None:
+        standalone_knowledge_refresh_scheduler = StandaloneKnowledgeRefreshScheduler()
+        knowledge_refresh_scheduler = standalone_knowledge_refresh_scheduler
+        standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler)
+        _app.state.knowledge_source_watcher = standalone_knowledge_source_watcher
+    _app.state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
     await _sync_standalone_knowledge_watchers(_app)
     logger.info(
         "Knowledge snapshots are not warmed during API startup; refresh is scheduled on access, filesystem watch, or explicit API actions",
@@ -453,10 +453,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await watch_task
     with suppress(asyncio.CancelledError):
         await worker_cleanup_task
-    if standalone_knowledge_watch_owner is not None:
-        await standalone_knowledge_watch_owner.shutdown()
-    if standalone_knowledge_refresh_owner is not None:
-        await standalone_knowledge_refresh_owner.shutdown()
+    if standalone_knowledge_source_watcher is not None:
+        await standalone_knowledge_source_watcher.shutdown()
+    if standalone_knowledge_refresh_scheduler is not None:
+        await standalone_knowledge_refresh_scheduler.shutdown()
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
