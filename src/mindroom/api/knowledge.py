@@ -31,8 +31,8 @@ from mindroom.knowledge.refresh_runner import (
     refresh_knowledge_binding,
 )
 from mindroom.knowledge.status import (
-    KnowledgeSnapshotStatus,
-    get_knowledge_snapshot_status,
+    KnowledgeIndexStatus,
+    get_knowledge_index_status,
     mark_source_dirty_async,
 )
 from mindroom.logging_config import get_logger
@@ -206,29 +206,29 @@ async def _mark_dirty_after_committed_mutation(
         return await dirty_task, True
 
 
-def _snapshot_status_sync(
+def _index_status_sync(
     config: Config,
     base_id: str,
     runtime_paths: constants.RuntimePaths,
-) -> KnowledgeSnapshotStatus:
+) -> KnowledgeIndexStatus:
     try:
-        return get_knowledge_snapshot_status(
+        return get_knowledge_index_status(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             create=False,
         )
     except Exception:
-        logger.warning("Could not resolve knowledge snapshot state", base_id=base_id, exc_info=True)
-        return KnowledgeSnapshotStatus()
+        logger.warning("Could not resolve published knowledge index state", base_id=base_id, exc_info=True)
+        return KnowledgeIndexStatus()
 
 
-async def _snapshot_status(
+async def _index_status(
     config: Config,
     base_id: str,
     runtime_paths: constants.RuntimePaths,
-) -> KnowledgeSnapshotStatus:
-    return await asyncio.to_thread(_snapshot_status_sync, config, base_id, runtime_paths)
+) -> KnowledgeIndexStatus:
+    return await asyncio.to_thread(_index_status_sync, config, base_id, runtime_paths)
 
 
 def _redacted_last_error(value: str | None) -> str | None:
@@ -264,14 +264,14 @@ async def _git_status(
     runtime_paths: constants.RuntimePaths,
     *,
     request: Request,
-    snapshot_status: KnowledgeSnapshotStatus | None = None,
+    index_status: KnowledgeIndexStatus | None = None,
 ) -> dict[str, Any] | None:
     git_config = config.knowledge_bases[base_id].git
     if git_config is None:
         return None
     root = _knowledge_root(config, base_id, runtime_paths)
-    if snapshot_status is None:
-        snapshot_status = _snapshot_status_sync(config, base_id, runtime_paths)
+    if index_status is None:
+        index_status = _index_status_sync(config, base_id, runtime_paths)
     repo_present = await asyncio.to_thread(
         git_checkout_present,
         root,
@@ -283,10 +283,10 @@ async def _git_status(
         "lfs": git_config.lfs,
         "syncing": _is_refreshing(config, base_id, runtime_paths, request=request),
         "repo_present": repo_present,
-        "initial_sync_complete": snapshot_status.initial_sync_complete,
-        "last_successful_sync_at": snapshot_status.last_published_at,
-        "last_successful_commit": snapshot_status.published_revision,
-        "last_error": _redacted_last_error(snapshot_status.last_error),
+        "initial_sync_complete": index_status.initial_sync_complete,
+        "last_successful_sync_at": index_status.last_published_at,
+        "last_successful_commit": index_status.published_revision,
+        "last_error": _redacted_last_error(index_status.last_error),
     }
 
 
@@ -460,13 +460,13 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
         file_info = await _list_file_info(config, base_id, root)
-        snapshot_status = await _snapshot_status(config, base_id, runtime_paths)
+        index_status = await _index_status(config, base_id, runtime_paths)
         git_status = await _git_status(
             config,
             base_id,
             runtime_paths,
             request=request,
-            snapshot_status=snapshot_status,
+            index_status=index_status,
         )
         refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
@@ -475,13 +475,13 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
             "path": str(root),
             "watch": base_config.watch,
             "file_count": len(file_info.files),
-            "indexed_count": snapshot_status.indexed_count,
+            "indexed_count": index_status.indexed_count,
             "refreshing": refreshing,
-            "refresh_state": snapshot_status.refresh_state,
+            "refresh_state": index_status.refresh_state,
             "file_listing_degraded": file_info.degraded,
         }
-        if snapshot_status.last_error is not None:
-            base_entry["last_error"] = _redacted_last_error(snapshot_status.last_error)
+        if index_status.last_error is not None:
+            base_entry["last_error"] = _redacted_last_error(index_status.last_error)
         if file_info.error is not None:
             base_entry["file_listing_error"] = file_info.error
         if git_status is not None:
@@ -595,14 +595,14 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     """Return current indexing status for one knowledge base."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
-    snapshot_status = await _snapshot_status(config, base_id, runtime_paths)
+    index_status = await _index_status(config, base_id, runtime_paths)
     file_info = await _list_file_info(config, base_id, root)
     git_status = await _git_status(
         config,
         base_id,
         runtime_paths,
         request=request,
-        snapshot_status=snapshot_status,
+        index_status=index_status,
     )
     refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
@@ -611,10 +611,10 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "folder_path": str(root),
         "watch": config.knowledge_bases[base_id].watch,
         "file_count": len(file_info.files),
-        "indexed_count": snapshot_status.indexed_count,
+        "indexed_count": index_status.indexed_count,
         "refreshing": refreshing,
-        "refresh_state": snapshot_status.refresh_state,
-        "last_error": _redacted_last_error(snapshot_status.last_error),
+        "refresh_state": index_status.refresh_state,
+        "last_error": _redacted_last_error(index_status.last_error),
         "file_listing_degraded": file_info.degraded,
         "file_listing_error": file_info.error,
     }
@@ -646,19 +646,19 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
                 force_reindex=True,
             )
     except Exception as exc:
-        snapshot_status = _snapshot_status_sync(config, base_id, runtime_paths)
+        index_status = _index_status_sync(config, base_id, runtime_paths)
         availability = (
-            snapshot_status.availability
-            if snapshot_status.indexing_status is not None
+            index_status.availability
+            if index_status.indexing_status is not None
             else KnowledgeAvailability.REFRESH_FAILED
         )
-        last_error = snapshot_status.last_error if snapshot_status.last_error is not None else str(exc)
+        last_error = index_status.last_error if index_status.last_error is not None else str(exc)
         raise HTTPException(
             status_code=409,
             detail={
                 "success": False,
                 "base_id": base_id,
-                "indexed_count": snapshot_status.indexed_count,
+                "indexed_count": index_status.indexed_count,
                 "availability": availability.value,
                 "last_error": _redacted_last_error(last_error),
             },

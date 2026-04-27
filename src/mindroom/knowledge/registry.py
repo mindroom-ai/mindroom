@@ -34,13 +34,13 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Identity levels:
-# - KnowledgeSourceKey: one physical source root. It gates source mutation locks and alias fanout.
-# - KnowledgeRefreshKey: one refresh target. It coalesces background work for a source and base ID.
-# - KnowledgeSnapshotKey: one published, query-compatible index. It includes indexing settings for read paths.
+# - KnowledgeSourceRoot: one physical source root. It gates source mutation locks and alias fanout.
+# - KnowledgeRefreshTarget: one refresh target. It coalesces background work for a source and base ID.
+# - PublishedIndexKey: one published, query-compatible index. It includes indexing settings for read paths.
 
 
 @dataclass(frozen=True)
-class KnowledgeSnapshotKey:
+class PublishedIndexKey:
     """Stable key for one configured knowledge binding."""
 
     base_id: str
@@ -50,7 +50,7 @@ class KnowledgeSnapshotKey:
 
 
 @dataclass(frozen=True)
-class KnowledgeRefreshKey:
+class KnowledgeRefreshTarget:
     """Stable key for refresh work for one physical knowledge binding."""
 
     base_id: str
@@ -59,7 +59,7 @@ class KnowledgeRefreshKey:
 
 
 @dataclass(frozen=True)
-class KnowledgeSourceKey:
+class KnowledgeSourceRoot:
     """Stable key for source filesystem mutations shared by aliases."""
 
     storage_root: str
@@ -85,27 +85,27 @@ class PublishedIndexingState:
 
 
 @dataclass(frozen=True)
-class PublishedKnowledgeSnapshot:
+class PublishedKnowledgeIndex:
     """Read handle for the active published knowledge collection."""
 
-    key: KnowledgeSnapshotKey
+    key: PublishedIndexKey
     knowledge: Knowledge
     state: PublishedIndexingState
     metadata_path: Path
 
 
 @dataclass(frozen=True)
-class KnowledgeSnapshotLookup:
+class KnowledgeIndexLookup:
     """Result of resolving the active collection for one knowledge base."""
 
-    key: KnowledgeSnapshotKey
-    snapshot: PublishedKnowledgeSnapshot | None
+    key: PublishedIndexKey
+    index: PublishedKnowledgeIndex | None
     state: PublishedIndexingState | None
     availability: KnowledgeAvailability
     schedule_refresh_on_access: bool = False
 
 
-class _SnapshotVectorDb(Protocol):
+class _PublishedIndexVectorDb(Protocol):
     client: object | None
     collection_name: str
 
@@ -114,9 +114,9 @@ class _SnapshotVectorDb(Protocol):
         ...
 
 
-_published_snapshots: dict[KnowledgeSnapshotKey, PublishedKnowledgeSnapshot] = {}
+_published_indexes: dict[PublishedIndexKey, PublishedKnowledgeIndex] = {}
 _PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
-_MAX_PRIVATE_PUBLISHED_SNAPSHOTS = 128
+_MAX_PRIVATE_PUBLISHED_INDEXES = 128
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -138,15 +138,15 @@ async def _run_to_thread_to_completion_on_cancel(
         raise
 
 
-def _snapshot_key_from_binding(
+def _published_index_key_from_binding(
     base_id: str,
     binding: ResolvedKnowledgeBinding,
     *,
     config: Config,
-) -> KnowledgeSnapshotKey:
+) -> PublishedIndexKey:
     storage_root = binding.storage_root.expanduser().resolve()
     knowledge_path = binding.knowledge_path.resolve()
-    return KnowledgeSnapshotKey(
+    return PublishedIndexKey(
         base_id=base_id,
         storage_root=str(storage_root),
         knowledge_path=str(knowledge_path),
@@ -159,14 +159,14 @@ def _snapshot_key_from_binding(
     )
 
 
-def _resolve_snapshot_key_and_binding(
+def _resolve_published_index_key_and_binding(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
-) -> tuple[KnowledgeSnapshotKey, ResolvedKnowledgeBinding]:
+) -> tuple[PublishedIndexKey, ResolvedKnowledgeBinding]:
     binding = resolve_knowledge_binding(
         base_id,
         config,
@@ -175,19 +175,19 @@ def _resolve_snapshot_key_and_binding(
         start_watchers=False,
         create=create,
     )
-    return _snapshot_key_from_binding(base_id, binding, config=config), binding
+    return _published_index_key_from_binding(base_id, binding, config=config), binding
 
 
-def resolve_snapshot_key(
+def resolve_published_index_key(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
-) -> KnowledgeSnapshotKey:
+) -> PublishedIndexKey:
     """Resolve one base ID to its current collection metadata key."""
-    key, _binding = _resolve_snapshot_key_and_binding(
+    key, _binding = _resolve_published_index_key_and_binding(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -197,36 +197,36 @@ def resolve_snapshot_key(
     return key
 
 
-def refresh_key_for_snapshot_key(key: KnowledgeSnapshotKey) -> KnowledgeRefreshKey:
-    """Return the refresh key for one snapshot key."""
-    return KnowledgeRefreshKey(
+def refresh_target_for_published_index_key(key: PublishedIndexKey) -> KnowledgeRefreshTarget:
+    """Return the refresh target for one published index key."""
+    return KnowledgeRefreshTarget(
         base_id=key.base_id,
         storage_root=key.storage_root,
         knowledge_path=key.knowledge_path,
     )
 
 
-def source_key_for_refresh_key(key: KnowledgeRefreshKey) -> KnowledgeSourceKey:
-    """Return the physical source key for one refresh key."""
-    return KnowledgeSourceKey(storage_root=key.storage_root, knowledge_path=key.knowledge_path)
+def source_root_for_refresh_target(key: KnowledgeRefreshTarget) -> KnowledgeSourceRoot:
+    """Return the physical source root for one refresh target."""
+    return KnowledgeSourceRoot(storage_root=key.storage_root, knowledge_path=key.knowledge_path)
 
 
-def source_key_for_snapshot_key(key: KnowledgeSnapshotKey) -> KnowledgeSourceKey:
-    """Return the physical source key for one snapshot key."""
-    return KnowledgeSourceKey(storage_root=key.storage_root, knowledge_path=key.knowledge_path)
+def source_root_for_published_index_key(key: PublishedIndexKey) -> KnowledgeSourceRoot:
+    """Return the physical source root for one published index key."""
+    return KnowledgeSourceRoot(storage_root=key.storage_root, knowledge_path=key.knowledge_path)
 
 
-def resolve_refresh_key(
+def resolve_refresh_target(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
-) -> KnowledgeRefreshKey:
-    """Resolve one base ID to its refresh key."""
-    return refresh_key_for_snapshot_key(
-        resolve_snapshot_key(
+) -> KnowledgeRefreshTarget:
+    """Resolve one base ID to its refresh target."""
+    return refresh_target_for_published_index_key(
+        resolve_published_index_key(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -236,7 +236,7 @@ def resolve_refresh_key(
     )
 
 
-def snapshot_base_storage_path(key: KnowledgeSnapshotKey) -> Path:
+def published_index_storage_path(key: PublishedIndexKey) -> Path:
     """Return the storage directory for one resolved knowledge base."""
     knowledge_path = Path(key.knowledge_path)
     return (
@@ -244,9 +244,9 @@ def snapshot_base_storage_path(key: KnowledgeSnapshotKey) -> Path:
     ).resolve()
 
 
-def snapshot_metadata_path(key: KnowledgeSnapshotKey) -> Path:
+def published_index_metadata_path(key: PublishedIndexKey) -> Path:
     """Return the single persisted state file for one knowledge base."""
-    return snapshot_base_storage_path(key) / "indexing_settings.json"
+    return published_index_storage_path(key) / "indexing_settings.json"
 
 
 def _coerce_nonnegative_int(value: object) -> int | None:
@@ -350,7 +350,7 @@ def save_published_indexing_state(metadata_path: Path, state: PublishedIndexingS
         raise
 
 
-def snapshot_refresh_state(
+def published_index_refresh_state(
     state: PublishedIndexingState | None,
     *,
     metadata_exists: bool = False,
@@ -368,7 +368,7 @@ def snapshot_refresh_state(
 
 
 def _state_with_refresh_fields(
-    key: KnowledgeSnapshotKey,
+    key: PublishedIndexKey,
     *,
     refresh_job: Literal["idle", "pending", "running", "failed"],
     status_when_missing: Literal["indexing", "failed"],
@@ -376,7 +376,7 @@ def _state_with_refresh_fields(
     last_error: str | None = None,
     clear_error: bool = False,
 ) -> PublishedIndexingState:
-    current = load_published_indexing_state(snapshot_metadata_path(key))
+    current = load_published_indexing_state(published_index_metadata_path(key))
     now = _utc_now()
     if current is None:
         return PublishedIndexingState(
@@ -398,15 +398,15 @@ def _state_with_refresh_fields(
     )
 
 
-def mark_snapshot_stale(
-    key: KnowledgeSnapshotKey,
+def mark_published_index_stale(
+    key: PublishedIndexKey,
     *,
     reason: str,
     refresh_job: Literal["idle", "pending", "running", "failed"] = "pending",
 ) -> None:
     """Mark the active collection stale without changing the published pointer."""
     save_published_indexing_state(
-        snapshot_metadata_path(key),
+        published_index_metadata_path(key),
         _state_with_refresh_fields(
             key,
             refresh_job=refresh_job,
@@ -416,10 +416,10 @@ def mark_snapshot_stale(
     )
 
 
-def mark_snapshot_refresh_running(key: KnowledgeSnapshotKey, *, reason: str = "refreshing") -> None:
+def mark_published_index_refresh_running(key: PublishedIndexKey, *, reason: str = "refreshing") -> None:
     """Mark refresh work running while keeping the old active collection readable."""
     save_published_indexing_state(
-        snapshot_metadata_path(key),
+        published_index_metadata_path(key),
         _state_with_refresh_fields(
             key,
             refresh_job="running",
@@ -429,9 +429,9 @@ def mark_snapshot_refresh_running(key: KnowledgeSnapshotKey, *, reason: str = "r
     )
 
 
-def mark_snapshot_refresh_failed_preserving_last_good(key: KnowledgeSnapshotKey, *, error: str) -> None:
+def mark_published_index_refresh_failed_preserving_last_good(key: PublishedIndexKey, *, error: str) -> None:
     """Record refresh failure while keeping any old active collection pointer."""
-    current = load_published_indexing_state(snapshot_metadata_path(key))
+    current = load_published_indexing_state(published_index_metadata_path(key))
     state = _state_with_refresh_fields(
         key,
         refresh_job="failed",
@@ -441,16 +441,16 @@ def mark_snapshot_refresh_failed_preserving_last_good(key: KnowledgeSnapshotKey,
     )
     if current is not None and current.status == "complete":
         state = replace(state, status="complete")
-    save_published_indexing_state(snapshot_metadata_path(key), state)
+    save_published_indexing_state(published_index_metadata_path(key), state)
 
 
-def mark_snapshot_refresh_succeeded(key: KnowledgeSnapshotKey) -> None:
+def mark_published_index_refresh_succeeded(key: PublishedIndexKey) -> None:
     """Clear refresh status after a successful publish."""
-    state = load_published_indexing_state(snapshot_metadata_path(key))
+    state = load_published_indexing_state(published_index_metadata_path(key))
     if state is None:
         return
     save_published_indexing_state(
-        snapshot_metadata_path(key),
+        published_index_metadata_path(key),
         replace(
             state,
             refresh_job="idle",
@@ -462,7 +462,7 @@ def mark_snapshot_refresh_succeeded(key: KnowledgeSnapshotKey) -> None:
     )
 
 
-def _state_collection_name(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> str:
+def _state_collection_name(key: PublishedIndexKey, state: PublishedIndexingState) -> str:
     _ = key
     if state.collection is None:
         msg = "Published knowledge metadata is missing a collection name"
@@ -470,42 +470,42 @@ def _state_collection_name(key: KnowledgeSnapshotKey, state: PublishedIndexingSt
     return state.collection
 
 
-def _build_snapshot_vector_db(
-    key: KnowledgeSnapshotKey,
+def _build_published_index_vector_db(
+    key: PublishedIndexKey,
     state: PublishedIndexingState,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> _SnapshotVectorDb:
+) -> _PublishedIndexVectorDb:
     return cast(
-        "_SnapshotVectorDb",
+        "_PublishedIndexVectorDb",
         manager_module.ChromaDb(
             collection=_state_collection_name(key, state),
-            path=str(snapshot_base_storage_path(key)),
+            path=str(published_index_storage_path(key)),
             persistent_client=True,
             embedder=manager_module._create_embedder(config, runtime_paths),
         ),
     )
 
 
-def _build_snapshot_knowledge(
-    key: KnowledgeSnapshotKey,
+def _build_published_index_knowledge(
+    key: PublishedIndexKey,
     state: PublishedIndexingState,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> Knowledge:
     return manager_module.Knowledge(
-        vector_db=_build_snapshot_vector_db(key, state, config=config, runtime_paths=runtime_paths),
+        vector_db=_build_published_index_vector_db(key, state, config=config, runtime_paths=runtime_paths),
     )
 
 
-def snapshot_collection_exists_for_state(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> bool:
+def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexingState) -> bool:
     """Return whether persisted metadata points at an existing active collection."""
     if state.status != "complete" or state.collection is None:
         return False
     try:
-        return manager_module.chroma_collection_exists(snapshot_base_storage_path(key), state.collection)
+        return manager_module.chroma_collection_exists(published_index_storage_path(key), state.collection)
     except Exception:
         logger.warning(
             "Published knowledge collection existence check failed",
@@ -546,7 +546,7 @@ def indexing_settings_metadata_equal(
     return published_settings == current_settings
 
 
-def indexing_settings_snapshot_compatible(
+def published_index_settings_compatible(
     published_settings: tuple[str, ...],
     current_settings: tuple[str, ...],
 ) -> bool:
@@ -557,21 +557,21 @@ def indexing_settings_snapshot_compatible(
     ) and indexing_settings_corpus_compatible(published_settings, current_settings)
 
 
-def _snapshot_state_queryable(key: KnowledgeSnapshotKey, state: PublishedIndexingState) -> bool:
+def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedIndexingState) -> bool:
     return (
         state.status == "complete"
         and state.collection is not None
-        and indexing_settings_snapshot_compatible(state.settings, key.indexing_settings)
+        and published_index_settings_compatible(state.settings, key.indexing_settings)
     )
 
 
-def _snapshot_availability(
+def _published_index_availability(
     *,
-    key: KnowledgeSnapshotKey,
+    key: PublishedIndexKey,
     state: PublishedIndexingState | None,
     metadata_exists: bool = False,
 ) -> KnowledgeAvailability:
-    refresh_state = snapshot_refresh_state(state, metadata_exists=metadata_exists)
+    refresh_state = published_index_refresh_state(state, metadata_exists=metadata_exists)
     if state is None:
         availability = (
             KnowledgeAvailability.REFRESH_FAILED
@@ -580,7 +580,7 @@ def _snapshot_availability(
         )
     elif state.collection is None and refresh_state == "refresh_failed":
         availability = KnowledgeAvailability.REFRESH_FAILED
-    elif not indexing_settings_snapshot_compatible(
+    elif not published_index_settings_compatible(
         state.settings,
         key.indexing_settings,
     ) or not indexing_settings_metadata_equal(state.settings, key.indexing_settings):
@@ -596,86 +596,86 @@ def _snapshot_availability(
     return availability
 
 
-def snapshot_availability_for_state(
+def published_index_availability_for_state(
     *,
-    key: KnowledgeSnapshotKey,
+    key: PublishedIndexKey,
     state: PublishedIndexingState | None,
     metadata_exists: bool = False,
 ) -> KnowledgeAvailability:
     """Return the public availability value for active collection state."""
-    return _snapshot_availability(
+    return _published_index_availability(
         key=key,
         state=state,
         metadata_exists=metadata_exists,
     )
 
 
-def _cached_snapshot_still_queryable(snapshot: PublishedKnowledgeSnapshot) -> bool:
-    if not _snapshot_state_queryable(snapshot.key, snapshot.state):
+def _cached_index_still_queryable(index: PublishedKnowledgeIndex) -> bool:
+    if not _published_index_state_queryable(index.key, index.state):
         return False
-    vector_db = cast("_SnapshotVectorDb | None", snapshot.knowledge.vector_db)
+    vector_db = cast("_PublishedIndexVectorDb | None", index.knowledge.vector_db)
     return vector_db is not None and vector_db.exists()
 
 
-def _load_queryable_snapshot_from_state(
-    key: KnowledgeSnapshotKey,
+def _load_queryable_index_from_state(
+    key: PublishedIndexKey,
     state: PublishedIndexingState,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> Knowledge | None:
-    if not _snapshot_state_queryable(key, state):
+    if not _published_index_state_queryable(key, state):
         return None
-    if not snapshot_collection_exists_for_state(key, state):
+    if not published_index_collection_exists_for_state(key, state):
         return None
-    return _build_snapshot_knowledge(key, state, config=config, runtime_paths=runtime_paths)
+    return _build_published_index_knowledge(key, state, config=config, runtime_paths=runtime_paths)
 
 
-def get_published_snapshot(
+def get_published_index(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> KnowledgeSnapshotLookup:
+) -> KnowledgeIndexLookup:
     """Return the currently active collection, if one is usable."""
-    key, binding = _resolve_snapshot_key_and_binding(
+    key, binding = _resolve_published_index_key_and_binding(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         create=False,
     )
-    metadata_path = snapshot_metadata_path(key)
+    metadata_path = published_index_metadata_path(key)
     state = load_published_indexing_state(metadata_path)
-    availability = _snapshot_availability(key=key, state=state, metadata_exists=metadata_path.exists())
+    availability = _published_index_availability(key=key, state=state, metadata_exists=metadata_path.exists())
 
-    snapshot = _published_snapshots.get(key)
-    if snapshot is not None:
-        if _cached_snapshot_still_queryable(snapshot):
-            return KnowledgeSnapshotLookup(
+    index = _published_indexes.get(key)
+    if index is not None:
+        if _cached_index_still_queryable(index):
+            return KnowledgeIndexLookup(
                 key=key,
-                snapshot=snapshot,
+                index=index,
                 state=state,
                 availability=availability,
                 schedule_refresh_on_access=binding.incremental_sync_on_access,
             )
-        _published_snapshots.pop(key, None)
+        _published_indexes.pop(key, None)
 
     if state is None:
-        return KnowledgeSnapshotLookup(
+        return KnowledgeIndexLookup(
             key=key,
-            snapshot=None,
+            index=None,
             state=state,
             availability=availability,
             schedule_refresh_on_access=binding.incremental_sync_on_access,
         )
 
-    knowledge = _load_queryable_snapshot_from_state(key, state, config=config, runtime_paths=runtime_paths)
+    knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
     if knowledge is None:
-        return KnowledgeSnapshotLookup(
+        return KnowledgeIndexLookup(
             key=key,
-            snapshot=None,
+            index=None,
             state=state,
             availability=availability
             if availability is not KnowledgeAvailability.READY
@@ -683,62 +683,62 @@ def get_published_snapshot(
             schedule_refresh_on_access=binding.incremental_sync_on_access,
         )
 
-    snapshot = PublishedKnowledgeSnapshot(
+    index = PublishedKnowledgeIndex(
         key=key,
         knowledge=knowledge,
         state=state,
-        metadata_path=snapshot_metadata_path(key),
+        metadata_path=published_index_metadata_path(key),
     )
-    _cache_published_snapshot(snapshot)
-    return KnowledgeSnapshotLookup(
+    _cache_published_index(index)
+    return KnowledgeIndexLookup(
         key=key,
-        snapshot=snapshot,
+        index=index,
         state=state,
         availability=availability,
         schedule_refresh_on_access=binding.incremental_sync_on_access,
     )
 
 
-def publish_snapshot(
-    key: KnowledgeSnapshotKey,
+def publish_knowledge_index(
+    key: PublishedIndexKey,
     *,
     knowledge: Knowledge,
     state: PublishedIndexingState,
     metadata_path: Path | None = None,
-) -> PublishedKnowledgeSnapshot:
+) -> PublishedKnowledgeIndex:
     """Publish a read handle in this process."""
-    _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(key))
-    snapshot = PublishedKnowledgeSnapshot(
+    _evict_published_indexes_for_refresh_target(refresh_target_for_published_index_key(key))
+    index = PublishedKnowledgeIndex(
         key=key,
         knowledge=knowledge,
         state=state,
-        metadata_path=metadata_path or snapshot_metadata_path(key),
+        metadata_path=metadata_path or published_index_metadata_path(key),
     )
-    _cache_published_snapshot(snapshot)
-    return snapshot
+    _cache_published_index(index)
+    return index
 
 
-def publish_snapshot_from_state(
-    key: KnowledgeSnapshotKey,
+def publish_knowledge_index_from_state(
+    key: PublishedIndexKey,
     *,
     state: PublishedIndexingState,
     config: Config,
     runtime_paths: RuntimePaths,
     metadata_path: Path | None = None,
-) -> PublishedKnowledgeSnapshot | None:
+) -> PublishedKnowledgeIndex | None:
     """Publish a read handle rebuilt from persisted metadata."""
-    knowledge = _load_queryable_snapshot_from_state(key, state, config=config, runtime_paths=runtime_paths)
+    knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
     if knowledge is None:
         return None
-    return publish_snapshot(key, knowledge=knowledge, state=state, metadata_path=metadata_path)
+    return publish_knowledge_index(key, knowledge=knowledge, state=state, metadata_path=metadata_path)
 
 
-def snapshot_indexed_count(snapshot: PublishedKnowledgeSnapshot) -> int:
+def published_indexed_count(index: PublishedKnowledgeIndex) -> int:
     """Return the persisted indexed source file count."""
-    return snapshot.state.indexed_count or 0
+    return index.state.indexed_count or 0
 
 
-def _same_physical_binding(key: KnowledgeSnapshotKey, refresh_key: KnowledgeRefreshKey) -> bool:
+def _same_physical_binding(key: PublishedIndexKey, refresh_key: KnowledgeRefreshTarget) -> bool:
     return (
         key.base_id == refresh_key.base_id
         and key.storage_root == refresh_key.storage_root
@@ -746,40 +746,40 @@ def _same_physical_binding(key: KnowledgeSnapshotKey, refresh_key: KnowledgeRefr
     )
 
 
-def _same_physical_source(left: KnowledgeSnapshotKey, right: KnowledgeSnapshotKey) -> bool:
+def _same_physical_source(left: PublishedIndexKey, right: PublishedIndexKey) -> bool:
     return left.storage_root == right.storage_root and left.knowledge_path == right.knowledge_path
 
 
-def _snapshot_key_is_private(key: KnowledgeSnapshotKey) -> bool:
+def _published_index_key_is_private(key: PublishedIndexKey) -> bool:
     return key.base_id.startswith(_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
 
 
-def prune_private_snapshot_bookkeeping() -> None:
-    """Bound PrivateAgentKnowledge in-process snapshot handles."""
-    private_snapshot_keys = [key for key in _published_snapshots if _snapshot_key_is_private(key)]
-    for key in private_snapshot_keys[:-_MAX_PRIVATE_PUBLISHED_SNAPSHOTS]:
-        _published_snapshots.pop(key, None)
+def prune_private_index_bookkeeping() -> None:
+    """Bound PrivateAgentKnowledge in-process published index handles."""
+    private_index_keys = [key for key in _published_indexes if _published_index_key_is_private(key)]
+    for key in private_index_keys[:-_MAX_PRIVATE_PUBLISHED_INDEXES]:
+        _published_indexes.pop(key, None)
 
 
-def _cache_published_snapshot(snapshot: PublishedKnowledgeSnapshot) -> None:
-    _published_snapshots[snapshot.key] = snapshot
-    prune_private_snapshot_bookkeeping()
+def _cache_published_index(index: PublishedKnowledgeIndex) -> None:
+    _published_indexes[index.key] = index
+    prune_private_index_bookkeeping()
 
 
-def _evict_published_snapshots_for_refresh_key(refresh_key: KnowledgeRefreshKey) -> None:
-    for cached_key in tuple(_published_snapshots):
+def _evict_published_indexes_for_refresh_target(refresh_key: KnowledgeRefreshTarget) -> None:
+    for cached_key in tuple(_published_indexes):
         if _same_physical_binding(cached_key, refresh_key):
-            _published_snapshots.pop(cached_key, None)
+            _published_indexes.pop(cached_key, None)
 
 
-def _snapshot_keys_for_shared_source(
+def _published_index_keys_for_shared_source(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> tuple[KnowledgeSnapshotKey, ...]:
-    key = resolve_snapshot_key(
+) -> tuple[PublishedIndexKey, ...]:
+    key = resolve_published_index_key(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -791,7 +791,7 @@ def _snapshot_keys_for_shared_source(
         if candidate_base_id == base_id:
             continue
         try:
-            candidate_key = resolve_snapshot_key(
+            candidate_key = resolve_published_index_key(
                 candidate_base_id,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -800,7 +800,7 @@ def _snapshot_keys_for_shared_source(
             )
         except Exception:
             logger.warning(
-                "Could not resolve related knowledge snapshot while marking dirty",
+                "Could not resolve related published knowledge index while marking dirty",
                 base_id=base_id,
                 related_base_id=candidate_base_id,
                 exc_info=True,
@@ -811,9 +811,9 @@ def _snapshot_keys_for_shared_source(
     return tuple(matching_keys)
 
 
-def _mark_snapshot_key_stale_on_disk(matching_key: KnowledgeSnapshotKey, *, reason: str) -> bool:
-    mark_snapshot_stale(matching_key, reason=reason)
-    _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
+def _mark_published_index_key_stale_on_disk(matching_key: PublishedIndexKey, *, reason: str) -> bool:
+    mark_published_index_stale(matching_key, reason=reason)
+    _evict_published_indexes_for_refresh_target(refresh_target_for_published_index_key(matching_key))
     return True
 
 
@@ -825,15 +825,15 @@ def mark_source_dirty(
     execution_identity: ToolExecutionIdentity | None = None,
     reason: str = "source_mutated",
 ) -> tuple[str, ...]:
-    """Mark same-source snapshots stale after a source mutation."""
-    matching_keys = _snapshot_keys_for_shared_source(
+    """Mark same-source published indexes stale after a source mutation."""
+    matching_keys = _published_index_keys_for_shared_source(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
     for matching_key in matching_keys:
-        _mark_snapshot_key_stale_on_disk(matching_key, reason=reason)
+        _mark_published_index_key_stale_on_disk(matching_key, reason=reason)
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 
@@ -856,6 +856,6 @@ async def mark_source_dirty_async(
     )
 
 
-def clear_published_snapshots() -> None:
+def clear_published_indexes() -> None:
     """Clear process-local read handles."""
-    _published_snapshots.clear()
+    _published_indexes.clear()

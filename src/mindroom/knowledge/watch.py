@@ -1,4 +1,4 @@
-"""Filesystem watch scheduling for knowledge snapshot refreshes."""
+"""Filesystem watch scheduling for published knowledge index refreshes."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from watchfiles import Change, awatch
 
 from mindroom.knowledge.manager import include_semantic_knowledge_relative_path
 from mindroom.knowledge.registry import (
-    KnowledgeSourceKey,
+    KnowledgeSourceRoot,
     mark_source_dirty_async,
-    resolve_refresh_key,
-    source_key_for_refresh_key,
+    resolve_refresh_target,
+    source_root_for_refresh_target,
 )
 from mindroom.logging_config import get_logger
 
@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class _WatchTarget:
-    key: KnowledgeSourceKey
+    key: KnowledgeSourceRoot
     path: Path
     base_ids: tuple[str, ...]
 
@@ -47,8 +47,8 @@ def _ensure_watch_root(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> dict[KnowledgeSourceKey, _WatchTarget]:
-    targets_by_key: dict[KnowledgeSourceKey, list[str]] = {}
+def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> dict[KnowledgeSourceRoot, _WatchTarget]:
+    targets_by_key: dict[KnowledgeSourceRoot, list[str]] = {}
     for base_id in sorted(config.knowledge_bases):
         base_config = config.get_knowledge_base_config(base_id)
         if not base_config.watch or base_config.git is not None:
@@ -56,15 +56,15 @@ def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> 
         if config.get_private_knowledge_base_agent(base_id) is not None:
             continue
 
-        refresh_key = resolve_refresh_key(
+        refresh_key = resolve_refresh_target(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             create=True,
         )
-        targets_by_key.setdefault(source_key_for_refresh_key(refresh_key), []).append(base_id)
+        targets_by_key.setdefault(source_root_for_refresh_target(refresh_key), []).append(base_id)
 
-    targets: dict[KnowledgeSourceKey, _WatchTarget] = {}
+    targets: dict[KnowledgeSourceRoot, _WatchTarget] = {}
     for key, base_ids in targets_by_key.items():
         path = Path(key.knowledge_path)
         _ensure_watch_root(path)
@@ -97,11 +97,11 @@ def _changes_include_indexable_path(
 
 
 class KnowledgeFilesystemWatchOwner:
-    """Own filesystem watchers that schedule atomic knowledge snapshot refreshes."""
+    """Own filesystem watchers that schedule atomic published index refreshes."""
 
     def __init__(self, refresh_owner: KnowledgeRefreshOwner) -> None:
         self._refresh_owner = refresh_owner
-        self._tasks: dict[KnowledgeSourceKey, _WatchTask] = {}
+        self._tasks: dict[KnowledgeSourceRoot, _WatchTask] = {}
 
     async def sync(self, *, config: Config | None, runtime_paths: RuntimePaths) -> None:
         """Replace watcher tasks so they match the current shared local knowledge config."""

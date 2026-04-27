@@ -17,10 +17,10 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.redaction import embedded_http_userinfo
 from mindroom.knowledge.registry import (
-    KnowledgeRefreshKey,
-    KnowledgeSnapshotLookup,
-    get_published_snapshot,
-    refresh_key_for_snapshot_key,
+    KnowledgeIndexLookup,
+    KnowledgeRefreshTarget,
+    get_published_index,
+    refresh_target_for_published_index_key,
 )
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
@@ -39,16 +39,16 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
-_refresh_scheduled_at: dict[tuple[KnowledgeRefreshKey, KnowledgeAvailability, tuple[str, ...] | None], float] = {}
+_refresh_scheduled_at: dict[tuple[KnowledgeRefreshTarget, KnowledgeAvailability, tuple[str, ...] | None], float] = {}
 _EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY = secrets.token_bytes(32)
 
 
 @dataclass(frozen=True)
 class KnowledgeAvailabilityDetail:
-    """Availability plus whether this turn received a last-good snapshot."""
+    """Availability plus whether this turn received a last-good index."""
 
     availability: KnowledgeAvailability
-    snapshot_attached: bool
+    index_attached: bool
 
 
 @dataclass(frozen=True)
@@ -91,22 +91,22 @@ def _lookup_knowledge_for_base(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> KnowledgeSnapshotLookup | None:
+) -> KnowledgeIndexLookup | None:
     """Resolve one configured base ID to its current Knowledge instance."""
     try:
-        return get_published_snapshot(
+        return get_published_index(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         )
     except Exception:
-        logger.exception("Knowledge snapshot lookup failed", base_id=base_id)
+        logger.exception("Published knowledge index lookup failed", base_id=base_id)
         return None
 
 
 def _refresh_schedule_due(
-    key: KnowledgeRefreshKey,
+    key: KnowledgeRefreshTarget,
     availability: KnowledgeAvailability,
     *,
     settings: tuple[str, ...] | None = None,
@@ -131,7 +131,7 @@ def _prune_refresh_schedule_bookkeeping() -> None:
         _refresh_scheduled_at.pop(cache_key, None)
 
 
-def _published_snapshot_age_seconds(value: str | None) -> float | None:
+def _published_index_age_seconds(value: str | None) -> float | None:
     if value is None:
         return None
     try:
@@ -143,38 +143,38 @@ def _published_snapshot_age_seconds(value: str | None) -> float | None:
     return max((datetime.now(tz=UTC) - published_at).total_seconds(), 0.0)
 
 
-def _git_poll_interval_seconds(lookup: KnowledgeSnapshotLookup, config: Config) -> float | None:
+def _git_poll_interval_seconds(lookup: KnowledgeIndexLookup, config: Config) -> float | None:
     git_config = config.get_knowledge_base_config(lookup.key.base_id).git
     if git_config is None:
         return None
     return max(float(git_config.poll_interval_seconds), 0.0)
 
 
-def _git_poll_due(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
-    if lookup.snapshot is None:
+def _git_poll_due(lookup: KnowledgeIndexLookup, config: Config) -> bool:
+    if lookup.index is None:
         return False
     poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
     if poll_interval_seconds is None:
         return False
-    published_age_seconds = _published_snapshot_age_seconds(
-        lookup.snapshot.state.last_refresh_at or lookup.snapshot.state.last_published_at,
+    published_age_seconds = _published_index_age_seconds(
+        lookup.index.state.last_refresh_at or lookup.index.state.last_published_at,
     )
     return published_age_seconds is None or published_age_seconds >= poll_interval_seconds
 
 
-def _ready_snapshot_effective_availability(
-    lookup: KnowledgeSnapshotLookup,
+def _ready_index_effective_availability(
+    lookup: KnowledgeIndexLookup,
     config: Config,
 ) -> KnowledgeAvailability:
-    """Return request-path availability for a ready snapshot without eager rescans."""
+    """Return request-path availability for a ready index without eager rescans."""
     availability = lookup.availability
-    if availability is KnowledgeAvailability.READY and lookup.snapshot is not None and _git_poll_due(lookup, config):
+    if availability is KnowledgeAvailability.READY and lookup.index is not None and _git_poll_due(lookup, config):
         availability = KnowledgeAvailability.STALE
     return availability
 
 
 def _refresh_cooldown_seconds(
-    lookup: KnowledgeSnapshotLookup | None,
+    lookup: KnowledgeIndexLookup | None,
     config: Config,
     availability: KnowledgeAvailability,
 ) -> float:
@@ -187,7 +187,7 @@ def _refresh_cooldown_seconds(
 
 
 def _failed_refresh_retry_fingerprint(
-    lookup: KnowledgeSnapshotLookup,
+    lookup: KnowledgeIndexLookup,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, ...]:
@@ -232,7 +232,7 @@ def _embedded_userinfo_fingerprint(repo_url: str) -> str:
 
 
 def _refresh_retry_settings(
-    lookup: KnowledgeSnapshotLookup,
+    lookup: KnowledgeIndexLookup,
     config: Config,
     runtime_paths: RuntimePaths,
     availability: KnowledgeAvailability,
@@ -244,7 +244,7 @@ def _refresh_retry_settings(
     return None
 
 
-def _schedule_refresh_on_access_cooldown_seconds(lookup: KnowledgeSnapshotLookup, config: Config) -> float:
+def _schedule_refresh_on_access_cooldown_seconds(lookup: KnowledgeIndexLookup, config: Config) -> float:
     """Return READY refresh throttle without request-path source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return _REFRESH_RETRY_COOLDOWN_SECONDS
@@ -252,7 +252,7 @@ def _schedule_refresh_on_access_cooldown_seconds(lookup: KnowledgeSnapshotLookup
     return max(poll_interval_seconds or _REFRESH_RETRY_COOLDOWN_SECONDS, 1.0)
 
 
-def _schedule_refresh_on_access_due(lookup: KnowledgeSnapshotLookup, config: Config) -> bool:
+def _schedule_refresh_on_access_due(lookup: KnowledgeIndexLookup, config: Config) -> bool:
     """Return whether READY on-access refresh should be scheduled without source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return True
@@ -288,13 +288,13 @@ def _schedule_refresh_for_availability(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-    lookup: KnowledgeSnapshotLookup | None,
+    lookup: KnowledgeIndexLookup | None,
     availability: KnowledgeAvailability,
 ) -> KnowledgeAvailability:
     if lookup is None:
         return availability
 
-    refresh_key = refresh_key_for_snapshot_key(lookup.key)
+    refresh_key = refresh_target_for_published_index_key(lookup.key)
     if availability is KnowledgeAvailability.READY:
         if not lookup.schedule_refresh_on_access or not _schedule_refresh_on_access_due(lookup, config):
             return availability
@@ -387,8 +387,8 @@ def resolve_agent_knowledge_access(
         )
         availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
         if lookup is not None and availability is KnowledgeAvailability.READY:
-            availability = _ready_snapshot_effective_availability(lookup, config)
-        knowledge = lookup.snapshot.knowledge if lookup is not None and lookup.snapshot is not None else None
+            availability = _ready_index_effective_availability(lookup, config)
+        knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
         if refresh_owner is not None:
             availability = _schedule_refresh_for_availability(
                 refresh_owner,
@@ -439,14 +439,14 @@ def get_agent_knowledge(
     return resolution.knowledge
 
 
-def _stale_availability_notice(base_id: str, *, snapshot_attached: bool) -> str:
-    if snapshot_attached:
+def _stale_availability_notice(base_id: str, *, index_attached: bool) -> str:
+    if index_attached:
         return (
             f"Knowledge base `{base_id}` may be stale while a refresh is pending this turn. "
             "Do not claim to have searched the latest contents."
         )
     return (
-        f"Knowledge base `{base_id}` is unavailable for semantic search this turn because its stale published snapshot "
+        f"Knowledge base `{base_id}` is unavailable for semantic search this turn because its stale published index "
         "could not be loaded. Do not claim to have searched it."
     )
 
@@ -462,10 +462,10 @@ def format_knowledge_availability_notice(
     for base_id, availability_value in sorted(unavailable_bases.items()):
         if isinstance(availability_value, KnowledgeAvailabilityDetail):
             availability = availability_value.availability
-            snapshot_attached = availability_value.snapshot_attached
+            index_attached = availability_value.index_attached
         else:
             availability = availability_value
-            snapshot_attached = True
+            index_attached = True
 
         if availability is KnowledgeAvailability.INITIALIZING:
             lines.append(
@@ -473,7 +473,7 @@ def format_knowledge_availability_notice(
                 "Do not claim to have searched it.",
             )
         elif availability is KnowledgeAvailability.CONFIG_MISMATCH:
-            if snapshot_attached:
+            if index_attached:
                 lines.append(
                     f"Knowledge base `{base_id}` is refreshing against newer config and may be stale this turn. "
                     "Do not claim to have searched the latest contents.",
@@ -481,12 +481,12 @@ def format_knowledge_availability_notice(
             else:
                 lines.append(
                     f"Knowledge base `{base_id}` is unavailable for semantic search this turn because its "
-                    "published snapshot does not match current config. Do not claim to have searched it.",
+                    "published index does not match current config. Do not claim to have searched it.",
                 )
         elif availability is KnowledgeAvailability.STALE:
-            lines.append(_stale_availability_notice(base_id, snapshot_attached=snapshot_attached))
+            lines.append(_stale_availability_notice(base_id, index_attached=index_attached))
         elif availability is KnowledgeAvailability.REFRESH_FAILED:
-            if snapshot_attached:
+            if index_attached:
                 lines.append(
                     f"Knowledge base `{base_id}` had a recent refresh failure and may be stale this turn. "
                     "Do not claim to have searched the latest contents.",
@@ -548,7 +548,7 @@ class MultiKnowledgeVectorDb:
 
     Duck-types the vector_db interface expected by agno's ``Knowledge.__post_init__``.
     ``exists()`` returns True and ``create()`` is a no-op so that Knowledge skips its
-    own initialization; the underlying snapshots are already-published read handles.
+    own initialization; the underlying indexes are already-published read handles.
     If agno changes the ``__post_init__`` protocol, this adapter will need updating.
     """
 
@@ -571,7 +571,7 @@ class MultiKnowledgeVectorDb:
         return True
 
     def create(self) -> None:
-        """No-op because underlying snapshots are already published."""
+        """No-op because underlying indexes are already published."""
         return
 
     def search(
@@ -691,7 +691,7 @@ def resolve_agent_knowledge(
             if availability is not KnowledgeAvailability.READY:
                 unavailable_base_details[base_id] = KnowledgeAvailabilityDetail(
                     availability=availability,
-                    snapshot_attached=knowledge is not None,
+                    index_attached=knowledge is not None,
                 )
         if knowledge is None:
             missing_base_ids.append(base_id)

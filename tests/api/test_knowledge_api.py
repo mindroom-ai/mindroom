@@ -24,7 +24,11 @@ from mindroom.api import main
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge import KnowledgeAvailability
-from mindroom.knowledge.registry import load_published_indexing_state, resolve_snapshot_key, snapshot_metadata_path
+from mindroom.knowledge.registry import (
+    load_published_indexing_state,
+    published_index_metadata_path,
+    resolve_published_index_key,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -79,8 +83,8 @@ def _write_snapshot_metadata(
     last_error: str | None = None,
     indexed_count: int | None = None,
 ) -> None:
-    key = resolve_snapshot_key(base_id, config=config, runtime_paths=runtime_paths)
-    metadata_path = snapshot_metadata_path(key)
+    key = resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = {
         "settings": list(key.indexing_settings),
@@ -95,9 +99,9 @@ def _write_snapshot_metadata(
         payload["last_published_at"] = published_at
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     if last_error is None:
-        knowledge_registry.mark_snapshot_refresh_succeeded(key)
+        knowledge_registry.mark_published_index_refresh_succeeded(key)
     else:
-        knowledge_registry.mark_snapshot_refresh_failed_preserving_last_good(key, error=last_error)
+        knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error=last_error)
 
 
 def _init_git_checkout(path: Path, *tracked_paths: str) -> None:
@@ -256,7 +260,7 @@ def test_status_does_not_probe_collection_availability(tmp_path: Path, monkeypat
         msg = "status should not probe collection availability"
         raise AssertionError(msg)
 
-    monkeypatch.setattr(knowledge_registry, "snapshot_collection_exists_for_state", _offloaded_collection_probe)
+    monkeypatch.setattr(knowledge_registry, "published_index_collection_exists_for_state", _offloaded_collection_probe)
 
     response = client.get("/api/knowledge/bases/research/status")
 
@@ -283,11 +287,11 @@ def test_status_reports_queryable_last_good_snapshot_when_refresh_state_is_not_r
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     _write_snapshot_metadata(config, runtime_paths, indexed_count=7)
-    key = resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("research", config=config, runtime_paths=runtime_paths)
     if refresh_state == "stale":
-        knowledge_registry.mark_snapshot_stale(key, reason="source_changed")
+        knowledge_registry.mark_published_index_stale(key, reason="source_changed")
     else:
-        knowledge_registry.mark_snapshot_refresh_failed_preserving_last_good(key, error="refresh failed")
+        knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="refresh failed")
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         status_response = client.get("/api/knowledge/bases/research/status")
@@ -316,15 +320,15 @@ def test_status_rejects_query_incompatible_published_snapshot(tmp_path: Path) ->
     docs.mkdir()
     config = _knowledge_config(docs)
     _write_snapshot_metadata(config, runtime_paths, indexed_count=9)
-    key = resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths)
-    metadata_path = snapshot_metadata_path(key)
+    key = resolve_published_index_key("research", config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["settings"][3] = "different-embedder-provider"
     metadata_path.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
     _publish_committed_runtime_config(client.app, config)
 
     with patch(
-        "mindroom.knowledge.registry.snapshot_collection_exists_for_state",
+        "mindroom.knowledge.registry.published_index_collection_exists_for_state",
         side_effect=AssertionError("query-incompatible snapshots should not probe collection availability"),
     ):
         response = client.get("/api/knowledge/bases/research/status")
@@ -769,7 +773,7 @@ def test_upload_dirty_mark_write_runs_off_event_loop(
     owner = _RecordingRefreshOwner()
     client.app.state.knowledge_refresh_owner = owner
     saw_running_loop: bool | None = None
-    original_save = knowledge_registry.mark_snapshot_stale
+    original_save = knowledge_registry.mark_published_index_stale
 
     def _offloaded_save(*args: object, **kwargs: object) -> object:
         nonlocal saw_running_loop
@@ -781,7 +785,7 @@ def test_upload_dirty_mark_write_runs_off_event_loop(
             saw_running_loop = True
         return original_save(*args, **kwargs)
 
-    monkeypatch.setattr(knowledge_registry, "mark_snapshot_stale", _offloaded_save)
+    monkeypatch.setattr(knowledge_registry, "mark_published_index_stale", _offloaded_save)
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -985,8 +989,8 @@ def test_upload_write_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
             files=[("files", ("guide.md", b"new", "text/markdown"))],
         )
 
-    metadata_path = snapshot_metadata_path(
-        resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths),
+    metadata_path = published_index_metadata_path(
+        resolve_published_index_key("research", config=config, runtime_paths=runtime_paths),
     )
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert "availability" not in metadata
@@ -1205,9 +1209,9 @@ async def test_delete_uses_once_decoded_route_path_for_percent_bearing_filenames
     assert response["path"] == literal_path
     assert not literal_file.exists()
     assert decoded_file.read_text(encoding="utf-8") == "decoded"
-    key = resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths)
-    state = load_published_indexing_state(snapshot_metadata_path(key))
-    assert knowledge_registry.snapshot_refresh_state(state) == "stale"
+    key = resolve_published_index_key("research", config=config, runtime_paths=runtime_paths)
+    state = load_published_indexing_state(published_index_metadata_path(key))
+    assert knowledge_registry.published_index_refresh_state(state) == "stale"
     assert [(base_id, scheduled_config) for base_id, scheduled_config, _ in owner.scheduled] == [("research", config)]
     refresh.assert_not_awaited()
 
@@ -1397,8 +1401,8 @@ def test_delete_filesystem_failure_leaves_ready_snapshot_unchanged_and_skips_ref
     ):
         client.delete("/api/knowledge/bases/research/files/guide.md")
 
-    metadata_path = snapshot_metadata_path(
-        resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths),
+    metadata_path = published_index_metadata_path(
+        resolve_published_index_key("research", config=config, runtime_paths=runtime_paths),
     )
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert "availability" not in metadata
@@ -1707,7 +1711,7 @@ def test_status_degrades_gracefully_when_snapshot_key_resolution_fails(tmp_path:
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
 
-    with patch("mindroom.api.knowledge.get_knowledge_snapshot_status", side_effect=ValueError("bad binding")):
+    with patch("mindroom.api.knowledge.get_knowledge_index_status", side_effect=ValueError("bad binding")):
         response = client.get("/api/knowledge/bases/research/status")
 
     assert response.status_code == 200

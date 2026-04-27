@@ -1,4 +1,4 @@
-"""Best-effort background refresh ownership for knowledge snapshots."""
+"""Best-effort background refresh scheduling for published knowledge indexes."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from mindroom.knowledge.refresh_runner import (
     mark_refresh_inactive,
     refresh_knowledge_binding,
 )
-from mindroom.knowledge.registry import KnowledgeRefreshKey, resolve_refresh_key
+from mindroom.knowledge.registry import KnowledgeRefreshTarget, resolve_refresh_target
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -76,8 +76,8 @@ class _ScheduledRefresh:
 class PerBindingKnowledgeRefreshOwner:
     """Run at most one best-effort background refresh per binding."""
 
-    _tasks: dict[KnowledgeRefreshKey, asyncio.Task[None]] = field(default_factory=dict, init=False)
-    _pending: dict[KnowledgeRefreshKey, _ScheduledRefresh] = field(default_factory=dict, init=False)
+    _tasks: dict[KnowledgeRefreshTarget, asyncio.Task[None]] = field(default_factory=dict, init=False)
+    _pending: dict[KnowledgeRefreshTarget, _ScheduledRefresh] = field(default_factory=dict, init=False)
     _shutting_down: bool = field(default=False, init=False)
 
     def schedule_refresh(
@@ -106,7 +106,7 @@ class PerBindingKnowledgeRefreshOwner:
     ) -> bool:
         """Return whether one resolved knowledge binding is refreshing."""
         try:
-            key = resolve_refresh_key(
+            key = resolve_refresh_target(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -159,7 +159,7 @@ class PerBindingKnowledgeRefreshOwner:
             logger.debug("Skipping knowledge refresh schedule after shutdown", base_id=base_id)
             return
         try:
-            key = resolve_refresh_key(
+            key = resolve_refresh_target(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -181,7 +181,7 @@ class PerBindingKnowledgeRefreshOwner:
             return
         self._start_task(key, request)
 
-    def _start_task(self, key: KnowledgeRefreshKey, request: _ScheduledRefresh) -> None:
+    def _start_task(self, key: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
         loop = _running_loop_for_schedule(key.base_id)
         if loop is None:
             return
@@ -190,7 +190,7 @@ class PerBindingKnowledgeRefreshOwner:
         self._tasks[key] = task
         task.add_done_callback(lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed))
 
-    def _handle_done(self, key: KnowledgeRefreshKey, task: asyncio.Task[None]) -> None:
+    def _handle_done(self, key: KnowledgeRefreshTarget, task: asyncio.Task[None]) -> None:
         mark_refresh_inactive(key)
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
@@ -208,7 +208,7 @@ class PerBindingKnowledgeRefreshOwner:
         if pending_request is not None:
             self._start_task(key, pending_request)
 
-    async def _run_refresh(self, key: KnowledgeRefreshKey, request: _ScheduledRefresh) -> None:
+    async def _run_refresh(self, key: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
         await refresh_knowledge_binding(
             key.base_id,
             config=request.config,

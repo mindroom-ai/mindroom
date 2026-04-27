@@ -18,8 +18,8 @@ _KnowledgeRefreshState = Literal["none", "stale", "refreshing", "refresh_failed"
 
 
 @dataclass(frozen=True)
-class KnowledgeSnapshotStatus:
-    """Read-only snapshot status for API and runtime status surfaces."""
+class KnowledgeIndexStatus:
+    """Read-only published index status for API and runtime status surfaces."""
 
     indexed_count: int = 0
     refresh_state: _KnowledgeRefreshState = "none"
@@ -32,46 +32,46 @@ class KnowledgeSnapshotStatus:
 
     @property
     def initial_sync_complete(self) -> bool:
-        """Return whether a Git-backed source has produced at least one committed snapshot."""
+        """Return whether a Git-backed source has produced at least one committed index."""
         return self.indexing_status == "complete" and self.published_revision is not None
 
 
 def _indexed_count_for_state(
-    key: registry.KnowledgeSnapshotKey,
+    key: registry.PublishedIndexKey,
     state: registry.PublishedIndexingState | None,
 ) -> int:
     if state is None:
         return 0
     if state.status != "complete":
         return 0
-    if not registry.indexing_settings_snapshot_compatible(state.settings, key.indexing_settings):
+    if not registry.published_index_settings_compatible(state.settings, key.indexing_settings):
         return 0
     return state.indexed_count or 0
 
 
-def get_knowledge_snapshot_status(
+def get_knowledge_index_status(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
-) -> KnowledgeSnapshotStatus:
-    """Resolve persisted snapshot metadata into the small status shape callers need."""
-    key = registry.resolve_snapshot_key(
+) -> KnowledgeIndexStatus:
+    """Resolve persisted published index metadata into the small status shape callers need."""
+    key = registry.resolve_published_index_key(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         create=create,
     )
-    metadata_path = registry.snapshot_metadata_path(key)
+    metadata_path = registry.published_index_metadata_path(key)
     metadata_exists = metadata_path.exists()
     state = registry.load_published_indexing_state(metadata_path)
-    return KnowledgeSnapshotStatus(
+    return KnowledgeIndexStatus(
         indexed_count=_indexed_count_for_state(key, state),
-        refresh_state=registry.snapshot_refresh_state(state, metadata_exists=metadata_exists),
-        availability=registry.snapshot_availability_for_state(
+        refresh_state=registry.published_index_refresh_state(state, metadata_exists=metadata_exists),
+        availability=registry.published_index_availability_for_state(
             key=key,
             state=state,
             metadata_exists=metadata_exists,
@@ -92,7 +92,7 @@ async def mark_source_dirty_async(
     execution_identity: ToolExecutionIdentity | None = None,
     reason: str = "source_mutated",
 ) -> tuple[str, ...]:
-    """Mark same-source snapshots stale without exposing registry internals to callers."""
+    """Mark same-source published indexes stale without exposing registry internals to callers."""
     return await registry.mark_source_dirty_async(
         base_id,
         config=config,

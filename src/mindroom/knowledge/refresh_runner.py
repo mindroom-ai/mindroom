@@ -13,29 +13,29 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
-    KnowledgeRefreshKey,
-    KnowledgeSnapshotKey,
-    KnowledgeSourceKey,
+    KnowledgeRefreshTarget,
+    KnowledgeSourceRoot,
     PublishedIndexingState,
+    PublishedIndexKey,
     indexing_settings_metadata_equal,
-    indexing_settings_snapshot_compatible,
     load_published_indexing_state,
-    mark_snapshot_refresh_failed_preserving_last_good,
-    mark_snapshot_refresh_running,
-    mark_snapshot_refresh_succeeded,
-    mark_snapshot_stale,
+    mark_published_index_refresh_failed_preserving_last_good,
+    mark_published_index_refresh_running,
+    mark_published_index_refresh_succeeded,
+    mark_published_index_stale,
     mark_source_dirty_async,
-    prune_private_snapshot_bookkeeping,
-    publish_snapshot_from_state,
-    refresh_key_for_snapshot_key,
-    resolve_refresh_key,
-    resolve_snapshot_key,
+    prune_private_index_bookkeeping,
+    publish_knowledge_index_from_state,
+    published_index_availability_for_state,
+    published_index_collection_exists_for_state,
+    published_index_metadata_path,
+    published_index_settings_compatible,
+    refresh_target_for_published_index_key,
+    resolve_published_index_key,
+    resolve_refresh_target,
     save_published_indexing_state,
-    snapshot_availability_for_state,
-    snapshot_collection_exists_for_state,
-    snapshot_metadata_path,
-    source_key_for_refresh_key,
-    source_key_for_snapshot_key,
+    source_root_for_published_index_key,
+    source_root_for_refresh_target,
 )
 from mindroom.runtime_resolution import resolve_knowledge_binding
 
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 class KnowledgeRefreshResult:
     """Result of one explicit knowledge refresh."""
 
-    key: KnowledgeSnapshotKey
+    key: PublishedIndexKey
     indexed_count: int
     published: bool
     availability: KnowledgeAvailability
@@ -59,7 +59,7 @@ class KnowledgeRefreshResult:
 
 
 _refresh_locks_guard = Lock()
-_active_refresh_counts: dict[KnowledgeRefreshKey, int] = {}
+_active_refresh_counts: dict[KnowledgeRefreshTarget, int] = {}
 _active_refresh_counts_guard = Lock()
 _MAX_REFRESH_LOCKS = 512
 
@@ -70,10 +70,10 @@ class _RefreshLockEntry:
     borrowers: int = 0
 
 
-_refresh_locks: dict[KnowledgeSourceKey, _RefreshLockEntry] = {}
+_refresh_locks: dict[KnowledgeSourceRoot, _RefreshLockEntry] = {}
 
 
-def _borrow_refresh_lock_for_key(key: KnowledgeSourceKey) -> _RefreshLockEntry:
+def _borrow_refresh_lock_for_key(key: KnowledgeSourceRoot) -> _RefreshLockEntry:
     with _refresh_locks_guard:
         entry = _refresh_locks.get(key)
         if entry is None:
@@ -84,7 +84,7 @@ def _borrow_refresh_lock_for_key(key: KnowledgeSourceKey) -> _RefreshLockEntry:
         return entry
 
 
-def _release_refresh_lock_for_key(key: KnowledgeSourceKey, entry: _RefreshLockEntry) -> None:
+def _release_refresh_lock_for_key(key: KnowledgeSourceRoot, entry: _RefreshLockEntry) -> None:
     with _refresh_locks_guard:
         if entry.borrowers <= 0:
             return
@@ -108,7 +108,7 @@ def _prune_refresh_locks_locked(*, reserve_slots: int = 0) -> None:
 
 
 @asynccontextmanager
-async def _acquire_refresh_lock(key: KnowledgeSourceKey) -> AsyncIterator[None]:
+async def _acquire_refresh_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
     entry = _borrow_refresh_lock_for_key(key)
     acquired = False
     try:
@@ -121,12 +121,12 @@ async def _acquire_refresh_lock(key: KnowledgeSourceKey) -> AsyncIterator[None]:
         _release_refresh_lock_for_key(key, entry)
 
 
-def _mark_refresh_active(key: KnowledgeRefreshKey) -> None:
+def _mark_refresh_active(key: KnowledgeRefreshTarget) -> None:
     with _active_refresh_counts_guard:
         _active_refresh_counts[key] = _active_refresh_counts.get(key, 0) + 1
 
 
-def _mark_refresh_inactive(key: KnowledgeRefreshKey) -> None:
+def _mark_refresh_inactive(key: KnowledgeRefreshTarget) -> None:
     with _active_refresh_counts_guard:
         count = _active_refresh_counts.get(key, 0)
         if count <= 1:
@@ -135,17 +135,17 @@ def _mark_refresh_inactive(key: KnowledgeRefreshKey) -> None:
             _active_refresh_counts[key] = count - 1
 
 
-def mark_refresh_active(key: KnowledgeRefreshKey) -> None:
+def mark_refresh_active(key: KnowledgeRefreshTarget) -> None:
     """Record owner-level refresh activity before a task reaches the runner."""
     _mark_refresh_active(key)
 
 
-def mark_refresh_inactive(key: KnowledgeRefreshKey) -> None:
+def mark_refresh_inactive(key: KnowledgeRefreshTarget) -> None:
     """Clear owner-level refresh activity after a scheduled task finishes."""
     _mark_refresh_inactive(key)
 
 
-def is_refresh_active(key: KnowledgeRefreshKey) -> bool:
+def is_refresh_active(key: KnowledgeRefreshTarget) -> bool:
     """Return whether a refresh is active for one resolved physical binding."""
     with _active_refresh_counts_guard:
         return _active_refresh_counts.get(key, 0) > 0
@@ -160,7 +160,7 @@ def is_refresh_active_for_binding(
 ) -> bool:
     """Resolve a binding and return whether it has an active refresh."""
     try:
-        key = resolve_refresh_key(
+        key = resolve_refresh_target(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -182,14 +182,14 @@ async def knowledge_binding_mutation_lock(
     create: bool = False,
 ) -> AsyncIterator[None]:
     """Serialize source mutations with refresh publishes in this runtime event loop."""
-    key = resolve_refresh_key(
+    key = resolve_refresh_target(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         create=create,
     )
-    async with _acquire_refresh_lock(source_key_for_refresh_key(key)):
+    async with _acquire_refresh_lock(source_root_for_refresh_target(key)):
         yield
 
 
@@ -202,23 +202,23 @@ async def refresh_knowledge_binding(
     force_reindex: bool = False,
 ) -> KnowledgeRefreshResult:
     """Build and publish one resolved knowledge binding."""
-    key = resolve_snapshot_key(
+    key = resolve_published_index_key(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         create=True,
     )
-    refresh_key = refresh_key_for_snapshot_key(key)
+    refresh_key = refresh_target_for_published_index_key(key)
     _mark_refresh_active(refresh_key)
     try:
         initial_state = await asyncio.to_thread(
             load_published_indexing_state,
-            snapshot_metadata_path(key),
+            published_index_metadata_path(key),
         )
         try:
             await _save_refreshing_state(key)
-            async with _acquire_refresh_lock(source_key_for_snapshot_key(key)):
+            async with _acquire_refresh_lock(source_root_for_published_index_key(key)):
                 return await _refresh_knowledge_binding_locked(
                     key,
                     config=config,
@@ -236,11 +236,11 @@ async def refresh_knowledge_binding(
             raise
     finally:
         _mark_refresh_inactive(refresh_key)
-        prune_private_snapshot_bookkeeping()
+        prune_private_index_bookkeeping()
 
 
-async def _save_refreshing_state(key: KnowledgeSnapshotKey) -> None:
-    write_task = asyncio.create_task(asyncio.to_thread(mark_snapshot_refresh_running, key))
+async def _save_refreshing_state(key: PublishedIndexKey) -> None:
+    write_task = asyncio.create_task(asyncio.to_thread(mark_published_index_refresh_running, key))
     try:
         await asyncio.shield(write_task)
     except asyncio.CancelledError:
@@ -250,12 +250,12 @@ async def _save_refreshing_state(key: KnowledgeSnapshotKey) -> None:
             write_completed = True
         if write_completed:
             with suppress(Exception):
-                await asyncio.to_thread(mark_snapshot_stale, key, reason="refresh_cancelled", refresh_job="idle")
+                await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
         raise
 
 
 async def _refresh_knowledge_binding_locked(
-    key: KnowledgeSnapshotKey,
+    key: PublishedIndexKey,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -280,7 +280,7 @@ async def _refresh_knowledge_binding_locked(
             storage_path=binding.storage_root,
             knowledge_path=binding.knowledge_path,
         )
-        unchanged_result = await _maybe_publish_unchanged_snapshot(
+        unchanged_result = await _maybe_publish_unchanged_index(
             manager,
             key,
             execution_identity=execution_identity,
@@ -288,10 +288,10 @@ async def _refresh_knowledge_binding_locked(
         )
         if unchanged_result is not None:
             return unchanged_result
-        indexed_count = await _reindex_manager_snapshot(manager, key)
+        indexed_count = await _reindex_manager_index(manager, key)
         if manager._last_refresh_error is not None:
             error = redact_credentials_in_text(manager._last_refresh_error)
-            await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=error)
+            await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
             return KnowledgeRefreshResult(
                 key=key,
                 indexed_count=indexed_count,
@@ -316,9 +316,9 @@ async def _refresh_knowledge_binding_locked(
     )
 
 
-async def _maybe_publish_unchanged_snapshot(
+async def _maybe_publish_unchanged_index(
     manager: KnowledgeManager,
-    key: KnowledgeSnapshotKey,
+    key: PublishedIndexKey,
     *,
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
@@ -336,7 +336,7 @@ async def _maybe_publish_unchanged_snapshot(
                     reason="git_source_updated",
                 )
             return None
-        return await _publish_unchanged_snapshot(
+        return await _publish_unchanged_index(
             manager,
             key,
             published_revision=manager._git_last_successful_commit,
@@ -351,7 +351,7 @@ async def _maybe_publish_unchanged_snapshot(
             reason="manual_reindex",
         )
         return None
-    return await _publish_unchanged_snapshot(
+    return await _publish_unchanged_index(
         manager,
         key,
         mark_stale_on_source_change=True,
@@ -360,16 +360,16 @@ async def _maybe_publish_unchanged_snapshot(
 
 
 async def _refresh_result_from_persisted_state(
-    key: KnowledgeSnapshotKey,
+    key: PublishedIndexKey,
     *,
     indexed_count: int,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> KnowledgeRefreshResult:
-    state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
+    state = await asyncio.to_thread(load_published_indexing_state, published_index_metadata_path(key))
     if state is None:
-        error = "Published snapshot metadata was missing after refresh"
-        await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=error)
+        error = "Published index metadata was missing after refresh"
+        await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
@@ -378,8 +378,8 @@ async def _refresh_result_from_persisted_state(
             last_error=error,
         )
     if state.status != "complete":
-        error = "Published snapshot metadata was incomplete after refresh"
-        await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=error)
+        error = "Published index metadata was incomplete after refresh"
+        await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
@@ -388,12 +388,12 @@ async def _refresh_result_from_persisted_state(
             last_error=error,
         )
 
-    availability = snapshot_availability_for_state(key=key, state=state)
-    if not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings):
+    availability = published_index_availability_for_state(key=key, state=state)
+    if not published_index_settings_compatible(state.settings, key.indexing_settings):
         await asyncio.to_thread(
-            mark_snapshot_stale,
+            mark_published_index_stale,
             key,
-            reason="published_snapshot_config_mismatch",
+            reason="published_index_config_mismatch",
         )
         return KnowledgeRefreshResult(
             key=key,
@@ -402,16 +402,16 @@ async def _refresh_result_from_persisted_state(
             availability=availability,
             last_error=None,
         )
-    snapshot = publish_snapshot_from_state(
+    index = publish_knowledge_index_from_state(
         key,
         state=state,
         config=config,
         runtime_paths=runtime_paths,
-        metadata_path=snapshot_metadata_path(key),
+        metadata_path=published_index_metadata_path(key),
     )
-    if snapshot is None:
-        error = "Published snapshot collection was missing after refresh"
-        await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=error)
+    if index is None:
+        error = "Published index collection was missing after refresh"
+        await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
@@ -419,7 +419,7 @@ async def _refresh_result_from_persisted_state(
             availability=KnowledgeAvailability.REFRESH_FAILED,
             last_error=error,
         )
-    await asyncio.to_thread(mark_snapshot_refresh_succeeded, key)
+    await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=indexed_count,
@@ -429,22 +429,22 @@ async def _refresh_result_from_persisted_state(
     )
 
 
-async def _publish_unchanged_snapshot(
+async def _publish_unchanged_index(
     manager: KnowledgeManager,
-    key: KnowledgeSnapshotKey,
+    key: PublishedIndexKey,
     *,
     published_revision: str | None = None,
     mark_git_initial_sync_complete: bool = False,
     mark_stale_on_source_change: bool = False,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeRefreshResult | None:
-    state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
+    state = await asyncio.to_thread(load_published_indexing_state, published_index_metadata_path(key))
     if (
         state is None
         or state.status != "complete"
         or state.source_signature is None
         or not indexing_settings_metadata_equal(state.settings, key.indexing_settings)
-        or not await asyncio.to_thread(snapshot_collection_exists_for_state, key, state)
+        or not await asyncio.to_thread(published_index_collection_exists_for_state, key, state)
     ):
         return None
 
@@ -478,17 +478,17 @@ async def _publish_unchanged_snapshot(
             published_revision=published_revision,
         )
     if updated_state != state:
-        await asyncio.to_thread(save_published_indexing_state, snapshot_metadata_path(key), updated_state)
-    snapshot = publish_snapshot_from_state(
+        await asyncio.to_thread(save_published_indexing_state, published_index_metadata_path(key), updated_state)
+    index = publish_knowledge_index_from_state(
         key,
         state=updated_state,
         config=manager.config,
         runtime_paths=manager.runtime_paths,
-        metadata_path=snapshot_metadata_path(key),
+        metadata_path=published_index_metadata_path(key),
     )
-    if snapshot is None:
-        error = "Published snapshot collection was missing during unchanged refresh"
-        await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=error)
+    if index is None:
+        error = "Published index collection was missing during unchanged refresh"
+        await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=updated_state.indexed_count or 0,
@@ -496,7 +496,7 @@ async def _publish_unchanged_snapshot(
             availability=KnowledgeAvailability.REFRESH_FAILED,
             last_error=error,
         )
-    await asyncio.to_thread(mark_snapshot_refresh_succeeded, key)
+    await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=updated_state.indexed_count or 0,
@@ -521,43 +521,43 @@ def _published_state_fingerprint(state: PublishedIndexingState | None) -> tuple[
 
 
 async def _reconcile_cancelled_refresh(
-    key: KnowledgeSnapshotKey,
+    key: PublishedIndexKey,
     *,
     initial_state: PublishedIndexingState | None,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> None:
-    state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
+    state = await asyncio.to_thread(load_published_indexing_state, published_index_metadata_path(key))
     state_advanced = _published_state_fingerprint(state) != _published_state_fingerprint(initial_state)
     if (
         state_advanced
         and state is not None
         and state.status == "complete"
-        and indexing_settings_snapshot_compatible(state.settings, key.indexing_settings)
-        and snapshot_availability_for_state(key=key, state=state) is KnowledgeAvailability.READY
-        and await asyncio.to_thread(snapshot_collection_exists_for_state, key, state)
+        and published_index_settings_compatible(state.settings, key.indexing_settings)
+        and published_index_availability_for_state(key=key, state=state) is KnowledgeAvailability.READY
+        and await asyncio.to_thread(published_index_collection_exists_for_state, key, state)
     ):
-        snapshot = publish_snapshot_from_state(
+        index = publish_knowledge_index_from_state(
             key,
             state=state,
             config=config,
             runtime_paths=runtime_paths,
-            metadata_path=snapshot_metadata_path(key),
+            metadata_path=published_index_metadata_path(key),
         )
-        if snapshot is not None:
-            await asyncio.to_thread(mark_snapshot_refresh_succeeded, key)
+        if index is not None:
+            await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
             return
-    await asyncio.to_thread(mark_snapshot_stale, key, reason="refresh_cancelled", refresh_job="idle")
+    await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
 
 
-async def _reindex_manager_snapshot(manager: KnowledgeManager, key: KnowledgeSnapshotKey) -> int:
+async def _reindex_manager_index(manager: KnowledgeManager, key: PublishedIndexKey) -> int:
     _ = key
     return await manager.reindex_all()
 
 
 async def _mark_refresh_failed(
     manager: KnowledgeManager,
-    key: KnowledgeSnapshotKey,
+    key: PublishedIndexKey,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -566,14 +566,14 @@ async def _mark_refresh_failed(
     """Record refresh failure while preserving any last complete collection."""
     _ = (manager, config, runtime_paths)
     await asyncio.to_thread(
-        mark_snapshot_refresh_failed_preserving_last_good,
+        mark_published_index_refresh_failed_preserving_last_good,
         key,
         error=redact_credentials_in_text(error),
     )
 
 
 async def _mark_refresh_setup_failed(
-    key: KnowledgeSnapshotKey,
+    key: PublishedIndexKey,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -582,4 +582,4 @@ async def _mark_refresh_setup_failed(
     """Record refresh failure before a KnowledgeManager can be constructed."""
     redacted_error = redact_credentials_in_text(error)
     _ = (config, runtime_paths)
-    await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=redacted_error)
+    await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=redacted_error)
