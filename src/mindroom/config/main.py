@@ -44,25 +44,20 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_config_relative_path,
     resolve_runtime_paths,
-    runtime_matrix_homeserver,
     safe_replace,
 )
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
-from mindroom.matrix.identity import (
-    agent_username_localpart,
-    managed_room_alias_localpart,
-    managed_space_alias_localpart,
-)
+from mindroom.matrix_naming import agent_username_localpart, managed_room_alias_localpart, managed_space_alias_localpart
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
-    from mindroom.matrix.identity import MatrixID
+    from mindroom.entity_resolution import MatrixID
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -199,50 +194,6 @@ def _history_policy_from_limits(
     if num_history_runs is not None:
         return HistoryPolicy(mode="runs", limit=num_history_runs)
     return HistoryPolicy(mode="all")
-
-
-def _resolve_agent_thread_mode(
-    agent_config: AgentConfig,
-    room_id: str | None,
-    runtime_paths: RuntimePaths,
-) -> Literal["thread", "room"]:
-    """Resolve one agent's effective thread mode for an optional room context.
-
-    Resolution order is:
-    1. Explicit room ID key match in ``room_thread_modes``.
-    2. Reverse alias lookup from room ID to managed room key.
-    3. Any ``room_thread_modes`` key that resolves to the active room ID.
-    4. Fallback to ``thread_mode``.
-    """
-    default_mode = agent_config.thread_mode
-    if room_id is None or not agent_config.room_thread_modes:
-        return default_mode
-
-    overrides = agent_config.room_thread_modes
-
-    # Fast path: direct room-id key.
-    direct_mode = overrides.get(room_id)
-    if direct_mode is not None:
-        return direct_mode
-
-    # Keep this import local to avoid config<->matrix import cycles during module initialization.
-    from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases  # noqa: PLC0415
-
-    room_alias = get_room_alias_from_id(room_id, runtime_paths)
-    if room_alias:
-        alias_mode = overrides.get(room_alias)
-        if alias_mode is not None:
-            return alias_mode
-
-    for override_key, resolved_room_id in zip(
-        overrides,
-        resolve_room_aliases(list(overrides), runtime_paths),
-        strict=False,
-    ):
-        if resolved_room_id == room_id:
-            return overrides[override_key]
-
-    return default_mode
 
 
 def _normalize_optional_config_sections(data: dict[str, object]) -> None:
@@ -384,37 +335,6 @@ def _skip_private_template_dir_validation(runtime_paths: RuntimePaths | None) ->
     return runtime_paths.env_flag("MINDROOM_SANDBOX_RUNNER_MODE") and bool(
         runtime_paths.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", default=""),
     )
-
-
-def _router_agents_for_room(
-    agents: dict[str, AgentConfig],
-    teams: dict[str, TeamConfig],
-    room_id: str | None,
-    runtime_paths: RuntimePaths,
-) -> set[str]:
-    """Return agents relevant for router mode resolution in one room context.
-
-    Includes:
-    - Agents directly configured for the room.
-    - Agents brought into the room via ``teams.<name>.rooms`` mappings.
-
-    Falls back to all agents when no room-specific subset is found.
-    """
-    if room_id is None:
-        return set(agents)
-
-    # Keep this import local to avoid config<->matrix import cycles during module initialization.
-    from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
-
-    router_agents: set[str] = set()
-    for agent_name, agent_cfg in agents.items():
-        if room_id in set(resolve_room_aliases(agent_cfg.rooms, runtime_paths)):
-            router_agents.add(agent_name)
-    for team_cfg in teams.values():
-        if room_id not in set(resolve_room_aliases(team_cfg.rooms, runtime_paths)):
-            continue
-        router_agents.update(agent_name for agent_name in team_cfg.agents if agent_name in agents)
-    return router_agents or set(agents)
 
 
 class Config(BaseModel):
@@ -955,10 +875,9 @@ class Config(BaseModel):
 
     def get_domain(self, runtime_paths: RuntimePaths) -> str:
         """Extract the Matrix domain for one explicit runtime context."""
-        from mindroom.matrix.identity import extract_server_name_from_homeserver  # noqa: PLC0415
+        from mindroom.entity_resolution import matrix_domain  # noqa: PLC0415
 
-        homeserver = runtime_matrix_homeserver(runtime_paths)
-        return extract_server_name_from_homeserver(homeserver, runtime_paths)
+        return matrix_domain(runtime_paths)
 
     def get_ids(self, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
         """Get MatrixID objects for all agents and teams.
@@ -967,30 +886,15 @@ class Config(BaseModel):
             Dictionary mapping agent/team names to their MatrixID objects.
 
         """
-        from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
+        from mindroom.entity_resolution import entity_matrix_ids  # noqa: PLC0415
 
-        mapping: dict[str, MatrixID] = {}
-        domain = self.get_domain(runtime_paths)
-
-        # Add all agents
-        for agent_name in self.agents:
-            mapping[agent_name] = MatrixID.from_agent(agent_name, domain, runtime_paths)
-
-        # Add router agent separately (it's not in config.agents)
-        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, domain, runtime_paths)
-
-        # Add all teams
-        for team_name in self.teams:
-            mapping[team_name] = MatrixID.from_agent(team_name, domain, runtime_paths)
-        return mapping
+        return entity_matrix_ids(self, runtime_paths)
 
     def get_mindroom_user_id(self, runtime_paths: RuntimePaths) -> str | None:
         """Get the full Matrix user ID for the configured internal user."""
-        if self.mindroom_user is None:
-            return None
-        from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
+        from mindroom.entity_resolution import mindroom_user_id  # noqa: PLC0415
 
-        return MatrixID.from_username(self.mindroom_user.username, self.get_domain(runtime_paths)).full_id
+        return mindroom_user_id(self, runtime_paths)
 
     @classmethod
     def validate_with_runtime(
@@ -1676,8 +1580,10 @@ class Config(BaseModel):
         Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
+        from mindroom.entity_resolution import resolve_agent_thread_mode, router_agents_for_room  # noqa: PLC0415
+
         if entity_name in self.agents:
-            return _resolve_agent_thread_mode(
+            return resolve_agent_thread_mode(
                 self.agents[entity_name],
                 room_id,
                 runtime_paths,
@@ -1685,7 +1591,7 @@ class Config(BaseModel):
 
         if entity_name in self.teams:
             team_modes: set[Literal["thread", "room"]] = {
-                _resolve_agent_thread_mode(
+                resolve_agent_thread_mode(
                     self.agents[name],
                     room_id,
                     runtime_paths,
@@ -1697,14 +1603,14 @@ class Config(BaseModel):
                 return next(iter(team_modes))
 
         if entity_name == ROUTER_AGENT_NAME:
-            router_agents = _router_agents_for_room(
+            router_agents = router_agents_for_room(
                 self.agents,
                 self.teams,
                 room_id,
                 runtime_paths,
             )
             configured_modes: set[Literal["thread", "room"]] = {
-                _resolve_agent_thread_mode(
+                resolve_agent_thread_mode(
                     self.agents[agent_name],
                     room_id,
                     runtime_paths,
@@ -1755,15 +1661,9 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
     ) -> str:
         """Return the effective model for one entity in one room context."""
-        if entity_name not in self.agents and entity_name not in self.teams and entity_name != ROUTER_AGENT_NAME:
-            return "default"
-        if room_id is not None:
-            from mindroom.matrix.rooms import get_room_alias_from_id  # noqa: PLC0415
+        from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
 
-            room_alias = get_room_alias_from_id(room_id, runtime_paths)
-            if room_alias and room_alias in self.room_models:
-                return self.room_models[room_alias]
-        return self.get_entity_model_name(entity_name)
+        return effective_entity_model_name(self, entity_name, room_id, runtime_paths)
 
     def resolve_runtime_model(
         self,
