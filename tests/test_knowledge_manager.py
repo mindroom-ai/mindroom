@@ -686,7 +686,7 @@ async def test_stale_snapshot_metadata_schedules_refresh_without_source_scan(tmp
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("ready snapshot changed", encoding="utf-8")
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.save_snapshot_dirty_state(key, reason="test_dirty")
+    knowledge_registry.mark_snapshot_stale(key, reason="test_dirty")
     clear_published_snapshots()
     owner = MagicMock()
     owner.schedule_refresh = MagicMock()
@@ -727,7 +727,7 @@ async def test_stale_snapshot_skips_duplicate_refresh_when_owner_is_active(tmp_p
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("ready snapshot changed", encoding="utf-8")
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.save_snapshot_dirty_state(key, reason="test_dirty")
+    knowledge_registry.mark_snapshot_stale(key, reason="test_dirty")
     clear_published_snapshots()
     owner = MagicMock()
     owner.is_refreshing = MagicMock(return_value=True)
@@ -779,7 +779,7 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
     assert response.status_code == 200
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.save_snapshot_refresh_failed_state(key, error="refresh failed after delete")
+    knowledge_registry.mark_snapshot_refresh_failed_preserving_last_good(key, error="refresh failed after delete")
     stale_knowledge = get_agent_knowledge("helper", config, runtime_paths)
 
     assert stale_knowledge is not None
@@ -830,7 +830,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
     }
 
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.save_snapshot_refresh_failed_state(key, error="refresh failed after replacement")
+    knowledge_registry.mark_snapshot_refresh_failed_preserving_last_good(key, error="refresh failed after replacement")
     filtered_knowledge = get_agent_knowledge("helper", config, runtime_paths)
 
     assert (docs_path / "guide.md").read_text(encoding="utf-8") == "replacement content"
@@ -855,7 +855,7 @@ async def test_dashboard_delete_dirty_write_failure_keeps_best_effort_source_cha
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("research", config=config, runtime_paths=runtime_paths)
     await refresh_knowledge_binding("summary", config=config, runtime_paths=runtime_paths)
-    original_save_dirty = knowledge_registry.save_snapshot_dirty_state
+    original_save_dirty = knowledge_registry.mark_snapshot_stale
     dirty_write_count = 0
 
     def _fail_second_dirty_write(*args: object, **kwargs: object) -> None:
@@ -866,7 +866,7 @@ async def test_dashboard_delete_dirty_write_failure_keeps_best_effort_source_cha
             raise RuntimeError(msg)
         original_save_dirty(*args, **kwargs)
 
-    monkeypatch.setattr(knowledge_registry, "save_snapshot_dirty_state", _fail_second_dirty_write)
+    monkeypatch.setattr(knowledge_registry, "mark_snapshot_stale", _fail_second_dirty_write)
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
     owner = MagicMock()
@@ -992,7 +992,7 @@ async def test_successful_publish_clears_dirty_refresh_state(tmp_path: Path) -> 
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.save_snapshot_dirty_state(key, reason="test_dirty")
+    knowledge_registry.mark_snapshot_stale(key, reason="test_dirty")
 
     dirty_lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
     assert dirty_lookup.snapshot is not None
@@ -1035,7 +1035,7 @@ async def test_refreshing_state_cancellation_clears_active_refresh_count(
         loop.call_soon_threadsafe(refreshing_write_started.set)
         assert release_refreshing_write.wait(timeout=5)
 
-    monkeypatch.setattr(knowledge_refresh_runner, "save_snapshot_refreshing_state", _blocked_refreshing_state)
+    monkeypatch.setattr(knowledge_refresh_runner, "mark_snapshot_refresh_running", _blocked_refreshing_state)
 
     refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
     await refreshing_write_started.wait()
@@ -1062,12 +1062,12 @@ async def test_cancelled_refresh_after_refreshing_write_keeps_existing_snapshot_
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.save_snapshot_dirty_state(key, reason="source_changed")
+    knowledge_registry.mark_snapshot_stale(key, reason="source_changed")
 
     loop = asyncio.get_running_loop()
     refreshing_saved = asyncio.Event()
     release_refreshing_save = Event()
-    original_save_refreshing = knowledge_refresh_runner.save_snapshot_refreshing_state
+    original_save_refreshing = knowledge_refresh_runner.mark_snapshot_refresh_running
 
     def _block_after_refreshing_state(*args: object, **kwargs: object) -> None:
         original_save_refreshing(*args, **kwargs)
@@ -1076,7 +1076,7 @@ async def test_cancelled_refresh_after_refreshing_write_keeps_existing_snapshot_
 
     monkeypatch.setattr(
         knowledge_refresh_runner,
-        "save_snapshot_refreshing_state",
+        "mark_snapshot_refresh_running",
         _block_after_refreshing_state,
     )
 
@@ -1111,7 +1111,7 @@ async def test_cancelled_refresh_waiting_for_source_lock_clears_running_state(
     second_refreshing_saved = asyncio.Event()
     first_entered = asyncio.Event()
     release_first = asyncio.Event()
-    original_save_refreshing = knowledge_refresh_runner.save_snapshot_refreshing_state
+    original_save_refreshing = knowledge_refresh_runner.mark_snapshot_refresh_running
     original_reindex = KnowledgeManager.reindex_all
 
     def _track_refreshing_state(*args: object, **kwargs: object) -> None:
@@ -1126,7 +1126,7 @@ async def test_cancelled_refresh_waiting_for_source_lock_clears_running_state(
         await release_first.wait()
         return await original_reindex(self, protected_collections=protected_collections)
 
-    monkeypatch.setattr(knowledge_refresh_runner, "save_snapshot_refreshing_state", _track_refreshing_state)
+    monkeypatch.setattr(knowledge_refresh_runner, "mark_snapshot_refresh_running", _track_refreshing_state)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _blocked_reindex)
 
     first_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
@@ -1259,9 +1259,9 @@ def test_mark_dirty_updates_refresh_state_without_changing_collection(tmp_path: 
             source_signature="test-source-signature",
         ),
     )
-    knowledge_registry.save_snapshot_refresh_success_state(key)
+    knowledge_registry.mark_snapshot_refresh_succeeded(key)
 
-    marked_base_ids = knowledge_registry.mark_snapshot_dirty(
+    marked_base_ids = knowledge_registry.mark_source_dirty(
         "docs",
         config=config,
         runtime_paths=runtime_paths,
@@ -1293,7 +1293,7 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
     assert beta_lookup.availability is KnowledgeAvailability.READY
     doc.write_text("shared source new", encoding="utf-8")
 
-    marked_base_ids = knowledge_registry.mark_snapshot_dirty(
+    marked_base_ids = knowledge_registry.mark_source_dirty(
         "alpha",
         config=config,
         runtime_paths=runtime_paths,
@@ -1327,7 +1327,7 @@ async def test_async_mark_dirty_cancellation_waits_for_state_commit(
     loop = asyncio.get_running_loop()
     stale_written = asyncio.Event()
     release_stale_write = Event()
-    original_mark = knowledge_registry._mark_snapshot_key_dirty_on_disk
+    original_mark = knowledge_registry._mark_snapshot_key_stale_on_disk
 
     def _block_after_stale_write(matching_key: knowledge_registry.KnowledgeSnapshotKey, *, reason: str) -> bool:
         result = original_mark(matching_key, reason=reason)
@@ -1335,10 +1335,10 @@ async def test_async_mark_dirty_cancellation_waits_for_state_commit(
         assert release_stale_write.wait(timeout=5)
         return result
 
-    monkeypatch.setattr(knowledge_registry, "_mark_snapshot_key_dirty_on_disk", _block_after_stale_write)
+    monkeypatch.setattr(knowledge_registry, "_mark_snapshot_key_stale_on_disk", _block_after_stale_write)
 
     mark_task = asyncio.create_task(
-        knowledge_registry.mark_snapshot_dirty_async(
+        knowledge_registry.mark_source_dirty_async(
             "docs",
             config=config,
             runtime_paths=runtime_paths,
@@ -1378,7 +1378,7 @@ async def test_async_mark_dirty_cancellation_finishes_same_source_aliases(
     loop = asyncio.get_running_loop()
     first_alias_written = asyncio.Event()
     release_remaining_writes = Event()
-    original_mark = knowledge_registry._mark_snapshot_key_dirty_on_disk
+    original_mark = knowledge_registry._mark_snapshot_key_stale_on_disk
     written_base_ids: list[str] = []
 
     def _block_after_first_alias(matching_key: knowledge_registry.KnowledgeSnapshotKey, *, reason: str) -> bool:
@@ -1389,10 +1389,10 @@ async def test_async_mark_dirty_cancellation_finishes_same_source_aliases(
             assert release_remaining_writes.wait(timeout=5)
         return result
 
-    monkeypatch.setattr(knowledge_registry, "_mark_snapshot_key_dirty_on_disk", _block_after_first_alias)
+    monkeypatch.setattr(knowledge_registry, "_mark_snapshot_key_stale_on_disk", _block_after_first_alias)
 
     mark_task = asyncio.create_task(
-        knowledge_registry.mark_snapshot_dirty_async(
+        knowledge_registry.mark_source_dirty_async(
             "alpha",
             config=config,
             runtime_paths=runtime_paths,
@@ -1433,17 +1433,17 @@ async def test_async_mark_dirty_recached_snapshot_reports_refresh_state_after_wr
     loop = asyncio.get_running_loop()
     stale_write_started = asyncio.Event()
     release_stale_write = Event()
-    original_mark = knowledge_registry._mark_snapshot_key_dirty_on_disk
+    original_mark = knowledge_registry._mark_snapshot_key_stale_on_disk
 
     def _block_before_stale_write(matching_key: knowledge_registry.KnowledgeSnapshotKey, *, reason: str) -> bool:
         loop.call_soon_threadsafe(stale_write_started.set)
         assert release_stale_write.wait(timeout=5)
         return original_mark(matching_key, reason=reason)
 
-    monkeypatch.setattr(knowledge_registry, "_mark_snapshot_key_dirty_on_disk", _block_before_stale_write)
+    monkeypatch.setattr(knowledge_registry, "_mark_snapshot_key_stale_on_disk", _block_before_stale_write)
 
     mark_task = asyncio.create_task(
-        knowledge_registry.mark_snapshot_dirty_async(
+        knowledge_registry.mark_source_dirty_async(
             "docs",
             config=config,
             runtime_paths=runtime_paths,
@@ -1666,7 +1666,7 @@ def test_raw_git_url_snapshot_metadata_is_config_mismatch(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
-    knowledge_registry.save_snapshot_refresh_success_state(key)
+    knowledge_registry.mark_snapshot_refresh_succeeded(key)
 
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
@@ -1705,7 +1705,7 @@ def test_passwordless_ssh_username_change_invalidates_published_snapshot(tmp_pat
         ),
         encoding="utf-8",
     )
-    knowledge_registry.save_snapshot_refresh_success_state(key)
+    knowledge_registry.mark_snapshot_refresh_succeeded(key)
     changed_config = _config(
         tmp_path,
         bases={"docs": docs_path},
@@ -2297,7 +2297,7 @@ async def test_shared_source_mutation_waits_for_duplicate_base_refresh(
         async with knowledge_binding_mutation_lock("beta", config=config, runtime_paths=runtime_paths):
             mutation_entered.set()
             doc.write_text("mutated", encoding="utf-8")
-            knowledge_registry.mark_snapshot_dirty(
+            knowledge_registry.mark_source_dirty(
                 "beta",
                 config=config,
                 runtime_paths=runtime_paths,
@@ -2696,7 +2696,7 @@ async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) ->
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.save_snapshot_refresh_failed_state(key, error="cold failure")
+    knowledge_registry.mark_snapshot_refresh_failed_preserving_last_good(key, error="cold failure")
     changed_config = config.model_copy(deep=True)
     changed_config.knowledge_bases["docs"].chunk_size = 1024
     newer_config = config.model_copy(deep=True)
@@ -2749,7 +2749,7 @@ async def test_failed_git_refresh_cooldown_is_credentials_service_aware(tmp_path
     )
     runtime_paths = runtime_paths_for(config)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.save_snapshot_refresh_failed_state(key, error="auth failed")
+    knowledge_registry.mark_snapshot_refresh_failed_preserving_last_good(key, error="auth failed")
     changed_config = config.model_copy(deep=True)
     changed_git_config = changed_config.knowledge_bases["docs"].git
     assert changed_git_config is not None
@@ -2781,7 +2781,7 @@ async def test_failed_git_refresh_cooldown_is_embedded_userinfo_aware(tmp_path: 
     )
     runtime_paths = runtime_paths_for(config)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge_registry.save_snapshot_refresh_failed_state(key, error="auth failed")
+    knowledge_registry.mark_snapshot_refresh_failed_preserving_last_good(key, error="auth failed")
     changed_config = config.model_copy(deep=True)
     changed_git_config = changed_config.knowledge_bases["docs"].git
     assert changed_git_config is not None
@@ -2815,9 +2815,9 @@ async def test_stale_or_failed_snapshot_reports_chunking_config_mismatch_before_
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_snapshot_key("docs", config=config, runtime_paths=runtime_paths)
     if availability is KnowledgeAvailability.STALE:
-        knowledge_registry.save_snapshot_dirty_state(key, reason="test_dirty")
+        knowledge_registry.mark_snapshot_stale(key, reason="test_dirty")
     else:
-        knowledge_registry.save_snapshot_refresh_failed_state(key, error="previous failure")
+        knowledge_registry.mark_snapshot_refresh_failed_preserving_last_good(key, error="previous failure")
     clear_published_snapshots()
     changed_config = config.model_copy(deep=True)
     changed_config.knowledge_bases["docs"].chunk_size = 1024
@@ -2985,7 +2985,7 @@ def test_stale_metadata_without_collection_returns_unavailable_snapshot(tmp_path
         ),
         encoding="utf-8",
     )
-    knowledge_registry.save_snapshot_refresh_success_state(key)
+    knowledge_registry.mark_snapshot_refresh_succeeded(key)
 
     lookup = get_published_snapshot("docs", config=config, runtime_paths=runtime_paths)
 
@@ -3017,7 +3017,7 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
         ),
         encoding="utf-8",
     )
-    knowledge_registry.save_snapshot_refresh_success_state(key)
+    knowledge_registry.mark_snapshot_refresh_succeeded(key)
     owner = MagicMock()
     owner.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
@@ -3856,7 +3856,7 @@ def test_private_snapshot_read_path_cache_insertion_is_bounded(tmp_path: Path) -
                 source_signature=f"sig-{index}",
             ),
         )
-        knowledge_registry.save_snapshot_refresh_success_state(key)
+        knowledge_registry.mark_snapshot_refresh_succeeded(key)
 
     clear_published_snapshots()
 
@@ -5160,7 +5160,7 @@ async def test_git_updated_stale_registry_mark_uses_async_registry_path(
         return ("docs",)
 
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", _sync_updated)
-    monkeypatch.setattr(knowledge_refresh_runner, "mark_snapshot_dirty_async", _record_mark_thread)
+    monkeypatch.setattr(knowledge_refresh_runner, "mark_source_dirty_async", _record_mark_thread)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 

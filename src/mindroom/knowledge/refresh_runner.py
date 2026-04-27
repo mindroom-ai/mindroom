@@ -20,17 +20,17 @@ from mindroom.knowledge.registry import (
     indexing_settings_metadata_equal,
     indexing_settings_snapshot_compatible,
     load_published_indexing_state,
-    mark_snapshot_dirty_async,
+    mark_snapshot_refresh_failed_preserving_last_good,
+    mark_snapshot_refresh_running,
+    mark_snapshot_refresh_succeeded,
+    mark_snapshot_stale,
+    mark_source_dirty_async,
     prune_private_snapshot_bookkeeping,
     publish_snapshot_from_state,
     refresh_key_for_snapshot_key,
     resolve_refresh_key,
     resolve_snapshot_key,
     save_published_indexing_state,
-    save_snapshot_dirty_state,
-    save_snapshot_refresh_failed_state,
-    save_snapshot_refresh_success_state,
-    save_snapshot_refreshing_state,
     snapshot_availability_for_state,
     snapshot_collection_exists_for_state,
     snapshot_metadata_path,
@@ -240,7 +240,7 @@ async def refresh_knowledge_binding(
 
 
 async def _save_refreshing_state(key: KnowledgeSnapshotKey) -> None:
-    write_task = asyncio.create_task(asyncio.to_thread(save_snapshot_refreshing_state, key))
+    write_task = asyncio.create_task(asyncio.to_thread(mark_snapshot_refresh_running, key))
     try:
         await asyncio.shield(write_task)
     except asyncio.CancelledError:
@@ -250,7 +250,7 @@ async def _save_refreshing_state(key: KnowledgeSnapshotKey) -> None:
             write_completed = True
         if write_completed:
             with suppress(Exception):
-                await asyncio.to_thread(save_snapshot_dirty_state, key, reason="refresh_cancelled", refresh_job="idle")
+                await asyncio.to_thread(mark_snapshot_stale, key, reason="refresh_cancelled", refresh_job="idle")
         raise
 
 
@@ -291,7 +291,7 @@ async def _refresh_knowledge_binding_locked(
         indexed_count = await _reindex_manager_snapshot(manager, key)
         if manager._last_refresh_error is not None:
             error = redact_credentials_in_text(manager._last_refresh_error)
-            await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=error)
+            await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=error)
             return KnowledgeRefreshResult(
                 key=key,
                 indexed_count=indexed_count,
@@ -328,7 +328,7 @@ async def _maybe_publish_unchanged_snapshot(
         git_sync_result = await manager.sync_git_repository(index_changes=False)
         if force_reindex or git_sync_result.get("updated", False):
             if git_sync_result.get("updated", False):
-                await mark_snapshot_dirty_async(
+                await mark_source_dirty_async(
                     key.base_id,
                     config=manager.config,
                     runtime_paths=manager.runtime_paths,
@@ -343,7 +343,7 @@ async def _maybe_publish_unchanged_snapshot(
             mark_git_initial_sync_complete=True,
         )
     if force_reindex:
-        await mark_snapshot_dirty_async(
+        await mark_source_dirty_async(
             key.base_id,
             config=manager.config,
             runtime_paths=manager.runtime_paths,
@@ -369,7 +369,7 @@ async def _refresh_result_from_persisted_state(
     state = await asyncio.to_thread(load_published_indexing_state, snapshot_metadata_path(key))
     if state is None:
         error = "Published snapshot metadata was missing after refresh"
-        await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=error)
+        await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=error)
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
@@ -379,7 +379,7 @@ async def _refresh_result_from_persisted_state(
         )
     if state.status != "complete":
         error = "Published snapshot metadata was incomplete after refresh"
-        await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=error)
+        await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=error)
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
@@ -391,7 +391,7 @@ async def _refresh_result_from_persisted_state(
     availability = snapshot_availability_for_state(key=key, state=state)
     if not indexing_settings_snapshot_compatible(state.settings, key.indexing_settings):
         await asyncio.to_thread(
-            save_snapshot_dirty_state,
+            mark_snapshot_stale,
             key,
             reason="published_snapshot_config_mismatch",
         )
@@ -411,7 +411,7 @@ async def _refresh_result_from_persisted_state(
     )
     if snapshot is None:
         error = "Published snapshot collection was missing after refresh"
-        await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=error)
+        await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=error)
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=indexed_count,
@@ -419,7 +419,7 @@ async def _refresh_result_from_persisted_state(
             availability=KnowledgeAvailability.REFRESH_FAILED,
             last_error=error,
         )
-    await asyncio.to_thread(save_snapshot_refresh_success_state, key)
+    await asyncio.to_thread(mark_snapshot_refresh_succeeded, key)
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=indexed_count,
@@ -457,7 +457,7 @@ async def _publish_unchanged_snapshot(
     )
     if current_source_signature != state.source_signature:
         if mark_stale_on_source_change:
-            await mark_snapshot_dirty_async(
+            await mark_source_dirty_async(
                 key.base_id,
                 config=manager.config,
                 runtime_paths=manager.runtime_paths,
@@ -488,7 +488,7 @@ async def _publish_unchanged_snapshot(
     )
     if snapshot is None:
         error = "Published snapshot collection was missing during unchanged refresh"
-        await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=error)
+        await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=error)
         return KnowledgeRefreshResult(
             key=key,
             indexed_count=updated_state.indexed_count or 0,
@@ -496,7 +496,7 @@ async def _publish_unchanged_snapshot(
             availability=KnowledgeAvailability.REFRESH_FAILED,
             last_error=error,
         )
-    await asyncio.to_thread(save_snapshot_refresh_success_state, key)
+    await asyncio.to_thread(mark_snapshot_refresh_succeeded, key)
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=updated_state.indexed_count or 0,
@@ -545,9 +545,9 @@ async def _reconcile_cancelled_refresh(
             metadata_path=snapshot_metadata_path(key),
         )
         if snapshot is not None:
-            await asyncio.to_thread(save_snapshot_refresh_success_state, key)
+            await asyncio.to_thread(mark_snapshot_refresh_succeeded, key)
             return
-    await asyncio.to_thread(save_snapshot_dirty_state, key, reason="refresh_cancelled", refresh_job="idle")
+    await asyncio.to_thread(mark_snapshot_stale, key, reason="refresh_cancelled", refresh_job="idle")
 
 
 async def _reindex_manager_snapshot(manager: KnowledgeManager, key: KnowledgeSnapshotKey) -> int:
@@ -565,7 +565,11 @@ async def _mark_refresh_failed(
 ) -> None:
     """Record refresh failure while preserving any last complete collection."""
     _ = (manager, config, runtime_paths)
-    await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=redact_credentials_in_text(error))
+    await asyncio.to_thread(
+        mark_snapshot_refresh_failed_preserving_last_good,
+        key,
+        error=redact_credentials_in_text(error),
+    )
 
 
 async def _mark_refresh_setup_failed(
@@ -578,4 +582,4 @@ async def _mark_refresh_setup_failed(
     """Record refresh failure before a KnowledgeManager can be constructed."""
     redacted_error = redact_credentials_in_text(error)
     _ = (config, runtime_paths)
-    await asyncio.to_thread(save_snapshot_refresh_failed_state, key, error=redacted_error)
+    await asyncio.to_thread(mark_snapshot_refresh_failed_preserving_last_good, key, error=redacted_error)

@@ -35,7 +35,7 @@ from mindroom.knowledge.registry import (
     PublishedIndexingState,
     indexing_settings_snapshot_compatible,
     load_published_indexing_state,
-    mark_snapshot_dirty_async,
+    mark_source_dirty_async,
     resolve_snapshot_key,
     snapshot_availability_for_state,
     snapshot_metadata_path,
@@ -199,7 +199,7 @@ async def _mark_dirty_after_committed_mutation(
     reason: str,
 ) -> tuple[tuple[str, ...], bool]:
     dirty_task = asyncio.create_task(
-        mark_snapshot_dirty_async(
+        mark_source_dirty_async(
             base_id,
             config=config,
             runtime_paths=runtime_paths,

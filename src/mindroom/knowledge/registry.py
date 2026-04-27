@@ -393,7 +393,7 @@ def _state_with_refresh_fields(
     )
 
 
-def save_snapshot_dirty_state(
+def mark_snapshot_stale(
     key: KnowledgeSnapshotKey,
     *,
     reason: str,
@@ -411,7 +411,7 @@ def save_snapshot_dirty_state(
     )
 
 
-def save_snapshot_refreshing_state(key: KnowledgeSnapshotKey, *, reason: str = "refreshing") -> None:
+def mark_snapshot_refresh_running(key: KnowledgeSnapshotKey, *, reason: str = "refreshing") -> None:
     """Mark refresh work running while keeping the old active collection readable."""
     save_published_indexing_state(
         snapshot_metadata_path(key),
@@ -424,7 +424,7 @@ def save_snapshot_refreshing_state(key: KnowledgeSnapshotKey, *, reason: str = "
     )
 
 
-def save_snapshot_refresh_failed_state(key: KnowledgeSnapshotKey, *, error: str) -> None:
+def mark_snapshot_refresh_failed_preserving_last_good(key: KnowledgeSnapshotKey, *, error: str) -> None:
     """Record refresh failure while keeping any old active collection pointer."""
     current = load_published_indexing_state(snapshot_metadata_path(key))
     state = _state_with_refresh_fields(
@@ -439,7 +439,7 @@ def save_snapshot_refresh_failed_state(key: KnowledgeSnapshotKey, *, error: str)
     save_published_indexing_state(snapshot_metadata_path(key), state)
 
 
-def save_snapshot_refresh_success_state(key: KnowledgeSnapshotKey) -> None:
+def mark_snapshot_refresh_succeeded(key: KnowledgeSnapshotKey) -> None:
     """Clear refresh status after a successful publish."""
     state = load_published_indexing_state(snapshot_metadata_path(key))
     if state is None:
@@ -806,13 +806,13 @@ def _snapshot_keys_for_shared_source(
     return tuple(matching_keys)
 
 
-def _mark_snapshot_key_dirty_on_disk(matching_key: KnowledgeSnapshotKey, *, reason: str) -> bool:
-    save_snapshot_dirty_state(matching_key, reason=reason)
+def _mark_snapshot_key_stale_on_disk(matching_key: KnowledgeSnapshotKey, *, reason: str) -> bool:
+    mark_snapshot_stale(matching_key, reason=reason)
     _evict_published_snapshots_for_refresh_key(refresh_key_for_snapshot_key(matching_key))
     return True
 
 
-def mark_snapshot_dirty(
+def mark_source_dirty(
     base_id: str,
     *,
     config: Config,
@@ -828,11 +828,11 @@ def mark_snapshot_dirty(
         execution_identity=execution_identity,
     )
     for matching_key in matching_keys:
-        _mark_snapshot_key_dirty_on_disk(matching_key, reason=reason)
+        _mark_snapshot_key_stale_on_disk(matching_key, reason=reason)
     return tuple(dict.fromkeys(key.base_id for key in matching_keys))
 
 
-async def mark_snapshot_dirty_async(
+async def mark_source_dirty_async(
     base_id: str,
     *,
     config: Config,
@@ -842,7 +842,7 @@ async def mark_snapshot_dirty_async(
 ) -> tuple[str, ...]:
     """Async stale marker that keeps metadata I/O off the event loop."""
     return await _run_to_thread_to_completion_on_cancel(
-        mark_snapshot_dirty,
+        mark_source_dirty,
         base_id,
         config=config,
         runtime_paths=runtime_paths,

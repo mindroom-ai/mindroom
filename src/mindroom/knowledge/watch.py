@@ -13,7 +13,7 @@ from watchfiles import Change, awatch
 from mindroom.knowledge.manager import include_semantic_knowledge_relative_path
 from mindroom.knowledge.registry import (
     KnowledgeSourceKey,
-    mark_snapshot_dirty_async,
+    mark_source_dirty_async,
     resolve_refresh_key,
     source_key_for_refresh_key,
 )
@@ -169,7 +169,7 @@ class KnowledgeFilesystemWatchOwner:
     ) -> None:
         scheduled_base_ids: set[str] = set()
         for base_id in target.base_ids:
-            dirty_base_ids = await mark_snapshot_dirty_async(
+            dirty_base_ids = await mark_source_dirty_async(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,

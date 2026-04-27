@@ -95,9 +95,9 @@ def _write_snapshot_metadata(
         payload["last_published_at"] = published_at
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     if last_error is None:
-        knowledge_registry.save_snapshot_refresh_success_state(key)
+        knowledge_registry.mark_snapshot_refresh_succeeded(key)
     else:
-        knowledge_registry.save_snapshot_refresh_failed_state(key, error=last_error)
+        knowledge_registry.mark_snapshot_refresh_failed_preserving_last_good(key, error=last_error)
 
 
 def _init_git_checkout(path: Path, *tracked_paths: str) -> None:
@@ -285,9 +285,9 @@ def test_status_reports_queryable_last_good_snapshot_when_refresh_state_is_not_r
     _write_snapshot_metadata(config, runtime_paths, indexed_count=7)
     key = resolve_snapshot_key("research", config=config, runtime_paths=runtime_paths)
     if refresh_state == "stale":
-        knowledge_registry.save_snapshot_dirty_state(key, reason="source_changed")
+        knowledge_registry.mark_snapshot_stale(key, reason="source_changed")
     else:
-        knowledge_registry.save_snapshot_refresh_failed_state(key, error="refresh failed")
+        knowledge_registry.mark_snapshot_refresh_failed_preserving_last_good(key, error="refresh failed")
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         status_response = client.get("/api/knowledge/bases/research/status")
@@ -705,7 +705,7 @@ async def test_empty_upload_parts_are_noop_without_dirty_mark_or_refresh(tmp_pat
     client.app.state.knowledge_refresh_owner = owner
 
     with (
-        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", side_effect=AssertionError("no mutation")),
+        patch("mindroom.api.knowledge.mark_source_dirty_async", side_effect=AssertionError("no mutation")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
     ):
         response = await knowledge_api.upload_knowledge_files(
@@ -769,7 +769,7 @@ def test_upload_dirty_mark_write_runs_off_event_loop(
     owner = _RecordingRefreshOwner()
     client.app.state.knowledge_refresh_owner = owner
     saw_running_loop: bool | None = None
-    original_save = knowledge_registry.save_snapshot_dirty_state
+    original_save = knowledge_registry.mark_snapshot_stale
 
     def _offloaded_save(*args: object, **kwargs: object) -> object:
         nonlocal saw_running_loop
@@ -781,7 +781,7 @@ def test_upload_dirty_mark_write_runs_off_event_loop(
             saw_running_loop = True
         return original_save(*args, **kwargs)
 
-    monkeypatch.setattr(knowledge_registry, "save_snapshot_dirty_state", _offloaded_save)
+    monkeypatch.setattr(knowledge_registry, "mark_snapshot_stale", _offloaded_save)
 
     with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
         response = client.post(
@@ -811,7 +811,7 @@ def test_upload_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_pat
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", _fail_dirty_mark),
+        patch("mindroom.api.knowledge.mark_source_dirty_async", _fail_dirty_mark),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="dirty mark failed"),
     ):
@@ -927,7 +927,7 @@ async def test_upload_cancellation_after_dirty_mark_finalizes_backup_and_schedul
         await release_dirty.wait()
         return ("research",)
 
-    monkeypatch.setattr(knowledge_api, "mark_snapshot_dirty_async", _slow_dirty_mark)
+    monkeypatch.setattr(knowledge_api, "mark_source_dirty_async", _slow_dirty_mark)
 
     upload_task = asyncio.create_task(
         knowledge_api.upload_knowledge_files(
@@ -976,7 +976,7 @@ def test_upload_write_failure_leaves_ready_snapshot_unchanged_and_skips_refresh(
 
     with (
         patch("mindroom.api.knowledge._stream_upload_to_destination", _fail_write),
-        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", side_effect=AssertionError("no dirty")),
+        patch("mindroom.api.knowledge.mark_source_dirty_async", side_effect=AssertionError("no dirty")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="write failed"),
     ):
@@ -1309,7 +1309,7 @@ def test_delete_dirty_mark_failure_keeps_source_change_and_skips_refresh(tmp_pat
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", _fail_dirty_mark),
+        patch("mindroom.api.knowledge.mark_source_dirty_async", _fail_dirty_mark),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="dirty mark failed"),
     ):
@@ -1342,7 +1342,7 @@ async def test_delete_cancellation_after_dirty_mark_removes_backup_and_schedules
         await release_dirty.wait()
         return ("research",)
 
-    monkeypatch.setattr(knowledge_api, "mark_snapshot_dirty_async", _slow_dirty_mark)
+    monkeypatch.setattr(knowledge_api, "mark_source_dirty_async", _slow_dirty_mark)
 
     delete_task = asyncio.create_task(
         knowledge_api.delete_knowledge_file(
@@ -1391,7 +1391,7 @@ def test_delete_filesystem_failure_leaves_ready_snapshot_unchanged_and_skips_ref
 
     with (
         patch("pathlib.Path.unlink", _fail_delete_stage),
-        patch("mindroom.api.knowledge.mark_snapshot_dirty_async", side_effect=AssertionError("no dirty")),
+        patch("mindroom.api.knowledge.mark_source_dirty_async", side_effect=AssertionError("no dirty")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh,
         pytest.raises(RuntimeError, match="unlink failed"),
     ):
