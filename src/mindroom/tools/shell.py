@@ -62,6 +62,8 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
 _STALE_RECORD_SECONDS = 600  # 10 minutes
 _MAX_BACKGROUNDED = 16
 _MAX_OUTPUT_LINES = 10_000
+_PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
+_POST_EXIT_READER_GRACE_SECONDS = 0.5
 _SHELL_ARGS_ERROR = '\'args\' must be a flat list of strings. Send args like ["bash", "-lc", "ls"].'
 
 # Module-level process registry shared across all MindRoomShellTools instances.
@@ -343,7 +345,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             try:
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=timeout)
+                    await _await_foreground_process_exit(process, timeout_seconds=timeout)
                 except TimeoutError:
                     active = sum(1 for r in self._processes.values() if not r.finished)
                     if active >= _MAX_BACKGROUNDED:
@@ -379,14 +381,18 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                         f"kill_shell_command('{handle}') to stop."
                     )
 
-                await stdout_reader
-                await stderr_reader
+                await _await_reader_tasks_with_grace(
+                    stdout_reader,
+                    stderr_reader,
+                    grace_seconds=_POST_EXIT_READER_GRACE_SECONDS,
+                )
             except asyncio.CancelledError:
                 if background_handle is not None:
                     self._processes.pop(background_handle, None)
                 if background_monitor_task is not None:
                     background_monitor_task.cancel()
-                await _terminate_process_group(process)
+                if process.returncode is None:
+                    await _terminate_process_group(process)
                 await _cancel_pending_tasks(stdout_reader, stderr_reader)
                 if background_monitor_task is not None:
                     with contextlib.suppress(asyncio.CancelledError):
@@ -502,6 +508,59 @@ async def _cancel_pending_tasks(*tasks: asyncio.Task[None]) -> None:
     for task in pending_tasks:
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+async def _await_foreground_process_exit(
+    process: asyncio.subprocess.Process,
+    *,
+    timeout_seconds: float,
+) -> None:
+    """Wait for the foreground process to exit without depending on pipe EOF."""
+    if process.returncode is not None:
+        return
+    if timeout_seconds <= 0:
+        raise TimeoutError
+
+    wait_task = asyncio.create_task(process.wait())
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    try:
+        while process.returncode is None:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError
+            done_tasks, _pending_tasks = await asyncio.wait(
+                (wait_task,),
+                timeout=min(_PROCESS_EXIT_POLL_INTERVAL_SECONDS, remaining),
+            )
+            if wait_task in done_tasks:
+                await wait_task
+                return
+    finally:
+        if not wait_task.done():
+            wait_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await wait_task
+
+
+async def _await_reader_tasks_with_grace(
+    stdout_reader: asyncio.Task[None],
+    stderr_reader: asyncio.Task[None],
+    *,
+    grace_seconds: float,
+) -> None:
+    """Drain reader tasks briefly after foreground exit, then stop waiting for EOF."""
+    reader_tasks = (stdout_reader, stderr_reader)
+    done_tasks, pending_tasks = await asyncio.wait(reader_tasks, timeout=grace_seconds)
+
+    try:
+        for task in done_tasks:
+            await task
+    finally:
+        for task in pending_tasks:
+            task.cancel()
+        for task in pending_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 async def _terminate_process_group(

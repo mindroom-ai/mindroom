@@ -9,7 +9,7 @@ import signal
 import sys
 import time
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -64,6 +64,44 @@ async def _assert_pid_dead(pid: int) -> None:
     raise AssertionError(message)
 
 
+def _fork_child_holding_stdio_script() -> str:
+    return (
+        "import os\n"
+        "import pathlib\n"
+        "import signal\n"
+        "import sys\n"
+        "import time\n"
+        "stop_file = pathlib.Path(sys.argv[2])\n"
+        "def stop_child(signum, frame):\n"
+        "    stop_file.write_text('stopped', encoding='utf-8')\n"
+        "    os._exit(0)\n"
+        "pid = os.fork()\n"
+        "if pid:\n"
+        "    pathlib.Path(sys.argv[1]).write_text(str(pid), encoding='utf-8')\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop_child)\n"
+        "time.sleep(30)\n"
+    )
+
+
+async def _stop_recorded_child(pid: int, stop_file: Path) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, signal.SIGTERM)
+
+    for _ in range(20):
+        if stop_file.exists():
+            return
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        await asyncio.sleep(0.05)
+
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, signal.SIGKILL)
+    await _assert_pid_dead(pid)
+
+
 @pytest.fixture(autouse=True)
 def clear_process_registry() -> Iterator[None]:
     """Ensure subprocess registry state does not leak between tests."""
@@ -91,17 +129,19 @@ async def test_run_shell_command_cancellation_kills_subprocess(tmp_path: Path) -
         str(pid_file),
     ]
 
-    task = asyncio.create_task(run_shell_command(command, timeout=120))
-    pid = await _wait_for_pid(pid_file)
-    await asyncio.sleep(0.1)
+    with patch("mindroom.tools.shell.os.killpg", wraps=os.killpg) as killpg_mock:
+        task = asyncio.create_task(run_shell_command(command, timeout=120))
+        pid = await _wait_for_pid(pid_file)
+        await asyncio.sleep(0.1)
 
-    started_cancel = time.perf_counter()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    elapsed = time.perf_counter() - started_cancel
+        started_cancel = time.perf_counter()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        elapsed = time.perf_counter() - started_cancel
 
     await _assert_pid_dead(pid)
+    killpg_mock.assert_called()
     assert elapsed < 2.0
     assert _process_registry == {}
 
@@ -178,4 +218,53 @@ async def test_run_shell_command_cancellation_cleans_up_background_handle(tmp_pa
             await task
 
     await _assert_pid_dead(pid)
+    assert _process_registry == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+async def test_run_shell_command_cancellation_after_foreground_exit_does_not_terminate_group(tmp_path: Path) -> None:
+    """Cancelling after foreground exit should cancel readers without process-group termination."""
+    run_shell_command = _get_run_shell_command(tmp_path)
+    pid_file = tmp_path / "inherited-child.pid"
+    stop_file = tmp_path / "inherited-child.stopped"
+    command = [sys.executable, "-c", _fork_child_holding_stdio_script(), str(pid_file), str(stop_file)]
+    grace_entered = asyncio.Event()
+    release_grace = asyncio.Event()
+
+    async def blocked_reader_grace(
+        stdout_reader: object,
+        stderr_reader: object,
+        *,
+        grace_seconds: float,
+    ) -> None:
+        del stdout_reader, stderr_reader, grace_seconds
+        grace_entered.set()
+        await release_grace.wait()
+
+    child_pid: int | None = None
+    terminate_process_group = AsyncMock()
+
+    with (
+        patch("mindroom.tools.shell._await_reader_tasks_with_grace", new=blocked_reader_grace),
+        patch("mindroom.tools.shell._terminate_process_group", new=terminate_process_group),
+    ):
+        task = asyncio.create_task(run_shell_command(command, timeout=120))
+        try:
+            child_pid = await _wait_for_pid(pid_file)
+            await asyncio.wait_for(grace_entered.wait(), timeout=2)
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release_grace.set()
+            if child_pid is not None:
+                await _stop_recorded_child(child_pid, stop_file)
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    terminate_process_group.assert_not_awaited()
     assert _process_registry == {}

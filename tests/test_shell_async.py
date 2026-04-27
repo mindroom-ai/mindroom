@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
+import sys
 import time
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -41,6 +45,64 @@ def _get_toolkit(tmp_path: Path) -> Toolkit:
     return get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
 
 
+def _fork_child_holding_stdio_script(*, parent_stderr: str = "", parent_exit_code: int = 0) -> str:
+    return (
+        "import os\n"
+        "import pathlib\n"
+        "import signal\n"
+        "import sys\n"
+        "import time\n"
+        "stop_file = pathlib.Path(sys.argv[2])\n"
+        "def stop_child(signum, frame):\n"
+        "    stop_file.write_text('stopped', encoding='utf-8')\n"
+        "    os._exit(0)\n"
+        f"sys.stderr.write({parent_stderr!r})\n"
+        "sys.stderr.flush()\n"
+        "pid = os.fork()\n"
+        "if pid:\n"
+        "    pathlib.Path(sys.argv[1]).write_text(str(pid), encoding='utf-8')\n"
+        f"    sys.exit({parent_exit_code})\n"
+        "signal.signal(signal.SIGTERM, stop_child)\n"
+        "time.sleep(30)\n"
+    )
+
+
+async def _wait_for_pid_file(pid_file: Path) -> int:
+    for _ in range(50):
+        if pid_file.exists():
+            return int(pid_file.read_text(encoding="utf-8").strip())
+        await asyncio.sleep(0.05)
+    message = f"PID file was not written: {pid_file}"
+    raise AssertionError(message)
+
+
+async def _stop_recorded_child(pid: int, stop_file: Path) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, signal.SIGTERM)
+
+    for _ in range(20):
+        if stop_file.exists():
+            return
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        await asyncio.sleep(0.05)
+
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, signal.SIGKILL)
+
+    for _ in range(20):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        await asyncio.sleep(0.05)
+
+    message = f"Child process {pid} did not stop"
+    raise AssertionError(message)
+
+
 def _get_run_shell_command_function(tool: Toolkit) -> Function:
     return tool.async_functions["run_shell_command"]
 
@@ -63,6 +125,17 @@ async def test_run_shell_command_returns_output(tmp_path: Path) -> None:
 
     result = await entrypoint(["echo", "hello world"])
     assert result == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_bash_echo_returns_output(tmp_path: Path) -> None:
+    """Normal shell output should still be returned."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(["bash", "-lc", "echo hello"])
+    assert result == "hello"
 
 
 def test_run_shell_command_schema_keeps_args_as_string_array(tmp_path: Path) -> None:
@@ -145,6 +218,74 @@ async def test_run_shell_command_returns_error_on_nonzero_exit(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+async def test_run_shell_command_returns_after_foreground_exit_with_inherited_pipe_child(tmp_path: Path) -> None:
+    """Regression: tmux/auth helpers/watchers/daemons can inherit pipes after foreground exit."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    pid_file = tmp_path / "child.pid"
+    stop_file = tmp_path / "child.stopped"
+    command = [sys.executable, "-c", _fork_child_holding_stdio_script(), str(pid_file), str(stop_file)]
+    started = time.perf_counter()
+    task = asyncio.create_task(entrypoint(command, timeout=10))
+    child_pid: int | None = None
+
+    try:
+        child_pid = await _wait_for_pid_file(pid_file)
+        result = await asyncio.wait_for(task, timeout=2)
+    finally:
+        if child_pid is not None:
+            await _stop_recorded_child(child_pid, stop_file)
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    elapsed = time.perf_counter() - started
+    assert elapsed < 2
+    assert result == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+async def test_run_shell_command_nonzero_foreground_exit_with_inherited_pipe_child(tmp_path: Path) -> None:
+    """Nonzero foreground exit should return buffered stderr without waiting for descendant EOF."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    pid_file = tmp_path / "child-error.pid"
+    stop_file = tmp_path / "child-error.stopped"
+    command = [
+        sys.executable,
+        "-c",
+        _fork_child_holding_stdio_script(parent_stderr="foreground failed\n", parent_exit_code=7),
+        str(pid_file),
+        str(stop_file),
+    ]
+    started = time.perf_counter()
+    task = asyncio.create_task(entrypoint(command, timeout=10))
+    child_pid: int | None = None
+
+    try:
+        child_pid = await _wait_for_pid_file(pid_file)
+        result = await asyncio.wait_for(task, timeout=2)
+    finally:
+        if child_pid is not None:
+            await _stop_recorded_child(child_pid, stop_file)
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    elapsed = time.perf_counter() - started
+    assert elapsed < 2
+    assert result == "Error: foreground failed"
+
+
+@pytest.mark.asyncio
 async def test_run_shell_command_tail_parameter(tmp_path: Path) -> None:
     """Only the last N lines should be returned."""
     tool = _get_toolkit(tmp_path)
@@ -161,7 +302,9 @@ async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> No
     """Command exceeding timeout should return a handle."""
     tool = _get_toolkit(tmp_path)
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    check_fn = tool.functions["check_shell_command"].entrypoint
     assert entrypoint is not None
+    assert check_fn is not None
 
     result = await entrypoint(["sleep", "300"], timeout=1)
 
@@ -171,6 +314,7 @@ async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> No
 
     # Extract handle and clean up
     handle = result.split("Handle: ")[1].split("\n")[0]
+    assert "RUNNING" in check_fn(handle)
     kill_fn = tool.functions["kill_shell_command"].entrypoint
     kill_fn(handle, force=True)
     await asyncio.sleep(0.1)
