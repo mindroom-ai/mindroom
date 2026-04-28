@@ -12,7 +12,13 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
-    from mindroom.orchestrator import MultiAgentOrchestrator
+    from mindroom.runtime_protocols import (
+        OrchestratorRuntime,
+        SupportsClientConfig,
+        SupportsClientConfigOrchestrator,
+        SupportsConfig,
+        SupportsConfigOrchestrator,
+    )
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
 
 
@@ -32,7 +38,7 @@ class BotRuntimeView(Protocol):
     def enable_streaming(self) -> bool: ...  # noqa: D102
 
     @property
-    def orchestrator(self) -> MultiAgentOrchestrator | None: ...  # noqa: D102
+    def orchestrator(self) -> OrchestratorRuntime | None: ...  # noqa: D102
 
     @property
     def event_cache(self) -> ConversationEventCache: ...  # noqa: D102
@@ -55,7 +61,7 @@ class BotRuntimeState:
     config: Config
     runtime_paths: RuntimePaths
     enable_streaming: bool
-    orchestrator: MultiAgentOrchestrator | None
+    orchestrator: OrchestratorRuntime | None
     event_cache: ConversationEventCache | None
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry | None = None
@@ -64,3 +70,20 @@ class BotRuntimeState:
     def mark_runtime_started(self) -> None:
         """Record the runtime start time for this bot start."""
         self.runtime_started_at = time.time()
+
+
+if TYPE_CHECKING:
+
+    def _check_runtime_state_satisfies_narrow_protocols(
+        view: BotRuntimeView,
+    ) -> None:
+        """Type-only proof that BotRuntimeView satisfies every narrow protocol.
+
+        This function is never called at runtime. The assignments below
+        will fail static type-check if any narrow protocol drifts out of
+        the BotRuntimeView surface.
+        """
+        _a: SupportsConfig = view
+        _b: SupportsClientConfig = view
+        _c: SupportsConfigOrchestrator = view
+        _d: SupportsClientConfigOrchestrator = view

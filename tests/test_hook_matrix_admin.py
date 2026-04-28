@@ -182,7 +182,7 @@ def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path:
     config = _config(tmp_path)
     orchestrator = MagicMock()
     sentinel = object()
-    orchestrator._hook_matrix_admin.return_value = sentinel
+    orchestrator.hook_matrix_admin.return_value = sentinel
     runtime = SimpleNamespace(
         client=AsyncMock(spec=nio.AsyncClient),
         orchestrator=orchestrator,
@@ -203,7 +203,7 @@ def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path:
         admin = support.matrix_admin()
 
     assert admin is sentinel
-    orchestrator._hook_matrix_admin.assert_called_once_with()
+    orchestrator.hook_matrix_admin.assert_called_once_with()
     mock_build.assert_not_called()
 
 
@@ -239,7 +239,7 @@ def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp
     config = _config(tmp_path)
     orchestrator = MagicMock()
     sentinel = object()
-    orchestrator._hook_matrix_admin.return_value = sentinel
+    orchestrator.hook_matrix_admin.return_value = sentinel
     runtime = SimpleNamespace(
         client=AsyncMock(spec=nio.AsyncClient),
         orchestrator=orchestrator,
@@ -259,7 +259,7 @@ def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp
     admin = support.matrix_admin()
 
     assert admin is sentinel
-    orchestrator._hook_matrix_admin.assert_called_once_with()
+    orchestrator.hook_matrix_admin.assert_called_once_with()
 
 
 def test_hook_context_support_returns_none_without_router_matrix_admin(tmp_path: Path) -> None:

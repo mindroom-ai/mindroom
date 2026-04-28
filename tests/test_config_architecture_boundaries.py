@@ -9,6 +9,10 @@ CONFIG_MODULES = tuple(Path("src/mindroom/config").glob("*.py"))
 PRODUCTION_MODULES = tuple(Path("src/mindroom").rglob("*.py"))
 MATRIX_IDENTITY_MODULE = Path("src/mindroom/matrix/identity.py")
 LEGACY_MATRIX_NAMING_MODULE = Path("src/mindroom/matrix_naming.py")
+CONCRETE_ORCHESTRATOR_IMPORT_ALLOWLIST = {
+    Path("src/mindroom/orchestrator.py"),
+}
+RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
 MATRIX_IDENTIFIER_HELPERS = frozenset(
     {
         "agent_username_localpart",
@@ -107,3 +111,35 @@ def test_matrix_naming_compatibility_module_does_not_exist() -> None:
                 )
 
     assert forbidden == []
+
+
+def test_runtime_collaborators_do_not_import_concrete_orchestrator() -> None:
+    """Collaborators depend on a narrow runtime protocol instead of MultiAgentOrchestrator."""
+    forbidden: list[str] = []
+    for source_path in PRODUCTION_MODULES:
+        if source_path in CONCRETE_ORCHESTRATOR_IMPORT_ALLOWLIST:
+            continue
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module != "mindroom.orchestrator":
+                continue
+            if any(alias.name == "MultiAgentOrchestrator" for alias in node.names):
+                forbidden.append(f"{source_path}:{node.lineno}: from {node.module} import MultiAgentOrchestrator")
+
+    assert forbidden == []
+
+
+def test_orchestrator_runtime_protocol_exposes_only_public_members() -> None:
+    """The orchestrator runtime protocol is the public cross-module contract."""
+    tree = ast.parse(RUNTIME_PROTOCOLS_MODULE.read_text(encoding="utf-8"))
+    protocol_class = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == "OrchestratorRuntime"
+    )
+
+    private_members = [
+        node.name
+        for node in protocol_class.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("_") and not node.name.startswith("__")
+    ]
+
+    assert private_members == []

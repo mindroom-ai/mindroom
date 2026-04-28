@@ -1078,14 +1078,13 @@ visibility = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_bookkeeping",
     "mindroom.response_runner",
-    "mindroom.runtime_protocols",
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",
 ]
 
 [[modules]]
 path = "mindroom.runtime_protocols"
-depends_on = ["mindroom.bot_runtime_view"]
+depends_on = []
 visibility = [
     "mindroom.bot_room_lifecycle",
     "mindroom.conversation_resolver",
@@ -1914,10 +1913,12 @@ from = ["mindroom.memory"]
 
 [[interfaces]]
 expose = [
+    "OrchestratorRuntime",
     "SupportsClientConfig",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",
+    "SupportsRunningState",
 ]
 from = ["mindroom.runtime_protocols"]
 

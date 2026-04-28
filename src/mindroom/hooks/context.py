@@ -164,7 +164,7 @@ class HookContextSupport:
             return self.hook_send_message
         orchestrator = self.runtime.orchestrator
         if orchestrator is not None:
-            sender = orchestrator._hook_message_sender()
+            sender = orchestrator.hook_message_sender()
             if sender is not None:
                 return sender
         return None
@@ -175,7 +175,7 @@ class HookContextSupport:
         fallback = None
         orchestrator = self.runtime.orchestrator
         if self.agent_name != ROUTER_AGENT_NAME and orchestrator is not None:
-            fallback = orchestrator._hook_room_state_querier()
+            fallback = orchestrator.hook_room_state_querier()
         return chain_hook_room_state_queriers(primary, fallback)
 
     def room_state_putter(self) -> HookRoomStatePutter | None:
@@ -184,14 +184,14 @@ class HookContextSupport:
         fallback = None
         orchestrator = self.runtime.orchestrator
         if self.agent_name != ROUTER_AGENT_NAME and orchestrator is not None:
-            fallback = orchestrator._hook_room_state_putter()
+            fallback = orchestrator.hook_room_state_putter()
         return chain_hook_room_state_putters(primary, fallback)
 
     def matrix_admin(self) -> HookMatrixAdmin | None:
         """Return the router-backed Matrix admin helper bound into hook contexts."""
         orchestrator = self.runtime.orchestrator
         if orchestrator is not None:
-            admin = orchestrator._hook_matrix_admin()
+            admin = orchestrator.hook_matrix_admin()
             if admin is not None:
                 return admin
         if self.agent_name == ROUTER_AGENT_NAME and self.runtime.client is not None:

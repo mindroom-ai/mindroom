@@ -148,7 +148,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.orchestrator import MultiAgentOrchestrator
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -571,12 +571,12 @@ class AgentBot:
         self._runtime_view.enable_streaming = value
 
     @property
-    def orchestrator(self) -> MultiAgentOrchestrator | None:
+    def orchestrator(self) -> OrchestratorRuntime | None:
         """Return the current orchestrator."""
         return self._runtime_view.orchestrator
 
     @orchestrator.setter
-    def orchestrator(self, value: MultiAgentOrchestrator | None) -> None:
+    def orchestrator(self, value: OrchestratorRuntime | None) -> None:
         """Update the current orchestrator."""
         self._runtime_view.orchestrator = value
 
