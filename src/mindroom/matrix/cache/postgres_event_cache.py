@@ -47,7 +47,6 @@ _TRANSIENT_SQLSTATES: frozenset[str] = frozenset(
 _TRANSIENT_ERROR_TEXT: tuple[str, ...] = (
     "connection is closed",
     "connection already closed",
-    "connection failed",
     "connection refused",
     "could not connect",
     "network is unreachable",
@@ -60,11 +59,12 @@ _TRANSIENT_ERROR_TEXT: tuple[str, ...] = (
 
 def _postgres_error_sqlstate(exc: BaseException) -> str | None:
     """Return the SQLSTATE attached to a psycopg error when available."""
-    sqlstate = getattr(exc, "sqlstate", None)
+    if not isinstance(exc, psycopg.Error):
+        return None
+    sqlstate = exc.sqlstate
     if isinstance(sqlstate, str):
         return sqlstate
-    diag = getattr(exc, "diag", None)
-    diag_sqlstate = getattr(diag, "sqlstate", None) if diag is not None else None
+    diag_sqlstate = exc.diag.sqlstate
     return diag_sqlstate if isinstance(diag_sqlstate, str) else None
 
 
@@ -509,7 +509,7 @@ class _PostgresEventCacheRuntime:
 
     def connection_is_closed(self, db: psycopg.AsyncConnection) -> bool:
         """Return whether psycopg considers one connection closed."""
-        return bool(getattr(db, "closed", False))
+        return bool(db.closed)
 
     def _unavailable_reason_from_exception(self, exc: BaseException) -> str:
         message = str(exc)

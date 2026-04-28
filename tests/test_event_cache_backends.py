@@ -4,23 +4,37 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, Mock
 
 import psycopg
 import pytest
 
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.logging_config import get_logger
+from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
     PostgresEventCache,
     PostgresEventCacheRuntime,
     _is_transient_postgres_failure,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.runtime_support import EventCacheRuntimeIdentity, build_event_cache
+from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.runtime_support import (
+    EventCacheRuntimeIdentity,
+    OwnedRuntimeSupport,
+    StartupThreadPrewarmRegistry,
+    build_event_cache,
+    event_cache_runtime_identity,
+    initialize_event_cache_best_effort,
+    sync_owned_runtime_support,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.matrix.cache import ConversationEventCache
 
 
 def _message_event(
@@ -514,6 +528,70 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
 def test_postgres_transient_classifier_accepts_startup_connection_refused() -> None:
     """Startup connection-refused errors should retry later instead of disabling the cache."""
     assert _is_transient_postgres_failure(psycopg.OperationalError("connection failed: Connection refused"))
+
+
+def test_postgres_transient_classifier_rejects_authentication_failures_without_sqlstate() -> None:
+    """Authentication failures should disable the cache instead of retrying forever."""
+    exc = psycopg.OperationalError(
+        'connection failed: connection to server at "127.0.0.1", port 5432 failed: '
+        'FATAL: password authentication failed for user "cache"',
+    )
+
+    assert not _is_transient_postgres_failure(exc)
+
+
+@pytest.mark.asyncio
+async def test_event_cache_startup_backend_unavailable_retries_without_disabling(tmp_path: Path) -> None:
+    """A transient startup outage should leave the cache enabled for the next sync retry."""
+    runtime_paths = _runtime_paths(tmp_path)
+    cache_config = CacheConfig()
+    cache = Mock()
+    cache.is_initialized = False
+    cache.initialize = AsyncMock()
+    cache.disable = Mock()
+    initialize_attempts = 0
+
+    async def initialize() -> None:
+        nonlocal initialize_attempts
+        initialize_attempts += 1
+        if initialize_attempts == 1:
+            reason = "postgres unavailable"
+            raise EventCacheBackendUnavailableError(reason)
+        cache.is_initialized = True
+
+    cache.initialize.side_effect = initialize
+    logger = get_logger("tests.event_cache_backends")
+    support = OwnedRuntimeSupport(
+        event_cache=cast("ConversationEventCache", cache),
+        event_cache_write_coordinator=_EventCacheWriteCoordinator(logger=logger),
+        startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
+        event_cache_identity=event_cache_runtime_identity(cache_config, runtime_paths),
+    )
+
+    await initialize_event_cache_best_effort(
+        support,
+        logger=logger,
+        init_failure_reason_prefix="test_startup",
+    )
+
+    assert initialize_attempts == 1
+    assert cache.is_initialized is False
+    cache.disable.assert_not_called()
+
+    retried_support = await sync_owned_runtime_support(
+        support,
+        cache_config=cache_config,
+        runtime_paths=runtime_paths,
+        logger=logger,
+        background_task_owner=object(),
+        init_failure_reason_prefix="test_retry",
+        log_db_path_change=False,
+    )
+
+    assert retried_support is support
+    assert initialize_attempts == 2
+    assert cache.is_initialized is True
+    cache.disable.assert_not_called()
 
 
 def test_build_event_cache_requires_postgres_database_url(tmp_path: Path) -> None:
