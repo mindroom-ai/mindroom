@@ -692,7 +692,7 @@ def test_room_specific_permissions_support_managed_room_key(
             ),
         },
     )
-    monkeypatch.setattr("mindroom.authorization.MatrixState.load", lambda **_kwargs: state)
+    monkeypatch.setattr("mindroom.authorization.matrix_state_for_runtime", lambda *_args, **_kwargs: state)
 
     assert is_authorized_sender("@bob:example.com", config, "!lobby:example.com")
     assert not is_authorized_sender("@eve:example.com", config, "!lobby:example.com")

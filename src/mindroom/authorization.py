@@ -11,7 +11,7 @@ import nio
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID, active_internal_sender_ids
-from mindroom.matrix.state import MatrixState
+from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
 
 if TYPE_CHECKING:
@@ -51,7 +51,7 @@ def _lookup_managed_room_identifiers(
     runtime_paths: RuntimePaths,
 ) -> tuple[str | None, str | None]:
     """Return managed room key + alias from persisted Matrix state for a room ID."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
     for room_key, room in state.rooms.items():
         if room.room_id == room_id:
             return room_key, room.alias

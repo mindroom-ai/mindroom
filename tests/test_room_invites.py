@@ -285,8 +285,8 @@ async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
     )
     monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
     monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.MatrixState.load",
-        lambda **_kwargs: MatrixState(space_room_id="!space:localhost"),
+        "mindroom.bot_room_lifecycle.matrix_state_for_runtime",
+        lambda *_args, **_kwargs: MatrixState(space_room_id="!space:localhost"),
     )
 
     await bot.leave_unconfigured_rooms()

@@ -18,7 +18,7 @@ from mindroom.matrix.client_session import (
     restore_login,
 )
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.state import MatrixState
+from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
@@ -76,7 +76,7 @@ def _get_agent_credentials(
         Dictionary with username and password, or None if not found
 
     """
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
     agent_key = _account_key_for_agent(agent_name)
     account = state.get_account(agent_key)
     if account:

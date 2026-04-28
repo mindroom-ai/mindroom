@@ -738,7 +738,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
         "load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
+    monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "room_has_avatar", AsyncMock(return_value=False))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
@@ -803,7 +803,7 @@ async def test_set_room_avatars_in_matrix_skips_rooms_with_existing_matrix_avata
         "load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
+    monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(
         generate_avatars,
@@ -868,7 +868,7 @@ async def test_set_room_avatars_in_matrix_force_replaces_existing_matrix_avatar(
         "load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
+    monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "room_has_avatar", room_has_avatar)
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
@@ -932,7 +932,7 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
         "load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
+    monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "room_has_avatar", AsyncMock(return_value=False))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", AsyncMock(return_value=False))
@@ -995,7 +995,7 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
         "load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
+    monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
     monkeypatch.setattr(
@@ -1018,7 +1018,7 @@ async def test_set_room_avatars_in_matrix_requires_initialized_router_account(
 ) -> None:
     """Standalone avatar sync should fail fast until MindRoom has initialized the router account."""
     state = SimpleNamespace(get_account=lambda _key: None)
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
+    monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
 
     with pytest.raises(
         generate_avatars.AvatarSyncError,
@@ -1053,7 +1053,7 @@ async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
         "load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, tmp_path),
     )
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
+    monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
     monkeypatch.setattr(
         generate_avatars,
         "login_agent_user",
