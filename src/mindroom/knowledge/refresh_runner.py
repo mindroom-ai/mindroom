@@ -254,6 +254,7 @@ async def refresh_knowledge_binding_in_subprocess(
 
     if return_code != 0:
         msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
+        await _reconcile_failed_refresh_subprocess(key, error=msg)
         raise RuntimeError(msg)
 
 
@@ -393,6 +394,15 @@ async def _cleanup_cancelled_refresh_subprocess(
             )
     except Exception:
         logger.warning("Failed to reconcile cancelled knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
+
+
+async def _reconcile_failed_refresh_subprocess(key: PublishedIndexKey, *, error: str) -> None:
+    try:
+        source_root = source_root_for_published_index_key(key)
+        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+            await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
+    except Exception:
+        logger.warning("Failed to reconcile failed knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
 
 
 @asynccontextmanager
