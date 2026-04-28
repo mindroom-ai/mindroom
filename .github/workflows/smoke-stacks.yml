@@ -66,6 +66,20 @@ jobs:
           skipClusterDeletion: true
           skipClusterLogsExport: true
 
+      - name: Free runner disk space
+        run: |
+          echo "Disk usage before cleanup:"
+          df -h /
+
+          echo "Removing preinstalled .NET SDKs to make room for smoke images..."
+          sudo rm -rf /usr/share/dotnet
+
+          echo "Removing preinstalled Android SDK to make room for smoke images..."
+          sudo rm -rf /usr/local/lib/android
+
+          echo "Disk usage after cleanup:"
+          df -h /
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
