@@ -14,12 +14,9 @@ from uuid import uuid4
 from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
+from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import ai_response
-from mindroom.hooks import EnrichmentItem
-from mindroom.knowledge import (
-    format_knowledge_availability_notice,
-    resolve_agent_knowledge_access,
-)
+from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -113,12 +110,10 @@ class DelegateTools(Toolkit):
                 refresh_scheduler=self._refresh_scheduler,
                 execution_identity=execution_identity,
             )
-            system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-            notice = format_knowledge_availability_notice(knowledge_resolution.unavailable)
-            if notice is not None:
-                system_enrichment_items = (
-                    EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
-                )
+            system_enrichment_items = append_knowledge_availability_enrichment(
+                (),
+                knowledge_resolution.unavailable,
+            )
             logger.info(
                 "Delegating task",
                 from_agent=self._agent_name,

@@ -100,6 +100,19 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.agent_run_context"
+depends_on = [
+    "mindroom.hooks",
+    "mindroom.knowledge",
+]
+visibility = [
+    "mindroom.api.openai_compat",
+    "mindroom.custom_tools.delegate",
+    "mindroom.response_runner",
+    "mindroom.teams",
+]
+
+[[modules]]
 path = "mindroom.agent_prompts"
 depends_on = []
 visibility = ["mindroom.agents"]
@@ -182,11 +195,11 @@ depends_on = ["mindroom.memory"]
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
+    "mindroom.agent_run_context",
     "mindroom.agent_descriptions",
     "mindroom.ai",
     "mindroom.config.main",
     "mindroom.constants",
-    "mindroom.hooks",
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.tool_system.runtime_context",
@@ -291,6 +304,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.openai_compat"
 depends_on = [
+    "mindroom.agent_run_context",
     "mindroom.ai",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
@@ -748,6 +762,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.constants",
@@ -756,7 +771,6 @@ depends_on = [
     "mindroom.history.interrupted_replay",
     "mindroom.history.turn_recorder",
     "mindroom.hooks",
-    "mindroom.knowledge",
     "mindroom.matrix.client_visible_messages",
     "mindroom.memory",
     "mindroom.orchestration.runtime",
@@ -810,6 +824,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.teams"
 depends_on = [
+    "mindroom.agent_run_context",
     "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.ai",

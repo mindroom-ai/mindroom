@@ -16,6 +16,11 @@ RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
 MATRIX_MESSAGE_TOOL_MODULE = Path("src/mindroom/custom_tools/matrix_message.py")
 RESPONSE_RUNNER_MODULE = Path("src/mindroom/response_runner.py")
 RESPONSE_LIFECYCLE_MODULE = Path("src/mindroom/response_lifecycle.py")
+KNOWLEDGE_AVAILABILITY_NOTICE_OWNER_MODULES = {
+    Path("src/mindroom/agent_run_context.py"),
+    Path("src/mindroom/knowledge/__init__.py"),
+    Path("src/mindroom/knowledge/utils.py"),
+}
 MATRIX_MESSAGE_LOW_LEVEL_IMPORTS = frozenset(
     {
         "mindroom.custom_tools.attachments",
@@ -222,3 +227,21 @@ def test_response_lifecycle_does_not_reach_into_response_runner_internals() -> N
             found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: {node.attr}")
 
     assert found == []
+
+
+def test_agent_run_context_owns_knowledge_availability_notice_injection() -> None:
+    """Agent-run adapters use the shared helper instead of formatting availability notices inline."""
+    forbidden: list[str] = []
+    for source_path in PRODUCTION_MODULES:
+        if source_path in KNOWLEDGE_AVAILABILITY_NOTICE_OWNER_MODULES:
+            continue
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "mindroom.knowledge":
+                imported_names = [alias.name for alias in node.names]
+                if "format_knowledge_availability_notice" in imported_names:
+                    forbidden.append(f"{source_path}:{node.lineno}: from {node.module}")
+            if isinstance(node, ast.Name) and node.id == "format_knowledge_availability_notice":
+                forbidden.append(f"{source_path}:{node.lineno}: {node.id}")
+
+    assert forbidden == []
