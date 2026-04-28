@@ -659,6 +659,59 @@ class TestThreadHistory:
         mock_store.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_history_logs_cache_store_skip_for_missing_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Skipped homeserver refills should expose why the advisory cache was not repopulated."""
+        client = AsyncMock()
+        logger = MagicMock()
+        fallback_history = [
+            ResolvedVisibleMessage.synthetic(
+                sender="@user:localhost",
+                body="reply",
+                event_id="$reply",
+                content={"body": "reply"},
+            ),
+        ]
+        monkeypatch.setattr(matrix_client_module, "logger", logger)
+
+        with (
+            patch(
+                "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
+                new=AsyncMock(
+                    return_value=MagicMock(
+                        history=fallback_history,
+                        event_sources=[{"event_id": "$reply"}],
+                        fetch_ms=10.0,
+                        room_scan_pages=73,
+                        scanned_event_count=7300,
+                        resolution_ms=0.0,
+                        sidecar_hydration_ms=0.0,
+                    ),
+                ),
+            ),
+            patch("mindroom.matrix.client_thread_history._store_thread_history_cache", new=AsyncMock()) as mock_store,
+        ):
+            await fetch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=make_event_cache_mock(),
+            )
+
+        mock_store.assert_not_awaited()
+        logger.info.assert_any_call(
+            "Thread history cache store skipped",
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            cache_store_skipped_reason="missing_thread_root",
+            has_thread_root=False,
+            event_count=1,
+            history_event_count=1,
+            homeserver_scan_pages=73,
+            homeserver_scanned_event_count=7300,
+            homeserver_thread_event_count=1,
+        )
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_snapshot_miss_uses_authoritative_refresh_path(self) -> None:
         """Snapshot misses should reuse the authoritative refresh path instead of a separate fast path."""
         refreshed_history = ThreadHistoryResult(
