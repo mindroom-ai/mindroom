@@ -80,10 +80,14 @@ It still needs more cleanup, but normal turn control, edit regeneration, and int
 Interactive reactions and numeric text selections now share the same controller-owned execution path.
 That path sends the acknowledgment, runs response generation, and records the handled turn once.
 
+`ResponseAttemptRunner` now owns visible response attempts.
+It sends thinking placeholders, registers stop tracking, runs the cancellable response task, logs cancellation provenance, and clears stop tracking.
+`ResponseRunner` keeps the existing attempt entry point, but delegates attempt mechanics through this deeper module.
+
 ## Next Simplification Work
 
 Shrink `ResponseRunner`.
-It should keep placeholder, locking, streaming, cancellation, AI or team execution, and post-response effects, but it should stop accumulating unrelated side paths.
+It should keep locking, streaming, AI or team execution, and post-response effects, but it should stop accumulating unrelated side paths.
 
 Revisit `IngressHookRunner`.
 It may stay as a helper, but it should not grow into another top-level orchestration object.
