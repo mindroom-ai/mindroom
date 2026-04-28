@@ -14,6 +14,7 @@ from uuid import uuid4
 import nio
 from nio import crypto
 from nio.api import Api
+from nio.exceptions import OlmTrustError
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import prepare_large_message
@@ -27,6 +28,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_MATRIX_TRUST_DELIVERY_ERROR_MESSAGE = "Matrix encrypted delivery rejected by local device trust policy."
+_MATRIX_GENERIC_DELIVERY_ERROR_MESSAGE = "Matrix delivery raised an unexpected local exception."
+
 
 @dataclass(frozen=True, slots=True)
 class DeliveredMatrixEvent:
@@ -34,6 +38,83 @@ class DeliveredMatrixEvent:
 
     event_id: str
     content_sent: dict[str, Any]
+
+
+def _sanitized_delivery_error_message(error: Exception) -> str:
+    """Return a log-safe Matrix delivery failure message."""
+    if isinstance(error, OlmTrustError):
+        return _MATRIX_TRUST_DELIVERY_ERROR_MESSAGE
+    return _MATRIX_GENERIC_DELIVERY_ERROR_MESSAGE
+
+
+def _log_matrix_delivery_exception(
+    error: Exception,
+    *,
+    room_id: str,
+    operation: str,
+    cache_bypass: bool,
+) -> None:
+    """Log one local Matrix send/edit exception without exposing device details."""
+    logger.error(
+        "matrix_message_delivery_exception",
+        room_id=room_id,
+        operation=operation,
+        cache_bypass=cache_bypass,
+        exception_type=error.__class__.__name__,
+        error_message=_sanitized_delivery_error_message(error),
+    )
+
+
+async def _send_prepared_room_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    content_sent: dict[str, Any],
+    *,
+    message_type: str,
+    cache_bypass: bool,
+    operation: str,
+) -> object | None:
+    """Send one prepared Matrix room message and normalize local delivery exceptions."""
+    try:
+        if cache_bypass:
+            access_token = client.access_token
+            if not access_token:
+                _log_matrix_delivery_exception(
+                    nio.LocalProtocolError("Matrix client access token is required to send a message."),
+                    room_id=room_id,
+                    operation=operation,
+                    cache_bypass=cache_bypass,
+                )
+                return None
+            method, path, data = Api.room_send(
+                access_token,
+                room_id,
+                message_type,
+                content_sent,
+                uuid4(),
+            )
+            return await client._send(
+                nio.RoomSendResponse,
+                method,
+                path,
+                data,
+                response_data=(room_id,),
+            )
+        return await client.room_send(
+            room_id=room_id,
+            message_type=message_type,
+            content=content_sent,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        _log_matrix_delivery_exception(
+            error,
+            room_id=room_id,
+            operation=operation,
+            cache_bypass=cache_bypass,
+        )
+        return None
 
 
 def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
@@ -65,9 +146,11 @@ async def send_message_result(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
+    *,
+    operation: str = "send_message",
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
-    if not _can_send_to_encrypted_room(client, room_id, operation="send_message"):
+    if not _can_send_to_encrypted_room(client, room_id, operation=operation):
         return None
 
     rooms = client.rooms
@@ -79,7 +162,7 @@ async def send_message_result(
             logger.error(
                 "matrix_encrypted_room_send_requires_synced_room_cache",
                 room_id=room_id,
-                operation="send_message",
+                operation=operation,
                 hint="Wait for initial sync to populate nio's room cache before sending to encrypted rooms.",
             )
             return None
@@ -89,7 +172,7 @@ async def send_message_result(
             logger.error(
                 "matrix_room_send_requires_known_encryption_state",
                 room_id=room_id,
-                operation="send_message",
+                operation=operation,
                 hint="Unable to determine whether the room is encrypted while nio's room cache is empty.",
             )
             return None
@@ -115,31 +198,25 @@ async def send_message_result(
         message_type=message_type,
         cache_bypass=cache_bypass,
     )
-    if cache_bypass:
-        access_token = client.access_token
-        if not access_token:
-            msg = "Matrix client access token is required to send a message."
-            raise nio.LocalProtocolError(msg)
-        method, path, data = Api.room_send(
-            access_token,
-            room_id,
-            message_type,
-            content_sent,
-            uuid4(),
-        )
-        response = await client._send(
-            nio.RoomSendResponse,
-            method,
-            path,
-            data,
-            response_data=(room_id,),
-        )
-    else:
-        response = await client.room_send(
+    response = await _send_prepared_room_message(
+        client,
+        room_id,
+        content_sent,
+        message_type=message_type,
+        cache_bypass=cache_bypass,
+        operation=operation,
+    )
+    if response is None:
+        emit_timing_event(
+            "Matrix send timing",
+            phase="send_finish",
             room_id=room_id,
             message_type=message_type,
-            content=content_sent,
+            cache_bypass=cache_bypass,
+            outcome="error",
+            error="delivery_exception",
         )
+        return None
     if isinstance(response, nio.RoomSendResponse):
         emit_timing_event(
             "Matrix send timing",
@@ -396,7 +473,7 @@ async def edit_message_result(
         extra_content=extra_content,
     )
 
-    return await send_message_result(client, room_id, edit_content)
+    return await send_message_result(client, room_id, edit_content, operation="edit_message")
 
 
 __all__ = [
