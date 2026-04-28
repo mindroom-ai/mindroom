@@ -860,8 +860,15 @@ def _load_agent_skills(
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
+    *,
+    workspace_skills_root: Path | None = None,
 ) -> Skills | None:
-    return build_agent_skills(agent_name, config, runtime_paths)
+    return build_agent_skills(
+        agent_name,
+        config,
+        runtime_paths,
+        workspace_skills_root=workspace_skills_root,
+    )
 
 
 @timed("system_prompt_assembly.agent_create.agent_init")
@@ -1073,7 +1080,12 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         model_id=model.id,
     )
 
-    skills = _load_agent_skills(agent_name, config, runtime_paths)
+    skills = _load_agent_skills(
+        agent_name,
+        config,
+        runtime_paths,
+        workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+    )
     if skills and skills.get_skill_names():
         instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
 

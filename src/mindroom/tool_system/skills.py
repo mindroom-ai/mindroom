@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 import json5
 import yaml
 from agno.skills import LocalSkills, Skills
+from agno.skills.errors import SkillValidationError
 from agno.skills.loaders import SkillLoader
 
 from mindroom.constants import runtime_env_values
@@ -56,6 +58,7 @@ class _MindroomSkillsLoader(SkillLoader):
     allowlist: Sequence[str] | None = None
     env_vars: Mapping[str, str] | None = None
     credential_keys: set[str] | None = None
+    block_script_execution: bool = False
 
     def load(self) -> list[Skill]:
         """Return the eligible skills for the configured roots and allowlist."""
@@ -93,35 +96,114 @@ class _MindroomSkillsLoader(SkillLoader):
         return list(skills_by_name.values())
 
 
+class _MindroomSkills(Skills):
+    """MindRoom-specific Skills wrapper for workspace script policy."""
+
+    def __init__(self, *, loaders: list[SkillLoader]) -> None:
+        self._script_execution_blocked_skill_names: set[str] = set()
+        super().__init__(loaders=loaders)
+
+    def _load_skills(self) -> None:
+        """Load skills while tracking which final skills came from workspace loaders."""
+        self._script_execution_blocked_skill_names.clear()
+        for loader in self.loaders:
+            try:
+                skills = loader.load()
+                block_script_execution = isinstance(loader, _MindroomSkillsLoader) and loader.block_script_execution
+                for skill in skills:
+                    if skill.name in self._skills:
+                        logger.warning("Duplicate skill name; overwriting with newer version", skill=skill.name)
+                    self._skills[skill.name] = skill
+                    if block_script_execution:
+                        self._script_execution_blocked_skill_names.add(skill.name)
+                    else:
+                        self._script_execution_blocked_skill_names.discard(skill.name)
+            except SkillValidationError:
+                raise
+            except Exception as exc:
+                logger.warning("Error loading skills", loader=repr(loader), error=str(exc))
+
+        logger.debug("Loaded skills", count=len(self._skills))
+
+    def _get_skill_script(
+        self,
+        skill_name: str,
+        script_path: str,
+        execute: bool = False,
+        args: list[str] | None = None,
+        timeout: int = 30,
+    ) -> str:
+        if execute and self._is_script_execution_blocked(skill_name):
+            return json.dumps(
+                {
+                    "error": "Workspace skill scripts cannot be executed through get_skill_script",
+                    "skill_name": skill_name,
+                    "script_path": script_path,
+                },
+            )
+        return super()._get_skill_script(
+            skill_name=skill_name,
+            script_path=script_path,
+            execute=execute,
+            args=args,
+            timeout=timeout,
+        )
+
+    def _is_script_execution_blocked(self, skill_name: str) -> bool:
+        return skill_name in self._script_execution_blocked_skill_names
+
+
 def build_agent_skills(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
     skill_roots: Sequence[Path] | None = None,
+    workspace_skills_root: Path | None = None,
     env_vars: Mapping[str, str] | None = None,
     credential_keys: set[str] | None = None,
 ) -> Skills | None:
     """Build an Agno Skills object for a specific agent."""
     agent_config = config.get_agent(agent_name)
-    if not agent_config.skills:
-        return None
+    resolved_credential_keys = (
+        credential_keys if credential_keys is not None else _collect_credential_keys(config, runtime_paths)
+    )
 
-    loader = _MindroomSkillsLoader(
-        roots=_resolve_agent_skill_roots(
-            runtime_paths,
-            agent_name,
-            skill_roots=skill_roots,
-        ),
+    configured_loader = None
+    if agent_config.skills:
+        configured_loader = _MindroomSkillsLoader(
+            roots=_resolve_configured_skill_roots(skill_roots),
+            config=config,
+            runtime_paths=runtime_paths,
+            allowlist=agent_config.skills,
+            env_vars=env_vars,
+            credential_keys=resolved_credential_keys,
+        )
+
+    workspace_skill_root = (
+        workspace_skills_root
+        if workspace_skills_root is not None
+        else _get_agent_workspace_skill_root(runtime_paths, agent_name)
+    )
+    workspace_loader = _MindroomSkillsLoader(
+        roots=[workspace_skill_root],
         config=config,
         runtime_paths=runtime_paths,
-        allowlist=agent_config.skills,
         env_vars=env_vars,
-        credential_keys=credential_keys
-        if credential_keys is not None
-        else _collect_credential_keys(config, runtime_paths),
+        credential_keys=resolved_credential_keys,
+        block_script_execution=True,
     )
-    return Skills(loaders=[loader])
+
+    loaders: list[SkillLoader]
+    if skill_roots is None:
+        loaders = [loader for loader in (configured_loader, workspace_loader) if loader is not None]
+    else:
+        loaders = [loader for loader in (workspace_loader, configured_loader) if loader is not None]
+
+    skills = _MindroomSkills(loaders=loaders)
+    if agent_config.skills or skills.get_skill_names():
+        return skills
+    return None
 
 
 @dataclass(frozen=True)
@@ -179,20 +261,14 @@ def _get_default_skill_roots() -> list[Path]:
     return _unique_paths([_get_bundled_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_user_skills_dir()])
 
 
-def _resolve_agent_skill_roots(
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    *,
-    skill_roots: Sequence[Path] | None = None,
-) -> list[Path]:
-    """Return skill roots for one agent while keeping explicit roots highest priority."""
-    roots = list(skill_roots) if skill_roots is not None else _get_default_skill_roots()
-    workspace_skills = agent_workspace_root_path(runtime_paths.storage_root, agent_name) / "skills"
-    if skill_roots is None:
-        roots.append(workspace_skills)
-    else:
-        roots.insert(0, workspace_skills)
-    return _unique_paths(roots)
+def _get_agent_workspace_skill_root(runtime_paths: RuntimePaths, agent_name: str) -> Path:
+    """Return the canonical workspace skill root for one agent."""
+    return agent_workspace_root_path(runtime_paths.storage_root, agent_name) / "skills"
+
+
+def _resolve_configured_skill_roots(skill_roots: Sequence[Path] | None = None) -> list[Path]:
+    """Return configured global skill roots without the agent workspace root."""
+    return _unique_paths(list(skill_roots) if skill_roots is not None else _get_default_skill_roots())
 
 
 def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListing]:
@@ -441,12 +517,12 @@ def _is_skill_eligible(
     if not isinstance(openclaw, dict):
         return True
 
-    if openclaw.get("always") is True:
-        return True
-
     os_requirements = _normalize_str_list(openclaw.get("os"))
     if os_requirements and not _matches_current_os(os_requirements):
         return False
+
+    if openclaw.get("always") is True:
+        return True
 
     requires = openclaw.get("requires")
     return _requirements_met(requires, config_data, env_vars, credential_keys, skill.name)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 from typing import TYPE_CHECKING
@@ -62,6 +63,12 @@ def _write_skill(
     return skill_path
 
 
+def _write_skill_script(skill_dir: Path, name: str, content: str) -> None:
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    (scripts_dir / name).write_text(content, encoding="utf-8")
+
+
 def _base_config(skills: list[str]) -> Config:
     return Config(
         agents={
@@ -75,8 +82,26 @@ def _base_config(skills: list[str]) -> Config:
     )
 
 
+def _base_config_with_omitted_skills() -> Config:
+    return Config(
+        agents={
+            "code": AgentConfig(
+                display_name="Code",
+                role="",
+                tools=["file"],
+            ),
+        },
+    )
+
+
 def _skill_names(skills: Skills | None) -> list[str]:
     return skills.get_skill_names() if skills is not None else []
+
+
+def _get_skill_script(skills: Skills, skill_name: str, script_path: str, *, execute: bool) -> dict[str, object]:
+    script_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_script")
+    assert script_tool.entrypoint is not None
+    return json.loads(script_tool.entrypoint(skill_name, script_path, execute=execute))
 
 
 def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
@@ -248,9 +273,9 @@ def test_skill_eligibility_os_mismatch(tmp_path: Path) -> None:
     assert _skill_names(skills) == []
 
 
-def test_skill_eligibility_always_overrides(tmp_path: Path) -> None:
-    """Allow always-eligible skills regardless of other requirements."""
-    metadata = '{openclaw:{always:true, os:["windows"]}}'
+def test_skill_eligibility_always_overrides_requirements(tmp_path: Path) -> None:
+    """Allow always-eligible skills regardless of missing requirements."""
+    metadata = '{openclaw:{always:true, requires:{env:["MISSING_ENV"]}}}'
     _write_skill(tmp_path, "always", "Always eligible", metadata)
 
     config = _base_config(["always"])
@@ -263,6 +288,26 @@ def test_skill_eligibility_always_overrides(tmp_path: Path) -> None:
         credential_keys=set(),
     )
     assert _skill_names(skills) == ["always"]
+
+
+def test_skill_eligibility_os_mismatch_wins_over_always(tmp_path: Path) -> None:
+    """Exclude OS-mismatched skills even when always is true."""
+    current = platform.system().lower()
+    other = "linux" if current == "windows" else "windows"
+
+    metadata = f'{{openclaw:{{always:true, os:["{other}"]}}}}'
+    _write_skill(tmp_path, "always-wrong-os", "Always wrong OS", metadata)
+
+    config = _base_config(["always-wrong-os"])
+    skills = build_agent_skills(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        skill_roots=[tmp_path],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(skills) == []
 
 
 def test_get_agent_skills_ordering(tmp_path: Path) -> None:
@@ -364,6 +409,175 @@ def test_workspace_skills_dir_discovered(tmp_path: Path) -> None:
         credential_keys=set(),
     )
     assert _skill_names(skills) == ["ws-skill"]
+
+
+def test_empty_allowlist_autoloads_workspace_skills(tmp_path: Path) -> None:
+    """Load workspace skills even when the configured allowlist is empty."""
+    storage = tmp_path / "storage"
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    _write_skill(workspace_skills, "auto", "Auto-loaded workspace skill")
+
+    config = _base_config([])
+    skills = build_agent_skills(
+        "code",
+        config,
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(skills) == ["auto"]
+
+
+def test_omitted_allowlist_autoloads_workspace_skills(tmp_path: Path) -> None:
+    """Load workspace skills when skills is omitted from agent config."""
+    storage = tmp_path / "storage"
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    _write_skill(workspace_skills, "auto", "Auto-loaded workspace skill")
+
+    skills = build_agent_skills(
+        "code",
+        _base_config_with_omitted_skills(),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(skills) == ["auto"]
+
+
+def test_empty_allowlist_does_not_load_global_skills(tmp_path: Path) -> None:
+    """Keep bundled, plugin, and user skills behind the configured allowlist."""
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    _write_skill(global_root, "global", "Configured global skill")
+
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(tmp_path / "storage"),
+        skill_roots=[global_root],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(skills) == []
+
+
+def test_workspace_skills_override_default_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workspace skills should override same-named default-root skills."""
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    _write_skill(global_root, "alpha", "Default alpha")
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [global_root])
+
+    storage = tmp_path / "storage"
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    _write_skill(workspace_skills, "alpha", "Workspace alpha")
+
+    skills = build_agent_skills(
+        "code",
+        _base_config(["alpha"]),
+        _runtime_paths(storage),
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is not None
+    assert _skill_names(skills) == ["alpha"]
+    assert skills.get_skill("alpha").description == "Workspace alpha"
+
+
+def test_malformed_workspace_skill_is_skipped(tmp_path: Path) -> None:
+    """Skip malformed workspace skills without rejecting other workspace skills."""
+    storage = tmp_path / "storage"
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    _write_skill(workspace_skills, "bad", "Bad metadata", "{openclaw:")
+    _write_skill(workspace_skills, "good", "Good metadata")
+
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert _skill_names(skills) == ["good"]
+
+
+def test_workspace_skill_script_read_allowed_but_execute_blocked(tmp_path: Path) -> None:
+    """Workspace skill scripts can be read but not executed through skill tools."""
+    storage = tmp_path / "storage"
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    skill_path = _write_skill(workspace_skills, "scripted", "Scripted workspace skill")
+    _write_skill_script(skill_path.parent, "hello.sh", "#!/bin/sh\necho workspace\n")
+
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is not None
+
+    read_result = _get_skill_script(skills, "scripted", "hello.sh", execute=False)
+    assert read_result["content"] == "#!/bin/sh\necho workspace\n"
+
+    execute_result = _get_skill_script(skills, "scripted", "hello.sh", execute=True)
+    assert execute_result["error"] == "Workspace skill scripts cannot be executed through get_skill_script"
+
+
+def test_symlinked_workspace_skill_script_execute_blocked(tmp_path: Path) -> None:
+    """Block workspace script execution even when the skill directory is a symlink."""
+    storage = tmp_path / "storage"
+    outside_root = tmp_path / "outside"
+    outside_skill_path = _write_skill(outside_root, "linked", "Linked workspace skill")
+    _write_skill_script(outside_skill_path.parent, "hello.sh", "#!/bin/sh\necho bypass\n")
+
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    (workspace_skills / "linked").symlink_to(outside_skill_path.parent, target_is_directory=True)
+
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is not None
+
+    execute_result = _get_skill_script(skills, "linked", "hello.sh", execute=True)
+    assert execute_result["error"] == "Workspace skill scripts cannot be executed through get_skill_script"
+
+
+def test_non_workspace_skill_script_execute_unchanged(tmp_path: Path) -> None:
+    """Configured non-workspace skill scripts keep Agno execute behavior."""
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    skill_path = _write_skill(global_root, "scripted", "Scripted global skill")
+    _write_skill_script(skill_path.parent, "hello.sh", "#!/bin/sh\necho global\n")
+
+    skills = build_agent_skills(
+        "code",
+        _base_config(["scripted"]),
+        _runtime_paths(tmp_path / "storage"),
+        skill_roots=[global_root],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is not None
+
+    execute_result = _get_skill_script(skills, "scripted", "hello.sh", execute=True)
+    assert execute_result["stdout"] == "global\n"
+    assert execute_result["returncode"] == 0
 
 
 def test_workspace_skills_reload_after_dir_created_late(tmp_path: Path) -> None:
