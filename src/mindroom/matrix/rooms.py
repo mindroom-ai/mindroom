@@ -26,7 +26,7 @@ from mindroom.matrix.client_session import (
     matrix_client,
 )
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.state import MatrixRoom, MatrixState
+from mindroom.matrix.state import MatrixRoom, MatrixState, matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
@@ -168,20 +168,17 @@ def _room_key_to_name(room_key: str) -> str:
 
 def load_rooms(runtime_paths: RuntimePaths) -> dict[str, MatrixRoom]:
     """Load room state from YAML file."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    return state.rooms
+    return matrix_state_for_runtime(runtime_paths).rooms
 
 
 def _get_room_aliases(runtime_paths: RuntimePaths) -> dict[str, str]:
     """Get mapping of room aliases to room IDs."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    return state.get_room_aliases()
+    return matrix_state_for_runtime(runtime_paths).get_room_aliases()
 
 
 def get_room_id(room_key: str, runtime_paths: RuntimePaths) -> str | None:
     """Get room ID for a given room key/alias."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    room = state.get_room(room_key)
+    room = matrix_state_for_runtime(runtime_paths).get_room(room_key)
     return room.room_id if room else None
 
 
