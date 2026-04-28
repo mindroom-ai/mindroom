@@ -393,6 +393,14 @@ class SqliteEventCache:
             "cache_sqlite_disabled": self._runtime.is_disabled,
         }
 
+    def pending_durable_write_room_ids(self) -> tuple[str, ...]:
+        """Return rooms with runtime-only writes that must persist before certifying a sync token."""
+        return ()
+
+    async def flush_pending_durable_writes(self, room_id: str) -> None:
+        """Persist runtime-only writes for one room before certifying a sync token."""
+        _ = room_id
+
     async def initialize(self) -> None:
         """Open the SQLite database and create the cache schema."""
         await self._runtime.initialize()

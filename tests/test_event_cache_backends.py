@@ -607,6 +607,11 @@ def test_postgres_transient_classifier_accepts_startup_connection_refused() -> N
     assert _is_transient_postgres_failure(psycopg.OperationalError("connection failed: Connection refused"))
 
 
+def test_postgres_transient_classifier_accepts_connection_timeout() -> None:
+    """Startup connection timeouts should retry later instead of disabling the cache."""
+    assert _is_transient_postgres_failure(psycopg.errors.ConnectionTimeout("connection timeout expired"))
+
+
 def test_postgres_transient_classifier_rejects_authentication_failures_without_sqlstate() -> None:
     """Authentication failures should disable the cache instead of retrying forever."""
     exc = psycopg.OperationalError(

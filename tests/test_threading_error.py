@@ -2111,6 +2111,40 @@ class TestThreadingBehavior:
         assert token_record.checkpoint == SyncCheckpoint("s_after_empty")
 
     @pytest.mark.asyncio
+    async def test_empty_sync_flushes_pending_cache_writes_before_certifying(self, bot: AgentBot) -> None:
+        """Sync-token certification should include pending runtime-only cache writes."""
+        pending_room_ids = {"!pending:localhost"}
+        event_cache = _runtime_event_cache()
+        event_cache.pending_durable_write_room_ids.side_effect = lambda: tuple(sorted(pending_room_ids))
+
+        async def flush_pending_durable_writes(room_id: str) -> None:
+            pending_room_ids.discard(room_id)
+
+        event_cache.flush_pending_durable_writes.side_effect = flush_pending_durable_writes
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(self._sync_response({}))
+
+        assert result.complete is True
+        assert result.task_count == 1
+        event_cache.flush_pending_durable_writes.assert_awaited_once_with("!pending:localhost")
+
+    @pytest.mark.asyncio
+    async def test_empty_sync_does_not_certify_while_pending_cache_writes_remain(self, bot: AgentBot) -> None:
+        """A sync token is not cache-certified while runtime-only writes remain in memory."""
+        event_cache = _runtime_event_cache()
+        event_cache.pending_durable_write_room_ids.return_value = ("!pending:localhost",)
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(self._sync_response({}))
+
+        assert result.complete is False
+        assert result.task_count == 1
+        event_cache.flush_pending_durable_writes.assert_awaited_once_with("!pending:localhost")
+
+    @pytest.mark.asyncio
     async def test_sync_error_keeps_watchdog_clock_on_latest_activity(self, bot: AgentBot) -> None:
         """Sync errors should keep the watchdog alive using the latest observed sync activity."""
         sync_response = MagicMock()

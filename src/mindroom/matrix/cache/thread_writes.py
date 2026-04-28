@@ -1148,6 +1148,7 @@ class ThreadSyncWritePolicy:
 
         try:
             tasks = self.cache_sync_timeline(response, raise_on_cache_write_failure=True)
+            tasks.extend(self._cache_ops.queue_pending_durable_write_flushes())
         except (KeyboardInterrupt, SystemExit):
             raise
         except asyncio.CancelledError:
@@ -1166,7 +1167,8 @@ class ThreadSyncWritePolicy:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         errors = self._cache_task_errors(results)
         runtime_available = self._cache_ops.cache_runtime_available()
-        complete = runtime_available and not errors and not limited_room_ids
+        pending_durable_write_room_ids = self._cache_ops.pending_durable_write_room_ids()
+        complete = runtime_available and not errors and not limited_room_ids and not pending_durable_write_room_ids
         return SyncCacheWriteResult(
             complete=complete,
             limited_room_ids=limited_room_ids,

@@ -48,6 +48,7 @@ _TRANSIENT_ERROR_TEXT: tuple[str, ...] = (
     "connection is closed",
     "connection already closed",
     "connection refused",
+    "connection timeout expired",
     "could not connect",
     "network is unreachable",
     "no route to host",
@@ -478,6 +479,12 @@ class _PostgresEventCacheRuntime:
             if pending_room_id == room_id
         )
 
+    def pending_invalidation_room_ids(self) -> tuple[str, ...]:
+        """Return rooms with runtime-only invalidation markers pending durable persistence."""
+        room_ids = set(self._pending_room_invalidations)
+        room_ids.update(room_id for room_id, _thread_id in self._pending_thread_invalidations)
+        return tuple(sorted(room_ids))
+
     def forget_pending_room_invalidation(self, room_id: str, pending: _PendingInvalidation) -> None:
         """Forget one persisted room invalidation and thread markers covered by it."""
         if self._pending_room_invalidations.get(room_id) == pending:
@@ -638,6 +645,23 @@ class PostgresEventCache:
     def runtime_diagnostics(self) -> dict[str, object]:
         """Return log-safe runtime state for sync certification diagnostics."""
         return self._runtime.runtime_diagnostics()
+
+    def pending_durable_write_room_ids(self) -> tuple[str, ...]:
+        """Return rooms with runtime-only writes that must persist before certifying a sync token."""
+        return self._runtime.pending_invalidation_room_ids()
+
+    async def flush_pending_durable_writes(self, room_id: str) -> None:
+        """Persist runtime-only writes for one room before certifying a sync token."""
+
+        async def flush_only(_db: psycopg.AsyncConnection) -> None:
+            return None
+
+        await self._write_operation(
+            room_id,
+            operation="flush_pending_durable_writes",
+            disabled_result=None,
+            writer=flush_only,
+        )
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
