@@ -2145,6 +2145,81 @@ class TestThreadingBehavior:
         event_cache.flush_pending_durable_writes.assert_awaited_once_with("!pending:localhost")
 
     @pytest.mark.asyncio
+    async def test_sync_write_failure_marks_room_stale_before_certification_retry(self, bot: AgentBot) -> None:
+        """A failed sync timeline write must protect cached room threads before a later token can certify."""
+        room_id = "!room:localhost"
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock(side_effect=RuntimeError("postgres write failed"))
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        message_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Fresh message", "msgtype": "m.text"},
+                "event_id": "$message:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+            self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))}),
+        )
+
+        assert result.complete is False
+        assert [type(error) for error in result.errors] == [RuntimeError]
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            room_id,
+            reason="sync_timeline_write_failed",
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_write_transient_failure_records_pending_room_stale_marker(self, bot: AgentBot) -> None:
+        """Transient sync write loss should block later certification until the room marker is flushed."""
+        room_id = "!room:localhost"
+        backend_error = EventCacheBackendUnavailableError("postgres unavailable")
+        pending_room_ids: set[str] = set()
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock(side_effect=backend_error)
+        event_cache.pending_durable_write_room_ids.side_effect = lambda: tuple(sorted(pending_room_ids))
+
+        async def mark_room_threads_stale(room_id_arg: str, *, reason: str) -> None:
+            assert reason == "sync_timeline_write_failed"
+            pending_room_ids.add(room_id_arg)
+            raise backend_error
+
+        event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
+        event_cache.invalidate_room_threads = AsyncMock(side_effect=backend_error)
+        event_cache.disable = Mock()
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        message_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Fresh message", "msgtype": "m.text"},
+                "event_id": "$message:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+            self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))}),
+        )
+
+        assert result.complete is False
+        assert result.errors == (backend_error,)
+        assert result.runtime_diagnostics == {"cache_backend": "mock"}
+        assert event_cache.pending_durable_write_room_ids() == (room_id,)
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            room_id,
+            reason="sync_timeline_write_failed",
+        )
+        event_cache.disable.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_sync_error_keeps_watchdog_clock_on_latest_activity(self, bot: AgentBot) -> None:
         """Sync errors should keep the watchdog alive using the latest observed sync activity."""
         sync_response = MagicMock()

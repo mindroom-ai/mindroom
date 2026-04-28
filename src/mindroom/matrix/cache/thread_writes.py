@@ -34,6 +34,7 @@ __all__ = ["_collect_sync_timeline_cache_updates"]
 
 
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
+_SYNC_TIMELINE_WRITE_FAILED_REASON = "sync_timeline_write_failed"
 
 
 def _collect_sync_timeline_cache_updates(
@@ -979,45 +980,53 @@ class ThreadSyncWritePolicy:
         *,
         raise_on_cache_write_failure: bool,
     ) -> None:
-        plain_batch = [
-            (event_id, room_id, event_source)
-            for event_source in plain_events
-            if isinstance((event_id := event_source.get("event_id")), str) and event_id
-        ]
-        threaded_batch = [
-            (event_id, room_id, event_source)
-            for event_source in threaded_events
-            if isinstance((event_id := event_source.get("event_id")), str) and event_id
-        ]
-        await self._cache_ops.store_events_batch(
-            room_id,
-            plain_batch,
-            failure_message="Failed to persist sync events to cache",
-            raise_on_failure=raise_on_cache_write_failure,
-        )
-        await self._cache_ops.store_events_batch(
-            room_id,
-            threaded_batch,
-            failure_message="Failed to persist sync threaded events to cache",
-            raise_on_failure=raise_on_cache_write_failure,
-        )
-        resolution_context = await self._resolver.build_sync_mutation_resolution_context(
-            room_id,
-            plain_events=plain_events,
-            threaded_events=threaded_events,
-        )
-        await self._persist_threaded_sync_events(
-            room_id,
-            threaded_events,
-            resolution_context=resolution_context,
-            raise_on_cache_write_failure=raise_on_cache_write_failure,
-        )
-        await self._apply_sync_redactions(
-            room_id,
-            redacted_event_ids,
-            resolution_context=resolution_context,
-            raise_on_cache_write_failure=raise_on_cache_write_failure,
-        )
+        try:
+            plain_batch = [
+                (event_id, room_id, event_source)
+                for event_source in plain_events
+                if isinstance((event_id := event_source.get("event_id")), str) and event_id
+            ]
+            threaded_batch = [
+                (event_id, room_id, event_source)
+                for event_source in threaded_events
+                if isinstance((event_id := event_source.get("event_id")), str) and event_id
+            ]
+            await self._cache_ops.store_events_batch(
+                room_id,
+                plain_batch,
+                failure_message="Failed to persist sync events to cache",
+                raise_on_failure=raise_on_cache_write_failure,
+            )
+            await self._cache_ops.store_events_batch(
+                room_id,
+                threaded_batch,
+                failure_message="Failed to persist sync threaded events to cache",
+                raise_on_failure=raise_on_cache_write_failure,
+            )
+            resolution_context = await self._resolver.build_sync_mutation_resolution_context(
+                room_id,
+                plain_events=plain_events,
+                threaded_events=threaded_events,
+            )
+            await self._persist_threaded_sync_events(
+                room_id,
+                threaded_events,
+                resolution_context=resolution_context,
+                raise_on_cache_write_failure=raise_on_cache_write_failure,
+            )
+            await self._apply_sync_redactions(
+                room_id,
+                redacted_event_ids,
+                resolution_context=resolution_context,
+                raise_on_cache_write_failure=raise_on_cache_write_failure,
+            )
+        except Exception:
+            if raise_on_cache_write_failure:
+                await self._cache_ops.invalidate_room_threads(
+                    room_id,
+                    reason=_SYNC_TIMELINE_WRITE_FAILED_REASON,
+                )
+            raise
 
     def _group_sync_timeline_updates(
         self,
