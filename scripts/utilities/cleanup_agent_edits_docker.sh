@@ -31,7 +31,7 @@ docker run --rm \
     -e SYNAPSE_DB_NAME=synapse \
     -e SYNAPSE_DB_USER=synapse \
     -e SYNAPSE_DB_PASSWORD=synapse_password \
-    python:3.11-slim \
+    python:3.13-slim \
     bash -c "
         pip install --quiet psycopg2-binary typer rich && \
         python /scripts/cleanup_agent_edits.py \
