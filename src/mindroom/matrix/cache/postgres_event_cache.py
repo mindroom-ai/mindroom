@@ -350,39 +350,9 @@ class _PostgresEventCacheRuntime:
         return self._disabled_reason is not None
 
     @property
-    def disabled_reason(self) -> str | None:
-        """Return the permanent disable reason, if any."""
-        return self._disabled_reason
-
-    @property
-    def unavailable_reason(self) -> str | None:
-        """Return the latest transient backend failure reason, if any."""
-        return self._unavailable_reason
-
-    @property
-    def transient_failure_count(self) -> int:
-        """Return the number of transient backend failures observed by this runtime."""
-        return self._transient_failure_count
-
-    @property
-    def reconnect_count(self) -> int:
-        """Return the number of replacement connections opened by this runtime."""
-        return self._reconnect_count
-
-    @property
-    def pending_thread_invalidation_count(self) -> int:
-        """Return how many thread invalidations still need to be persisted."""
-        return len(self._pending_thread_invalidations)
-
-    @property
-    def pending_room_invalidation_count(self) -> int:
-        """Return how many room invalidations still need to be persisted."""
-        return len(self._pending_room_invalidations)
-
-    @property
-    def explicitly_closed(self) -> bool:
-        """Return whether this runtime was intentionally closed."""
-        return self._explicitly_closed
+    def durable_writes_available(self) -> bool:
+        """Return whether callers should still attempt durable cache writes."""
+        return not self.is_disabled and not self._explicitly_closed
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
@@ -642,7 +612,7 @@ class PostgresEventCache:
     @property
     def durable_writes_available(self) -> bool:
         """Return whether cache writes can durably persist data."""
-        return not self._runtime.is_disabled and not self._runtime.explicitly_closed
+        return self._runtime.durable_writes_available
 
     async def initialize(self) -> None:
         """Open the PostgreSQL database and create the cache schema."""
