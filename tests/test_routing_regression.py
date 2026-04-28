@@ -108,7 +108,7 @@ class TestRoutingRegression:
     """Regression tests for routing behavior."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.is_user_online")
+    @patch("mindroom.response_attempt.is_user_online")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.turn_controller.suggest_agent_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
@@ -739,7 +739,7 @@ class TestRoutingRegression:
         assert mock_team_arun.call_count == 1  # Team formed once
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.is_user_online")
+    @patch("mindroom.response_attempt.is_user_online")
     @patch("mindroom.response_runner.ai_response")
     async def test_router_message_has_completion_marker(
         self,

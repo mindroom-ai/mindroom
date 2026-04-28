@@ -23,8 +23,6 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
-    STREAM_STATUS_KEY,
-    STREAM_STATUS_PENDING,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import run_post_response_compaction_check
@@ -39,10 +37,9 @@ from mindroom.knowledge import (
     KnowledgeAvailabilityDetail,
     format_knowledge_availability_notice,
 )
-from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
-from mindroom.matrix.presence import is_user_online, should_use_streaming
+from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import (
     mark_auto_flush_dirty_session,
@@ -54,6 +51,12 @@ from mindroom.orchestration.runtime import cancel_failure_reason, classify_cance
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,
     ResponseOutcome,
+)
+from mindroom.response_attempt import (
+    ResponseAttemptDeps,
+    ResponseAttemptRequest,
+    ResponseAttemptRunner,
+    log_cancelled_response,
 )
 from mindroom.response_terminal import PendingVisibleResponse, build_terminal_stream_transport_outcome
 from mindroom.streaming import (
@@ -81,7 +84,6 @@ from .delivery_gateway import (
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     MatrixCompactionLifecycle,
-    SendTextRequest,
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
@@ -408,28 +410,6 @@ class ResponseRunner:
             failure_reason=str(error),
             error_type=error.__class__.__name__,
         )
-
-    def _log_cancelled_response(
-        self,
-        *,
-        exc: asyncio.CancelledError,
-        message_id: str | None,
-        restart_message: str,
-        user_stop_message: str,
-        interrupted_message: str,
-    ) -> None:
-        """Log one CancelledError with the right provenance label."""
-        cancel_source = classify_cancel_source(exc)
-        if cancel_source == "sync_restart":
-            self.deps.logger.info(restart_message, message_id=message_id)
-        elif cancel_source == "user_stop":
-            self.deps.logger.info(user_stop_message, message_id=message_id)
-        else:
-            self.deps.logger.warning(
-                interrupted_message,
-                message_id=message_id,
-                exc_info=(type(exc), exc, exc.__traceback__),
-            )
 
     @property
     def in_flight_response_count(self) -> int:
@@ -1166,7 +1146,8 @@ class ResponseRunner:
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
                 except asyncio.CancelledError as exc:
-                    self._log_cancelled_response(
+                    log_cancelled_response(
+                        self.deps.logger,
                         exc=exc,
                         message_id=message_id,
                         restart_message="Team non-streaming response interrupted by sync restart",
@@ -1377,96 +1358,32 @@ class ResponseRunner:
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
         )
-
-        assert not (thinking_message and existing_event_id), (
-            "thinking_message and existing_event_id are mutually exclusive"
-        )
-
         try:
             self.in_flight_response_count += 1
-            with bound_log_context(**resolved_target.log_context):
-                initial_message_id = None
-                if thinking_message:
-                    assert not existing_event_id
-                    initial_message_id = await self.deps.delivery_gateway.send_text(
-                        SendTextRequest(
-                            target=resolved_target,
-                            response_text=thinking_message,
-                            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-                        ),
-                    )
-                    if initial_message_id is not None and pipeline_timing is not None:
-                        pipeline_timing.mark("placeholder_sent")
-                        pipeline_timing.mark_first_visible_reply("placeholder")
-
-                message_id = existing_event_id or initial_message_id
-                task: asyncio.Task[None] = asyncio.create_task(response_function(message_id))
-
-                message_to_track = existing_event_id or initial_message_id
-                tracked_message_id = message_to_track or f"__pending_response__:{id(task)}"
-                show_stop_button = False
-
-                self.deps.stop_manager.set_current(
-                    tracked_message_id,
-                    resolved_target,
-                    task,
-                    None,
+            return await ResponseAttemptRunner(
+                ResponseAttemptDeps(
+                    client=self._client(),
+                    delivery_gateway=self.deps.delivery_gateway,
+                    stop_manager=self.deps.stop_manager,
+                    logger=self.deps.logger,
+                    show_stop_button=lambda: self.deps.runtime.config.defaults.show_stop_button,
+                    notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
+                    notify_outbound_redaction=(
+                        self.deps.post_response_effects.conversation_cache.notify_outbound_redaction
+                    ),
+                ),
+            ).run(
+                ResponseAttemptRequest(
+                    target=resolved_target,
+                    response_function=response_function,
+                    thinking_message=thinking_message,
+                    existing_event_id=existing_event_id,
+                    user_id=user_id,
                     run_id=run_id,
-                )
-
-                if message_to_track:
-                    show_stop_button = self.deps.runtime.config.defaults.show_stop_button
-                    if show_stop_button and user_id:
-                        user_is_online = await is_user_online(
-                            self._client(),
-                            user_id,
-                            room_id=room_id,
-                        )
-                        show_stop_button = user_is_online
-                        self.deps.logger.info(
-                            "Stop button decision",
-                            message_id=message_to_track,
-                            user_online=user_is_online,
-                            show_button=show_stop_button,
-                        )
-
-                    if show_stop_button:
-                        self.deps.logger.info("Adding stop button", message_id=message_to_track)
-                        await self.deps.stop_manager.add_stop_button(
-                            self._client(),
-                            message_to_track,
-                            notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
-                        )
-
-                try:
-                    await task
-                except asyncio.CancelledError as exc:
-                    failure_reason = cancel_failure_reason(classify_cancel_source(exc))
-                    if on_cancelled is not None:
-                        on_cancelled(failure_reason)
-                    self._log_cancelled_response(
-                        exc=exc,
-                        message_id=message_to_track or tracked_message_id,
-                        restart_message="Response interrupted by sync restart",
-                        user_stop_message="Response cancelled by user",
-                        interrupted_message="Response interrupted — traceback for diagnosis",
-                    )
-                except Exception as error:
-                    self.deps.logger.exception("Error during response generation", error=str(error))
-                    raise
-                finally:
-                    tracked = self.deps.stop_manager.tracked_messages.get(tracked_message_id)
-                    button_already_removed = tracked is None or tracked.reaction_event_id is None
-                    self.deps.stop_manager.clear_message(
-                        tracked_message_id,
-                        client=self._client(),
-                        remove_button=show_stop_button and not button_already_removed,
-                        notify_outbound_redaction=(
-                            self.deps.post_response_effects.conversation_cache.notify_outbound_redaction
-                        ),
-                    )
-
-                return message_id
+                    pipeline_timing=pipeline_timing,
+                    on_cancelled=on_cancelled,
+                ),
+            )
         finally:
             self.in_flight_response_count -= 1
 
@@ -1819,7 +1736,8 @@ class ResponseRunner:
                 await lifecycle.emit_session_started(session_started_watch)
         except asyncio.CancelledError as exc:
             cancel_source = classify_cancel_source(exc)
-            self._log_cancelled_response(
+            log_cancelled_response(
+                self.deps.logger,
                 exc=exc,
                 message_id=request.existing_event_id,
                 restart_message="Non-streaming response interrupted by sync restart",
@@ -2019,7 +1937,8 @@ class ResponseRunner:
                 ),
             )
         except asyncio.CancelledError as exc:
-            self._log_cancelled_response(
+            log_cancelled_response(
+                self.deps.logger,
                 exc=exc,
                 message_id=request.existing_event_id,
                 restart_message="Bot streaming response interrupted by sync restart",
