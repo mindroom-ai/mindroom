@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
+    from mindroom.streaming_delivery import StreamInputChunk
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import (
         ToolRuntimeContext,
@@ -1297,7 +1298,7 @@ class ResponseRunner:
                 async with typing_indicator(self._client(), request.room_id):
                     event_id: str | None = None
 
-                    def build_response_stream() -> AsyncIterator[object]:
+                    def build_response_stream() -> AsyncIterator[StreamInputChunk]:
                         return team_response_stream(
                             agent_ids=list(team_request.team_agents),
                             message=model_message,

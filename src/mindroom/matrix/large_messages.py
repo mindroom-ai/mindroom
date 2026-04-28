@@ -517,12 +517,14 @@ async def prepare_large_message(
             size_limit_bytes=64000,
         )
 
-    inner: dict[str, Any] = modified_content.get("m.new_content", modified_content)  # type: ignore[assignment]
+    new_content = modified_content.get("m.new_content")
+    inner = new_content if isinstance(new_content, dict) else modified_content
+    body = inner.get("body")
     logger.info(
         "large_message_prepared",
         room_id=room_id,
         original_size_bytes=current_size,
-        preview_length=len(inner["body"]),
+        preview_length=len(body) if isinstance(body, str) else 0,
         is_edit=is_edit,
     )
 

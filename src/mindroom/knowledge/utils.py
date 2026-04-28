@@ -26,7 +26,7 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     from agno.knowledge.document import Document
     from structlog.stdlib import BoundLogger
@@ -514,17 +514,11 @@ class MultiKnowledgeVectorDb:
 
     # Agno Knowledge.__post_init__ calls exists()/create(); this adapter intentionally
     # presents already-published read handles as initialized.
-    vector_dbs: list[_KnowledgeVectorDb | Callable[[], _KnowledgeVectorDb | None]]
+    vector_dbs: list[_KnowledgeVectorDb]
 
     def _resolved_vector_dbs(self) -> list[_KnowledgeVectorDb]:
         """Return the current vector DB instances for every merged source."""
-        resolved_vector_dbs: list[_KnowledgeVectorDb] = []
-        for source in self.vector_dbs:
-            vector_db = source() if callable(source) else source
-            if vector_db is None:
-                continue
-            resolved_vector_dbs.append(vector_db)
-        return resolved_vector_dbs
+        return self.vector_dbs.copy()
 
     def exists(self) -> bool:
         """Present as already-initialized to satisfy Knowledge.__post_init__."""
@@ -615,10 +609,8 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
         return None
     if len(knowledges) == 1:
         return knowledges[0]
-    vector_db_sources = [
-        (lambda knowledge=knowledge: cast("_KnowledgeVectorDb | None", knowledge.vector_db))
-        for knowledge in knowledges
-        if knowledge.vector_db is not None
+    vector_db_sources: list[_KnowledgeVectorDb] = [
+        cast("_KnowledgeVectorDb", knowledge.vector_db) for knowledge in knowledges if knowledge.vector_db is not None
     ]
     if not vector_db_sources:
         return None

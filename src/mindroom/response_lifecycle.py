@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.post_response_effects import apply_post_response_effects
 
@@ -168,10 +168,14 @@ class ResponseLifecycle:
         """Apply post-response effects without masking failures before visible delivery."""
         response_event_id = final_delivery_outcome.final_visible_event_id
         try:
+            if callable(post_response_outcome):
+                post_response_outcome = cast("Callable[[], ResponseOutcome]", post_response_outcome)()
+            if callable(post_response_deps):
+                post_response_deps = cast("Callable[[], PostResponseEffectsDeps]", post_response_deps)()
             await apply_post_response_effects(
                 final_delivery_outcome,
-                post_response_outcome() if callable(post_response_outcome) else post_response_outcome,
-                post_response_deps() if callable(post_response_deps) else post_response_deps,
+                post_response_outcome,
+                post_response_deps,
             )
         except asyncio.CancelledError as error:
             if response_event_id is None:

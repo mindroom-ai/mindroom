@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     from structlog.stdlib import BoundLogger
 
@@ -198,7 +198,7 @@ def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
         if not _is_enabled():
             return fn
 
-        def emit_timing(start: float, kwargs: P.kwargs) -> None:
+        def emit_timing(start: float, kwargs: Mapping[str, Any]) -> None:
             emit_elapsed_timing(label, start, timing_scope=kwargs.get("timing_scope"))
 
         if inspect.isasyncgenfunction(fn):

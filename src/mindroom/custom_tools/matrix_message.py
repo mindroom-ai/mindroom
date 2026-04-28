@@ -606,7 +606,7 @@ class MatrixMessageTools(Toolkit):
             trusted_sender_ids=trusted_sender_ids,
         )
 
-        payload = {
+        payload: dict[str, object] = {
             "thread_id": event_id,
             "sender": sender,
             "timestamp": timestamp,

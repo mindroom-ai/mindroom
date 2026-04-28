@@ -406,7 +406,7 @@ initialize_api_app(app, constants.resolve_primary_runtime_paths())
 
 # Configure CORS for the standalone frontend dev server.
 app.add_middleware(
-    CORSMiddleware,  # ty: ignore[invalid-argument-type]
+    CORSMiddleware,
     allow_origins=[
         "http://localhost:3003",  # Frontend dev server alternative port
         "http://localhost:5173",  # Vite dev server default

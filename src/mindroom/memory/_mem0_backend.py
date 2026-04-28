@@ -485,6 +485,8 @@ async def store_mem0_conversation_memory(
         execution_identity=execution_identity,
     )
 
+    metadata: dict[str, object]
+    failure_context: dict[str, object]
     if isinstance(agent_name, list):
         scope_user_id = build_team_user_id(agent_name)
         metadata = {
@@ -496,7 +498,7 @@ async def store_mem0_conversation_memory(
         if replica_key is not None:
             metadata[MEM0_REPLICA_KEY] = replica_key
         failure_log = "Failed to add team memory"
-        failure_context: dict[str, object] = {"team_id": scope_user_id}
+        failure_context = {"team_id": scope_user_id}
     else:
         scope_user_id = agent_scope_user_id(agent_name)
         metadata = {

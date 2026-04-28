@@ -274,10 +274,9 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
         ),
         source_event_ids=[pending_event.event.event_id for pending_event in ordered_pending_events],
         source_event_prompts=_batch_source_event_prompts(ordered_pending_events),
-        media_events=cast(
-            "list[MediaDispatchEvent]",
-            [pending_event.event for pending_event in ordered_pending_events if _is_media_event(pending_event.event)],
-        ),
+        media_events=[
+            pending_event.event for pending_event in ordered_pending_events if _is_media_event(pending_event.event)
+        ],
         original_sender=original_sender,
         raw_audio_fallback=raw_audio_fallback,
     )
