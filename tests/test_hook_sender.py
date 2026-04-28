@@ -22,7 +22,9 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
+    EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_RECEIVED,
+    EVENT_SYSTEM_ENRICH,
     AfterResponseContext,
     AgentLifecycleContext,
     BeforeResponseContext,
@@ -34,6 +36,7 @@ from mindroom.hooks import (
     MessageReceivedContext,
     ResponseDraft,
     ResponseResult,
+    SystemEnrichContext,
     hook,
 )
 from mindroom.hooks.execution import emit
@@ -850,6 +853,61 @@ async def test_apply_message_enrichment_preserves_hook_chain_metadata(tmp_path: 
 
     assert prepared.envelope.hook_source == "origin-plugin:message:received"
     assert prepared.envelope.message_received_depth == 1
+
+
+@pytest.mark.asyncio
+async def test_payload_enrichment_timing_reports_hook_counts(tmp_path: Path) -> None:
+    """Payload enrichment timing should report registered hooks and collected item counts."""
+    bot = _agent_bot(tmp_path)
+    dispatch = PreparedDispatch(
+        requester_user_id="@user:localhost",
+        context=_dispatch_context(bot),
+        target=MessageTarget.resolve("!room:localhost", "$thread", "$hook-event"),
+        correlation_id="corr-enrich-timing",
+        envelope=_synthetic_envelope(),
+    )
+
+    @hook(EVENT_MESSAGE_ENRICH)
+    async def message_enrich(context: MessageEnrichContext) -> None:
+        context.add_metadata("message-context", "message enrichment")
+
+    @hook(EVENT_SYSTEM_ENRICH)
+    async def system_enrich(context: SystemEnrichContext) -> None:
+        context.add_instruction("system-context", "system enrichment")
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("enrich-plugin", [message_enrich, system_enrich])])
+
+    with patch("mindroom.turn_policy.emit_elapsed_timing") as mock_emit:
+        prepared = await bot._ingress_hook_runner.apply_message_enrichment(
+            dispatch,
+            DispatchPayload(prompt="hello"),
+            target_entity_name="code",
+            target_member_names=("code",),
+        )
+        system_items = await bot._ingress_hook_runner.apply_system_enrichment(
+            dispatch,
+            prepared.envelope,
+            target_entity_name="code",
+            target_member_names=("code",),
+        )
+
+    assert "message enrichment" in (prepared.payload.model_prompt or "")
+    assert [item.text for item in system_items] == ["system enrichment"]
+    calls_by_label = {call.args[0]: call for call in mock_emit.call_args_list}
+    assert calls_by_label["response_payload.apply_message_enrichment"].kwargs == {
+        "room_id": "!room:localhost",
+        "target_entity_name": "code",
+        "hook_registered": True,
+        "enrichment_item_count": 1,
+    }
+    assert calls_by_label["response_payload.apply_system_enrichment"].kwargs == {
+        "room_id": "!room:localhost",
+        "target_entity_name": "code",
+        "hook_registered": True,
+        "enrichment_item_count": 1,
+    }
+    assert isinstance(calls_by_label["response_payload.apply_message_enrichment"].args[1], float)
+    assert isinstance(calls_by_label["response_payload.apply_system_enrichment"].args[1], float)
 
 
 @pytest.mark.asyncio

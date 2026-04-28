@@ -28,7 +28,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.hooks import MessageEnvelope
-from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.inbound_turn_normalizer import BatchMediaAttachmentRequest, DispatchPayload
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -1549,6 +1549,70 @@ async def test_handle_coalesced_batch_timing_events_include_dispatch_scope(tmp_p
     ]
     assert batch_calls
     assert all(call.kwargs["timing_scope"] == "$m1" for call in batch_calls)
+
+
+@pytest.mark.asyncio
+async def test_register_batch_media_attachments_emits_payload_timing_for_empty_batch(tmp_path: Path) -> None:
+    """Batch media registration timing should report empty payload batches."""
+    bot = _make_bot(tmp_path)
+
+    with patch("mindroom.inbound_turn_normalizer.emit_elapsed_timing") as mock_emit:
+        result = await bot._inbound_turn_normalizer.register_batch_media_attachments(
+            BatchMediaAttachmentRequest(
+                room_id="!room:localhost",
+                thread_id="$thread",
+                media_events=[],
+            ),
+        )
+
+    assert result.attachment_ids == []
+    assert result.fallback_images is None
+    mock_emit.assert_called_once()
+    assert mock_emit.call_args.args[0] == "response_payload.register_batch_media_attachments"
+    assert isinstance(mock_emit.call_args.args[1], float)
+    assert mock_emit.call_args.kwargs == {
+        "room_id": "!room:localhost",
+        "thread_id": "$thread",
+        "outcome": "success",
+        "media_event_count": 0,
+        "image_event_count": 0,
+        "file_or_video_event_count": 0,
+        "attachment_count": 0,
+        "fallback_image_count": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_register_batch_media_attachments_emits_payload_timing_on_failure(tmp_path: Path) -> None:
+    """Batch media registration timing should still emit when attachment hydration fails."""
+    bot = _make_bot(tmp_path)
+
+    with (
+        patch("mindroom.inbound_turn_normalizer.download_image", new=AsyncMock(return_value=None)),
+        patch("mindroom.inbound_turn_normalizer.emit_elapsed_timing") as mock_emit,
+        pytest.raises(RuntimeError, match="Failed to download image"),
+    ):
+        await bot._inbound_turn_normalizer.register_batch_media_attachments(
+            BatchMediaAttachmentRequest(
+                room_id="!room:localhost",
+                thread_id="$thread",
+                media_events=[_image_event(event_id="$img1")],
+            ),
+        )
+
+    mock_emit.assert_called_once()
+    assert mock_emit.call_args.args[0] == "response_payload.register_batch_media_attachments"
+    assert isinstance(mock_emit.call_args.args[1], float)
+    assert mock_emit.call_args.kwargs == {
+        "room_id": "!room:localhost",
+        "thread_id": "$thread",
+        "outcome": "failed",
+        "media_event_count": 1,
+        "image_event_count": 1,
+        "file_or_video_event_count": 0,
+        "attachment_count": 0,
+        "fallback_image_count": 0,
+    }
 
 
 @pytest.mark.asyncio

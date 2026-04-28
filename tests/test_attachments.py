@@ -22,6 +22,7 @@ from mindroom.attachments import (
     register_image_attachment,
     register_local_attachment,
     resolve_attachments,
+    resolve_thread_attachment_ids,
 )
 from tests.conftest import make_visible_message
 
@@ -388,6 +389,84 @@ def test_resolve_attachment_media_drops_cross_thread_ids(tmp_path: Path) -> None
     assert resolved_ids == ["att_ok"]
     assert len(files) == 1
     assert str(files[0].filepath) == str(file_path.resolve())
+
+
+def test_resolve_attachment_media_emits_payload_timing(tmp_path: Path) -> None:
+    """Attachment media resolution timing should report payload counts."""
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+
+    allowed = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_ok",
+        room_id="!room:localhost",
+        thread_id="$thread_a",
+    )
+    rejected = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="file",
+        attachment_id="att_wrong_thread",
+        room_id="!room:localhost",
+        thread_id="$thread_b",
+    )
+    assert allowed is not None
+    assert rejected is not None
+
+    with patch("mindroom.attachment_media.emit_elapsed_timing") as mock_emit:
+        resolved_ids, _, _, files, _ = resolve_attachment_media(
+            tmp_path,
+            ["att_ok", "att_wrong_thread"],
+            room_id="!room:localhost",
+            thread_id="$thread_a",
+        )
+
+    assert resolved_ids == ["att_ok"]
+    assert len(files) == 1
+    mock_emit.assert_called_once()
+    assert mock_emit.call_args.args[0] == "response_payload.resolve_attachment_media"
+    assert isinstance(mock_emit.call_args.args[1], float)
+    assert mock_emit.call_args.kwargs == {
+        "room_id": "!room:localhost",
+        "thread_id": "$thread_a",
+        "requested_attachment_count": 2,
+        "resolved_attachment_count": 1,
+        "rejected_attachment_count": 1,
+        "audio_count": 0,
+        "image_count": 0,
+        "file_count": 1,
+        "video_count": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolve_thread_attachment_ids_emits_payload_timing(tmp_path: Path) -> None:
+    """Thread attachment ID resolution timing should include outcome and source event kind."""
+    event = MagicMock()
+    event.source = {"content": {"com.mindroom.attachment_ids": ["att_root"]}}
+
+    with patch("mindroom.attachments.emit_elapsed_timing") as mock_emit:
+        attachment_ids = await resolve_thread_attachment_ids(
+            AsyncMock(),
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            thread_root_event=event,
+        )
+
+    assert attachment_ids == ["att_root"]
+    mock_emit.assert_called_once()
+    assert mock_emit.call_args.args[0] == "response_payload.resolve_thread_attachment_ids"
+    assert isinstance(mock_emit.call_args.args[1], float)
+    assert mock_emit.call_args.kwargs == {
+        "room_id": "!room:localhost",
+        "thread_id": "$thread_root",
+        "outcome": "event_metadata",
+        "event_kind": "provided",
+        "attachment_count": 1,
+    }
 
 
 def test_register_local_attachment_prunes_expired_managed_media(tmp_path: Path) -> None:
