@@ -11,7 +11,7 @@ MindRoom uses the Matrix protocol for all agent communication. The integration i
 
 ## Matrix Client
 
-MindRoom uses `matrix-nio` for Matrix communication with SSL context handling and encryption key storage.
+MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling and encryption key storage.
 
 ### Environment Variables
 

@@ -32,10 +32,10 @@ dependencies = [
   "humanize>=4.12.3",
   "json5>=0.13",
   "markdown-it-py>=4",
-  "matrix-nio>=0.25",
   "mcp[cli]>=1.12.4",
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
+  "mindroom-nio[e2e]>=0.25.2",
   "openai",
   "pydantic>=2",
   "pydantic-settings>=2.10.1",
@@ -235,9 +235,7 @@ lumalabs = [
   "lumaai",
 ]
 matrix_api = []
-matrix-e2ee = [
-  "matrix-nio[e2e]>=0.25",
-]
+matrix-e2ee = []
 matrix_message = []
 matrix_room = []
 mem0 = [
@@ -404,7 +402,6 @@ dev = [
   "aioresponses>=0.7.8",
   "markdown-code-runner>=2.4",
   "markdown-gfm-admonition",
-  "matty>=0.3",
   "pre-commit>=4.2",
   "pre-commit-uv>=4.1.4",
   "pytest>=8.4.1",

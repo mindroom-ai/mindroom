@@ -55,7 +55,7 @@ def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operat
         "matrix_e2ee_support_required",
         room_id=room_id,
         operation=operation,
-        hint="Install `mindroom[matrix_e2ee]` or `matrix-nio[e2e]` to use encrypted Matrix rooms.",
+        hint="Reinstall MindRoom dependencies so `mindroom-nio[e2e]` is available for encrypted Matrix rooms.",
     )
     return False
 
