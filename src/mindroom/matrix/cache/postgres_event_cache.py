@@ -14,6 +14,7 @@ import psycopg
 from mindroom.logging_config import get_logger
 
 from . import postgres_event_cache_events, postgres_event_cache_threads
+from .event_cache import EventCacheBackendUnavailable
 from .event_normalization import normalize_event_source_for_cache
 from .postgres_agent_message_snapshot import load_postgres_agent_message_snapshot
 from .postgres_redaction import redact_postgres_connection_info
@@ -30,9 +31,58 @@ if TYPE_CHECKING:
 POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 1
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
+_MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
 T = TypeVar("T")
 
 logger = get_logger(__name__)
+
+_TRANSIENT_SQLSTATE_PREFIXES: tuple[str, ...] = ("08",)
+_TRANSIENT_SQLSTATES: frozenset[str] = frozenset(
+    {
+        "57P01",  # admin_shutdown
+        "57P02",  # crash_shutdown
+        "57P03",  # cannot_connect_now
+    },
+)
+_TRANSIENT_ERROR_TEXT: tuple[str, ...] = (
+    "connection is closed",
+    "connection already closed",
+    "server closed the connection",
+    "terminating connection",
+)
+
+
+def _postgres_error_sqlstate(exc: BaseException) -> str | None:
+    """Return the SQLSTATE attached to a psycopg error when available."""
+    sqlstate = getattr(exc, "sqlstate", None)
+    if isinstance(sqlstate, str):
+        return sqlstate
+    diag = getattr(exc, "diag", None)
+    diag_sqlstate = getattr(diag, "sqlstate", None) if diag is not None else None
+    return diag_sqlstate if isinstance(diag_sqlstate, str) else None
+
+
+def _is_transient_postgres_failure(exc: BaseException) -> bool:
+    """Return whether one PostgreSQL failure should be retried on a new connection."""
+    if isinstance(exc, psycopg.InterfaceError):
+        return True
+    if not isinstance(exc, psycopg.OperationalError):
+        return False
+
+    sqlstate = _postgres_error_sqlstate(exc)
+    if sqlstate in _TRANSIENT_SQLSTATES:
+        return True
+    if sqlstate is not None and sqlstate.startswith(_TRANSIENT_SQLSTATE_PREFIXES):
+        return True
+
+    message = str(exc).lower()
+    return any(fragment in message for fragment in _TRANSIENT_ERROR_TEXT)
+
+
+def _cache_backend_unavailable(operation: str, exc: BaseException) -> EventCacheBackendUnavailable:
+    message = str(exc)
+    detail = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+    return EventCacheBackendUnavailable(f"Postgres event cache unavailable during {operation}: {detail}")
 
 
 async def initialize_postgres_event_cache_db(database_url: str) -> psycopg.AsyncConnection:
@@ -238,6 +288,14 @@ class _RoomLockEntry:
     active_users: int = 0
 
 
+@dataclass(frozen=True)
+class _PendingInvalidation:
+    """Stale marker that must be persisted before cache rows can be trusted again."""
+
+    invalidated_at: float
+    reason: str
+
+
 class _PostgresEventCacheRuntime:
     """Own runtime-only lifecycle, locking, and disable state for one cache instance."""
 
@@ -246,8 +304,15 @@ class _PostgresEventCacheRuntime:
         self._namespace = namespace
         self._db: psycopg.AsyncConnection | None = None
         self._disabled_reason: str | None = None
+        self._unavailable_reason: str | None = None
+        self._transient_failure_count = 0
+        self._reconnect_count = 0
+        self._reconnect_after_transient = False
+        self._explicitly_closed = False
         self._db_lock = asyncio.Lock()
         self._room_locks: OrderedDict[str, _RoomLockEntry] = OrderedDict()
+        self._pending_thread_invalidations: dict[tuple[str, str], _PendingInvalidation] = {}
+        self._pending_room_invalidations: dict[str, _PendingInvalidation] = {}
 
     @property
     def database_url(self) -> str:
@@ -277,12 +342,47 @@ class _PostgresEventCacheRuntime:
     @property
     def is_initialized(self) -> bool:
         """Return whether the PostgreSQL connection is currently open."""
-        return self._db is not None
+        return self._db is not None and not self.connection_is_closed(self._db)
 
     @property
     def is_disabled(self) -> bool:
         """Return whether the advisory cache is disabled for this runtime."""
         return self._disabled_reason is not None
+
+    @property
+    def disabled_reason(self) -> str | None:
+        """Return the permanent disable reason, if any."""
+        return self._disabled_reason
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        """Return the latest transient backend failure reason, if any."""
+        return self._unavailable_reason
+
+    @property
+    def transient_failure_count(self) -> int:
+        """Return the number of transient backend failures observed by this runtime."""
+        return self._transient_failure_count
+
+    @property
+    def reconnect_count(self) -> int:
+        """Return the number of replacement connections opened by this runtime."""
+        return self._reconnect_count
+
+    @property
+    def pending_thread_invalidation_count(self) -> int:
+        """Return how many thread invalidations still need to be persisted."""
+        return len(self._pending_thread_invalidations)
+
+    @property
+    def pending_room_invalidation_count(self) -> int:
+        """Return how many room invalidations still need to be persisted."""
+        return len(self._pending_room_invalidations)
+
+    @property
+    def explicitly_closed(self) -> bool:
+        """Return whether this runtime was intentionally closed."""
+        return self._explicitly_closed
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
@@ -296,21 +396,147 @@ class _PostgresEventCacheRuntime:
             reason=reason,
         )
 
+    def runtime_diagnostics(self) -> dict[str, object]:
+        """Return log-safe runtime state for sync certification diagnostics."""
+        diagnostics: dict[str, object] = {
+            "cache_backend": "postgres",
+            "cache_postgres_initialized": self.is_initialized,
+            "cache_postgres_disabled": self.is_disabled,
+            "cache_postgres_transient_failure_count": self._transient_failure_count,
+            "cache_postgres_reconnect_count": self._reconnect_count,
+            "cache_postgres_pending_thread_invalidations": len(self._pending_thread_invalidations),
+            "cache_postgres_pending_room_invalidations": len(self._pending_room_invalidations),
+            "cache_postgres_explicitly_closed": self._explicitly_closed,
+        }
+        if self._disabled_reason is not None:
+            diagnostics["cache_postgres_disabled_reason"] = self._disabled_reason
+        if self._unavailable_reason is not None:
+            diagnostics["cache_postgres_unavailable_reason"] = self._unavailable_reason
+        return diagnostics
+
     async def initialize(self) -> None:
         """Open the PostgreSQL database and create the cache schema."""
         async with self._db_lock:
-            if self._disabled_reason is not None or self._db is not None:
+            if self._disabled_reason is not None:
                 return
-            self._db = await initialize_postgres_event_cache_db(self._database_url)
+            self._explicitly_closed = False
+            if self._db is not None and not self.connection_is_closed(self._db):
+                return
+            had_previous_connection = self._db is not None
+            await self._close_db_locked(operation="initialize")
+            try:
+                self._db = await initialize_postgres_event_cache_db(self._database_url)
+            except Exception as exc:
+                if _is_transient_postgres_failure(exc):
+                    self._transient_failure_count += 1
+                    self._unavailable_reason = self._unavailable_reason_from_exception(exc)
+                    operation = "initialize"
+                    raise _cache_backend_unavailable(operation, exc) from exc
+                raise
+            if had_previous_connection or self._reconnect_after_transient:
+                self._reconnect_count += 1
+            self._reconnect_after_transient = False
+            self._unavailable_reason = None
 
     async def close(self) -> None:
         """Close the PostgreSQL connection when the cache is no longer needed."""
         async with self._db_lock:
-            if self._db is None:
-                return
-            await self._db.close()
-            self._db = None
+            self._explicitly_closed = True
+            self._reconnect_after_transient = False
+            await self._close_db_locked(operation="close")
             self._room_locks.clear()
+
+    async def handle_transient_failure(self, exc: BaseException, *, operation: str) -> None:
+        """Drop a dead connection and leave the runtime eligible for later reconnect."""
+        async with self._db_lock:
+            self._transient_failure_count += 1
+            self._unavailable_reason = self._unavailable_reason_from_exception(exc)
+            self._reconnect_after_transient = True
+            await self._close_db_locked(operation=operation)
+        logger.info(
+            "Postgres event cache temporarily unavailable",
+            database_url=self.redacted_database_url,
+            namespace=self._namespace,
+            operation=operation,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            transient_failure_count=self._transient_failure_count,
+        )
+
+    def record_pending_thread_invalidation(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        invalidated_at: float,
+        reason: str,
+    ) -> None:
+        """Remember a stale marker that must be persisted before trusting cache rows."""
+        self._pending_thread_invalidations[(room_id, thread_id)] = _PendingInvalidation(
+            invalidated_at=invalidated_at,
+            reason=reason,
+        )
+
+    def record_pending_room_invalidation(
+        self,
+        room_id: str,
+        *,
+        invalidated_at: float,
+        reason: str,
+    ) -> None:
+        """Remember a room stale marker that must be persisted before trusting cache rows."""
+        self._pending_room_invalidations[room_id] = _PendingInvalidation(
+            invalidated_at=invalidated_at,
+            reason=reason,
+        )
+
+    def pending_room_invalidations(self, room_id: str) -> tuple[tuple[str, str | None, _PendingInvalidation], ...]:
+        """Return pending invalidations for one room as (kind, thread_id, pending)."""
+        pending: list[tuple[str, str | None, _PendingInvalidation]] = []
+        room_pending = self._pending_room_invalidations.get(room_id)
+        if room_pending is not None:
+            pending.append(("room", None, room_pending))
+        for (pending_room_id, thread_id), thread_pending in self._pending_thread_invalidations.items():
+            if pending_room_id == room_id:
+                pending.append(("thread", thread_id, thread_pending))
+        return tuple(pending)
+
+    def forget_pending_room_invalidation(self, room_id: str) -> None:
+        """Forget one persisted room invalidation and redundant thread invalidations."""
+        self._pending_room_invalidations.pop(room_id, None)
+        self._pending_thread_invalidations = {
+            key: pending for key, pending in self._pending_thread_invalidations.items() if key[0] != room_id
+        }
+
+    def forget_pending_thread_invalidation(self, room_id: str, thread_id: str) -> None:
+        """Forget one persisted thread invalidation."""
+        self._pending_thread_invalidations.pop((room_id, thread_id), None)
+
+    async def _close_db_locked(self, *, operation: str) -> None:
+        """Close the active connection best-effort. Caller must hold ``_db_lock``."""
+        db = self._db
+        self._db = None
+        if db is None:
+            return
+        try:
+            await db.close()
+        except Exception as exc:
+            logger.debug(
+                "Ignoring error while closing Postgres event cache connection",
+                namespace=self._namespace,
+                operation=operation,
+                error=str(exc),
+            )
+
+    def connection_is_closed(self, db: psycopg.AsyncConnection) -> bool:
+        """Return whether psycopg considers one connection closed."""
+        return bool(getattr(db, "closed", False))
+
+    def _unavailable_reason_from_exception(self, exc: BaseException) -> str:
+        message = str(exc)
+        if not message:
+            return type(exc).__name__
+        return f"{type(exc).__name__}: {message[:200]}"
 
     def room_lock_entry(self, room_id: str, *, active_user_increment: int = 0) -> _RoomLockEntry:
         """Return the cached room lock entry, creating it on demand."""
@@ -358,7 +584,7 @@ class _PostgresEventCacheRuntime:
         operation: str,
     ) -> AsyncIterator[psycopg.AsyncConnection]:
         """Serialize one DB operation with lifecycle changes and room ordering."""
-        if self._db is None:
+        if self._db is None or self.connection_is_closed(self._db):
             await self.initialize()
         async with self._db_lock, self.acquire_room_lock(room_id, operation=operation):
             db = self.require_db()
@@ -416,11 +642,15 @@ class PostgresEventCache:
     @property
     def durable_writes_available(self) -> bool:
         """Return whether cache writes can durably persist data."""
-        return self._runtime.is_initialized and not self._runtime.is_disabled
+        return not self._runtime.is_disabled and not self._runtime.explicitly_closed
 
     async def initialize(self) -> None:
         """Open the PostgreSQL database and create the cache schema."""
         await self._runtime.initialize()
+
+    def runtime_diagnostics(self) -> dict[str, object]:
+        """Return log-safe runtime state for sync certification diagnostics."""
+        return self._runtime.runtime_diagnostics()
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
@@ -438,16 +668,12 @@ class PostgresEventCache:
         disabled_result: T,
         reader: Callable[[psycopg.AsyncConnection], Awaitable[T]],
     ) -> T:
-        if self._runtime.is_disabled:
-            return disabled_result
-        async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
-            try:
-                result = await reader(db)
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-        return result
+        return await self._operation(
+            room_id,
+            operation=operation,
+            disabled_result=disabled_result,
+            callback=reader,
+        )
 
     async def _write_operation(
         self,
@@ -457,16 +683,109 @@ class PostgresEventCache:
         disabled_result: T,
         writer: Callable[[psycopg.AsyncConnection], Awaitable[T]],
     ) -> T:
+        return await self._operation(
+            room_id,
+            operation=operation,
+            disabled_result=disabled_result,
+            callback=writer,
+        )
+
+    async def _operation(
+        self,
+        room_id: str,
+        *,
+        operation: str,
+        disabled_result: T,
+        callback: Callable[[psycopg.AsyncConnection], Awaitable[T]],
+    ) -> T:
         if self._runtime.is_disabled:
             return disabled_result
-        async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
+        transient_error: BaseException | None = None
+        for attempt in range(_MAX_TRANSIENT_OPERATION_ATTEMPTS):
+            flushed_pending: tuple[tuple[str, str | None], ...] = ()
             try:
-                result = await writer(db)
-                await db.commit()
-            except Exception:
-                await db.rollback()
+                async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
+                    try:
+                        flushed_pending = await self._flush_pending_invalidations(db, room_id)
+                        result = await callback(db)
+                        await db.commit()
+                    except Exception:
+                        await self._rollback_best_effort(db, operation=operation)
+                        raise
+            except EventCacheBackendUnavailable as exc:
+                transient_error = exc
+                if attempt + 1 < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
+                    continue
                 raise
-        return result
+            except Exception as exc:
+                if not _is_transient_postgres_failure(exc):
+                    raise
+                transient_error = exc
+                await self._runtime.handle_transient_failure(exc, operation=operation)
+                if attempt + 1 < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
+                    continue
+                raise _cache_backend_unavailable(operation, exc) from exc
+            else:
+                self._forget_flushed_pending_invalidations(room_id, flushed_pending)
+                return result
+        raise _cache_backend_unavailable(operation, transient_error or RuntimeError("operation did not run"))
+
+    async def _rollback_best_effort(self, db: psycopg.AsyncConnection, *, operation: str) -> None:
+        try:
+            await db.rollback()
+        except Exception as exc:
+            logger.debug(
+                "Ignoring Postgres event cache rollback failure",
+                namespace=self._runtime.namespace,
+                operation=operation,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    async def _flush_pending_invalidations(
+        self,
+        db: psycopg.AsyncConnection,
+        room_id: str,
+    ) -> tuple[tuple[str, str | None], ...]:
+        pending = self._runtime.pending_room_invalidations(room_id)
+        if not pending:
+            return ()
+        flushed: list[tuple[str, str | None]] = []
+        for kind, thread_id, pending_invalidation in pending:
+            if kind == "room":
+                await postgres_event_cache_threads.mark_room_stale_locked(
+                    db,
+                    namespace=self._runtime.namespace,
+                    room_id=room_id,
+                    invalidated_at=pending_invalidation.invalidated_at,
+                    reason=pending_invalidation.reason,
+                )
+                flushed.append(("room", None))
+                break
+            if thread_id is None:
+                continue
+            await postgres_event_cache_threads.mark_thread_stale_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+                thread_id=thread_id,
+                invalidated_at=pending_invalidation.invalidated_at,
+                reason=pending_invalidation.reason,
+            )
+            flushed.append(("thread", thread_id))
+        return tuple(flushed)
+
+    def _forget_flushed_pending_invalidations(
+        self,
+        room_id: str,
+        flushed_pending: tuple[tuple[str, str | None], ...],
+    ) -> None:
+        for kind, thread_id in flushed_pending:
+            if kind == "room":
+                self._runtime.forget_pending_room_invalidation(room_id)
+                continue
+            if thread_id is not None:
+                self._runtime.forget_pending_thread_invalidation(room_id, thread_id)
 
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
@@ -703,32 +1022,53 @@ class PostgresEventCache:
 
     async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
         """Persist one durable thread invalidation marker."""
-        await self._write_operation(
-            room_id,
-            operation="mark_thread_stale",
-            disabled_result=None,
-            writer=lambda db: postgres_event_cache_threads.mark_thread_stale_locked(
-                db,
-                namespace=self._runtime.namespace,
-                room_id=room_id,
-                thread_id=thread_id,
+        invalidated_at = time.time()
+        try:
+            await self._write_operation(
+                room_id,
+                operation="mark_thread_stale",
+                disabled_result=None,
+                writer=lambda db: postgres_event_cache_threads.mark_thread_stale_locked(
+                    db,
+                    namespace=self._runtime.namespace,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    invalidated_at=invalidated_at,
+                    reason=reason,
+                ),
+            )
+        except EventCacheBackendUnavailable:
+            self._runtime.record_pending_thread_invalidation(
+                room_id,
+                thread_id,
+                invalidated_at=invalidated_at,
                 reason=reason,
-            ),
-        )
+            )
+            raise
 
     async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
         """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
-        await self._write_operation(
-            room_id,
-            operation="mark_room_threads_stale",
-            disabled_result=None,
-            writer=lambda db: postgres_event_cache_threads.mark_room_stale_locked(
-                db,
-                namespace=self._runtime.namespace,
-                room_id=room_id,
+        invalidated_at = time.time()
+        try:
+            await self._write_operation(
+                room_id,
+                operation="mark_room_threads_stale",
+                disabled_result=None,
+                writer=lambda db: postgres_event_cache_threads.mark_room_stale_locked(
+                    db,
+                    namespace=self._runtime.namespace,
+                    room_id=room_id,
+                    invalidated_at=invalidated_at,
+                    reason=reason,
+                ),
+            )
+        except EventCacheBackendUnavailable:
+            self._runtime.record_pending_room_invalidation(
+                room_id,
+                invalidated_at=invalidated_at,
                 reason=reason,
-            ),
-        )
+            )
+            raise
 
     async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
         """Append one event when the thread already has cached data."""

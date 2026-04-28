@@ -32,6 +32,7 @@ class SyncCacheWriteResult:
     errors: tuple[BaseException, ...] = ()
     runtime_available: bool | None = None
     task_count: int | None = None
+    runtime_diagnostics: dict[str, object] | None = None
 
     @property
     def certified(self) -> bool:
@@ -162,6 +163,8 @@ def sync_cache_write_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str
         diagnostics["cache_runtime_available"] = cache_result.runtime_available
     if cache_result.task_count is not None:
         diagnostics["cache_task_count"] = cache_result.task_count
+    if cache_result.runtime_diagnostics:
+        diagnostics.update(cache_result.runtime_diagnostics)
     if cache_result.limited_room_ids:
         diagnostics["cache_limited_room_ids"] = cache_result.limited_room_ids[:5]
     if cache_result.errors:

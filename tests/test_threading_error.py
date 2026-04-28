@@ -35,7 +35,7 @@ from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, STREA
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix import thread_bookkeeping
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
-from mindroom.matrix.cache.event_cache import ThreadCacheState
+from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailable, ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
@@ -1485,6 +1485,47 @@ class TestMatrixConversationCacheThreadReads:
         )
 
         event_cache.invalidate_room_threads.assert_awaited_once_with("!room:localhost")
+
+    @pytest.mark.asyncio
+    async def test_invalidate_known_thread_keeps_cache_enabled_when_backend_is_temporarily_unavailable(self) -> None:
+        """Transient backend loss should not permanently disable a cache that tracks pending markers."""
+        event_cache = _runtime_event_cache()
+        backend_error = EventCacheBackendUnavailable("postgres unavailable")
+        event_cache.mark_thread_stale = AsyncMock(side_effect=backend_error)
+        event_cache.invalidate_thread = AsyncMock(side_effect=backend_error)
+        event_cache.disable = Mock()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+
+        await access._write_cache_ops.invalidate_known_thread(
+            "!room:localhost",
+            "$thread:localhost",
+            reason="test_failure",
+        )
+
+        event_cache.disable.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalidate_room_threads_keeps_cache_enabled_when_backend_is_temporarily_unavailable(self) -> None:
+        """Transient backend loss should not turn a reconnectable Postgres cache into a permanent miss."""
+        event_cache = _runtime_event_cache()
+        backend_error = EventCacheBackendUnavailable("postgres unavailable")
+        event_cache.mark_room_threads_stale = AsyncMock(side_effect=backend_error)
+        event_cache.invalidate_room_threads = AsyncMock(side_effect=backend_error)
+        event_cache.disable = Mock()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+
+        await access._write_cache_ops.invalidate_room_threads(
+            "!room:localhost",
+            reason="test_failure",
+        )
+
+        event_cache.disable.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_lookup_miss_invalidation_survives_restart_and_refetches_next_read(self, tmp_path: Path) -> None:

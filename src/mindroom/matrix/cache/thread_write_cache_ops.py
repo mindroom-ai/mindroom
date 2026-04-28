@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
+from .event_cache import EventCacheBackendUnavailable
+
 if TYPE_CHECKING:
     import asyncio
     from collections.abc import Callable, Coroutine, Sequence
@@ -39,6 +41,18 @@ class ThreadMutationCacheOps:
             and self.runtime.event_cache_write_coordinator is not None
             and self.runtime.event_cache.durable_writes_available
         )
+
+    def cache_runtime_diagnostics(self) -> dict[str, object]:
+        """Return log-safe event-cache runtime diagnostics for sync certification."""
+        if self.runtime.event_cache is None:
+            return {"cache_backend": "none"}
+        diagnostics = getattr(self.runtime.event_cache, "runtime_diagnostics", None)
+        if callable(diagnostics):
+            return dict(diagnostics())
+        return {
+            "cache_backend": type(self.runtime.event_cache).__name__,
+            "cache_initialized": getattr(self.runtime.event_cache, "is_initialized", None),
+        }
 
     def queue_room_cache_update(
         self,
@@ -284,6 +298,16 @@ class ThreadMutationCacheOps:
         try:
             await self.runtime.event_cache.invalidate_thread(room_id, thread_id)
         except Exception as invalidate_exc:
+            if isinstance(stale_marker_error, EventCacheBackendUnavailable):
+                self.logger.warning(
+                    "Cached thread stale marker is pending because cache backend is temporarily unavailable",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    reason=reason,
+                    stale_marker_error=str(stale_marker_error),
+                    error=str(invalidate_exc),
+                )
+                return
             self.logger.warning(
                 "Failed to delete cached thread rows after stale-marker failure; disabling cache",
                 room_id=room_id,
@@ -310,6 +334,15 @@ class ThreadMutationCacheOps:
         try:
             await self.runtime.event_cache.invalidate_room_threads(room_id)
         except Exception as invalidate_exc:
+            if isinstance(stale_marker_error, EventCacheBackendUnavailable):
+                self.logger.warning(
+                    "Cached room stale marker is pending because cache backend is temporarily unavailable",
+                    room_id=room_id,
+                    reason=reason,
+                    stale_marker_error=str(stale_marker_error),
+                    error=str(invalidate_exc),
+                )
+                return
             self.logger.warning(
                 "Failed to delete cached room thread rows after stale-marker failure; disabling cache",
                 room_id=room_id,

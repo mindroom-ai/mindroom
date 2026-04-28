@@ -1130,7 +1130,12 @@ class ThreadSyncWritePolicy:
     ) -> SyncCacheWriteResult:
         """Persist sync timeline data and report whether it certifies the sync token."""
         if not self._cache_ops.cache_runtime_available():
-            return SyncCacheWriteResult(complete=False, runtime_available=False, task_count=0)
+            return SyncCacheWriteResult(
+                complete=False,
+                runtime_available=False,
+                task_count=0,
+                runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
+            )
 
         limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
         if validation_errors:
@@ -1138,6 +1143,7 @@ class ThreadSyncWritePolicy:
                 complete=False,
                 errors=validation_errors,
                 runtime_available=self._cache_ops.cache_runtime_available(),
+                runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
             )
 
         try:
@@ -1152,6 +1158,7 @@ class ThreadSyncWritePolicy:
                 limited_room_ids=limited_room_ids,
                 errors=(exc,),
                 runtime_available=self._cache_ops.cache_runtime_available(),
+                runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
             )
 
         results: list[object | BaseException] = []
@@ -1166,4 +1173,5 @@ class ThreadSyncWritePolicy:
             errors=errors,
             runtime_available=runtime_available,
             task_count=len(tasks),
+            runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
         )

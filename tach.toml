@@ -1059,7 +1059,10 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.cache.thread_write_cache_ops"
-depends_on = [ "mindroom.matrix.thread_bookkeeping"]
+depends_on = [
+    "mindroom.matrix.cache.event_cache",
+    "mindroom.matrix.thread_bookkeeping",
+]
 
 [[modules]]
 path = "mindroom.matrix.cache.sqlite_event_cache_events"
@@ -1091,6 +1094,7 @@ visibility = ["mindroom.runtime_support"]
 [[modules]]
 path = "mindroom.matrix.cache.postgres_event_cache"
 depends_on = [
+    "mindroom.matrix.cache.event_cache",
     "mindroom.matrix.cache.event_normalization",
     "mindroom.logging_config",
     "mindroom.matrix.cache.postgres_agent_message_snapshot",
@@ -1135,6 +1139,7 @@ path = "mindroom.runtime_support"
 depends_on = [
     "mindroom.config.matrix",
     "mindroom.constants",
+    "mindroom.matrix.cache.event_cache",
     "mindroom.matrix.cache.postgres_event_cache",
     "mindroom.matrix.cache.postgres_redaction",
     "mindroom.matrix.cache.sqlite_event_cache",
@@ -2022,7 +2027,7 @@ expose = [
 from = ["mindroom.matrix.cache"]
 
 [[interfaces]]
-expose = ["ConversationEventCache", "ThreadCacheState"]
+expose = ["ConversationEventCache", "EventCacheBackendUnavailable", "ThreadCacheState"]
 from = ["mindroom.matrix.cache.event_cache"]
 visibility = ["mindroom.matrix.cache"]
 exclusive = true

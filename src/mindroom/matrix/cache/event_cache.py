@@ -20,6 +20,10 @@ class ThreadCacheState:
     room_invalidation_reason: str | None
 
 
+class EventCacheBackendUnavailable(RuntimeError):
+    """Raised when cache storage is temporarily unreachable but not logically corrupt."""
+
+
 class ConversationEventCache(Protocol):
     """Storage-agnostic cache API for Matrix event and thread lookups."""
 

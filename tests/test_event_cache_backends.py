@@ -6,6 +6,7 @@ import uuid
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import psycopg
 import pytest
 
 from mindroom.config.matrix import CacheConfig
@@ -349,6 +350,104 @@ async def test_postgres_event_cache_round_trips_core_conversation_cache_behavior
         await cache.close()
         await shared_cache.close()
         await isolated_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_event_cache_recovers_after_backend_connection_termination(
+    postgres_event_cache_url: str,
+) -> None:
+    """A transient Postgres disconnect should reconnect instead of disabling cache."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    root_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="thread root",
+        origin_server_ts=1000,
+    )
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+
+    await cache.initialize()
+    try:
+        await cache.replace_thread(room_id, thread_id, [root_event], validated_at=100.0)
+        assert cache._runtime.db is not None
+        cursor = await cache._runtime.db.execute("SELECT pg_backend_pid()")
+        row = await cursor.fetchone()
+        assert row is not None
+        pid = int(row[0])
+
+        admin = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+        try:
+            terminate_cursor = await admin.execute("SELECT pg_terminate_backend(%s)", (pid,))
+            terminate_row = await terminate_cursor.fetchone()
+            assert terminate_row == (True,)
+            await admin.commit()
+        finally:
+            await admin.close()
+
+        await cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
+
+        state = await cache.get_thread_cache_state(room_id, thread_id)
+        assert state is not None
+        assert state.invalidated_at is not None
+        assert state.invalidation_reason == "live_thread_mutation"
+        assert cache.durable_writes_available is True
+        diagnostics = cache.runtime_diagnostics()
+        assert diagnostics["cache_postgres_disabled"] is False
+        assert diagnostics["cache_postgres_reconnect_count"] >= 1
+        assert diagnostics["cache_postgres_transient_failure_count"] >= 1
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded_replace(
+    postgres_event_cache_url: str,
+) -> None:
+    """A deferred stale marker must be persisted before a guarded cache replacement can win."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    root_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="thread root",
+        origin_server_ts=1000,
+    )
+    replacement_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="replacement root",
+        origin_server_ts=2000,
+    )
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+
+    await cache.initialize()
+    try:
+        await cache.replace_thread(room_id, thread_id, [root_event], validated_at=100.0)
+        cache._runtime.record_pending_thread_invalidation(
+            room_id,
+            thread_id,
+            invalidated_at=200.0,
+            reason="live_thread_mutation",
+        )
+
+        replaced = await cache.replace_thread_if_not_newer(
+            room_id,
+            thread_id,
+            [replacement_event],
+            fetch_started_at=150.0,
+        )
+
+        assert replaced is False
+        state = await cache.get_thread_cache_state(room_id, thread_id)
+        assert state is not None
+        assert state.invalidated_at == 200.0
+        assert state.invalidation_reason == "live_thread_mutation"
+        assert cache.runtime_diagnostics()["cache_postgres_pending_thread_invalidations"] == 0
+    finally:
+        await cache.close()
 
 
 def test_build_event_cache_requires_postgres_database_url(tmp_path: Path) -> None:
