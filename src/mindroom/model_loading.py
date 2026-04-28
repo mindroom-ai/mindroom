@@ -13,7 +13,6 @@ from agno.models.groq import Groq
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
-from agno.models.vertexai.claude import Claude as VertexAIClaude
 
 from mindroom.codex_model import CodexResponses, derive_codex_prompt_cache_key, normalize_codex_model_id
 from mindroom.constants import RuntimePaths, runtime_env_path
@@ -21,6 +20,7 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
+from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 
 if TYPE_CHECKING:
@@ -116,7 +116,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
         "anthropic": Claude,
         "gemini": Gemini,
         "google": Gemini,
-        "vertexai_claude": VertexAIClaude,
+        "vertexai_claude": MindroomVertexAIClaude,
         "cerebras": Cerebras,
         "groq": Groq,
         "deepseek": DeepSeek,
