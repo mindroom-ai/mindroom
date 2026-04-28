@@ -36,6 +36,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.background import BackgroundTask
 
+from mindroom.agent_run_context import prepend_knowledge_availability_notice
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
@@ -51,7 +52,6 @@ from mindroom.history import (
 )
 from mindroom.knowledge import (
     KnowledgeAvailabilityDetail,
-    format_knowledge_availability_notice,
     resolve_agent_knowledge_access,
 )
 from mindroom.logging_config import get_logger
@@ -84,7 +84,7 @@ _TEAM_MODEL_PREFIX = "team/"
 _RESERVED_MODEL_NAMES = {_AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 
     from agno.agent import Agent
     from agno.db.base import BaseDb
@@ -787,15 +787,6 @@ def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]
     )
 
 
-def _prepend_knowledge_availability_notice(
-    prompt: str,
-    unavailable_bases: Mapping[str, KnowledgeAvailabilityDetail],
-) -> str:
-    """Prefix the prompt with the degraded-knowledge notice when shared bases are unavailable."""
-    availability_hint = format_knowledge_availability_notice(unavailable_bases)
-    return f"{availability_hint}\n\n{prompt}" if availability_hint else prompt
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -970,9 +961,7 @@ async def chat_completions(  # noqa: C901, PLR0912
                     _log_missing_knowledge_bases(agent_name)(list(knowledge_resolution.missing))
                 knowledge = knowledge_resolution.knowledge
                 unavailable_bases = dict(knowledge_resolution.unavailable)
-            availability_hint = format_knowledge_availability_notice(unavailable_bases)
-            if availability_hint:
-                prompt = f"{availability_hint}\n\n{prompt}"
+            prompt = prepend_knowledge_availability_notice(prompt, unavailable_bases)
             if req.stream:
                 response = await _stream_completion(
                     agent_name,
@@ -1558,7 +1547,7 @@ async def _non_stream_team_completion(
             )
 
             try:
-                prompt = _prepend_knowledge_availability_notice(
+                prompt = prepend_knowledge_availability_notice(
                     prompt,
                     unavailable_bases,
                 )
@@ -1692,7 +1681,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         )
 
         try:
-            prompt = _prepend_knowledge_availability_notice(
+            prompt = prepend_knowledge_availability_notice(
                 prompt,
                 unavailable_bases,
             )

@@ -28,6 +28,7 @@ from agno.team import Team
 from pydantic import BaseModel, Field
 
 from mindroom import ai_runtime, model_loading
+from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent
 from mindroom.ai import build_matrix_run_metadata
@@ -49,11 +50,7 @@ from mindroom.history import (
 )
 from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
-from mindroom.knowledge import (
-    KnowledgeAvailabilityDetail,
-    format_knowledge_availability_notice,
-    resolve_agent_knowledge_access,
-)
+from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -73,7 +70,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Collection, Sequence
 
     import nio
     from agno.db.base import BaseDb
@@ -102,20 +99,6 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
     max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
     missing_sender_label="Unknown",
 )
-
-
-def _append_knowledge_availability_enrichment(
-    system_enrichment_items: Sequence[EnrichmentItem],
-    unavailable_bases: Mapping[str, KnowledgeAvailabilityDetail],
-) -> tuple[EnrichmentItem, ...]:
-    """Append one volatile knowledge-availability notice when needed."""
-    notice = format_knowledge_availability_notice(unavailable_bases)
-    if notice is None:
-        return tuple(system_enrichment_items)
-    return (
-        *system_enrichment_items,
-        EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
-    )
 
 
 @dataclass
@@ -1510,7 +1493,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         )
     except ValueError as exc:
         return str(exc)
-    system_enrichment_items = _append_knowledge_availability_enrichment(
+    system_enrichment_items = append_knowledge_availability_enrichment(
         system_enrichment_items,
         unavailable_bases,
     )
@@ -1868,7 +1851,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     except ValueError as exc:
         yield str(exc)
         return
-    system_enrichment_items = _append_knowledge_availability_enrichment(
+    system_enrichment_items = append_knowledge_availability_enrichment(
         system_enrichment_items,
         unavailable_bases,
     )

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
 
+from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import (
     ai_response,
@@ -31,11 +32,6 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import (
     EnrichmentItem,
     MessageEnvelope,
-)
-from mindroom.knowledge import (
-    KnowledgeAccessSupport,
-    KnowledgeAvailabilityDetail,
-    format_knowledge_availability_notice,
 )
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
@@ -103,6 +99,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.history import CompactionOutcome, HistoryScope, PostResponseCompactionCheck
+    from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
@@ -117,20 +114,6 @@ _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
-
-
-def _append_knowledge_availability_enrichment(
-    system_enrichment_items: Sequence[EnrichmentItem],
-    unavailable_bases: Mapping[str, KnowledgeAvailabilityDetail],
-) -> tuple[EnrichmentItem, ...]:
-    """Append one volatile knowledge-availability notice when needed."""
-    notice = format_knowledge_availability_notice(unavailable_bases)
-    if notice is None:
-        return tuple(system_enrichment_items)
-    return (
-        *system_enrichment_items,
-        EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
-    )
 
 
 def _merge_response_extra_content(
@@ -1495,7 +1478,7 @@ class ResponseRunner:
                 self.deps.agent_name,
                 execution_identity=runtime.tool_dispatch.execution_identity,
             )
-            system_enrichment_items = _append_knowledge_availability_enrichment(
+            system_enrichment_items = append_knowledge_availability_enrichment(
                 request.system_enrichment_items,
                 knowledge_resolution.unavailable,
             )
@@ -1585,7 +1568,7 @@ class ResponseRunner:
             self.deps.agent_name,
             execution_identity=runtime.tool_dispatch.execution_identity,
         )
-        system_enrichment_items = _append_knowledge_availability_enrichment(
+        system_enrichment_items = append_knowledge_availability_enrichment(
             request.system_enrichment_items,
             knowledge_resolution.unavailable,
         )
