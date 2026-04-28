@@ -410,10 +410,7 @@ async def _reconcile_failed_refresh_subprocess(
         source_root = source_root_for_published_index_key(key)
         async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
             state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
-            if _published_state_fingerprint(state) not in {
-                _published_state_fingerprint(initial_state),
-                _refresh_running_fingerprint(key, initial_state),
-            }:
+            if not _failed_subprocess_state_can_be_reconciled(key, state, initial_state):
                 return
             await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
     except Exception:
@@ -792,6 +789,19 @@ def _refresh_running_fingerprint(
             last_error=None,
         ),
     )
+
+
+def _failed_subprocess_state_can_be_reconciled(
+    key: PublishedIndexKey,
+    state: PublishedIndexState | None,
+    initial_state: PublishedIndexState | None,
+) -> bool:
+    if _published_state_fingerprint(state) in {
+        _published_state_fingerprint(initial_state),
+        _refresh_running_fingerprint(key, initial_state),
+    }:
+        return True
+    return state is not None and state.refresh_job == "running" and state.reason == "refreshing"
 
 
 async def _reconcile_cancelled_refresh(
