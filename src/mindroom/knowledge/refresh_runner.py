@@ -912,7 +912,7 @@ async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshRes
         storage_path=Path(request.storage_root),
         process_env=dict(os.environ),
     )
-    config = Config.validate_with_runtime(request.config_data, runtime_paths)
+    config = Config.validate_with_runtime(request.config_data, runtime_paths, tolerate_plugin_load_errors=True)
     execution_identity = _execution_identity_from_payload(request.execution_identity)
     return await refresh_knowledge_binding(
         request.base_id,

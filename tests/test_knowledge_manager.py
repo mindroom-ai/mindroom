@@ -4002,6 +4002,44 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_subprocess_refresh_tolerates_broken_unused_plugin(tmp_path: Path) -> None:
+    """Child refresh config validation should match startup's broken-plugin tolerance."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("plugin-tolerant refresh", encoding="utf-8")
+    plugin_root = tmp_path / "plugins" / "broken"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("import definitely_missing_refresh_plugin_dependency\n", encoding="utf-8")
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "agents": {"helper": {"display_name": "Helper", "knowledge_bases": ["docs"]}},
+            "models": {},
+            "plugins": ["./plugins/broken"],
+            "knowledge_bases": {"docs": {"path": str(docs_path)}},
+        },
+        runtime_paths,
+        tolerate_plugin_load_errors=True,
+    )
+    payload = knowledge_refresh_runner._serialize_subprocess_refresh_request(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+        force_reindex=False,
+    )
+
+    result = await knowledge_refresh_runner._run_subprocess_refresh_request(payload)
+
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+
+
+@pytest.mark.asyncio
 async def test_cancelled_subprocess_refresh_reconciles_running_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
