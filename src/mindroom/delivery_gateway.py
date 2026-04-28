@@ -233,6 +233,20 @@ class CancelledVisibleNoteRequest:
 
 
 @dataclass(frozen=True)
+class _PlaceholderFailureUpdateRequest:
+    """Parameters for finalizing a placeholder after Matrix delivery fails."""
+
+    target: MessageTarget
+    event_id: str
+    response_kind: str
+    response_envelope: MessageEnvelope
+    correlation_id: str
+    failure_reason: str
+    tool_trace: list[ToolTraceEntry] | None
+    extra_content: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class MatrixCompactionLifecycle:
     """Matrix-backed compaction lifecycle notice adapter."""
 
@@ -452,57 +466,49 @@ class DeliveryGateway:
             return failure_reason or f"failed to redact suppressed response {event_id}"
         return None
 
-    async def _deliver_placeholder_failure_update(
+    async def _finish_placeholder_delivery_failure(
         self,
-        *,
-        target: MessageTarget,
-        event_id: str,
-        response_kind: str,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
-        failure_reason: str,
-        tool_trace: list[ToolTraceEntry] | None,
-        extra_content: dict[str, Any] | None,
+        request: _PlaceholderFailureUpdateRequest,
     ) -> FinalDeliveryOutcome:
         """Best-effort terminal error edit for a visible placeholder."""
-        failure_extra_content = dict(extra_content or {})
+        failure_extra_content = dict(request.extra_content or {})
         failure_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_ERROR
         edited = await self.edit_text(
             EditTextRequest(
-                target=target,
-                event_id=event_id,
+                target=request.target,
+                event_id=request.event_id,
                 new_text=_PLACEHOLDER_DELIVERY_FAILURE_TEXT,
-                tool_trace=tool_trace,
+                tool_trace=request.tool_trace,
                 extra_content=failure_extra_content,
             ),
         )
         if edited:
             return FinalDeliveryOutcome(
                 terminal_status="error",
-                event_id=event_id,
+                event_id=request.event_id,
                 is_visible_response=True,
                 final_visible_body=_PLACEHOLDER_DELIVERY_FAILURE_TEXT,
                 delivery_kind="edited",
-                failure_reason=failure_reason,
-                tool_trace=tuple(tool_trace or ()),
+                failure_reason=request.failure_reason,
+                tool_trace=tuple(request.tool_trace or ()),
                 extra_content=failure_extra_content,
             )
 
         self.deps.logger.error(
             "Failed to deliver placeholder failure update",
-            room_id=target.room_id,
-            event_id=event_id,
-            response_kind=response_kind,
-            source_event_id=response_envelope.source_event_id,
-            correlation_id=correlation_id,
-            failure_reason=failure_reason,
+            room_id=request.target.room_id,
+            event_id=request.event_id,
+            response_kind=request.response_kind,
+            source_event_id=request.response_envelope.source_event_id,
+            correlation_id=request.correlation_id,
+            failure_reason=request.failure_reason,
         )
         return FinalDeliveryOutcome(
             terminal_status="error",
-            event_id=event_id,
+            event_id=request.event_id,
             is_visible_response=True,
-            failure_reason=failure_reason,
-            tool_trace=tuple(tool_trace or ()),
+            failure_reason=request.failure_reason,
+            tool_trace=tuple(request.tool_trace or ()),
             extra_content=failure_extra_content,
         )
 
@@ -779,15 +785,17 @@ class DeliveryGateway:
                 )
 
             if request.existing_event_is_placeholder:
-                return await self._deliver_placeholder_failure_update(
-                    target=request.target,
-                    event_id=request.existing_event_id,
-                    response_kind=request.response_kind,
-                    response_envelope=request.response_envelope,
-                    correlation_id=request.correlation_id,
-                    failure_reason="delivery_failed",
-                    tool_trace=draft.tool_trace,
-                    extra_content=draft.extra_content,
+                return await self._finish_placeholder_delivery_failure(
+                    _PlaceholderFailureUpdateRequest(
+                        target=request.target,
+                        event_id=request.existing_event_id,
+                        response_kind=request.response_kind,
+                        response_envelope=request.response_envelope,
+                        correlation_id=request.correlation_id,
+                        failure_reason="delivery_failed",
+                        tool_trace=draft.tool_trace,
+                        extra_content=draft.extra_content,
+                    ),
                 )
             return FinalDeliveryOutcome(
                 terminal_status="error",
@@ -1094,6 +1102,49 @@ class DeliveryGateway:
             else None,
         )
 
+    async def _finalize_placeholder_only_stream_error(
+        self,
+        request: FinalizeStreamedResponseRequest,
+        *,
+        stream_outcome: StreamTransportOutcome,
+        failure_reason: str,
+    ) -> FinalDeliveryOutcome:
+        """Finalize a failed stream whose only visible event is still the placeholder."""
+        placeholder_event_id = stream_outcome.last_physical_stream_event_id
+        if placeholder_event_id is None:
+            return FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id=None,
+                failure_reason=failure_reason,
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
+            )
+
+        if _is_placeholder_delivery_failure(failure_reason):
+            return await self._finish_placeholder_delivery_failure(
+                _PlaceholderFailureUpdateRequest(
+                    target=request.target,
+                    event_id=placeholder_event_id,
+                    response_kind=request.response_kind,
+                    response_envelope=request.response_envelope,
+                    correlation_id=request.correlation_id,
+                    failure_reason=failure_reason,
+                    tool_trace=request.tool_trace,
+                    extra_content=request.extra_content,
+                ),
+            )
+
+        return await self._cleanup_completed_placeholder_only_stream(
+            room_id=request.target.room_id,
+            streamed_event_id=placeholder_event_id,
+            response_kind=request.response_kind,
+            response_envelope=request.response_envelope,
+            correlation_id=request.correlation_id,
+            failure_reason=failure_reason,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+        )
+
     async def finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         request: FinalizeStreamedResponseRequest,
@@ -1189,34 +1240,10 @@ class DeliveryGateway:
                         )
                 failure_reason = stream_outcome.failure_reason or "stream_finalize_error"
                 if stream_outcome.visible_body_state == "placeholder_only":
-                    if stream_outcome.last_physical_stream_event_id is None:
-                        return FinalDeliveryOutcome(
-                            terminal_status="error",
-                            event_id=None,
-                            failure_reason=failure_reason,
-                            tool_trace=tuple(request.tool_trace or ()),
-                            extra_content=request.extra_content,
-                        )
-                    if _is_placeholder_delivery_failure(failure_reason):
-                        return await self._deliver_placeholder_failure_update(
-                            target=request.target,
-                            event_id=stream_outcome.last_physical_stream_event_id,
-                            response_kind=request.response_kind,
-                            response_envelope=request.response_envelope,
-                            correlation_id=request.correlation_id,
-                            failure_reason=failure_reason,
-                            tool_trace=request.tool_trace,
-                            extra_content=request.extra_content,
-                        )
-                    return await self._cleanup_completed_placeholder_only_stream(
-                        room_id=request.target.room_id,
-                        streamed_event_id=stream_outcome.last_physical_stream_event_id,
-                        response_kind=request.response_kind,
-                        response_envelope=request.response_envelope,
-                        correlation_id=request.correlation_id,
+                    return await self._finalize_placeholder_only_stream_error(
+                        request,
+                        stream_outcome=stream_outcome,
                         failure_reason=failure_reason,
-                        tool_trace=request.tool_trace,
-                        extra_content=request.extra_content,
                     )
 
                 visible_stream_event_id = self._visible_stream_event_id(stream_outcome)
