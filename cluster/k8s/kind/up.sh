@@ -34,9 +34,8 @@ echo "[kind] Installing ingress-nginx for kind..."
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
 
 echo "[kind] Waiting for ingress controller to be ready..."
-kubectl wait --namespace ingress-nginx \
-  --for=condition=ready pod \
-  --selector=app.kubernetes.io/component=controller \
+kubectl rollout status deployment/ingress-nginx-controller \
+  --namespace ingress-nginx \
   --timeout=180s
 
 echo "[kind] Cluster '${CLUSTER_NAME}' is ready."
