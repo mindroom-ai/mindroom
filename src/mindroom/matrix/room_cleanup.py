@@ -16,7 +16,12 @@ from mindroom.entity_resolution import configured_bot_usernames_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms, should_persist_invited_rooms
+from mindroom.matrix.invited_rooms_store import (
+    invited_room_entity_names,
+    invited_rooms_path,
+    load_invited_rooms,
+    should_persist_invited_rooms,
+)
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.state import managed_account_usernames, matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
@@ -47,16 +52,16 @@ def _load_all_persisted_invited_rooms(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> dict[str, set[str]]:
-    """Load persisted invited rooms for opted-in agents, keyed by bot username."""
+    """Load persisted invited rooms for invite-accepting entities, keyed by bot username."""
     invited_rooms_by_bot: dict[str, set[str]] = {}
 
-    for agent_name in config.agents:
-        if not should_persist_invited_rooms(config, agent_name):
+    for entity_name in invited_room_entity_names(config):
+        if not should_persist_invited_rooms(config, entity_name):
             continue
 
-        rooms = load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, agent_name))
+        rooms = load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, entity_name))
         if rooms:
-            invited_rooms_by_bot[agent_username_localpart(agent_name, runtime_paths)] = rooms
+            invited_rooms_by_bot[agent_username_localpart(entity_name, runtime_paths)] = rooms
 
     return invited_rooms_by_bot
 

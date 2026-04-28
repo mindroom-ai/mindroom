@@ -62,13 +62,23 @@ def save_invited_rooms(path: Path, room_ids: set[str]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def should_persist_invited_rooms(config: Config, agent_name: str) -> bool:
-    """Return whether one entity should keep invited rooms across restarts."""
+def should_accept_invites(config: Config, agent_name: str) -> bool:
+    """Return whether one configured entity accepts authorized room invites."""
     if agent_name == ROUTER_AGENT_NAME:
-        return False
+        return config.router.accept_invites
 
     agent_config = config.agents.get(agent_name)
-    if agent_config is None:
-        return False
+    if agent_config is not None:
+        return agent_config.accept_invites
 
-    return agent_config.accept_invites
+    return agent_name in config.teams
+
+
+def invited_room_entity_names(config: Config) -> tuple[str, ...]:
+    """Return configured entity names that may own persisted invited rooms."""
+    return (ROUTER_AGENT_NAME, *config.agents.keys(), *config.teams.keys())
+
+
+def should_persist_invited_rooms(config: Config, agent_name: str) -> bool:
+    """Return whether one entity should keep accepted invited rooms across restarts."""
+    return should_accept_invites(config, agent_name)

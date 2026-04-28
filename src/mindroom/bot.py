@@ -847,7 +847,7 @@ class AgentBot:
         return self._room_lifecycle.invited_rooms_file_path()
 
     def _load_invited_rooms(self) -> set[str]:
-        """Load invited rooms persisted for one eligible named agent."""
+        """Load invited rooms persisted for one eligible entity."""
         return self._room_lifecycle.load_invited_rooms()
 
     def _save_invited_rooms(self) -> None:

@@ -9,15 +9,19 @@ router:
   # Model for routing decisions (defaults to "default")
   model: haiku
 
+  # Accept authorized room invites and preserve them across restarts (default: true)
+  accept_invites: true
+
   # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
   startup_thread_prewarm: true
 ```
 
-The router has two configuration options:
+The router has three configuration options:
 
 | Option                   | Type   | Default     | Description                                                                                                                                                                                 |
 | ------------------------ | ------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `model`                  | string | `"default"` | Model to use for routing decisions                                                                                                                                                          |
+| `accept_invites`         | bool   | `true`      | When enabled, the router accepts authorized room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup                                    |
 | `startup_thread_prewarm` | bool   | `true`      | When enabled, the router may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
 
 Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
