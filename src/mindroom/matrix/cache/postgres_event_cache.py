@@ -14,7 +14,7 @@ import psycopg
 from mindroom.logging_config import get_logger
 
 from . import postgres_event_cache_events, postgres_event_cache_threads
-from .event_cache import EventCacheBackendUnavailable
+from .event_cache import EventCacheBackendUnavailableError
 from .event_normalization import normalize_event_source_for_cache
 from .postgres_agent_message_snapshot import load_postgres_agent_message_snapshot
 from .postgres_redaction import redact_postgres_connection_info
@@ -79,10 +79,10 @@ def _is_transient_postgres_failure(exc: BaseException) -> bool:
     return any(fragment in message for fragment in _TRANSIENT_ERROR_TEXT)
 
 
-def _cache_backend_unavailable(operation: str, exc: BaseException) -> EventCacheBackendUnavailable:
+def _cache_backend_unavailable(operation: str, exc: BaseException) -> EventCacheBackendUnavailableError:
     message = str(exc)
     detail = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
-    return EventCacheBackendUnavailable(f"Postgres event cache unavailable during {operation}: {detail}")
+    return EventCacheBackendUnavailableError(f"Postgres event cache unavailable during {operation}: {detail}")
 
 
 async def initialize_postgres_event_cache_db(database_url: str) -> psycopg.AsyncConnection:
@@ -682,7 +682,7 @@ class PostgresEventCache:
                     except Exception:
                         await self._rollback_best_effort(db, operation=operation)
                         raise
-            except EventCacheBackendUnavailable as exc:
+            except EventCacheBackendUnavailableError as exc:
                 transient_error = exc
                 if attempt + 1 < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
                     continue
@@ -1007,7 +1007,7 @@ class PostgresEventCache:
                     reason=reason,
                 ),
             )
-        except EventCacheBackendUnavailable:
+        except EventCacheBackendUnavailableError:
             self._runtime.record_pending_thread_invalidation(
                 room_id,
                 thread_id,
@@ -1032,7 +1032,7 @@ class PostgresEventCache:
                     reason=reason,
                 ),
             )
-        except EventCacheBackendUnavailable:
+        except EventCacheBackendUnavailableError:
             self._runtime.record_pending_room_invalidation(
                 room_id,
                 invalidated_at=invalidated_at,

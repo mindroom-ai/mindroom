@@ -2027,7 +2027,7 @@ expose = [
 from = ["mindroom.matrix.cache"]
 
 [[interfaces]]
-expose = ["ConversationEventCache", "EventCacheBackendUnavailable", "ThreadCacheState"]
+expose = ["ConversationEventCache", "EventCacheBackendUnavailableError", "ThreadCacheState"]
 from = ["mindroom.matrix.cache.event_cache"]
 visibility = ["mindroom.matrix.cache"]
 exclusive = true

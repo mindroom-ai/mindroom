@@ -20,7 +20,7 @@ class ThreadCacheState:
     room_invalidation_reason: str | None
 
 
-class EventCacheBackendUnavailable(RuntimeError):
+class EventCacheBackendUnavailableError(RuntimeError):
     """Raised when cache storage is temporarily unreachable but not logically corrupt."""
 
 

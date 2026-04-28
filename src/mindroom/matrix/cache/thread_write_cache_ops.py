@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
-from .event_cache import EventCacheBackendUnavailable
+from .event_cache import EventCacheBackendUnavailableError
 
 if TYPE_CHECKING:
     import asyncio
@@ -298,7 +298,7 @@ class ThreadMutationCacheOps:
         try:
             await self.runtime.event_cache.invalidate_thread(room_id, thread_id)
         except Exception as invalidate_exc:
-            if isinstance(stale_marker_error, EventCacheBackendUnavailable):
+            if isinstance(stale_marker_error, EventCacheBackendUnavailableError):
                 self.logger.warning(
                     "Cached thread stale marker is pending because cache backend is temporarily unavailable",
                     room_id=room_id,
@@ -334,7 +334,7 @@ class ThreadMutationCacheOps:
         try:
             await self.runtime.event_cache.invalidate_room_threads(room_id)
         except Exception as invalidate_exc:
-            if isinstance(stale_marker_error, EventCacheBackendUnavailable):
+            if isinstance(stale_marker_error, EventCacheBackendUnavailableError):
                 self.logger.warning(
                     "Cached room stale marker is pending because cache backend is temporarily unavailable",
                     room_id=room_id,

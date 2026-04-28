@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths
-from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailable
+from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_redaction import redact_postgres_connection_info
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
@@ -156,7 +156,7 @@ async def initialize_event_cache_best_effort(
         return
     try:
         await support.event_cache.initialize()
-    except EventCacheBackendUnavailable as exc:
+    except EventCacheBackendUnavailableError as exc:
         logger.warning(
             "Event cache backend temporarily unavailable during init; will retry on demand",
             backend=support.event_cache_identity.backend,

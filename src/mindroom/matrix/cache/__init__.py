@@ -26,7 +26,7 @@ from .agent_message_snapshot import (
     AgentMessageSnapshot,
     AgentMessageSnapshotUnavailable,
 )
-from .event_cache import ConversationEventCache, EventCacheBackendUnavailable, ThreadCacheState
+from .event_cache import ConversationEventCache, EventCacheBackendUnavailableError, ThreadCacheState
 from .event_normalization import normalize_event_source_for_cache, normalize_nio_event_for_cache
 from .thread_cache_helpers import thread_cache_rejection_reason, thread_cache_state_is_usable
 from .thread_history_result import (
@@ -53,7 +53,7 @@ __all__ = [
     "AgentMessageSnapshot",
     "AgentMessageSnapshotUnavailable",
     "ConversationEventCache",
-    "EventCacheBackendUnavailable",
+    "EventCacheBackendUnavailableError",
     "EventCacheWriteCoordinator",
     "ThreadCacheState",
     "ThreadHistoryResult",
