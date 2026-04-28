@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 if os.name != "nt":
     import fcntl
@@ -871,19 +871,37 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     )
 
 
+def _optional_str_payload_field(payload: dict[str, object], field_name: str) -> str | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        msg = f"Knowledge refresh execution_identity.{field_name} must be a string when present"
+        raise TypeError(msg)
+    return value
+
+
 def _execution_identity_from_payload(payload: dict[str, object] | None) -> ToolExecutionIdentity | None:
     if payload is None:
         return None
+    channel = payload.get("channel")
+    if channel not in ("matrix", "openai_compat"):
+        msg = "Knowledge refresh execution_identity.channel must be matrix or openai_compat"
+        raise TypeError(msg)
+    agent_name = payload.get("agent_name")
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        msg = "Knowledge refresh execution_identity.agent_name must be a non-empty string"
+        raise TypeError(msg)
     return ToolExecutionIdentity(
-        channel=payload["channel"],  # type: ignore[arg-type]
-        agent_name=payload["agent_name"],  # type: ignore[arg-type]
-        requester_id=payload.get("requester_id"),  # type: ignore[arg-type]
-        room_id=payload.get("room_id"),  # type: ignore[arg-type]
-        thread_id=payload.get("thread_id"),  # type: ignore[arg-type]
-        resolved_thread_id=payload.get("resolved_thread_id"),  # type: ignore[arg-type]
-        session_id=payload.get("session_id"),  # type: ignore[arg-type]
-        tenant_id=payload.get("tenant_id"),  # type: ignore[arg-type]
-        account_id=payload.get("account_id"),  # type: ignore[arg-type]
+        channel=cast("Literal['matrix', 'openai_compat']", channel),
+        agent_name=agent_name,
+        requester_id=_optional_str_payload_field(payload, "requester_id"),
+        room_id=_optional_str_payload_field(payload, "room_id"),
+        thread_id=_optional_str_payload_field(payload, "thread_id"),
+        resolved_thread_id=_optional_str_payload_field(payload, "resolved_thread_id"),
+        session_id=_optional_str_payload_field(payload, "session_id"),
+        tenant_id=_optional_str_payload_field(payload, "tenant_id"),
+        account_id=_optional_str_payload_field(payload, "account_id"),
     )
 
 
