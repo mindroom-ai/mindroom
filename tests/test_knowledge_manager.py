@@ -5987,7 +5987,7 @@ async def test_index_file_locked_runs_off_event_loop_thread(
 
     def _record_insert(self: _Knowledge, **kwargs: object) -> None:
         insert_thread_ids.append(get_ident())
-        original_insert(self, **kwargs)  # type: ignore[arg-type]
+        original_insert(self, **kwargs)
 
     async def _forbidden_ainsert(self: _Knowledge, **kwargs: object) -> None:
         _ = (self, kwargs)

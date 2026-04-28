@@ -86,7 +86,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
-    from mindroom.orchestrator import MultiAgentOrchestrator
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -1237,7 +1237,7 @@ def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
 
 def _materialize_team_members(
     agent_names: list[str],
-    orchestrator: MultiAgentOrchestrator,
+    orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     *,
     session_id: str | None = None,
@@ -1471,7 +1471,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     agent_names: list[str],
     mode: TeamMode,
     message: str,
-    orchestrator: MultiAgentOrchestrator,
+    orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_name: str | None = None,
@@ -1819,7 +1819,7 @@ async def _team_response_stream_raw(
 async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     agent_ids: list[MatrixID],
     message: str,
-    orchestrator: MultiAgentOrchestrator,
+    orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     mode: TeamMode = TeamMode.COORDINATE,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,

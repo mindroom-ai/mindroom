@@ -26,10 +26,12 @@ BOT_RUNTIME_VIEW_MODULE = "mindroom.bot_runtime_view"
 RUNTIME_VIEW_STRUCTURAL_MEMBER = "orchestrator"
 RUNTIME_PROTOCOL_PRIVATE_SYMBOL = "_check_narrow_protocols_are_subsets_of_bot_runtime_view"
 RUNTIME_PROTOCOL_PUBLIC_SYMBOLS = [
+    "OrchestratorRuntime",
     "SupportsClientConfig",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",
+    "SupportsRunningState",
 ]
 RUNTIME_PROTOCOL_IMPORTERS = {
     "mindroom.bot_room_lifecycle",
@@ -45,7 +47,6 @@ RUNTIME_PROTOCOL_IMPORTERS = {
 }
 BOT_RUNTIME_VIEW_ALLOWED_IMPORTERS = {
     "mindroom.bot",
-    RUNTIME_PROTOCOL_MODULE,
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.cache.thread_write_cache_ops",
     "mindroom.matrix.conversation_cache",
@@ -273,7 +274,7 @@ def test_bot_runtime_view_visibility_is_limited_to_owner_and_protocol_facade() -
     runtime_protocol_entry = module_entries[RUNTIME_PROTOCOL_MODULE]
     depends_on = runtime_protocol_entry.get("depends_on")
     assert isinstance(depends_on, list)
-    assert BOT_RUNTIME_VIEW_MODULE in depends_on
+    assert BOT_RUNTIME_VIEW_MODULE not in depends_on
 
 
 def test_tach_rejects_forbidden_split_matrix_client_import(tmp_path: Path) -> None:
@@ -405,7 +406,7 @@ def test_ty_rejects_runtime_view_missing_structural_member(tmp_path: Path) -> No
     original_text = bot_runtime_view_path.read_text()
     missing_member_block = (
         "\n    @property\n"
-        f"    def {RUNTIME_VIEW_STRUCTURAL_MEMBER}(self) -> MultiAgentOrchestrator | None: ...  # noqa: D102\n"
+        f"    def {RUNTIME_VIEW_STRUCTURAL_MEMBER}(self) -> OrchestratorRuntime | None: ...  # noqa: D102\n"
     )
     assert missing_member_block in original_text
     bot_runtime_view_path.write_text(original_text.replace(missing_member_block, "\n"))
@@ -415,10 +416,10 @@ def test_ty_rejects_runtime_view_missing_structural_member(tmp_path: Path) -> No
         textwrap.dedent(
             f"""
             from mindroom.bot_runtime_view import BotRuntimeView
-            from mindroom.orchestrator import MultiAgentOrchestrator
+            from mindroom.runtime_protocols import OrchestratorRuntime
 
 
-            def require_orchestrator(view: BotRuntimeView) -> MultiAgentOrchestrator | None:
+            def require_orchestrator(view: BotRuntimeView) -> OrchestratorRuntime | None:
                 return view.{RUNTIME_VIEW_STRUCTURAL_MEMBER}
             """,
         ).lstrip(),

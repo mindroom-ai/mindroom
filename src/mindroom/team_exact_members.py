@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
 
     from mindroom.config.main import Config
-    from mindroom.orchestrator import MultiAgentOrchestrator
+    from mindroom.runtime_protocols import OrchestratorRuntime, SupportsRunningState
 
 
 logger = get_logger(__name__)
@@ -32,7 +32,7 @@ class ResolvedExactTeamMembers:
 
 
 def resolve_live_shared_agent_names(
-    orchestrator: MultiAgentOrchestrator,
+    orchestrator: OrchestratorRuntime,
     *,
     config: Config | None = None,
 ) -> set[str] | None:
@@ -42,9 +42,10 @@ def resolve_live_shared_agent_names(
     orchestrator_agent_bots = orchestrator.agent_bots
     if not isinstance(orchestrator_agent_bots, dict):
         return None
+    running_agent_bots = cast("dict[str, SupportsRunningState]", orchestrator_agent_bots)
     return {
         name
-        for name, bot in orchestrator_agent_bots.items()
+        for name, bot in running_agent_bots.items()
         if name != ROUTER_AGENT_NAME and name in active_config.agents and bot.running
     }
 

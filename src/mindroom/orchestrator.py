@@ -911,28 +911,28 @@ class MultiAgentOrchestrator:
         )
         return router_bot
 
-    def _hook_message_sender(self) -> HookMessageSender | None:
+    def hook_message_sender(self) -> HookMessageSender | None:
         """Return a router-backed sender for hook contexts when available."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None:
             return None
         return router_bot._hook_send_message
 
-    def _hook_room_state_querier(self) -> HookRoomStateQuerier | None:
+    def hook_room_state_querier(self) -> HookRoomStateQuerier | None:
         """Return a router-backed room-state querier for hook contexts when available."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None or router_bot.client is None:
             return None
         return build_hook_room_state_querier(router_bot.client)
 
-    def _hook_room_state_putter(self) -> HookRoomStatePutter | None:
+    def hook_room_state_putter(self) -> HookRoomStatePutter | None:
         """Return a router-backed room-state putter for hook contexts when available."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None or router_bot.client is None:
             return None
         return build_hook_room_state_putter(router_bot.client)
 
-    def _hook_matrix_admin(self) -> HookMatrixAdmin | None:
+    def hook_matrix_admin(self) -> HookMatrixAdmin | None:
         """Return a router-backed Matrix admin helper for hook contexts when available."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None or router_bot.client is None:
@@ -1118,13 +1118,13 @@ class MultiAgentOrchestrator:
             logger=logger.bind(event_name=EVENT_CONFIG_RELOADED),
             correlation_id=f"config-reload:{uuid4().hex}",
             runtime_started_at=(router_bot.runtime_started_at if isinstance(router_bot, AgentBot) else time.time()),
-            message_sender=self._hook_message_sender(),
+            message_sender=self.hook_message_sender(),
             agent_message_snapshot_reader=(
                 router_bot._hook_agent_message_snapshot if isinstance(router_bot, AgentBot) else None
             ),
-            matrix_admin=self._hook_matrix_admin(),
-            room_state_querier=self._hook_room_state_querier(),
-            room_state_putter=self._hook_room_state_putter(),
+            matrix_admin=self.hook_matrix_admin(),
+            room_state_querier=self.hook_room_state_querier(),
+            room_state_putter=self.hook_room_state_putter(),
             changed_entities=tuple(sorted(changed_entities)),
             added_entities=tuple(sorted(added_entities)),
             removed_entities=tuple(sorted(removed_entities)),
