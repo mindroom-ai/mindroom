@@ -18,6 +18,7 @@ from nio.api import Api
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -93,7 +94,27 @@ async def send_message_result(
             )
             return None
 
+    message_type = "m.room.message"
+    emit_timing_event(
+        "Matrix send timing",
+        phase="prepare_start",
+        room_id=room_id,
+        message_type=message_type,
+    )
     content_sent = await prepare_large_message(client, room_id, content)
+    emit_timing_event(
+        "Matrix send timing",
+        phase="prepare_finish",
+        room_id=room_id,
+        message_type=message_type,
+    )
+    emit_timing_event(
+        "Matrix send timing",
+        phase="send_start",
+        room_id=room_id,
+        message_type=message_type,
+        cache_bypass=cache_bypass,
+    )
     if cache_bypass:
         access_token = client.access_token
         if not access_token:
@@ -102,7 +123,7 @@ async def send_message_result(
         method, path, data = Api.room_send(
             access_token,
             room_id,
-            "m.room.message",
+            message_type,
             content_sent,
             uuid4(),
         )
@@ -116,10 +137,19 @@ async def send_message_result(
     else:
         response = await client.room_send(
             room_id=room_id,
-            message_type="m.room.message",
+            message_type=message_type,
             content=content_sent,
         )
     if isinstance(response, nio.RoomSendResponse):
+        emit_timing_event(
+            "Matrix send timing",
+            phase="send_finish",
+            room_id=room_id,
+            message_type=message_type,
+            cache_bypass=cache_bypass,
+            outcome="sent",
+            event_id=str(response.event_id),
+        )
         logger.debug(
             "matrix_message_sent",
             room_id=room_id,
@@ -127,6 +157,15 @@ async def send_message_result(
             cache_bypass=cache_bypass,
         )
         return DeliveredMatrixEvent(event_id=str(response.event_id), content_sent=content_sent)
+    emit_timing_event(
+        "Matrix send timing",
+        phase="send_finish",
+        room_id=room_id,
+        message_type=message_type,
+        cache_bypass=cache_bypass,
+        outcome="error",
+        error=str(response),
+    )
     logger.error(
         "matrix_message_send_failed",
         room_id=room_id,

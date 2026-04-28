@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, NoReturn
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.logging_config import get_logger
+from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -132,6 +133,17 @@ def _queue_delivery_request(
             ),
             capture_completion=capture_completion,
         ),
+    )
+    emit_timing_event(
+        "Dispatch tool delivery timing",
+        phase="queued",
+        queue_size=delivery_queue.qsize(),
+        progress_hint=progress_hint,
+        force_refresh=force_refresh,
+        boundary_refresh=boundary_refresh,
+        phase_boundary_flush=phase_boundary_flush,
+        allow_empty_progress=allow_empty_progress,
+        wait_for_capture=wait_for_capture,
     )
     return capture_completion
 
