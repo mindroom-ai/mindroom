@@ -1234,6 +1234,40 @@ class TestAgentBot:
         assert mock_error.call_args.args == ("fatal_embedded_api_server_exit",)
 
     @pytest.mark.asyncio
+    async def test_run_api_server_allows_expected_shutdown_after_serve_returns(self, tmp_path: Path) -> None:
+        """server.serve() returning after an intentional shutdown should not be fatal."""
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+
+            def __init__(self, _config: object, _shutdown_requested: asyncio.Event | None) -> None:
+                pass
+
+            async def serve(self) -> None:
+                return None
+
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+
+        with (
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
+            patch("mindroom.api.main.initialize_api_app"),
+            patch("mindroom.api.main.bind_orchestrator_knowledge_refresh_scheduler"),
+            patch("mindroom.orchestrator.logger.error") as mock_error,
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                0,
+                "INFO",
+                self._runtime_paths(tmp_path),
+                shutdown_requested=shutdown_requested,
+            )
+
+        mock_error.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_orchestrator_main_stops_when_api_server_requests_shutdown(self, tmp_path: Path) -> None:
         """Regression coverage for API server signal shutdown not leaving the process half alive."""
         reset_runtime_state()

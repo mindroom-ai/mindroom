@@ -1538,7 +1538,6 @@ async def test_matrix_ingress_logging_includes_receive_lag(tmp_path: Path) -> No
         callback="message",
         event_id="$m1",
         room_id="!room:localhost",
-        thread_id="$thread",
         agent_name="test_agent",
         receive_timestamp_ms=2500,
         origin_server_ts_ms=1000,
@@ -1567,7 +1566,6 @@ async def test_matrix_ingress_logging_handles_missing_origin_timestamp(tmp_path:
         "callback": "message",
         "event_id": "$m1",
         "room_id": "!room:localhost",
-        "thread_id": None,
         "agent_name": "test_agent",
         "receive_timestamp_ms": 2500,
     }

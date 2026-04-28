@@ -136,6 +136,18 @@ _CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
 _CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS = 120.0
 
 
+@dataclass(frozen=True)
+class _EmbeddedApiServerContext:
+    """Shared identity fields for embedded API server lifecycle logs."""
+
+    host: str
+    port: int
+
+    def log_context(self) -> dict[str, object]:
+        """Return structured fields common to API server lifecycle logs."""
+        return {"host": self.host, "port": self.port}
+
+
 def _signal_name(sig: int) -> str:
     """Return a stable signal name for lifecycle logs."""
     for candidate in signal.Signals:
@@ -144,12 +156,11 @@ def _signal_name(sig: int) -> str:
     return str(sig)
 
 
-def _raise_embedded_api_server_exit(host: str, port: int, *, reason: str) -> NoReturn:
+def _raise_embedded_api_server_exit(api_server: _EmbeddedApiServerContext, *, reason: str) -> NoReturn:
     """Raise the fatal lifecycle error for an unexpected API server exit."""
     logger.error(
         "fatal_embedded_api_server_exit",
-        host=host,
-        port=port,
+        **api_server.log_context(),
         reason=reason,
     )
     msg = "Embedded API server exited unexpectedly"
@@ -1688,26 +1699,25 @@ async def _run_api_server(
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
 
+    api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.initialize_api_app(api_main.app, runtime_paths)
     if knowledge_refresh_scheduler is not None:
         api_main.bind_orchestrator_knowledge_refresh_scheduler(api_main.app, knowledge_refresh_scheduler)
     config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
     server = _SignalAwareUvicornServer(config, shutdown_requested)
-    logger.info("embedded_api_server_started", host=host, port=port)
+    logger.info("embedded_api_server_started", **api_server.log_context())
     await server.serve()
     shutdown_expected = shutdown_requested.is_set() if shutdown_requested is not None else False
     logger.info(
         "embedded_api_server_serve_returned",
-        host=host,
-        port=port,
+        **api_server.log_context(),
         shutdown_expected=shutdown_expected,
         server_should_exit=server.should_exit,
         server_force_exit=server.force_exit,
     )
     if not shutdown_expected:
         _raise_embedded_api_server_exit(
-            host,
-            port,
+            api_server,
             reason="server.serve() returned while application shutdown was not requested",
         )
 
@@ -1757,8 +1767,7 @@ async def _wait_for_runtime_completion(
     shutdown_wait_task: asyncio.Task[bool],
     api_task: asyncio.Task[None] | None,
     shutdown_requested: asyncio.Event,
-    api_host: str,
-    api_port: int,
+    api_server: _EmbeddedApiServerContext,
 ) -> None:
     """Wait until the orchestrator, API server, or shutdown signal ends the run."""
     monitored_tasks: set[asyncio.Task] = {orchestrator_task, shutdown_wait_task}
@@ -1767,21 +1776,39 @@ async def _wait_for_runtime_completion(
     done, _pending = await asyncio.wait(monitored_tasks, return_when=asyncio.FIRST_COMPLETED)
 
     if api_task is not None and api_task in done:
-        await api_task
-        if shutdown_requested.is_set():
-            logger.info("embedded_api_server_requested_application_shutdown")
-            return
-        _raise_embedded_api_server_exit(
-            api_host,
-            api_port,
-            reason="API task finished while application shutdown was not requested",
+        await _await_api_task_completion(
+            api_task,
+            shutdown_requested=shutdown_requested,
+            api_server=api_server,
         )
+        return
     if shutdown_wait_task in done:
         logger.info("application_shutdown_requested")
         if api_task is not None:
-            await api_task
+            await _await_api_task_completion(
+                api_task,
+                shutdown_requested=shutdown_requested,
+                api_server=api_server,
+            )
         return
     await orchestrator_task
+
+
+async def _await_api_task_completion(
+    api_task: asyncio.Task[None],
+    *,
+    shutdown_requested: asyncio.Event,
+    api_server: _EmbeddedApiServerContext,
+) -> None:
+    """Await the API task and classify normal shutdown versus unexpected exit."""
+    await api_task
+    if shutdown_requested.is_set():
+        logger.info("embedded_api_server_requested_application_shutdown", **api_server.log_context())
+        return
+    _raise_embedded_api_server_exit(
+        api_server,
+        reason="API task finished while application shutdown was not requested",
+    )
 
 
 async def _cancel_task_if_pending(task: asyncio.Task | None) -> None:
@@ -1818,6 +1845,7 @@ async def main(
     set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()
+    api_server = _EmbeddedApiServerContext(host=api_host, port=api_port)
     orchestrator_task: asyncio.Task[None] | None = None
     shutdown_wait_task: asyncio.Task[bool] | None = None
     api_task: asyncio.Task[None] | None = None
@@ -1865,8 +1893,7 @@ async def main(
             shutdown_wait_task=shutdown_wait_task,
             api_task=api_task,
             shutdown_requested=shutdown_requested,
-            api_host=api_host,
-            api_port=api_port,
+            api_server=api_server,
         )
 
     except KeyboardInterrupt:

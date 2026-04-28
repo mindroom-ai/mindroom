@@ -116,7 +116,6 @@ from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
-from .matrix.event_info import EventInfo
 from .media_inputs import MediaInputs
 from .response_runner import (
     ResponseRequest,
@@ -279,13 +278,6 @@ type _MediaDispatchEvent = (
     | nio.RoomEncryptedFile
     | nio.RoomMessageVideo
     | nio.RoomEncryptedVideo
-)
-
-type _IngressLoggedEvent = (
-    nio.RoomMessageText
-    | _MediaDispatchEvent
-    | nio.RoomMessageAudio
-    | nio.RoomEncryptedAudio
 )
 
 type _MessageContext = MessageContext
@@ -1378,7 +1370,8 @@ class AgentBot:
         """Return a Matrix origin timestamp from a raw event source if present."""
         if not isinstance(source, dict):
             return None
-        raw_timestamp = source.get("origin_server_ts")
+        source_dict = cast("dict[str, object]", source)
+        raw_timestamp = source_dict.get("origin_server_ts")
         if isinstance(raw_timestamp, int | float) and not isinstance(raw_timestamp, bool):
             return raw_timestamp
         return None
@@ -1386,19 +1379,17 @@ class AgentBot:
     def _log_matrix_event_callback_started(
         self,
         room: nio.MatrixRoom,
-        event: _IngressLoggedEvent,
+        event: nio.RoomMessageText | _MediaDispatchEvent,
         *,
         callback_name: str,
     ) -> None:
         """Log Matrix ingress timing without message content."""
         receive_timestamp_ms = int(time.time() * 1000)
-        event_info = EventInfo.from_event(event.source if isinstance(event.source, dict) else None)
         origin_server_ts = self._origin_server_ts_from_source(event.source)
         log_context: dict[str, object] = {
             "callback": callback_name,
             "event_id": event.event_id,
             "room_id": room.room_id,
-            "thread_id": event_info.thread_id or event_info.thread_id_from_edit,
             "agent_name": self.agent_name,
             "receive_timestamp_ms": receive_timestamp_ms,
         }
