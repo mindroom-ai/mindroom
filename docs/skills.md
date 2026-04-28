@@ -58,8 +58,8 @@ Notes:
 
 If `metadata.openclaw` is present, MindRoom filters skills using these rules:
 
-- `always: true` bypasses all checks
 - `os: ["linux", "darwin", "windows"]`
+- `always: true` bypasses `requires`, but it does not bypass an OS mismatch
 - `requires.env`: env var set or credential key exists
 - `requires.config`: config path is truthy (e.g., `agents.code.tools`)
 - `requires.bins`: all binaries must exist in PATH
@@ -95,7 +95,13 @@ agents:
       - code-review
 ```
 
-If `skills` is empty or unset, the agent gets no skills.
+The `skills:` list is an allowlist for bundled, plugin, and user skills.
+If `skills` is empty or unset, the agent gets no bundled, plugin, or user skills.
+Workspace skills under `<storage>/agents/<agent>/workspace/skills/` are still auto-loaded for that agent.
+This lets an agent create or receive skills in its own workspace without editing `config.yaml`.
+
+Workspace auto-loading is a runtime capability, not a proactive behavior policy.
+If you want agents to create skills on their own when they notice reusable workflows, add that guidance to the agent's prompt or instructions.
 
 ## Using skills at runtime
 
@@ -104,6 +110,10 @@ Agents see available skills in the system prompt and can load details using thes
 - `get_skill_instructions(skill_name)` - Load the full instructions for a skill
 - `get_skill_reference(skill_name, reference_path)` - Access reference documentation
 - `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` - Read or execute scripts
+
+Workspace skill scripts can be read with `get_skill_script(..., execute=False)`.
+Workspace skill scripts cannot be executed through `get_skill_script(..., execute=True)`.
+Agents that have shell or file execution permissions can still read and execute workspace files through their normal authorized tools.
 
 ## Skill vs tool
 
@@ -118,6 +128,7 @@ Agents see available skills in the system prompt and can load details using thes
 ## Hot reloading
 
 MindRoom polls skill directories every second. When a `SKILL.md` file is added, removed, or modified, the skill cache is automatically cleared so agents pick up the new instructions on their next request.
+For workspace skills created during an agent turn, assume they become available on the next agent run rather than in the same response.
 
 ## Best practices
 

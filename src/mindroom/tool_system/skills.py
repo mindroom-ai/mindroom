@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -93,6 +94,57 @@ class _MindroomSkillsLoader(SkillLoader):
         return list(skills_by_name.values())
 
 
+class _MindroomSkills(Skills):
+    """MindRoom-specific Skills wrapper for workspace script policy."""
+
+    def __init__(
+        self,
+        *,
+        loaders: list[SkillLoader],
+        non_executable_script_roots: Sequence[Path],
+    ) -> None:
+        self._non_executable_script_roots = tuple(_unique_paths(non_executable_script_roots))
+        super().__init__(loaders=loaders)
+
+    def _get_skill_script(
+        self,
+        skill_name: str,
+        script_path: str,
+        execute: bool = False,
+        args: list[str] | None = None,
+        timeout: int = 30,
+    ) -> str:
+        if execute and self._is_script_execution_blocked(skill_name):
+            return json.dumps(
+                {
+                    "error": "Workspace skill scripts cannot be executed through get_skill_script",
+                    "skill_name": skill_name,
+                    "script_path": script_path,
+                },
+            )
+        return super()._get_skill_script(
+            skill_name=skill_name,
+            script_path=script_path,
+            execute=execute,
+            args=args,
+            timeout=timeout,
+        )
+
+    def _is_script_execution_blocked(self, skill_name: str) -> bool:
+        skill = self.get_skill(skill_name)
+        if skill is None:
+            return False
+
+        try:
+            source_path = Path(skill.source_path).expanduser().resolve()
+        except OSError:
+            return False
+
+        return any(
+            source_path == root or source_path.is_relative_to(root) for root in self._non_executable_script_roots
+        )
+
+
 def build_agent_skills(
     agent_name: str,
     config: Config,
@@ -104,24 +156,43 @@ def build_agent_skills(
 ) -> Skills | None:
     """Build an Agno Skills object for a specific agent."""
     agent_config = config.get_agent(agent_name)
-    if not agent_config.skills:
-        return None
+    resolved_credential_keys = (
+        credential_keys if credential_keys is not None else _collect_credential_keys(config, runtime_paths)
+    )
 
-    loader = _MindroomSkillsLoader(
-        roots=_resolve_agent_skill_roots(
-            runtime_paths,
-            agent_name,
-            skill_roots=skill_roots,
-        ),
+    configured_loader = None
+    if agent_config.skills:
+        configured_loader = _MindroomSkillsLoader(
+            roots=_resolve_configured_skill_roots(skill_roots),
+            config=config,
+            runtime_paths=runtime_paths,
+            allowlist=agent_config.skills,
+            env_vars=env_vars,
+            credential_keys=resolved_credential_keys,
+        )
+
+    workspace_skill_root = _get_agent_workspace_skill_root(runtime_paths, agent_name)
+    workspace_loader = _MindroomSkillsLoader(
+        roots=[workspace_skill_root],
         config=config,
         runtime_paths=runtime_paths,
-        allowlist=agent_config.skills,
         env_vars=env_vars,
-        credential_keys=credential_keys
-        if credential_keys is not None
-        else _collect_credential_keys(config, runtime_paths),
+        credential_keys=resolved_credential_keys,
     )
-    return Skills(loaders=[loader])
+
+    loaders: list[SkillLoader]
+    if skill_roots is None:
+        loaders = [loader for loader in (configured_loader, workspace_loader) if loader is not None]
+    else:
+        loaders = [loader for loader in (workspace_loader, configured_loader) if loader is not None]
+
+    skills = _MindroomSkills(
+        loaders=loaders,
+        non_executable_script_roots=[workspace_skill_root],
+    )
+    if agent_config.skills or skills.get_skill_names():
+        return skills
+    return None
 
 
 @dataclass(frozen=True)
@@ -179,6 +250,16 @@ def _get_default_skill_roots() -> list[Path]:
     return _unique_paths([_get_bundled_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_user_skills_dir()])
 
 
+def _get_agent_workspace_skill_root(runtime_paths: RuntimePaths, agent_name: str) -> Path:
+    """Return the canonical workspace skill root for one agent."""
+    return agent_workspace_root_path(runtime_paths.storage_root, agent_name) / "skills"
+
+
+def _resolve_configured_skill_roots(skill_roots: Sequence[Path] | None = None) -> list[Path]:
+    """Return configured global skill roots without the agent workspace root."""
+    return _unique_paths(list(skill_roots) if skill_roots is not None else _get_default_skill_roots())
+
+
 def _resolve_agent_skill_roots(
     runtime_paths: RuntimePaths,
     agent_name: str,
@@ -186,8 +267,8 @@ def _resolve_agent_skill_roots(
     skill_roots: Sequence[Path] | None = None,
 ) -> list[Path]:
     """Return skill roots for one agent while keeping explicit roots highest priority."""
-    roots = list(skill_roots) if skill_roots is not None else _get_default_skill_roots()
-    workspace_skills = agent_workspace_root_path(runtime_paths.storage_root, agent_name) / "skills"
+    roots = _resolve_configured_skill_roots(skill_roots)
+    workspace_skills = _get_agent_workspace_skill_root(runtime_paths, agent_name)
     if skill_roots is None:
         roots.append(workspace_skills)
     else:
@@ -441,12 +522,12 @@ def _is_skill_eligible(
     if not isinstance(openclaw, dict):
         return True
 
-    if openclaw.get("always") is True:
-        return True
-
     os_requirements = _normalize_str_list(openclaw.get("os"))
     if os_requirements and not _matches_current_os(os_requirements):
         return False
+
+    if openclaw.get("always") is True:
+        return True
 
     requires = openclaw.get("requires")
     return _requirements_met(requires, config_data, env_vars, credential_keys, skill.name)
