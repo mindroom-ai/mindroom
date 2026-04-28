@@ -16,7 +16,7 @@ import mindroom.constants as constants_mod
 from mindroom.config.main import Config, load_config
 from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix_naming import managed_space_alias_localpart
+from mindroom.matrix_identifiers import managed_space_alias_localpart
 
 _RUNTIME_GLOBAL_NAMES = {
     "MATRIX_HOMESERVER",
@@ -984,7 +984,7 @@ class TestRuntimeContextConsumers:
 
     def test_imported_modules_follow_runtime_context_changes_without_reload(self, tmp_path: Path) -> None:
         """Explicit runtime-aware helpers should use the passed runtime context without reloads."""
-        naming_mod = importlib.import_module("mindroom.matrix_naming")
+        naming_mod = importlib.import_module("mindroom.matrix_identifiers")
         first_dir = tmp_path / "first"
         second_dir = tmp_path / "second"
         first_dir.mkdir(parents=True)

@@ -19,7 +19,7 @@ from mindroom.matrix.client_session import (
 )
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix_naming import agent_username_localpart, extract_server_name_from_homeserver
+from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
 

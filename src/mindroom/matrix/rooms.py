@@ -28,7 +28,7 @@ from mindroom.matrix.client_session import (
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixRoom, MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
-from mindroom.matrix_naming import (
+from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     managed_room_alias_localpart,
     managed_space_alias_localpart,

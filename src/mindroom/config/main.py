@@ -50,7 +50,11 @@ from mindroom.constants import (
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
-from mindroom.matrix_naming import agent_username_localpart, managed_room_alias_localpart, managed_space_alias_localpart
+from mindroom.matrix_identifiers import (
+    agent_username_localpart,
+    managed_room_alias_localpart,
+    managed_space_alias_localpart,
+)
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names

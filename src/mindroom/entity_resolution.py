@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 import mindroom.matrix.rooms as matrix_rooms
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix_naming import agent_username_localpart, extract_server_name_from_homeserver
+from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
 
 if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, TeamConfig

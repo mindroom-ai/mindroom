@@ -12,7 +12,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID, active_internal_sender_ids
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix_naming import managed_room_key_from_alias_localpart, room_alias_localpart
+from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
