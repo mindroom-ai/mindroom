@@ -167,8 +167,13 @@ def _room_key_to_name(room_key: str) -> str:
 
 
 def load_rooms(runtime_paths: RuntimePaths) -> dict[str, MatrixRoom]:
-    """Load room state from YAML file."""
-    return matrix_state_for_runtime(runtime_paths).rooms
+    """Load room state from YAML file.
+
+    Returns an isolated copy of the rooms map so callers may mutate the dict
+    or its ``MatrixRoom`` values without corrupting cached state used by other
+    readers.
+    """
+    return MatrixState.load(runtime_paths=runtime_paths).rooms
 
 
 def _get_room_aliases(runtime_paths: RuntimePaths) -> dict[str, str]:

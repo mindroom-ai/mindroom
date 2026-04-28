@@ -94,6 +94,32 @@ def test_matrix_state_load_returns_isolated_deep_copy(tmp_path: Path) -> None:
     assert mutated is not cached
 
 
+def test_load_rooms_returns_isolated_dict(tmp_path: Path) -> None:
+    """``load_rooms`` must hand back an isolated copy that mutators cannot leak via the cache."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
+    _load_matrix_state_file_cached.cache_clear()
+
+    rooms = matrix_rooms.load_rooms(runtime_paths)
+    assert "dev" in rooms
+    rooms.clear()
+    rooms_after_mutation = matrix_rooms.load_rooms(runtime_paths)
+    assert rooms_after_mutation.get("dev") is not None
+    assert rooms_after_mutation["dev"].room_id == "!dev:localhost"
+
+
+def test_load_rooms_room_value_is_isolated(tmp_path: Path) -> None:
+    """Mutating a ``MatrixRoom`` returned by ``load_rooms`` must not leak into cached state."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
+    _load_matrix_state_file_cached.cache_clear()
+
+    rooms = matrix_rooms.load_rooms(runtime_paths)
+    rooms["dev"].room_id = "!corrupted:localhost"
+    rooms_after_mutation = matrix_rooms.load_rooms(runtime_paths)
+    assert rooms_after_mutation["dev"].room_id == "!dev:localhost"
+
+
 def test_resolve_room_aliases_does_not_reparse_yaml(
     tmp_path: Path,
     monkeypatch,  # noqa: ANN001
