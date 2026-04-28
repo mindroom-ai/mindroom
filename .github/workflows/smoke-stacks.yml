@@ -92,6 +92,8 @@ jobs:
 
       - name: Create kind cluster
         run: bash cluster/k8s/kind/up.sh
+        env:
+          KIND_CONFIG: cluster/k8s/kind/kind-config-smoke.yaml
 
       - name: Build and load images
         run: bash cluster/k8s/kind/build_load_images.sh

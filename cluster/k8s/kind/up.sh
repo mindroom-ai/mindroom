@@ -4,8 +4,8 @@ set -euo pipefail
 # Create a local kind cluster for MindRoom with ingress
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLUSTER_NAME="mindroom"
-KIND_CONFIG="${SCRIPT_DIR}/kind-config.yaml"
+CLUSTER_NAME="${CLUSTER_NAME:-mindroom}"
+KIND_CONFIG="${KIND_CONFIG:-${SCRIPT_DIR}/kind-config.yaml}"
 
 echo "[kind] Bringing up cluster '${CLUSTER_NAME}'..."
 
