@@ -12,6 +12,7 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
 ]
 dynamic = [ "version" ]
 dependencies = [
@@ -427,6 +428,20 @@ skills = "mindroom/_bundled_skills"
 source = "vcs"
 [tool.hatch.version.raw-options]
 version_scheme = "no-guess-dev"
+
+[tool.uv]
+override-dependencies = [
+  # crawl4ai 0.8.6 declares lxml~=5.3, which caps lxml below 6.
+  # The locked lxml 5.4.0 has no cp314 Linux wheels.
+  # On Python 3.14 it source-builds against libxml2/libxslt, so use lxml 6.1+ there.
+  "lxml>=5.3,<6; python_version < '3.14'",
+  "lxml>=6.1.0; python_version >= '3.14'",
+  # composio-core 0.7.21 declares Pillow<11,>=10.2.0.
+  # The locked Pillow 10.4.0 has no cp314 Linux wheels.
+  # On Python 3.14 it source-builds against zlib, so use Pillow 11.x there.
+  "pillow>=10.2,<11; python_version < '3.14'",
+  "pillow>=11,<12; python_version >= '3.14'",
+]
 
 [tool.ruff]
 target-version = "py312"
