@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 from agno.media import Audio, File, Image, Video
 
 from .attachments import AttachmentRecord, filter_attachments_for_context, resolve_attachments
 from .logging_config import get_logger
+from .timing import emit_elapsed_timing
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -80,22 +82,45 @@ def resolve_attachment_media(
     room/thread context are included. Mismatched records are dropped with a
     debug log.
     """
-    attachment_records = resolve_attachments(storage_path, attachment_ids)
-    if room_id is not None:
-        attachment_records, rejected = filter_attachments_for_context(
-            attachment_records,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        if rejected:
-            logger.debug(
-                "Rejected out-of-context attachment IDs",
-                rejected=rejected,
+    started = time.monotonic()
+    rejected_count = 0
+    attachment_records: list[AttachmentRecord] = []
+    attachment_audio: list[Audio] = []
+    attachment_images: list[Image] = []
+    attachment_files: list[File] = []
+    attachment_videos: list[Video] = []
+    try:
+        attachment_records = resolve_attachments(storage_path, attachment_ids)
+        if room_id is not None:
+            attachment_records, rejected = filter_attachments_for_context(
+                attachment_records,
                 room_id=room_id,
                 thread_id=thread_id,
             )
-    resolved_attachment_ids = [record.attachment_id for record in attachment_records]
-    attachment_audio, attachment_images, attachment_files, attachment_videos = _attachment_records_to_media(
-        attachment_records,
-    )
-    return resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos
+            rejected_count = len(rejected)
+            if rejected:
+                logger.debug(
+                    "Rejected out-of-context attachment IDs",
+                    rejected=rejected,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                )
+        resolved_attachment_ids = [record.attachment_id for record in attachment_records]
+        attachment_audio, attachment_images, attachment_files, attachment_videos = _attachment_records_to_media(
+            attachment_records,
+        )
+        return resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos
+    finally:
+        emit_elapsed_timing(
+            "response_payload.resolve_attachment_media",
+            started,
+            room_id=room_id,
+            thread_id=thread_id,
+            requested_attachment_count=len(attachment_ids),
+            resolved_attachment_count=len(attachment_records),
+            rejected_attachment_count=rejected_count,
+            audio_count=len(attachment_audio),
+            image_count=len(attachment_images),
+            file_count=len(attachment_files),
+            video_count=len(attachment_videos),
+        )

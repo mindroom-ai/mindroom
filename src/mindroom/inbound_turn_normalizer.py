@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence  # noqa: TC003
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -26,6 +27,7 @@ from mindroom.matrix.message_content import (
 )
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.timing import emit_elapsed_timing
 from mindroom.voice_handler import prepare_voice_message
 
 if TYPE_CHECKING:
@@ -279,48 +281,78 @@ class InboundTurnNormalizer:
         request: BatchMediaAttachmentRequest,
     ) -> BatchMediaAttachmentResult:
         """Register media attachments for one coalesced batch."""
+        started = time.monotonic()
+        media_event_count = len(request.media_events)
+        image_event_count = 0
+        file_or_video_event_count = 0
+        attachment_ids: list[str] = []
+        fallback_images: list[Image] = []
         if not request.media_events:
+            emit_elapsed_timing(
+                "response_payload.register_batch_media_attachments",
+                started,
+                room_id=request.room_id,
+                thread_id=request.thread_id,
+                media_event_count=media_event_count,
+                image_event_count=image_event_count,
+                file_or_video_event_count=file_or_video_event_count,
+                attachment_count=0,
+                fallback_image_count=0,
+            )
             return BatchMediaAttachmentResult(attachment_ids=[])
 
         client = self._client()
-        attachment_ids: list[str] = []
-        fallback_images: list[Image] = []
-        for media_event in request.media_events:
-            if isinstance(media_event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-                image = await download_image(client, media_event)
-                if image is None:
-                    msg = "Failed to download image"
-                    raise RuntimeError(msg)
-                attachment_record = await register_image_attachment(
+        try:
+            for media_event in request.media_events:
+                if isinstance(media_event, nio.RoomMessageImage | nio.RoomEncryptedImage):
+                    image_event_count += 1
+                    image = await download_image(client, media_event)
+                    if image is None:
+                        msg = "Failed to download image"
+                        raise RuntimeError(msg)
+                    attachment_record = await register_image_attachment(
+                        client,
+                        self.deps.storage_path,
+                        room_id=request.room_id,
+                        thread_id=request.thread_id,
+                        event=media_event,
+                        image_bytes=image.content,
+                    )
+                    if attachment_record is not None:
+                        attachment_ids.append(attachment_record.attachment_id)
+                    else:
+                        fallback_images.append(image)
+                    continue
+
+                file_or_video_event_count += 1
+                attachment_record = await register_file_or_video_attachment(
                     client,
                     self.deps.storage_path,
                     room_id=request.room_id,
                     thread_id=request.thread_id,
-                    event=media_event,
-                    image_bytes=image.content,
+                    event=self._as_file_or_video_dispatch_event(media_event),
                 )
-                if attachment_record is not None:
-                    attachment_ids.append(attachment_record.attachment_id)
-                else:
-                    fallback_images.append(image)
-                continue
+                if attachment_record is None:
+                    msg = "Failed to register media attachment"
+                    raise RuntimeError(msg)
+                attachment_ids.append(attachment_record.attachment_id)
 
-            attachment_record = await register_file_or_video_attachment(
-                client,
-                self.deps.storage_path,
+            return BatchMediaAttachmentResult(
+                attachment_ids=attachment_ids,
+                fallback_images=fallback_images or None,
+            )
+        finally:
+            emit_elapsed_timing(
+                "response_payload.register_batch_media_attachments",
+                started,
                 room_id=request.room_id,
                 thread_id=request.thread_id,
-                event=self._as_file_or_video_dispatch_event(media_event),
+                media_event_count=media_event_count,
+                image_event_count=image_event_count,
+                file_or_video_event_count=file_or_video_event_count,
+                attachment_count=len(attachment_ids),
+                fallback_image_count=len(fallback_images),
             )
-            if attachment_record is None:
-                msg = "Failed to register media attachment"
-                raise RuntimeError(msg)
-            attachment_ids.append(attachment_record.attachment_id)
-
-        return BatchMediaAttachmentResult(
-            attachment_ids=attachment_ids,
-            fallback_images=fallback_images or None,
-        )
 
     async def build_dispatch_payload_with_attachments(
         self,
