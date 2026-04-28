@@ -231,7 +231,7 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         tool_runtime_context(ctx),
@@ -257,7 +257,7 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         tool_runtime_context(ctx),
@@ -300,12 +300,12 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
-        patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
+        patch("mindroom.custom_tools.matrix_conversation_operations.register_interactive_question") as mock_register,
         patch(
-            "mindroom.custom_tools.matrix_message.add_reaction_buttons",
+            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
             new_callable=AsyncMock,
         ) as mock_add_reactions,
         tool_runtime_context(ctx),
@@ -347,20 +347,20 @@ async def test_matrix_message_send_plain_text_skips_interactive_registration_and
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ),
         patch(
-            "mindroom.custom_tools.matrix_message.parse_and_format_interactive",
+            "mindroom.custom_tools.matrix_conversation_operations.parse_and_format_interactive",
             wraps=parse_and_format_interactive,
         ) as mock_parse,
         patch(
-            "mindroom.custom_tools.matrix_message.should_create_interactive_question",
+            "mindroom.custom_tools.matrix_conversation_operations.should_create_interactive_question",
             return_value=False,
         ) as mock_should_create,
-        patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
+        patch("mindroom.custom_tools.matrix_conversation_operations.register_interactive_question") as mock_register,
         patch(
-            "mindroom.custom_tools.matrix_message.add_reaction_buttons",
+            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
             new_callable=AsyncMock,
         ) as mock_add_reactions,
         tool_runtime_context(ctx),
@@ -392,7 +392,7 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         patch(
@@ -449,7 +449,7 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         patch(
@@ -499,7 +499,7 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$reply_evt")),
         ) as mock_send,
         patch(
@@ -552,7 +552,7 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$send_evt")),
         ) as mock_send,
         patch(
@@ -607,7 +607,7 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         patch(
@@ -668,11 +668,11 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_file_message",
+            "mindroom.custom_tools.matrix_conversation_operations.send_file_message",
             new=AsyncMock(return_value="$file_root"),
         ) as mock_send_file,
         patch(
-            "mindroom.custom_tools.matrix_message._send_attachment_paths",
+            "mindroom.custom_tools.matrix_conversation_operations._send_attachment_paths",
             new=AsyncMock(return_value=(["$file_child"], None)),
         ) as mock_send_attachment_paths,
         tool_runtime_context(ctx),
@@ -741,7 +741,7 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_file_message",
+            "mindroom.custom_tools.matrix_conversation_operations.send_file_message",
             new=AsyncMock(return_value="$unexpected_root"),
         ) as mock_matrix_send_file,
         patch(
@@ -791,7 +791,7 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         patch(
@@ -843,11 +843,11 @@ async def test_matrix_message_send_text_failure_does_not_attempt_attachments(tmp
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(return_value=None),
         ) as mock_send,
         patch(
-            "mindroom.custom_tools.matrix_message.send_context_attachments",
+            "mindroom.custom_tools.matrix_conversation_operations.send_context_attachments",
             new=AsyncMock(),
         ) as mock_send_context_attachments,
         tool_runtime_context(ctx),
@@ -899,11 +899,11 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_file_message",
+            "mindroom.custom_tools.matrix_conversation_operations.send_file_message",
             new=AsyncMock(return_value=None),
         ) as mock_send_file,
         patch(
-            "mindroom.custom_tools.matrix_message._send_attachment_paths",
+            "mindroom.custom_tools.matrix_conversation_operations._send_attachment_paths",
             new=AsyncMock(return_value=([], None)),
         ) as mock_send_attachment_paths,
         tool_runtime_context(ctx),
@@ -946,7 +946,7 @@ async def test_matrix_message_accepts_register_attachment_ids_across_task_bounda
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         patch(
@@ -986,7 +986,7 @@ async def test_matrix_message_reply_defaults_to_context_thread() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         tool_runtime_context(ctx),
@@ -1008,7 +1008,7 @@ async def test_matrix_message_thread_reply_defaults_to_context_thread() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
         tool_runtime_context(ctx),
@@ -1060,11 +1060,13 @@ async def test_matrix_message_react_skips_interactive_processing() -> None:
     ctx.client.room_send.return_value = response
 
     with (
-        patch("mindroom.custom_tools.matrix_message.should_create_interactive_question") as mock_should_create,
-        patch("mindroom.custom_tools.matrix_message.parse_and_format_interactive") as mock_parse,
-        patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
         patch(
-            "mindroom.custom_tools.matrix_message.add_reaction_buttons",
+            "mindroom.custom_tools.matrix_conversation_operations.should_create_interactive_question",
+        ) as mock_should_create,
+        patch("mindroom.custom_tools.matrix_conversation_operations.parse_and_format_interactive") as mock_parse,
+        patch("mindroom.custom_tools.matrix_conversation_operations.register_interactive_question") as mock_register,
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
             new_callable=AsyncMock,
         ) as mock_add_reactions,
         tool_runtime_context(ctx),
@@ -1102,12 +1104,12 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ) as mock_edit,
-        patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
+        patch("mindroom.custom_tools.matrix_conversation_operations.register_interactive_question") as mock_register,
         patch(
-            "mindroom.custom_tools.matrix_message.add_reaction_buttons",
+            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
             new_callable=AsyncMock,
         ) as mock_add_reactions,
         tool_runtime_context(ctx),
@@ -1160,7 +1162,7 @@ async def test_matrix_message_edit_plain_text_clears_existing_interactive_questi
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ),
         tool_runtime_context(ctx),
@@ -1195,13 +1197,13 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ) as mock_edit,
-        patch("mindroom.custom_tools.matrix_message.clear_interactive_question") as mock_clear,
-        patch("mindroom.custom_tools.matrix_message.register_interactive_question") as mock_register,
+        patch("mindroom.custom_tools.matrix_conversation_operations.clear_interactive_question") as mock_clear,
+        patch("mindroom.custom_tools.matrix_conversation_operations.register_interactive_question") as mock_register,
         patch(
-            "mindroom.custom_tools.matrix_message.add_reaction_buttons",
+            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
             new_callable=AsyncMock,
         ) as mock_add_reactions,
         tool_runtime_context(ctx),
@@ -1388,11 +1390,11 @@ async def test_matrix_message_room_threads_returns_paginated_thread_roots() -> N
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], next_page)),
         ) as mock_get_page,
         patch(
-            "mindroom.custom_tools.matrix_message.thread_root_body_preview",
+            "mindroom.custom_tools.matrix_conversation_operations.thread_root_body_preview",
             new=AsyncMock(return_value="Resolved root message body"),
         ) as mock_preview,
         tool_runtime_context(ctx),
@@ -1455,11 +1457,11 @@ async def test_matrix_message_room_threads_includes_latest_activity_ts() -> None
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ),
         patch(
-            "mindroom.custom_tools.matrix_message.thread_root_body_preview",
+            "mindroom.custom_tools.matrix_conversation_operations.thread_root_body_preview",
             new=AsyncMock(return_value="Resolved root message body"),
         ) as mock_preview,
         tool_runtime_context(ctx),
@@ -1505,11 +1507,11 @@ async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ) as mock_get_page,
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
             new=AsyncMock(),
         ) as mock_extract,
         tool_runtime_context(ctx),
@@ -1562,11 +1564,11 @@ async def test_matrix_message_room_threads_prefers_trusted_canonical_bundled_pre
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ),
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
             new=AsyncMock(),
         ) as mock_extract,
         tool_runtime_context(ctx),
@@ -1608,11 +1610,11 @@ async def test_matrix_message_room_threads_uses_nested_bundled_replacement_previ
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ) as mock_get_page,
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
             new=AsyncMock(),
         ) as mock_extract,
         tool_runtime_context(ctx),
@@ -1653,11 +1655,11 @@ async def test_matrix_message_room_threads_resolves_notice_root_without_replacem
     )
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ) as mock_get_page,
         patch(
-            "mindroom.custom_tools.matrix_message.thread_root_body_preview",
+            "mindroom.custom_tools.matrix_conversation_operations.thread_root_body_preview",
             new=AsyncMock(return_value="Resolved notice body"),
         ) as mock_preview,
         tool_runtime_context(ctx),
@@ -1728,7 +1730,7 @@ async def test_matrix_message_room_threads_resolves_large_file_root_through_cano
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ),
         tool_runtime_context(ctx),
@@ -1782,7 +1784,7 @@ async def test_matrix_message_room_threads_resolves_large_bundled_replacement_th
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ),
         tool_runtime_context(ctx),
@@ -1817,14 +1819,14 @@ async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([MalformedThreadRoot(), thread_root], None)),
         ),
         patch(
-            "mindroom.custom_tools.matrix_message.thread_root_body_preview",
+            "mindroom.custom_tools.matrix_conversation_operations.thread_root_body_preview",
             new=AsyncMock(return_value="Resolved root message body"),
         ) as mock_preview,
-        patch("mindroom.custom_tools.matrix_message.logger.warning") as mock_warning,
+        patch("mindroom.custom_tools.matrix_conversation_operations.logger.warning") as mock_warning,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="room-threads"))
@@ -1872,11 +1874,11 @@ async def test_matrix_message_room_threads_has_more_false_without_next_token() -
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=(thread_roots, None)),
         ),
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
             new=AsyncMock(side_effect=[{"body": "First thread"}, {"body": "Second thread"}]),
         ),
         tool_runtime_context(ctx),
@@ -1897,7 +1899,7 @@ async def test_matrix_message_room_threads_empty_room() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([], None)),
         ) as mock_get_page,
         tool_runtime_context(ctx),
@@ -1931,7 +1933,7 @@ async def test_matrix_message_room_threads_returns_structured_api_error() -> Non
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(
                 side_effect=RoomThreadsPageError(
                     response="RoomThreadsError: M_INVALID_PARAM Unknown or invalid from token",
@@ -1958,7 +1960,7 @@ async def test_matrix_message_room_threads_preserves_rate_limit_details() -> Non
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(
                 side_effect=RoomThreadsPageError(
                     response="RoomThreadsError: M_LIMIT_EXCEEDED Too many requests - retry after 1500ms",
@@ -1987,7 +1989,7 @@ async def test_matrix_message_room_threads_returns_structured_transport_error() 
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(
                 side_effect=RoomThreadsPageError(
                     response="TimeoutError: request timed out",
@@ -2014,7 +2016,7 @@ async def test_matrix_message_room_threads_clamps_limit() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([], None)),
         ) as mock_get_page,
         tool_runtime_context(ctx),
@@ -2044,11 +2046,11 @@ async def test_matrix_message_room_threads_encrypted_preview_is_redacted() -> No
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.get_room_threads_page",
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([encrypted_root], None)),
         ),
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
             new=AsyncMock(),
         ) as mock_extract,
         tool_runtime_context(ctx),
@@ -2086,7 +2088,7 @@ async def test_matrix_message_read_room_happy_path() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
             new=AsyncMock(return_value={"event_id": "$evt", "body": "hello"}),
         ) as mock_extract,
         tool_runtime_context(ctx),
@@ -2154,7 +2156,7 @@ async def test_matrix_message_read_room_includes_notice_events() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
             new=AsyncMock(side_effect=_extract),
         ) as mock_extract,
         tool_runtime_context(ctx),
@@ -2217,11 +2219,11 @@ async def test_matrix_message_read_room_precomputes_trusted_sender_ids_once() ->
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.trusted_visible_sender_ids",
+            "mindroom.custom_tools.matrix_conversation_operations.trusted_visible_sender_ids",
             return_value=trusted_sender_ids,
         ) as mock_trusted_sender_ids,
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
             new=AsyncMock(side_effect=_extract),
         ) as mock_extract,
         tool_runtime_context(ctx),
@@ -2262,7 +2264,7 @@ async def test_matrix_message_read_room_sentinel_uses_room_timeline() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.extract_and_resolve_message",
+            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
             new=AsyncMock(return_value={"event_id": "$evt", "body": "hello from room"}),
         ) as mock_extract,
         tool_runtime_context(ctx),
@@ -2318,7 +2320,7 @@ async def test_matrix_message_edit_happy_path() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.edit_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ) as mock_edit,
         tool_runtime_context(ctx),
@@ -2460,7 +2462,7 @@ async def test_matrix_message_reply_room_sentinel_disables_context_thread_fallba
     ctx = _make_context(thread_id="$ctx-thread:localhost")
 
     with (
-        patch("mindroom.custom_tools.matrix_message.send_message_result", new=AsyncMock()) as mock_send,
+        patch("mindroom.custom_tools.matrix_conversation_operations.send_message_result", new=AsyncMock()) as mock_send,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="reply", thread_id="room", message="hello"))
@@ -2520,7 +2522,7 @@ async def test_matrix_message_rate_limit_guardrail() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ),
         patch.object(MatrixMessageTools, "_RATE_LIMIT_MAX_ACTIONS", 1),
@@ -2552,7 +2554,7 @@ async def test_matrix_message_rate_limit_counts_attachments_weight(tmp_path: Pat
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_message.send_message_result",
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ),
         patch(

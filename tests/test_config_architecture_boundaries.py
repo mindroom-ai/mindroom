@@ -13,6 +13,17 @@ CONCRETE_ORCHESTRATOR_IMPORT_ALLOWLIST = {
     Path("src/mindroom/orchestrator.py"),
 }
 RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
+MATRIX_MESSAGE_TOOL_MODULE = Path("src/mindroom/custom_tools/matrix_message.py")
+MATRIX_MESSAGE_LOW_LEVEL_IMPORTS = frozenset(
+    {
+        "mindroom.custom_tools.attachments",
+        "mindroom.interactive",
+        "mindroom.matrix.client_delivery",
+        "mindroom.matrix.client_thread_history",
+        "mindroom.matrix.client_visible_messages",
+        "mindroom.matrix.mentions",
+    },
+)
 MATRIX_IDENTIFIER_HELPERS = frozenset(
     {
         "agent_username_localpart",
@@ -143,3 +154,20 @@ def test_orchestrator_runtime_protocol_exposes_only_public_members() -> None:
     ]
 
     assert private_members == []
+
+
+def test_matrix_message_tool_uses_conversation_operations_boundary() -> None:
+    """The model-facing Matrix message tool delegates protocol behavior below the tool adapter."""
+    forbidden: list[str] = []
+    tree = ast.parse(MATRIX_MESSAGE_TOOL_MODULE.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in MATRIX_MESSAGE_LOW_LEVEL_IMPORTS:
+            forbidden.append(f"{MATRIX_MESSAGE_TOOL_MODULE}:{node.lineno}: from {node.module}")
+        if isinstance(node, ast.Import):
+            forbidden.extend(
+                f"{MATRIX_MESSAGE_TOOL_MODULE}:{node.lineno}: import {alias.name}"
+                for alias in node.names
+                if alias.name in MATRIX_MESSAGE_LOW_LEVEL_IMPORTS
+            )
+
+    assert forbidden == []

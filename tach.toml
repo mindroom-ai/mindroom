@@ -475,14 +475,26 @@ visibility = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_message"
 depends_on = [
-    "mindroom.constants",
-    "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_helpers",
+    "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_conversation_operations"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.attachments",
+    "mindroom.interactive",
+    "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.client_visible_messages",
-    "mindroom.tool_system.runtime_context",
+    "mindroom.matrix.mentions",
 ]
+visibility = ["mindroom.custom_tools.matrix_message"]
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_room"
@@ -1172,7 +1184,7 @@ depends_on = []
 visibility = [
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.attachments",
-    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.subagents",
     "mindroom.delivery_gateway",
     "mindroom.hooks.sender",
@@ -1223,7 +1235,7 @@ depends_on = [
 visibility = [
     "mindroom.api.openai_compat",
     "mindroom.commands.handler",
-    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
     "mindroom.edit_regenerator",
     "mindroom.execution_preparation",
@@ -1270,7 +1282,7 @@ depends_on = [
     "mindroom.matrix.visible_body",
 ]
 visibility = [
-    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
     "mindroom.matrix.client",
     "mindroom.matrix.conversation_cache",
