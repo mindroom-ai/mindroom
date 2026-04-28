@@ -188,12 +188,12 @@ class TestMatrixUserManagement:
         assert "agent_test" in saved_data["accounts"]
         assert saved_data["accounts"]["agent_test"]["username"] == "mindroom_test"
 
-    @patch("mindroom.matrix.state.MatrixState.load")
-    def test_get_agent_credentials(self, mock_load: MagicMock, tmp_path: Path) -> None:
+    @patch("mindroom.matrix.users.matrix_state_for_runtime")
+    def test_get_agent_credentials(self, mock_matrix_state_for_runtime: MagicMock, tmp_path: Path) -> None:
         """Test getting agent credentials."""
         mock_state = MatrixState()
         mock_state.add_account("agent_calculator", "mindroom_calculator", "calc_pass")
-        mock_load.return_value = mock_state
+        mock_matrix_state_for_runtime.return_value = mock_state
         runtime_paths = _runtime_paths(tmp_path)
 
         creds = _get_agent_credentials("calculator", runtime_paths)
