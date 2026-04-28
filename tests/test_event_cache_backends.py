@@ -690,6 +690,13 @@ def test_postgres_transient_classifier_accepts_connection_timeout() -> None:
     assert _is_transient_postgres_failure(psycopg.errors.ConnectionTimeout("connection timeout expired"))
 
 
+def test_postgres_transient_classifier_accepts_dns_resolution_failure() -> None:
+    """Transient Kubernetes DNS gaps should retry later instead of disabling the cache."""
+    assert _is_transient_postgres_failure(
+        psycopg.OperationalError("failed to resolve host 'mindroom-cache-postgres': [Errno -2] Name or service not known"),
+    )
+
+
 def test_postgres_transient_classifier_rejects_authentication_failures_without_sqlstate() -> None:
     """Authentication failures should disable the cache instead of retrying forever."""
     exc = psycopg.OperationalError(
