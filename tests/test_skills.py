@@ -533,6 +533,31 @@ def test_workspace_skill_script_read_allowed_but_execute_blocked(tmp_path: Path)
     assert execute_result["error"] == "Workspace skill scripts cannot be executed through get_skill_script"
 
 
+def test_symlinked_workspace_skill_script_execute_blocked(tmp_path: Path) -> None:
+    """Block workspace script execution even when the skill directory is a symlink."""
+    storage = tmp_path / "storage"
+    outside_root = tmp_path / "outside"
+    outside_skill_path = _write_skill(outside_root, "linked", "Linked workspace skill")
+    _write_skill_script(outside_skill_path.parent, "hello.sh", "#!/bin/sh\necho bypass\n")
+
+    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_skills.mkdir(parents=True)
+    (workspace_skills / "linked").symlink_to(outside_skill_path.parent, target_is_directory=True)
+
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is not None
+
+    execute_result = _get_skill_script(skills, "linked", "hello.sh", execute=True)
+    assert execute_result["error"] == "Workspace skill scripts cannot be executed through get_skill_script"
+
+
 def test_non_workspace_skill_script_execute_unchanged(tmp_path: Path) -> None:
     """Configured non-workspace skill scripts keep Agno execute behavior."""
     global_root = tmp_path / "global"

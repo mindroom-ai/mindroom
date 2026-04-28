@@ -2456,6 +2456,51 @@ def test_create_agent_private_template_dir_does_not_imply_context_files(
 
 
 @patch("mindroom.agent_storage.SqliteDb")
+def test_create_agent_loads_private_workspace_skills(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Private agents should load skills from the resolved requester workspace."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
+    config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="$thread",
+    )
+    workspace = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    ).workspace
+    assert workspace is not None
+    skill_dir = workspace.root / "skills" / "private-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: private-skill\ndescription: Private workspace skill\n---\n\n# Body\n",
+        encoding="utf-8",
+    )
+
+    agent = create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
+
+    assert agent.skills is not None
+    assert agent.skills.get_skill_names() == ["private-skill"]
+
+
+@patch("mindroom.agent_storage.SqliteDb")
 def test_create_agent_private_root_requires_execution_identity(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
