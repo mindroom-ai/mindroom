@@ -22,7 +22,7 @@ from mindroom.constants import (
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
-from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
+from mindroom.matrix.large_messages import should_upload_oversized_nonterminal_stream_sidecar
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import (
@@ -722,9 +722,9 @@ class StreamingResponse:
     ) -> bool:
         """Send one already-prepared non-terminal or terminal payload."""
         is_initial_send = self.event_id is None
-        if not is_final and not is_initial_send and not self._should_send_prepared_nonterminal_edit(prepared_delivery):
-            _complete_capture_completions(capture_completions)
-            return True
+        upload_nonterminal_stream_sidecar = is_final or is_initial_send or self._should_upload_nonterminal_stream_sidecar(
+            prepared_delivery,
+        )
         capture = None
         if not is_final:
             capture = asyncio.get_running_loop().create_future()
@@ -737,6 +737,7 @@ class StreamingResponse:
                 client,
                 content=prepared_delivery.content,
                 display_text=prepared_delivery.display_text,
+                upload_nonterminal_stream_sidecar=upload_nonterminal_stream_sidecar,
                 retry_on_failure=retry_on_failure,
                 retry_without_backoff=retry_without_backoff,
             )
@@ -764,18 +765,18 @@ class StreamingResponse:
             self.placeholder_progress_sent = False
         return True
 
-    def _should_send_prepared_nonterminal_edit(
+    def _should_upload_nonterminal_stream_sidecar(
         self,
         prepared_delivery: _PreparedStreamingDelivery,
     ) -> bool:
-        """Return whether a prepared in-progress edit should hit Matrix now."""
+        """Return whether a prepared in-progress edit should upload a fresh sidecar now."""
         assert self.event_id is not None
         edit_content = build_edit_event_content(
             event_id=self.event_id,
             new_content=prepared_delivery.content,
             new_text=prepared_delivery.display_text,
         )
-        return should_send_oversized_nonterminal_streaming_edit(
+        return should_upload_oversized_nonterminal_stream_sidecar(
             room_id=self.room_id,
             original_event_id=self.event_id,
             edit_content=edit_content,
@@ -928,10 +929,18 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
+        upload_nonterminal_stream_sidecar: bool,
     ) -> bool:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
-        delivered = await edit_message_result(client, self.room_id, self.event_id, content, display_text)
+        delivered = await edit_message_result(
+            client,
+            self.room_id,
+            self.event_id,
+            content,
+            display_text,
+            upload_nonterminal_stream_sidecar=upload_nonterminal_stream_sidecar,
+        )
         if delivered is None:
             return False
         await self._record_streaming_edit(delivered.event_id, content_sent=delivered.content_sent)
@@ -944,6 +953,7 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
+        upload_nonterminal_stream_sidecar: bool = True,
         retry_on_failure: bool = False,
         retry_without_backoff: bool = False,
     ) -> bool:
@@ -958,7 +968,12 @@ class StreamingResponse:
                     logger.error("Failed to send initial streaming message", attempt=attempt)
                 else:
                     logger.debug("Editing streaming message", event_id=self.event_id, attempt=attempt)
-                    if await self._edit_existing_content(client, content=content, display_text=display_text):
+                    if await self._edit_existing_content(
+                        client,
+                        content=content,
+                        display_text=display_text,
+                        upload_nonterminal_stream_sidecar=upload_nonterminal_stream_sidecar,
+                    ):
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
             except Exception:

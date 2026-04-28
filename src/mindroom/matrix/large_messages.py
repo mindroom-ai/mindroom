@@ -51,8 +51,8 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
 _MATRIX_EVENT_HARD_LIMIT = 64000
-_OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS = 5.0
-_oversized_nonterminal_streaming_edit_sent_at: dict[tuple[str, str], float] = {}
+_OVERSIZED_NONTERMINAL_STREAMING_SIDECAR_UPLOAD_MIN_INTERVAL_SECONDS = 5.0
+_oversized_nonterminal_streaming_sidecar_uploaded_at: dict[tuple[str, str], float] = {}
 
 
 def _is_passthrough_preview_key(key: object) -> bool:
@@ -144,28 +144,28 @@ def _is_nonterminal_stream_content(content: dict[str, Any]) -> bool:
     return content.get(STREAM_STATUS_KEY) in _NONTERMINAL_STREAM_STATUSES
 
 
-def _clear_oversized_nonterminal_streaming_edit_rate_limits() -> None:
-    """Reset oversized streaming-edit rate state for tests."""
-    _oversized_nonterminal_streaming_edit_sent_at.clear()
+def _clear_oversized_nonterminal_streaming_sidecar_upload_rate_limits() -> None:
+    """Reset oversized streaming-edit sidecar upload rate state for tests."""
+    _oversized_nonterminal_streaming_sidecar_uploaded_at.clear()
 
 
-def _prune_expired_oversized_nonterminal_streaming_edit_rate_limits(now: float) -> None:
+def _prune_expired_oversized_nonterminal_streaming_sidecar_upload_rate_limits(now: float) -> None:
     expired_keys = [
         key
-        for key, sent_at in _oversized_nonterminal_streaming_edit_sent_at.items()
-        if now - sent_at >= _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS
+        for key, sent_at in _oversized_nonterminal_streaming_sidecar_uploaded_at.items()
+        if now - sent_at >= _OVERSIZED_NONTERMINAL_STREAMING_SIDECAR_UPLOAD_MIN_INTERVAL_SECONDS
     ]
     for key in expired_keys:
-        _oversized_nonterminal_streaming_edit_sent_at.pop(key, None)
+        _oversized_nonterminal_streaming_sidecar_uploaded_at.pop(key, None)
 
 
-def should_send_oversized_nonterminal_streaming_edit(
+def should_upload_oversized_nonterminal_stream_sidecar(
     *,
     room_id: str,
     original_event_id: str,
     edit_content: dict[str, Any],
 ) -> bool:
-    """Return whether one oversized non-terminal streaming edit may be sent now."""
+    """Return whether one oversized non-terminal streaming edit should upload a fresh sidecar now."""
     if not original_event_id or not _is_edit_message(edit_content):
         return True
 
@@ -177,11 +177,14 @@ def should_send_oversized_nonterminal_streaming_edit(
 
     key = (room_id, original_event_id)
     now = monotonic()
-    _prune_expired_oversized_nonterminal_streaming_edit_rate_limits(now)
-    last_sent_at = _oversized_nonterminal_streaming_edit_sent_at.get(key)
-    if last_sent_at is not None and now - last_sent_at < _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS:
+    _prune_expired_oversized_nonterminal_streaming_sidecar_upload_rate_limits(now)
+    last_sent_at = _oversized_nonterminal_streaming_sidecar_uploaded_at.get(key)
+    if (
+        last_sent_at is not None
+        and now - last_sent_at < _OVERSIZED_NONTERMINAL_STREAMING_SIDECAR_UPLOAD_MIN_INTERVAL_SECONDS
+    ):
         return False
-    _oversized_nonterminal_streaming_edit_sent_at[key] = now
+    _oversized_nonterminal_streaming_sidecar_uploaded_at[key] = now
     return True
 
 
@@ -195,7 +198,7 @@ def _build_nonterminal_streaming_edit_preview(
     file_info: dict[str, Any] | None,
     original_size: int,
 ) -> dict[str, Any] | None:
-    """Build an in-progress rich edit preview with a fresh full-content sidecar."""
+    """Build an in-progress rich edit preview with optional full-content sidecar metadata."""
     preview_limit = _NONTERMINAL_STREAM_PREVIEW_BYTES
     while True:
         preview = _create_preview(
@@ -417,6 +420,8 @@ async def prepare_large_message(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
+    *,
+    upload_nonterminal_stream_sidecar: bool = True,
 ) -> dict[str, Any]:
     """Check if message is too large and prepare it if needed.
 
@@ -430,6 +435,8 @@ async def prepare_large_message(
         client: The Matrix client
         room_id: The room to send to
         content: The message content dictionary
+        upload_nonterminal_stream_sidecar: Whether oversized in-progress
+            streaming edits should upload a fresh full-content JSON sidecar.
 
     Returns:
         Original content (if small) or modified content with preview and MXC reference
@@ -445,12 +452,21 @@ async def prepare_large_message(
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     preview_text = source_content["body"]
     if is_edit and _is_nonterminal_stream_content(source_content):
-        logger.info(
-            "large_streaming_edit_sidecar_upload_started",
-            room_id=room_id,
-            original_size_bytes=current_size,
-        )
-        mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, content)
+        mxc_uri = None
+        file_info = None
+        if upload_nonterminal_stream_sidecar:
+            logger.info(
+                "large_streaming_edit_sidecar_upload_started",
+                room_id=room_id,
+                original_size_bytes=current_size,
+            )
+            mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, content)
+        else:
+            logger.info(
+                "large_streaming_edit_sidecar_upload_skipped",
+                room_id=room_id,
+                original_size_bytes=current_size,
+            )
         modified_content = _build_nonterminal_streaming_edit_preview(
             content,
             source_content,

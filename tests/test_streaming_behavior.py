@@ -47,7 +47,7 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.large_messages import _clear_oversized_nonterminal_streaming_edit_rate_limits
+from mindroom.matrix.large_messages import _clear_oversized_nonterminal_streaming_sidecar_upload_rate_limits
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
@@ -538,8 +538,8 @@ class TestStreamingBehavior:
 
     @pytest.mark.asyncio
     async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(self) -> None:
-        """Oversized in-progress edits should not burst sidecar uploads while final still sends."""
-        _clear_oversized_nonterminal_streaming_edit_rate_limits()
+        """Oversized in-progress edits should still stream while sidecar uploads are rate-limited."""
+        _clear_oversized_nonterminal_streaming_sidecar_upload_rate_limits()
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -560,8 +560,12 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             _new_text: str,
+            *,
+            upload_nonterminal_stream_sidecar: bool = True,
         ) -> DeliveredMatrixEvent:
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
+            content_sent = dict(new_content)
+            content_sent["upload_nonterminal_stream_sidecar"] = upload_nonterminal_stream_sidecar
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=content_sent)
 
         with (
             patch(
@@ -572,16 +576,19 @@ class TestStreamingBehavior:
         ):
             assert await streaming._send_or_edit_message(mock_client)
             assert mock_edit.await_count == 1
+            assert mock_edit.await_args_list[-1].kwargs["upload_nonterminal_stream_sidecar"] is True
 
             streaming.accumulated_text += "y"
             streaming._mark_nonadditive_text_mutation()
             assert await streaming._send_or_edit_message(mock_client)
-            assert mock_edit.await_count == 1
+            assert mock_edit.await_count == 2
+            assert mock_edit.await_args_list[-1].kwargs["upload_nonterminal_stream_sidecar"] is False
 
             streaming.accumulated_text += "z"
             streaming._mark_nonadditive_text_mutation()
             assert await streaming._send_or_edit_message(mock_client)
-            assert mock_edit.await_count == 2
+            assert mock_edit.await_count == 3
+            assert mock_edit.await_args_list[-1].kwargs["upload_nonterminal_stream_sidecar"] is True
 
             streaming.accumulated_text += " final"
             assert await streaming._send_or_edit_message(
@@ -589,12 +596,13 @@ class TestStreamingBehavior:
                 is_final=True,
                 stream_status=STREAM_STATUS_COMPLETED,
             )
-            assert mock_edit.await_count == 3
+            assert mock_edit.await_count == 4
+            assert mock_edit.await_args_list[-1].kwargs["upload_nonterminal_stream_sidecar"] is True
 
     @pytest.mark.asyncio
-    async def test_rate_limited_oversized_nonterminal_edit_resolves_capture_completion(self) -> None:
-        """Skipping an oversized in-progress edit should still unblock capture waiters."""
-        _clear_oversized_nonterminal_streaming_edit_rate_limits()
+    async def test_rate_limited_oversized_nonterminal_sidecar_upload_resolves_capture_completion(self) -> None:
+        """Rate-limited sidecar uploads should still send edits and unblock capture waiters."""
+        _clear_oversized_nonterminal_streaming_sidecar_upload_rate_limits()
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -618,7 +626,8 @@ class TestStreamingBehavior:
                 capture_completions=(capture_completion,),
             )
 
-        assert streaming._send_content.await_count == 1
+        assert streaming._send_content.await_count == 2
+        assert streaming._send_content.await_args_list[-1].kwargs["upload_nonterminal_stream_sidecar"] is False
         assert capture_completion.done()
         assert capture_completion.result() is None
 
