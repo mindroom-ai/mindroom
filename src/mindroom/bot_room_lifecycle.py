@@ -15,6 +15,7 @@ from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,
     save_invited_rooms,
+    should_accept_invites,
     should_persist_invited_rooms,
 )
 from mindroom.matrix.rooms import leave_non_dm_rooms
@@ -72,14 +73,7 @@ class BotRoomLifecycle:
 
     def should_accept_invite(self) -> bool:
         """Return whether this entity should accept one inbound room invite."""
-        if self.deps.agent_name == ROUTER_AGENT_NAME:
-            return True
-        if self.deps.agent_name in self._config().teams:
-            return True
-        agent_config = self._config().agents.get(self.deps.agent_name)
-        if agent_config is None:
-            return False
-        return agent_config.accept_invites
+        return should_accept_invites(self._config(), self.deps.agent_name)
 
     def should_persist_invited_rooms(self) -> bool:
         """Return whether this entity persists invited room IDs across restarts."""
@@ -90,13 +84,13 @@ class BotRoomLifecycle:
         return invited_rooms_path(self.deps.runtime_paths.storage_root, self.deps.agent_name)
 
     def load_invited_rooms(self) -> set[str]:
-        """Load invited rooms persisted for one eligible named agent."""
+        """Load invited rooms persisted for one eligible entity."""
         if not self.should_persist_invited_rooms():
             return set()
         return load_invited_rooms(self.invited_rooms_file_path())
 
     def save_invited_rooms(self) -> None:
-        """Persist invited room IDs for one eligible named agent."""
+        """Persist invited room IDs for one eligible entity."""
         if not self.should_persist_invited_rooms():
             return
         save_invited_rooms(self.invited_rooms_file_path(), self.invited_rooms)

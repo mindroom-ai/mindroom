@@ -30,6 +30,7 @@ agents:
 # Router configuration (routes messages to the right agent)
 router:
   model: default
+  accept_invites: true  # Accept authorized room invites and preserve them across restarts
 
 # Internal MindRoom user account (optional)
 # Set username before first run; once the account is created, the username is fixed.

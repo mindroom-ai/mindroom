@@ -632,6 +632,7 @@ defaults:
 # Router
 router:
   model: "default"
+  accept_invites: true
 
 # Timezone
 timezone: "America/Los_Angeles"

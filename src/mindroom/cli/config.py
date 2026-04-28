@@ -763,6 +763,7 @@ agents:
 
 router:
   model: default
+  accept_invites: true
 {mindroom_user_block}
 matrix_room_access:
   mode: single_user_private
@@ -887,6 +888,7 @@ agents:
 
 router:
   model: default
+  accept_invites: true
 
 # Set username before first run; once created, it cannot be changed.
 # You can still change display_name later.
