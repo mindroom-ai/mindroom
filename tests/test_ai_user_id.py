@@ -987,14 +987,24 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
         session_id=target.session_id,
     )
 
-    should_watch = coordinator._should_watch_session_started(
+    lifecycle = coordinator._build_lifecycle(
+        response_kind="ai",
+        request=replace(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            target=target,
+        ),
+    )
+    watch = lifecycle.setup_session_watch(
         tool_context=tool_context,
         session_id=target.session_id,
         session_type=SessionType.AGENT,
+        scope=HistoryScope(kind="agent", scope_id="general"),
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
         create_storage=BrokenStorage,
     )
 
-    assert should_watch is False
+    assert watch.should_watch is False
     coordinator.deps.logger.exception.assert_called_once()
     assert coordinator.deps.logger.exception.call_args.kwargs["session_id"] == target.session_id
     assert coordinator.deps.logger.exception.call_args.kwargs["failure_reason"] == "probe boom"

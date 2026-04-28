@@ -94,7 +94,7 @@ visibility = [
     "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
     "mindroom.memory.auto_flush",
-    "mindroom.response_runner",
+    "mindroom.response_lifecycle",
     "mindroom.teams",
     "mindroom.turn_store",
 ]
@@ -748,7 +748,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
-    "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.constants",
@@ -772,9 +771,11 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_lifecycle"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.ai_runtime",
     "mindroom.hooks",
     "mindroom.post_response_effects",
+    "mindroom.tool_system.runtime_context",
 ]
 visibility = ["mindroom.response_runner"]
 

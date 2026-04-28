@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -42,7 +41,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
-from mindroom.response_lifecycle import ResponseLifecycle
+from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
 from mindroom.turn_store import LoadedTurnRecord
 from tests.conftest import (
@@ -111,6 +110,24 @@ def _response_hook_service(tmp_path: Path, registry: HookRegistry) -> tuple[Conf
         hook_send_message=AsyncMock(),
     )
     return config, ResponseHookService(hook_context=hook_context)
+
+
+def _response_lifecycle(
+    response_hooks: ResponseHookService,
+    *,
+    response_envelope: MessageEnvelope | None = None,
+    correlation_id: str,
+) -> ResponseLifecycle:
+    return ResponseLifecycle(
+        ResponseLifecycleDeps(
+            response_hooks=response_hooks,
+            logger=get_logger("tests.response_lifecycle"),
+        ),
+        response_kind="ai",
+        pipeline_timing=None,
+        response_envelope=response_envelope or _envelope(),
+        correlation_id=correlation_id,
+    )
 
 
 def _team_bot(tmp_path: Path) -> TeamBot:
@@ -502,21 +519,8 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
         ),
     )
 
-    runner = SimpleNamespace(
-        deps=SimpleNamespace(
-            delivery_gateway=SimpleNamespace(
-                deps=SimpleNamespace(response_hooks=response_hooks),
-            ),
-        ),
-        _log_post_response_effects_failure=MagicMock(),
-        _emit_pipeline_timing_summary=MagicMock(),
-        _response_outcome=MagicMock(return_value=None),
-    )
-    lifecycle = ResponseLifecycle(
-        runner=runner,
-        response_kind="ai",
-        request=MagicMock(),
-        response_envelope=_envelope(),
+    lifecycle = _response_lifecycle(
+        response_hooks,
         correlation_id="corr-suppressed-final",
     )
     finalized = await lifecycle.finalize(
@@ -566,21 +570,8 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
         [_plugin("test-late-after-cancel", [slow_after_response, on_cancelled])],
     )
     _, response_hooks = _response_hook_service(tmp_path, registry)
-    runner = SimpleNamespace(
-        deps=SimpleNamespace(
-            delivery_gateway=SimpleNamespace(
-                deps=SimpleNamespace(response_hooks=response_hooks),
-            ),
-        ),
-        _log_post_response_effects_failure=MagicMock(),
-        _emit_pipeline_timing_summary=MagicMock(),
-        _response_outcome=MagicMock(return_value=None),
-    )
-    lifecycle = ResponseLifecycle(
-        runner=runner,
-        response_kind="ai",
-        request=MagicMock(),
-        response_envelope=_envelope(),
+    lifecycle = _response_lifecycle(
+        response_hooks,
         correlation_id=f"corr-late-{mode}",
     )
 
@@ -667,21 +658,8 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
             ),
         )
 
-    runner = SimpleNamespace(
-        deps=SimpleNamespace(
-            delivery_gateway=SimpleNamespace(
-                deps=SimpleNamespace(response_hooks=response_hooks),
-            ),
-        ),
-        _log_post_response_effects_failure=MagicMock(),
-        _emit_pipeline_timing_summary=MagicMock(),
-        _response_outcome=MagicMock(return_value=None),
-    )
-    lifecycle = ResponseLifecycle(
-        runner=runner,
-        response_kind="ai",
-        request=MagicMock(),
-        response_envelope=_envelope(),
+    lifecycle = _response_lifecycle(
+        response_hooks,
         correlation_id="corr-delivery-failure",
     )
     finalized = await lifecycle.finalize(
@@ -757,21 +735,8 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
         ),
     )
 
-    runner = SimpleNamespace(
-        deps=SimpleNamespace(
-            delivery_gateway=SimpleNamespace(
-                deps=SimpleNamespace(response_hooks=response_hooks),
-            ),
-        ),
-        _log_post_response_effects_failure=MagicMock(),
-        _emit_pipeline_timing_summary=MagicMock(),
-        _response_outcome=MagicMock(return_value=None),
-    )
-    lifecycle = ResponseLifecycle(
-        runner=runner,
-        response_kind="ai",
-        request=MagicMock(),
-        response_envelope=_envelope(),
+    lifecycle = _response_lifecycle(
+        response_hooks,
         correlation_id="corr-final-only-provider",
     )
 
@@ -844,21 +809,8 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
 
     assert outcome.terminal_status == "error"
     assert outcome.final_visible_event_id == "$placeholder"
-    runner = SimpleNamespace(
-        deps=SimpleNamespace(
-            delivery_gateway=SimpleNamespace(
-                deps=SimpleNamespace(response_hooks=response_hooks),
-            ),
-        ),
-        _log_post_response_effects_failure=MagicMock(),
-        _emit_pipeline_timing_summary=MagicMock(),
-        _response_outcome=MagicMock(return_value=None),
-    )
-    lifecycle = ResponseLifecycle(
-        runner=runner,
-        response_kind="ai",
-        request=MagicMock(),
-        response_envelope=_envelope(),
+    lifecycle = _response_lifecycle(
+        response_hooks,
         correlation_id="corr-suppressed-cleanup-fail",
     )
     await lifecycle.finalize(
@@ -927,21 +879,8 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
 
     assert outcome.terminal_status == "error"
     assert outcome.final_visible_event_id == "$placeholder"
-    runner = SimpleNamespace(
-        deps=SimpleNamespace(
-            delivery_gateway=SimpleNamespace(
-                deps=SimpleNamespace(response_hooks=response_hooks),
-            ),
-        ),
-        _log_post_response_effects_failure=MagicMock(),
-        _emit_pipeline_timing_summary=MagicMock(),
-        _response_outcome=MagicMock(return_value=None),
-    )
-    lifecycle = ResponseLifecycle(
-        runner=runner,
-        response_kind="ai",
-        request=MagicMock(),
-        response_envelope=_envelope(),
+    lifecycle = _response_lifecycle(
+        response_hooks,
         correlation_id="corr-suppressed-cleanup-exception",
     )
     await lifecycle.finalize(
