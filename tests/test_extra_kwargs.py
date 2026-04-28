@@ -15,6 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
+from mindroom.vertex_claude_compat import MindroomVertexAIClaude, strip_vertex_claude_tool_strict
 from mindroom.vertex_claude_prompt_cache import (
     copy_messages_with_vertex_prompt_cache_breakpoint,
     install_vertex_claude_prompt_cache_hook,
@@ -293,6 +294,7 @@ def test_vertexai_claude_provider() -> None:
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 
     assert isinstance(model, VertexAIClaude)
+    assert isinstance(model, MindroomVertexAIClaude)
     assert model.id == "claude-sonnet-4@20250514"
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
@@ -321,6 +323,67 @@ def test_vertexai_prompt_cache_breakpoint_marks_last_user_block() -> None:
         {"type": "text", "text": "Current turn"},
         {"type": "image", "source": "x", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
     ]
+
+
+def _strict_tool_definition() -> dict[str, object]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "update_profile",
+            "description": "Update profile",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "strict": {"type": "boolean"},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def test_strip_vertex_claude_tool_strict_preserves_schema_and_input() -> None:
+    """Vertex Claude rejects provider-level strict, but schema fields named strict are valid."""
+    tool = _strict_tool_definition()
+
+    sanitized = strip_vertex_claude_tool_strict([tool])
+
+    assert sanitized is not None
+    assert "strict" not in sanitized[0]["function"]
+    assert "strict" in sanitized[0]["function"]["parameters"]["properties"]
+    assert tool["function"]["strict"] is True
+
+
+def test_mindroom_vertexai_claude_request_kwargs_strip_tool_strict() -> None:
+    """Mindroom's Vertex Claude model should not send strict in the provider tool payload."""
+    model = MindroomVertexAIClaude(
+        id="claude-sonnet-4-6",
+        project_id="demo-project",
+        region="us-central1",
+        cache_system_prompt=False,
+    )
+
+    request_kwargs = model._prepare_request_kwargs("", tools=[_strict_tool_definition()])
+
+    assert request_kwargs["tools"] == [
+        {
+            "name": "update_profile",
+            "description": "Update profile",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": ""},
+                    "strict": {"type": "boolean", "description": ""},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+    assert model._has_beta_features(tools=[_strict_tool_definition()]) is False
 
 
 def _vertex_claude_model(*, extended_cache_time: bool = True) -> VertexAIClaude:
