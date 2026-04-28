@@ -2,13 +2,28 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import hashlib
+import json
+import os
+import signal
+import sys
+import tempfile
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypedDict
 
+if os.name != "nt":
+    import fcntl
+else:
+    fcntl = None
+
+from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -37,14 +52,15 @@ from mindroom.knowledge.registry import (
     source_root_for_published_index_key,
     source_root_for_refresh_target,
 )
+from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -58,10 +74,25 @@ class KnowledgeRefreshResult:
     last_error: str | None = None
 
 
+@dataclass(frozen=True)
+class _SubprocessRefreshRequest:
+    base_id: str
+    config_data: dict[str, object]
+    config_path: str
+    storage_root: str
+    execution_identity: dict[str, object] | None = None
+    force_reindex: bool = False
+
+
+class _SubprocessSessionKwargs(TypedDict, total=False):
+    start_new_session: bool
+
+
 _refresh_locks_guard = Lock()
 _active_refresh_counts: dict[KnowledgeRefreshTarget, int] = {}
 _active_refresh_counts_guard = Lock()
 _MAX_REFRESH_LOCKS = 512
+_REFRESH_FILE_LOCK_POLL_SECONDS = 0.1
 
 
 @dataclass
@@ -164,6 +195,228 @@ def is_refresh_active_for_binding(
     return is_refresh_active(key)
 
 
+async def refresh_knowledge_binding_in_subprocess(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+    force_reindex: bool = False,
+) -> None:
+    """Run one knowledge refresh in a child interpreter.
+
+    Scheduled refreshes are best-effort maintenance work. Running them in a
+    subprocess keeps Chroma, embedding, Git, and reader CPU/I/O away from the
+    control-plane event loop and its shared thread pool while preserving the
+    last-good published index semantics.
+    """
+    key = resolve_published_index_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+    initial_state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
+    request_payload = _serialize_subprocess_refresh_request(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        force_reindex=force_reindex,
+    )
+    env = dict(runtime_env_values(runtime_paths))
+    env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "mindroom.knowledge_refresh_runner",
+        stdin=asyncio.subprocess.PIPE,
+        env=env,
+        **_subprocess_session_kwargs(),
+    )
+    try:
+        with suppress(BrokenPipeError, ConnectionResetError):
+            await _send_subprocess_refresh_request(process, request_payload)
+        return_code = await process.wait()
+    except asyncio.CancelledError:
+        cleanup_task = asyncio.create_task(
+            _cleanup_cancelled_refresh_subprocess(
+                process,
+                key,
+                initial_state=initial_state,
+                config=config,
+                runtime_paths=runtime_paths,
+            ),
+        )
+        while not cleanup_task.done():
+            with suppress(asyncio.CancelledError):
+                await asyncio.shield(cleanup_task)
+        with suppress(Exception):
+            cleanup_task.result()
+        raise
+
+    if return_code != 0:
+        msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
+        await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=msg)
+        raise RuntimeError(msg)
+
+
+def _serialize_subprocess_refresh_request(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    force_reindex: bool,
+) -> bytes:
+    payload = _SubprocessRefreshRequest(
+        base_id=base_id,
+        config_data=config.authored_model_dump(),
+        config_path=str(runtime_paths.config_path),
+        storage_root=str(runtime_paths.storage_root),
+        execution_identity=None if execution_identity is None else asdict(execution_identity),
+        force_reindex=force_reindex,
+    )
+    return json.dumps(asdict(payload), sort_keys=True).encode()
+
+
+async def _send_subprocess_refresh_request(
+    process: asyncio.subprocess.Process,
+    payload: bytes,
+) -> None:
+    if process.stdin is None:
+        msg = "Knowledge refresh subprocess was created without stdin"
+        raise RuntimeError(msg)
+    process.stdin.write(payload)
+    await process.stdin.drain()
+    process.stdin.close()
+    with suppress(BrokenPipeError, ConnectionResetError):
+        await process.stdin.wait_closed()
+
+
+def _refresh_file_lock_path(key: KnowledgeSourceRoot) -> Path:
+    digest = hashlib.sha256(f"{key.storage_root}\0{key.knowledge_path}".encode()).hexdigest()
+    return Path(tempfile.gettempdir()) / "mindroom" / "knowledge_refresh_locks" / f"{digest}.lock"
+
+
+def _open_refresh_file_lock_sync(key: KnowledgeSourceRoot) -> tuple[Any, Any] | None:
+    if fcntl is None:
+        return None
+
+    lock_path = _refresh_file_lock_path(key)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    return fcntl, lock_path.open("a", encoding="utf-8")
+
+
+def _try_acquire_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> bool:
+    if handle is None:
+        return True
+    fcntl, lock_file = handle
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _close_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> None:
+    if handle is not None:
+        _fcntl, lock_file = handle
+        lock_file.close()
+
+
+def _release_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> None:
+    if handle is None:
+        return
+    fcntl, lock_file = handle
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
+@asynccontextmanager
+async def _acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
+    """Serialize source-root refresh and mutation work across processes."""
+    handle = _open_refresh_file_lock_sync(key)
+    acquired = False
+    try:
+        while not _try_acquire_refresh_file_lock_sync(handle):  # noqa: ASYNC110
+            await asyncio.sleep(_REFRESH_FILE_LOCK_POLL_SECONDS)
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            _release_refresh_file_lock_sync(handle)
+        else:
+            _close_refresh_file_lock_sync(handle)
+
+
+def _subprocess_session_kwargs() -> _SubprocessSessionKwargs:
+    if os.name == "nt":
+        return {}
+    return {"start_new_session": True}
+
+
+async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    if os.name == "nt":
+        process.terminate()
+    else:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=10)
+    except TimeoutError:
+        if os.name == "nt":
+            process.kill()
+        else:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
+
+
+async def _cleanup_cancelled_refresh_subprocess(
+    process: asyncio.subprocess.Process,
+    key: PublishedIndexKey,
+    *,
+    initial_state: PublishedIndexState | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> None:
+    try:
+        await _terminate_refresh_subprocess(process)
+        source_root = source_root_for_published_index_key(key)
+        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+            await _reconcile_cancelled_refresh(
+                key,
+                initial_state=initial_state,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+    except Exception:
+        logger.warning("Failed to reconcile cancelled knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
+
+
+async def _reconcile_failed_refresh_subprocess(
+    key: PublishedIndexKey,
+    *,
+    initial_state: PublishedIndexState | None,
+    error: str,
+) -> None:
+    try:
+        source_root = source_root_for_published_index_key(key)
+        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+            state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
+            if not _failed_subprocess_state_can_be_reconciled(key, state, initial_state):
+                return
+            await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
+    except Exception:
+        logger.warning("Failed to reconcile failed knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
+
+
 @asynccontextmanager
 async def knowledge_binding_mutation_lock(
     base_id: str,
@@ -181,7 +434,8 @@ async def knowledge_binding_mutation_lock(
         execution_identity=execution_identity,
         create=create,
     )
-    async with _acquire_refresh_lock(source_root_for_refresh_target(key)):
+    source_root = source_root_for_refresh_target(key)
+    async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
         yield
 
 
@@ -202,15 +456,16 @@ async def refresh_knowledge_binding(
         create=True,
     )
     refresh_target = refresh_target_for_published_index_key(key)
+    source_root = source_root_for_published_index_key(key)
     mark_refresh_active(refresh_target)
     try:
-        initial_state = await asyncio.to_thread(
-            load_published_index_state,
-            published_index_metadata_path(key),
-        )
-        try:
-            await _save_refreshing_state(key)
-            async with _acquire_refresh_lock(source_root_for_published_index_key(key)):
+        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+            initial_state = await asyncio.to_thread(
+                load_published_index_state,
+                published_index_metadata_path(key),
+            )
+            try:
+                await _save_refreshing_state(key)
                 return await _refresh_knowledge_binding_locked(
                     key,
                     config=config,
@@ -218,14 +473,14 @@ async def refresh_knowledge_binding(
                     execution_identity=execution_identity,
                     force_reindex=force_reindex,
                 )
-        except asyncio.CancelledError:
-            await _reconcile_cancelled_refresh(
-                key,
-                initial_state=initial_state,
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-            raise
+            except asyncio.CancelledError:
+                await _reconcile_cancelled_refresh(
+                    key,
+                    initial_state=initial_state,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                )
+                raise
     finally:
         mark_refresh_inactive(refresh_target)
         prune_private_index_bookkeeping()
@@ -507,7 +762,46 @@ def _published_state_fingerprint(state: PublishedIndexState | None) -> tuple[obj
         state.published_revision,
         state.indexed_count,
         state.source_signature,
+        state.refresh_job,
+        state.reason,
+        state.last_error,
     )
+
+
+def _refresh_running_fingerprint(
+    key: PublishedIndexKey,
+    state: PublishedIndexState | None,
+) -> tuple[object, ...] | None:
+    if state is None:
+        return _published_state_fingerprint(
+            PublishedIndexState(
+                settings=key.indexing_settings,
+                status="indexing",
+                refresh_job="running",
+                reason="refreshing",
+            ),
+        )
+    return _published_state_fingerprint(
+        replace(
+            state,
+            refresh_job="running",
+            reason="refreshing",
+            last_error=None,
+        ),
+    )
+
+
+def _failed_subprocess_state_can_be_reconciled(
+    key: PublishedIndexKey,
+    state: PublishedIndexState | None,
+    initial_state: PublishedIndexState | None,
+) -> bool:
+    if _published_state_fingerprint(state) in {
+        _published_state_fingerprint(initial_state),
+        _refresh_running_fingerprint(key, initial_state),
+    }:
+        return True
+    return state is not None and state.refresh_job == "running" and state.reason == "refreshing"
 
 
 async def _reconcile_cancelled_refresh(
@@ -519,9 +813,10 @@ async def _reconcile_cancelled_refresh(
 ) -> None:
     state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
     state_advanced = _published_state_fingerprint(state) != _published_state_fingerprint(initial_state)
+    if not state_advanced:
+        return
     if (
-        state_advanced
-        and state is not None
+        state is not None
         and state.status == "complete"
         and published_index_settings_compatible(state.settings, key.indexing_settings)
         and published_index_availability_for_state(key=key, state=state) is KnowledgeAvailability.READY
@@ -538,3 +833,101 @@ async def _reconcile_cancelled_refresh(
             await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
             return
     await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
+
+
+def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshRequest:
+    raw_payload = json.loads(payload.decode())
+    if not isinstance(raw_payload, dict):
+        msg = "Knowledge refresh subprocess request must be a JSON object"
+        raise TypeError(msg)
+    raw_base_id = raw_payload.get("base_id")
+    raw_config_data = raw_payload.get("config_data")
+    raw_config_path = raw_payload.get("config_path")
+    raw_storage_root = raw_payload.get("storage_root")
+    raw_execution_identity = raw_payload.get("execution_identity")
+    raw_force_reindex = raw_payload.get("force_reindex", False)
+    if not isinstance(raw_base_id, str) or not raw_base_id.strip():
+        msg = "Knowledge refresh subprocess request is missing base_id"
+        raise TypeError(msg)
+    if not isinstance(raw_config_data, dict):
+        msg = "Knowledge refresh subprocess request is missing config_data"
+        raise TypeError(msg)
+    if not isinstance(raw_config_path, str) or not raw_config_path.strip():
+        msg = "Knowledge refresh subprocess request is missing config_path"
+        raise TypeError(msg)
+    if not isinstance(raw_storage_root, str) or not raw_storage_root.strip():
+        msg = "Knowledge refresh subprocess request is missing storage_root"
+        raise TypeError(msg)
+    if raw_execution_identity is not None and not isinstance(raw_execution_identity, dict):
+        msg = "Knowledge refresh subprocess request execution_identity must be an object when present"
+        raise TypeError(msg)
+    return _SubprocessRefreshRequest(
+        base_id=raw_base_id,
+        config_data=raw_config_data,
+        config_path=raw_config_path,
+        storage_root=raw_storage_root,
+        execution_identity=raw_execution_identity,
+        force_reindex=bool(raw_force_reindex),
+    )
+
+
+def _execution_identity_from_payload(payload: dict[str, object] | None) -> ToolExecutionIdentity | None:
+    if payload is None:
+        return None
+    return ToolExecutionIdentity(
+        channel=payload["channel"],  # type: ignore[arg-type]
+        agent_name=payload["agent_name"],  # type: ignore[arg-type]
+        requester_id=payload.get("requester_id"),  # type: ignore[arg-type]
+        room_id=payload.get("room_id"),  # type: ignore[arg-type]
+        thread_id=payload.get("thread_id"),  # type: ignore[arg-type]
+        resolved_thread_id=payload.get("resolved_thread_id"),  # type: ignore[arg-type]
+        session_id=payload.get("session_id"),  # type: ignore[arg-type]
+        tenant_id=payload.get("tenant_id"),  # type: ignore[arg-type]
+        account_id=payload.get("account_id"),  # type: ignore[arg-type]
+    )
+
+
+async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshResult:
+    request = _load_subprocess_refresh_request(payload)
+    runtime_paths = resolve_runtime_paths(
+        config_path=Path(request.config_path),
+        storage_path=Path(request.storage_root),
+        process_env=dict(os.environ),
+    )
+    config = Config.validate_with_runtime(request.config_data, runtime_paths)
+    execution_identity = _execution_identity_from_payload(request.execution_identity)
+    return await refresh_knowledge_binding(
+        request.base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        force_reindex=request.force_reindex,
+    )
+
+
+def _parse_refresh_runner_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run one internal MindRoom knowledge refresh request.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Internal CLI used by scheduled knowledge refresh subprocesses."""
+    _parse_refresh_runner_args(argv)
+    payload = sys.stdin.buffer.read()
+    try:
+        result = asyncio.run(_run_subprocess_refresh_request(payload))
+    except Exception:
+        logger.exception("Knowledge refresh subprocess failed")
+        return 1
+    logger.info(
+        "Knowledge refresh subprocess completed",
+        base_id=result.key.base_id,
+        indexed_count=result.indexed_count,
+        index_published=result.index_published,
+        availability=result.availability.value,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
