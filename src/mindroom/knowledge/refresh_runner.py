@@ -15,12 +15,12 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 if os.name != "nt":
     import fcntl
 else:
-    fcntl = None  # type: ignore[assignment]
+    fcntl = None
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
@@ -82,6 +82,10 @@ class _SubprocessRefreshRequest:
     storage_root: str
     execution_identity: dict[str, object] | None = None
     force_reindex: bool = False
+
+
+class _SubprocessSessionKwargs(TypedDict, total=False):
+    start_new_session: bool
 
 
 _refresh_locks_guard = Lock()
@@ -349,7 +353,7 @@ async def _acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[
             _close_refresh_file_lock_sync(handle)
 
 
-def _subprocess_session_kwargs() -> dict[str, object]:
+def _subprocess_session_kwargs() -> _SubprocessSessionKwargs:
     if os.name == "nt":
         return {}
     return {"start_new_session": True}

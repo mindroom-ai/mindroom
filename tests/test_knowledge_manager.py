@@ -4274,7 +4274,10 @@ async def test_refresh_status_is_visible_across_scheduler_instances(
         await release.wait()
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _blocked_refresh)
+    monkeypatch.setattr(
+        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        _blocked_refresh,
+    )
 
     matrix_scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await started.wait()
