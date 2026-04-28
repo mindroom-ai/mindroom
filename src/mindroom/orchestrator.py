@@ -1774,13 +1774,16 @@ async def _wait_for_runtime_completion(
     if api_task is not None:
         monitored_tasks.add(api_task)
     done, _pending = await asyncio.wait(monitored_tasks, return_when=asyncio.FIRST_COMPLETED)
+    await _raise_completed_runtime_task_errors(
+        done,
+        orchestrator_task=orchestrator_task,
+        shutdown_wait_task=shutdown_wait_task,
+        api_task=api_task,
+        shutdown_requested=shutdown_requested,
+        api_server=api_server,
+    )
 
     if api_task is not None and api_task in done:
-        await _await_api_task_completion(
-            api_task,
-            shutdown_requested=shutdown_requested,
-            api_server=api_server,
-        )
         return
     if shutdown_wait_task in done:
         logger.info("application_shutdown_requested")
@@ -1792,6 +1795,37 @@ async def _wait_for_runtime_completion(
             )
         return
     await orchestrator_task
+
+
+async def _raise_completed_runtime_task_errors(
+    done: set[asyncio.Task],
+    *,
+    orchestrator_task: asyncio.Task[None],
+    shutdown_wait_task: asyncio.Task[bool],
+    api_task: asyncio.Task[None] | None,
+    shutdown_requested: asyncio.Event,
+    api_server: _EmbeddedApiServerContext,
+) -> None:
+    """Drain completed runtime tasks and raise the first non-cancellation failure."""
+    failures: list[Exception] = []
+    for task in (orchestrator_task, api_task, shutdown_wait_task):
+        if task is None or task not in done:
+            continue
+        try:
+            if api_task is not None and task is api_task:
+                await _await_api_task_completion(
+                    api_task,
+                    shutdown_requested=shutdown_requested,
+                    api_server=api_server,
+                )
+                continue
+            await task
+        except asyncio.CancelledError:
+            continue
+        except Exception as exc:
+            failures.append(exc)
+    if failures:
+        raise failures[0]
 
 
 async def _await_api_task_completion(

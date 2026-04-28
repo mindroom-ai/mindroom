@@ -98,9 +98,11 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.orchestrator import (
     MultiAgentOrchestrator,
+    _EmbeddedApiServerContext,
     _run_api_server,
     _run_auxiliary_task_forever,
     _SignalAwareUvicornServer,
+    _wait_for_runtime_completion,
     main,
 )
 from mindroom.response_lifecycle import response_outcome_label
@@ -1266,6 +1268,36 @@ class TestAgentBot:
             )
 
         mock_error.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_runtime_completion_raises_done_orchestrator_failure_before_clean_shutdown_return(self) -> None:
+        """Simultaneous shutdown/API completion must not hide orchestrator failures."""
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+
+        async def _failed_orchestrator() -> None:
+            msg = "orchestrator failed during shutdown"
+            raise RuntimeError(msg)
+
+        async def _api_done() -> None:
+            return None
+
+        orchestrator_task = asyncio.create_task(_failed_orchestrator(), name="orchestrator")
+        shutdown_wait_task = asyncio.create_task(shutdown_requested.wait(), name="application_shutdown_wait")
+        api_task = asyncio.create_task(_api_done(), name="api_server")
+        await asyncio.sleep(0)
+
+        try:
+            with pytest.raises(RuntimeError, match="orchestrator failed during shutdown"):
+                await _wait_for_runtime_completion(
+                    orchestrator_task=orchestrator_task,
+                    shutdown_wait_task=shutdown_wait_task,
+                    api_task=api_task,
+                    shutdown_requested=shutdown_requested,
+                    api_server=_EmbeddedApiServerContext(host="127.0.0.1", port=0),
+                )
+        finally:
+            await asyncio.gather(orchestrator_task, shutdown_wait_task, api_task, return_exceptions=True)
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_stops_when_api_server_requests_shutdown(self, tmp_path: Path) -> None:
