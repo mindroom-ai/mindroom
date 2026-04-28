@@ -25,14 +25,14 @@ from mindroom.matrix.client_room_admin import (
 from mindroom.matrix.client_session import (
     matrix_client,
 )
-from mindroom.matrix.identity import (
-    MatrixID,
+from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.state import MatrixRoom, MatrixState
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
+from mindroom.matrix_naming import (
     extract_server_name_from_homeserver,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
-from mindroom.matrix.state import MatrixRoom, MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
 if TYPE_CHECKING:

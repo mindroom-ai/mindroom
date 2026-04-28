@@ -15,11 +15,12 @@ import nio
 from mindroom.entity_resolution import configured_bot_usernames_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
-from mindroom.matrix.identity import MatrixID, agent_username_localpart
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms, should_persist_invited_rooms
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.state import MatrixState, managed_account_usernames
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
+from mindroom.matrix_naming import agent_username_localpart
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

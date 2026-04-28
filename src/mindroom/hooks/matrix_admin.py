@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.matrix.client_room_admin import add_room_to_space, create_room, get_room_members, invite_to_room
-from mindroom.matrix.identity import extract_server_name_from_homeserver
+from mindroom.matrix_naming import extract_server_name_from_homeserver
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths

@@ -17,8 +17,9 @@ from mindroom.matrix.client_session import (
     matrix_startup_error,
     restore_login,
 )
-from mindroom.matrix.identity import MatrixID, agent_username_localpart, extract_server_name_from_homeserver
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix_naming import agent_username_localpart, extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
 

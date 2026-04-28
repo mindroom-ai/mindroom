@@ -15,11 +15,11 @@ from mindroom.config.models import ModelConfig
 from mindroom.matrix.identity import (
     MatrixID,
     _ThreadStateKey,
-    agent_username_localpart,
     extract_agent_name,
     is_agent_id,
 )
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix_naming import agent_username_localpart
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:

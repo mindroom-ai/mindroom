@@ -15,8 +15,8 @@ from pydantic import ValidationError
 import mindroom.constants as constants_mod
 from mindroom.config.main import Config, load_config
 from mindroom.handled_turns import HandledTurnLedger
-from mindroom.matrix.identity import managed_space_alias_localpart
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix_naming import managed_space_alias_localpart
 
 _RUNTIME_GLOBAL_NAMES = {
     "MATRIX_HOMESERVER",
@@ -984,7 +984,7 @@ class TestRuntimeContextConsumers:
 
     def test_imported_modules_follow_runtime_context_changes_without_reload(self, tmp_path: Path) -> None:
         """Explicit runtime-aware helpers should use the passed runtime context without reloads."""
-        identity_mod = importlib.import_module("mindroom.matrix.identity")
+        naming_mod = importlib.import_module("mindroom.matrix_naming")
         first_dir = tmp_path / "first"
         second_dir = tmp_path / "second"
         first_dir.mkdir(parents=True)
@@ -1004,11 +1004,11 @@ class TestRuntimeContextConsumers:
 
         first_runtime_paths = constants_mod.resolve_primary_runtime_paths(config_path=first_config)
         assert (
-            identity_mod.agent_username_localpart("general", runtime_paths=first_runtime_paths)
+            naming_mod.agent_username_localpart("general", runtime_paths=first_runtime_paths)
             == "mindroom_general_alpha1234"
         )
         assert (
-            identity_mod.extract_server_name_from_homeserver(
+            naming_mod.extract_server_name_from_homeserver(
                 "http://localhost:8008",
                 runtime_paths=first_runtime_paths,
             )
@@ -1017,11 +1017,11 @@ class TestRuntimeContextConsumers:
 
         second_runtime_paths = constants_mod.resolve_primary_runtime_paths(config_path=second_config)
         assert (
-            identity_mod.agent_username_localpart("general", runtime_paths=second_runtime_paths)
+            naming_mod.agent_username_localpart("general", runtime_paths=second_runtime_paths)
             == "mindroom_general_beta1234"
         )
         assert (
-            identity_mod.extract_server_name_from_homeserver(
+            naming_mod.extract_server_name_from_homeserver(
                 "http://localhost:8008",
                 runtime_paths=second_runtime_paths,
             )

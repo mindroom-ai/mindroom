@@ -31,7 +31,7 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
-from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -50,6 +50,7 @@ from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
     create_agent_user,
 )
+from mindroom.matrix_naming import extract_server_name_from_homeserver
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
