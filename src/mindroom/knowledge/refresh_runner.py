@@ -10,6 +10,7 @@ import json
 import os
 import signal
 import sys
+import tempfile
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -84,6 +85,7 @@ _refresh_locks_guard = Lock()
 _active_refresh_counts: dict[KnowledgeRefreshTarget, int] = {}
 _active_refresh_counts_guard = Lock()
 _MAX_REFRESH_LOCKS = 512
+_REFRESH_FILE_LOCK_POLL_SECONDS = 0.1
 
 
 @dataclass
@@ -201,6 +203,14 @@ async def refresh_knowledge_binding_in_subprocess(
     control-plane event loop and its shared thread pool while preserving the
     last-good published index semantics.
     """
+    key = resolve_published_index_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+    initial_state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
     request_payload = _serialize_subprocess_refresh_request(
         base_id,
         config=config,
@@ -224,7 +234,20 @@ async def refresh_knowledge_binding_in_subprocess(
             await _send_subprocess_refresh_request(process, request_payload)
         return_code = await process.wait()
     except asyncio.CancelledError:
-        await _terminate_refresh_subprocess(process)
+        cleanup_task = asyncio.create_task(
+            _cleanup_cancelled_refresh_subprocess(
+                process,
+                key,
+                initial_state=initial_state,
+                config=config,
+                runtime_paths=runtime_paths,
+            ),
+        )
+        while not cleanup_task.done():
+            with suppress(asyncio.CancelledError):
+                await asyncio.shield(cleanup_task)
+        with suppress(Exception):
+            cleanup_task.result()
         raise
 
     if return_code != 0:
@@ -267,22 +290,33 @@ async def _send_subprocess_refresh_request(
 
 def _refresh_file_lock_path(key: KnowledgeSourceRoot) -> Path:
     digest = hashlib.sha256(f"{key.storage_root}\0{key.knowledge_path}".encode()).hexdigest()
-    return Path(key.storage_root) / "knowledge_db" / "refresh_locks" / f"{digest}.lock"
+    return Path(tempfile.gettempdir()) / "mindroom" / "knowledge_refresh_locks" / f"{digest}.lock"
 
 
-def _acquire_refresh_file_lock_sync(key: KnowledgeSourceRoot) -> tuple[Any, Any] | None:
+def _open_refresh_file_lock_sync(key: KnowledgeSourceRoot) -> tuple[Any, Any] | None:
     if os.name == "nt":
         return None
     fcntl = importlib.import_module("fcntl")
     lock_path = _refresh_file_lock_path(key)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = lock_path.open("a", encoding="utf-8")
+    return fcntl, lock_path.open("a", encoding="utf-8")
+
+
+def _try_acquire_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> bool:
+    if handle is None:
+        return True
+    fcntl, lock_file = handle
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-    except Exception:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _close_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> None:
+    if handle is not None:
+        _fcntl, lock_file = handle
         lock_file.close()
-        raise
-    return fcntl, lock_file
 
 
 def _release_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> None:
@@ -298,11 +332,18 @@ def _release_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> None:
 @asynccontextmanager
 async def _acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
     """Serialize source-root refresh and mutation work across processes."""
-    handle = await asyncio.to_thread(_acquire_refresh_file_lock_sync, key)
+    handle = _open_refresh_file_lock_sync(key)
+    acquired = False
     try:
+        while not _try_acquire_refresh_file_lock_sync(handle):  # noqa: ASYNC110
+            await asyncio.sleep(_REFRESH_FILE_LOCK_POLL_SECONDS)
+        acquired = True
         yield
     finally:
-        await asyncio.to_thread(_release_refresh_file_lock_sync, handle)
+        if acquired:
+            _release_refresh_file_lock_sync(handle)
+        else:
+            _close_refresh_file_lock_sync(handle)
 
 
 def _subprocess_session_kwargs() -> dict[str, object]:
@@ -328,6 +369,28 @@ async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> 
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
         await process.wait()
+
+
+async def _cleanup_cancelled_refresh_subprocess(
+    process: asyncio.subprocess.Process,
+    key: PublishedIndexKey,
+    *,
+    initial_state: PublishedIndexState | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> None:
+    try:
+        await _terminate_refresh_subprocess(process)
+        source_root = source_root_for_published_index_key(key)
+        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+            await _reconcile_cancelled_refresh(
+                key,
+                initial_state=initial_state,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+    except Exception:
+        logger.warning("Failed to reconcile cancelled knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
 
 
 @asynccontextmanager
@@ -687,9 +750,10 @@ async def _reconcile_cancelled_refresh(
 ) -> None:
     state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
     state_advanced = _published_state_fingerprint(state) != _published_state_fingerprint(initial_state)
+    if not state_advanced:
+        return
     if (
-        state_advanced
-        and state is not None
+        state is not None
         and state.status == "complete"
         and published_index_settings_compatible(state.settings, key.indexing_settings)
         and published_index_availability_for_state(key=key, state=state) is KnowledgeAvailability.READY

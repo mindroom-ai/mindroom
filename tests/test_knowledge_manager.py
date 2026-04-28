@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from threading import Event, Lock, get_ident
 from typing import TYPE_CHECKING, ClassVar
@@ -2540,6 +2541,53 @@ async def test_mutation_lock_uses_cross_process_source_lock(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_cross_process_file_lock_waiter_closes_unacquired_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled file-lock waiter must not leak a handle that can later acquire the lock."""
+    source_root = knowledge_registry.KnowledgeSourceRoot(storage_root="/storage", knowledge_path="/storage/docs")
+    handle = object()
+    opened = asyncio.Event()
+    closed: list[object] = []
+    released: list[object] = []
+
+    def _open(_source_root: knowledge_registry.KnowledgeSourceRoot) -> object:
+        opened.set()
+        return handle
+
+    def _try_acquire(_handle: object) -> bool:
+        assert _handle is handle
+        return False
+
+    def _close(_handle: object) -> None:
+        closed.append(_handle)
+
+    def _release(_handle: object) -> None:
+        released.append(_handle)
+
+    async def _wait_for_file_lock() -> None:
+        async with knowledge_refresh_runner._acquire_refresh_file_lock(source_root):
+            pytest.fail("lock waiter unexpectedly acquired the file lock")
+
+    monkeypatch.setattr(knowledge_refresh_runner, "_REFRESH_FILE_LOCK_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(knowledge_refresh_runner, "_open_refresh_file_lock_sync", _open)
+    monkeypatch.setattr(knowledge_refresh_runner, "_try_acquire_refresh_file_lock_sync", _try_acquire)
+    monkeypatch.setattr(knowledge_refresh_runner, "_close_refresh_file_lock_sync", _close)
+    monkeypatch.setattr(knowledge_refresh_runner, "_release_refresh_file_lock_sync", _release)
+
+    waiter = asyncio.create_task(_wait_for_file_lock())
+    await opened.wait()
+    await asyncio.sleep(0)
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert closed == [handle]
+    assert released == []
+
+
+@pytest.mark.asyncio
 async def test_refresh_generations_keep_latest_index_without_protecting_old_handles(tmp_path: Path) -> None:
     """Old read handles are best effort; refresh cleanup only guarantees the next active index."""
     docs_path = tmp_path / "docs"
@@ -2563,6 +2611,44 @@ async def test_refresh_generations_keep_latest_index_without_protecting_old_hand
     assert latest.index is not None
     assert [document.content for document in latest.index.knowledge.search("generation", max_results=5)] == [
         "generation 6",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_published_index_reopens_when_persisted_collection_changes(tmp_path: Path) -> None:
+    """A child-process publish must invalidate stale parent process read handles."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("parent cached", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    cached_lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert cached_lookup.index is not None
+    assert cached_lookup.state is not None
+    cached_index = cached_lookup.index
+
+    child_collection = "external_child_collection"
+    with _VectorDb.lock:
+        _VectorDb.collections[child_collection] = [
+            {"content": "child published", "metadata": {"path": "doc.md"}},
+        ]
+    child_state = replace(
+        cached_lookup.state,
+        collection=child_collection,
+        last_published_at="2026-04-27T00:00:00+00:00",
+        source_signature="child-source-signature",
+    )
+    knowledge_registry.save_published_index_state(published_index_metadata_path(cached_lookup.key), child_state)
+
+    refreshed_lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+
+    assert refreshed_lookup.index is not None
+    assert refreshed_lookup.index is not cached_index
+    assert refreshed_lookup.index.state == child_state
+    assert [document.content for document in refreshed_lookup.index.knowledge.search("child", max_results=5)] == [
+        "child published",
     ]
 
 
@@ -3913,6 +3999,77 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert "runtime_paths" not in captured_request
     assert captured_request["config_data"]["knowledge_bases"]["docs"]["chunk_size"] == 1234
     assert captured_request["execution_identity"]["requester_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_subprocess_refresh_reconciles_running_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parent cancellation should not leave child-written metadata stuck as refreshing."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    wait_entered = asyncio.Event()
+    release_wait = asyncio.Event()
+    terminated = asyncio.Event()
+
+    class _Stdin:
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _Stdin()
+
+        async def wait(self) -> int:
+            knowledge_registry.mark_published_index_refresh_running(key)
+            wait_entered.set()
+            await release_wait.wait()
+            return self.returncode or 0
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        return _Process()
+
+    async def _fake_terminate(process: _Process) -> None:
+        process.returncode = -15
+        release_wait.set()
+        terminated.set()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+
+    refresh_task = asyncio.create_task(
+        knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        ),
+    )
+    await wait_entered.wait()
+
+    refresh_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_task
+
+    assert terminated.is_set()
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.refresh_job == "idle"
+    assert state.reason == "refresh_cancelled"
 
 
 @pytest.mark.asyncio

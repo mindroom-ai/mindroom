@@ -617,6 +617,22 @@ def _cached_index_still_queryable(index: PublishedIndexHandle) -> bool:
     return vector_db is not None and vector_db.exists()
 
 
+def _cached_index_matches_persisted_state(
+    index: PublishedIndexHandle,
+    state: PublishedIndexState,
+) -> bool:
+    """Return whether a process-local handle still points at persisted metadata."""
+    return (
+        index.state.settings == state.settings
+        and index.state.status == state.status
+        and index.state.collection == state.collection
+        and index.state.last_published_at == state.last_published_at
+        and index.state.published_revision == state.published_revision
+        and index.state.indexed_count == state.indexed_count
+        and index.state.source_signature == state.source_signature
+    )
+
+
 def _load_queryable_index_from_state(
     key: PublishedIndexKey,
     state: PublishedIndexState,
@@ -652,7 +668,14 @@ def get_published_index(
 
     index = _published_indexes.get(key)
     if index is not None:
-        if _cached_index_still_queryable(index):
+        if (
+            state is not None
+            and _cached_index_matches_persisted_state(index, state)
+            and _cached_index_still_queryable(index)
+        ):
+            if index.state != state:
+                index = replace(index, state=state)
+                _published_indexes[key] = index
             return PublishedIndexResolution(
                 key=key,
                 index=index,
