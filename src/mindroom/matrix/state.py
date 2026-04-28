@@ -45,12 +45,14 @@ class MatrixState(BaseModel):
 
     @classmethod
     def load(cls, runtime_paths: constants.RuntimePaths) -> "MatrixState":
-        """Load state from file."""
-        state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
-        return _load_matrix_state_file(
-            state_file,
-            current_domain=_current_runtime_domain(runtime_paths),
-        )
+        """Load state from file.
+
+        Reads come from a process-wide cache keyed by the state file's
+        ``(path, st_mtime_ns, st_size)`` so repeated calls against an unchanged
+        file skip the YAML parse. A deep copy is returned so callers may safely
+        mutate the result before ``save`` without polluting the cache.
+        """
+        return matrix_state_for_runtime(runtime_paths).model_copy(deep=True)
 
     def save(self, runtime_paths: constants.RuntimePaths) -> None:
         """Save state to file."""
@@ -105,10 +107,10 @@ class MatrixState(BaseModel):
 def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixState:
     """Return persisted Matrix state for one runtime, cached by file mtime/size.
 
-    Mutating callers must continue to use ``MatrixState.load`` so they receive a
-    fresh, isolated copy that can be safely modified before ``save``. Read-only
-    hot paths should prefer this helper to avoid re-parsing the YAML on every
-    call.
+    The returned object is shared across callers; **read-only callers** should
+    prefer this helper for the lowest overhead. Callers that intend to mutate
+    the result must use :py:meth:`MatrixState.load`, which returns a deep copy
+    backed by the same cache.
     """
     state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
     return _load_matrix_state_file_cached(

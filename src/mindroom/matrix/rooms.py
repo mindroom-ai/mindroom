@@ -543,7 +543,7 @@ async def ensure_user_in_rooms(
         runtime_paths: Explicit runtime context for server-name resolution.
 
     """
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
     user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
     if not user_account:
         logger.warning("No user account found, skipping user room membership")

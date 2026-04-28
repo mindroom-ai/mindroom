@@ -80,6 +80,20 @@ def test_get_room_aliases_uses_cached_state(tmp_path: Path) -> None:
     assert info.hits >= 1
 
 
+def test_matrix_state_load_returns_isolated_deep_copy(tmp_path: Path) -> None:
+    """``MatrixState.load`` must return a fresh copy that mutators cannot leak through the cache."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
+    _load_matrix_state_file_cached.cache_clear()
+
+    mutated = MatrixState.load(runtime_paths=runtime_paths)
+    mutated.add_room("scratch", room_id="!scratch:localhost", alias="#scratch:localhost", name="scratch")
+
+    cached = matrix_state_for_runtime(runtime_paths)
+    assert cached.get_room("scratch") is None
+    assert mutated is not cached
+
+
 def test_resolve_room_aliases_does_not_reparse_yaml(
     tmp_path: Path,
     monkeypatch,  # noqa: ANN001
