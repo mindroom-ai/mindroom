@@ -104,6 +104,10 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
             errors=(RuntimeError("cache failed"),),
             runtime_available=False,
             task_count=3,
+            runtime_diagnostics={
+                "cache_backend": "postgres",
+                "cache_postgres_unavailable_reason": "connection closed",
+            },
         ),
     )
 
@@ -114,6 +118,8 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
         "cache_error_count": 1,
         "cache_runtime_available": False,
         "cache_task_count": 3,
+        "cache_backend": "postgres",
+        "cache_postgres_unavailable_reason": "connection closed",
         "cache_limited_room_ids": ("!room:localhost",),
         "cache_error_types": ("RuntimeError",),
         "cache_error_messages": ("cache failed",),

@@ -424,8 +424,10 @@ async def mark_thread_stale_locked(
     room_id: str,
     thread_id: str,
     reason: str,
+    invalidated_at: float | None = None,
 ) -> None:
     """Persist a durable invalidate-and-refetch marker within an active transaction."""
+    stale_at = time.time() if invalidated_at is None else invalidated_at
     await db.execute(
         """
         INSERT INTO mindroom_event_cache_thread_state(
@@ -438,10 +440,20 @@ async def mark_thread_stale_locked(
         )
         VALUES (%s, %s, %s, NULL, %s, %s)
         ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
-            invalidated_at = excluded.invalidated_at,
-            invalidation_reason = excluded.invalidation_reason
+            invalidated_at = CASE
+                WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
+                    OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
+                    THEN excluded.invalidated_at
+                ELSE mindroom_event_cache_thread_state.invalidated_at
+            END,
+            invalidation_reason = CASE
+                WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
+                    OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
+                    THEN excluded.invalidation_reason
+                ELSE mindroom_event_cache_thread_state.invalidation_reason
+            END
         """,
-        (namespace, room_id, thread_id, time.time(), reason),
+        (namespace, room_id, thread_id, stale_at, reason),
     )
 
 
@@ -487,17 +499,29 @@ async def mark_room_stale_locked(
     namespace: str,
     room_id: str,
     reason: str,
+    invalidated_at: float | None = None,
 ) -> None:
     """Persist one durable room-scoped invalidate-and-refetch marker."""
+    stale_at = time.time() if invalidated_at is None else invalidated_at
     await db.execute(
         """
         INSERT INTO mindroom_event_cache_room_state(namespace, room_id, invalidated_at, invalidation_reason)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT(namespace, room_id) DO UPDATE SET
-            invalidated_at = excluded.invalidated_at,
-            invalidation_reason = excluded.invalidation_reason
+            invalidated_at = CASE
+                WHEN mindroom_event_cache_room_state.invalidated_at IS NULL
+                    OR excluded.invalidated_at >= mindroom_event_cache_room_state.invalidated_at
+                    THEN excluded.invalidated_at
+                ELSE mindroom_event_cache_room_state.invalidated_at
+            END,
+            invalidation_reason = CASE
+                WHEN mindroom_event_cache_room_state.invalidated_at IS NULL
+                    OR excluded.invalidated_at >= mindroom_event_cache_room_state.invalidated_at
+                    THEN excluded.invalidation_reason
+                ELSE mindroom_event_cache_room_state.invalidation_reason
+            END
         """,
-        (namespace, room_id, time.time(), reason),
+        (namespace, room_id, stale_at, reason),
     )
 
 

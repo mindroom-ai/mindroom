@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths
+from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_redaction import redact_postgres_connection_info
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
@@ -144,6 +145,36 @@ def build_owned_runtime_support(
     )
 
 
+async def initialize_event_cache_best_effort(
+    support: OwnedRuntimeSupport,
+    *,
+    logger: structlog.stdlib.BoundLogger,
+    init_failure_reason_prefix: str,
+) -> None:
+    """Initialize event-cache storage without permanently disabling on transient outages."""
+    if support.event_cache.is_initialized:
+        return
+    try:
+        await support.event_cache.initialize()
+    except EventCacheBackendUnavailableError as exc:
+        logger.warning(
+            "Event cache backend temporarily unavailable during init; will retry on demand",
+            backend=support.event_cache_identity.backend,
+            location=support.event_cache_identity.redacted_location,
+            namespace=support.event_cache_identity.namespace,
+            error=str(exc),
+        )
+    except Exception as exc:
+        support.event_cache.disable(f"{init_failure_reason_prefix}:{exc}")
+        logger.warning(
+            "Event cache init failed; continuing without advisory cache",
+            backend=support.event_cache_identity.backend,
+            location=support.event_cache_identity.redacted_location,
+            namespace=support.event_cache_identity.namespace,
+            error=str(exc),
+        )
+
+
 async def sync_owned_runtime_support(
     support: OwnedRuntimeSupport | None,
     *,
@@ -199,20 +230,11 @@ async def sync_owned_runtime_support(
                 configured_namespace=target_identity.namespace,
             )
 
-    if support.event_cache.is_initialized:
-        return support
-
-    try:
-        await support.event_cache.initialize()
-    except Exception as exc:
-        support.event_cache.disable(f"{init_failure_reason_prefix}:{exc}")
-        logger.warning(
-            "Event cache init failed; continuing without advisory cache",
-            backend=support.event_cache_identity.backend,
-            location=support.event_cache_identity.redacted_location,
-            namespace=support.event_cache_identity.namespace,
-            error=str(exc),
-        )
+    await initialize_event_cache_best_effort(
+        support,
+        logger=logger,
+        init_failure_reason_prefix=init_failure_reason_prefix,
+    )
     return support
 
 

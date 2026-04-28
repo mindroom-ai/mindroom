@@ -19,6 +19,7 @@ from mindroom.matrix.cache import (
     event_normalization,
     sqlite_event_cache_events,
     sqlite_event_cache_threads,
+    thread_cache_rejection_reason,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client_thread_history import fetch_thread_history
@@ -198,17 +199,18 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
             ],
             validated_at=100.0,
         )
-        await sqlite_event_cache_threads.mark_thread_stale_locked(
-            db,
-            room_id="!room:localhost",
-            thread_id="$thread_root",
-            reason="thread_stale",
-        )
-        await sqlite_event_cache_threads.mark_room_stale_locked(
-            db,
-            room_id="!room:localhost",
-            reason="room_stale",
-        )
+        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
+            await sqlite_event_cache_threads.mark_thread_stale_locked(
+                db,
+                room_id="!room:localhost",
+                thread_id="$thread_root",
+                reason="thread_stale",
+            )
+            await sqlite_event_cache_threads.mark_room_stale_locked(
+                db,
+                room_id="!room:localhost",
+                reason="room_stale",
+            )
         await db.commit()
 
         state = await sqlite_event_cache_threads.load_thread_cache_state(
@@ -221,8 +223,58 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
 
     assert state is not None
     assert state.validated_at == 100.0
+    assert state.invalidated_at == 200.0
     assert state.invalidation_reason == "thread_stale"
+    assert state.room_invalidated_at == 200.0
     assert state.room_invalidation_reason == "room_stale"
+    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
+    """Older stale markers should not downgrade newer thread or room invalidations."""
+    db = await event_cache_module.initialize_event_cache_db(tmp_path / "event_cache.db")
+
+    try:
+        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
+            await sqlite_event_cache_threads.mark_thread_stale_locked(
+                db,
+                room_id="!room:localhost",
+                thread_id="$thread_root",
+                reason="newer_thread_marker",
+            )
+            await sqlite_event_cache_threads.mark_room_stale_locked(
+                db,
+                room_id="!room:localhost",
+                reason="newer_room_marker",
+            )
+        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=100.0):
+            await sqlite_event_cache_threads.mark_thread_stale_locked(
+                db,
+                room_id="!room:localhost",
+                thread_id="$thread_root",
+                reason="older_thread_marker",
+            )
+            await sqlite_event_cache_threads.mark_room_stale_locked(
+                db,
+                room_id="!room:localhost",
+                reason="older_room_marker",
+            )
+        await db.commit()
+
+        state = await sqlite_event_cache_threads.load_thread_cache_state(
+            db,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+        )
+    finally:
+        await db.close()
+
+    assert state is not None
+    assert state.invalidated_at == 200.0
+    assert state.invalidation_reason == "newer_thread_marker"
+    assert state.room_invalidated_at == 200.0
+    assert state.room_invalidation_reason == "newer_room_marker"
 
 
 @pytest.mark.asyncio

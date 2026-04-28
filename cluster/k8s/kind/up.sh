@@ -4,8 +4,8 @@ set -euo pipefail
 # Create a local kind cluster for MindRoom with ingress
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLUSTER_NAME="mindroom"
-KIND_CONFIG="${SCRIPT_DIR}/kind-config.yaml"
+CLUSTER_NAME="${CLUSTER_NAME:-mindroom}"
+KIND_CONFIG="${KIND_CONFIG:-${SCRIPT_DIR}/kind-config.yaml}"
 
 echo "[kind] Bringing up cluster '${CLUSTER_NAME}'..."
 
@@ -34,9 +34,8 @@ echo "[kind] Installing ingress-nginx for kind..."
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
 
 echo "[kind] Waiting for ingress controller to be ready..."
-kubectl wait --namespace ingress-nginx \
-  --for=condition=ready pod \
-  --selector=app.kubernetes.io/component=controller \
+kubectl rollout status deployment/ingress-nginx-controller \
+  --namespace ingress-nginx \
   --timeout=180s
 
 echo "[kind] Cluster '${CLUSTER_NAME}' is ready."

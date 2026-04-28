@@ -35,7 +35,7 @@ from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, STREA
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix import thread_bookkeeping
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
-from mindroom.matrix.cache.event_cache import ThreadCacheState
+from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError, ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
@@ -1487,6 +1487,47 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.invalidate_room_threads.assert_awaited_once_with("!room:localhost")
 
     @pytest.mark.asyncio
+    async def test_invalidate_known_thread_keeps_cache_enabled_when_backend_is_temporarily_unavailable(self) -> None:
+        """Transient backend loss should not permanently disable a cache that tracks pending markers."""
+        event_cache = _runtime_event_cache()
+        backend_error = EventCacheBackendUnavailableError("postgres unavailable")
+        event_cache.mark_thread_stale = AsyncMock(side_effect=backend_error)
+        event_cache.invalidate_thread = AsyncMock(side_effect=backend_error)
+        event_cache.disable = Mock()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+
+        await access._write_cache_ops.invalidate_known_thread(
+            "!room:localhost",
+            "$thread:localhost",
+            reason="test_failure",
+        )
+
+        event_cache.disable.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalidate_room_threads_keeps_cache_enabled_when_backend_is_temporarily_unavailable(self) -> None:
+        """Transient backend loss should not turn a reconnectable Postgres cache into a permanent miss."""
+        event_cache = _runtime_event_cache()
+        backend_error = EventCacheBackendUnavailableError("postgres unavailable")
+        event_cache.mark_room_threads_stale = AsyncMock(side_effect=backend_error)
+        event_cache.invalidate_room_threads = AsyncMock(side_effect=backend_error)
+        event_cache.disable = Mock()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+
+        await access._write_cache_ops.invalidate_room_threads(
+            "!room:localhost",
+            reason="test_failure",
+        )
+
+        event_cache.disable.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_lookup_miss_invalidation_survives_restart_and_refetches_next_read(self, tmp_path: Path) -> None:
         """Lookup-miss mutations should leave a durable marker that the next runtime observes."""
         event_cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -2068,6 +2109,115 @@ class TestThreadingBehavior:
         assert token_record is not None
         assert token_record.token == "s_after_empty"  # noqa: S105
         assert token_record.checkpoint == SyncCheckpoint("s_after_empty")
+
+    @pytest.mark.asyncio
+    async def test_empty_sync_flushes_pending_cache_writes_before_certifying(self, bot: AgentBot) -> None:
+        """Sync-token certification should include pending runtime-only cache writes."""
+        pending_room_ids = {"!pending:localhost"}
+        event_cache = _runtime_event_cache()
+        event_cache.pending_durable_write_room_ids.side_effect = lambda: tuple(sorted(pending_room_ids))
+
+        async def flush_pending_durable_writes(room_id: str) -> None:
+            pending_room_ids.discard(room_id)
+
+        event_cache.flush_pending_durable_writes.side_effect = flush_pending_durable_writes
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(self._sync_response({}))
+
+        assert result.complete is True
+        assert result.task_count == 1
+        event_cache.flush_pending_durable_writes.assert_awaited_once_with("!pending:localhost")
+
+    @pytest.mark.asyncio
+    async def test_empty_sync_does_not_certify_while_pending_cache_writes_remain(self, bot: AgentBot) -> None:
+        """A sync token is not cache-certified while runtime-only writes remain in memory."""
+        event_cache = _runtime_event_cache()
+        event_cache.pending_durable_write_room_ids.return_value = ("!pending:localhost",)
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(self._sync_response({}))
+
+        assert result.complete is False
+        assert result.task_count == 1
+        event_cache.flush_pending_durable_writes.assert_awaited_once_with("!pending:localhost")
+
+    @pytest.mark.asyncio
+    async def test_sync_write_failure_marks_room_stale_before_certification_retry(self, bot: AgentBot) -> None:
+        """A failed sync timeline write must protect cached room threads before a later token can certify."""
+        room_id = "!room:localhost"
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock(side_effect=RuntimeError("postgres write failed"))
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        message_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Fresh message", "msgtype": "m.text"},
+                "event_id": "$message:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+            self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))}),
+        )
+
+        assert result.complete is False
+        assert [type(error) for error in result.errors] == [RuntimeError]
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            room_id,
+            reason="sync_timeline_write_failed",
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_write_transient_failure_records_pending_room_stale_marker(self, bot: AgentBot) -> None:
+        """Transient sync write loss should block later certification until the room marker is flushed."""
+        room_id = "!room:localhost"
+        backend_error = EventCacheBackendUnavailableError("postgres unavailable")
+        pending_room_ids: set[str] = set()
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock(side_effect=backend_error)
+        event_cache.pending_durable_write_room_ids.side_effect = lambda: tuple(sorted(pending_room_ids))
+
+        async def mark_room_threads_stale(room_id_arg: str, *, reason: str) -> None:
+            assert reason == "sync_timeline_write_failed"
+            pending_room_ids.add(room_id_arg)
+            raise backend_error
+
+        event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
+        event_cache.invalidate_room_threads = AsyncMock(side_effect=backend_error)
+        event_cache.disable = Mock()
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        message_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Fresh message", "msgtype": "m.text"},
+                "event_id": "$message:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+            self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))}),
+        )
+
+        assert result.complete is False
+        assert result.errors == (backend_error,)
+        assert result.runtime_diagnostics == {"cache_backend": "mock"}
+        assert event_cache.pending_durable_write_room_ids() == (room_id,)
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            room_id,
+            reason="sync_timeline_write_failed",
+        )
+        event_cache.disable.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sync_error_keeps_watchdog_clock_on_latest_activity(self, bot: AgentBot) -> None:

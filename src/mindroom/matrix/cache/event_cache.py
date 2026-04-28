@@ -20,6 +20,10 @@ class ThreadCacheState:
     room_invalidation_reason: str | None
 
 
+class EventCacheBackendUnavailableError(RuntimeError):
+    """Raised when cache storage is temporarily unreachable but not logically corrupt."""
+
+
 class ConversationEventCache(Protocol):
     """Storage-agnostic cache API for Matrix event and thread lookups."""
 
@@ -129,3 +133,12 @@ class ConversationEventCache(Protocol):
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
+
+    def runtime_diagnostics(self) -> dict[str, object]:
+        """Return log-safe runtime state for sync certification diagnostics."""
+
+    def pending_durable_write_room_ids(self) -> tuple[str, ...]:
+        """Return rooms with runtime-only writes that must persist before certifying a sync token."""
+
+    async def flush_pending_durable_writes(self, room_id: str) -> None:
+        """Persist runtime-only writes for one room before certifying a sync token."""
