@@ -12,7 +12,6 @@ from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
 
-from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import (
     ai_response,
@@ -32,11 +31,8 @@ from mindroom.history import run_post_response_compaction_check
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import (
-    EVENT_SESSION_STARTED,
     EnrichmentItem,
     MessageEnvelope,
-    SessionHookContext,
-    emit,
 )
 from mindroom.knowledge import (
     KnowledgeAccessSupport,
@@ -71,7 +67,6 @@ from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
-    resolve_tool_runtime_hook_bindings,
     runtime_context_from_dispatch_context,
 )
 from mindroom.tool_system.worker_routing import (
@@ -89,7 +84,7 @@ from .delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
-from .response_lifecycle import ResponseLifecycle, ResponseLifecycleCoordinator
+from .response_lifecycle import ResponseLifecycle, ResponseLifecycleCoordinator, ResponseLifecycleDeps
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -111,10 +106,7 @@ if TYPE_CHECKING:
     from mindroom.stop import StopManager
     from mindroom.streaming_delivery import StreamInputChunk
     from mindroom.tool_system.events import ToolTraceEntry
-    from mindroom.tool_system.runtime_context import (
-        ToolRuntimeContext,
-        ToolRuntimeSupport,
-    )
+    from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 type MatrixEventId = str
@@ -416,22 +408,6 @@ class ResponseRunner:
             error_type=error.__class__.__name__,
         )
 
-    def _log_post_response_effects_failure(
-        self,
-        *,
-        response_kind: str,
-        response_event_id: str,
-        error: BaseException,
-    ) -> None:
-        """Log one non-fatal post-response failure after visible delivery succeeded."""
-        self.deps.logger.error(
-            "Post-response effects failed after visible delivery",
-            response_kind=response_kind,
-            response_event_id=response_event_id,
-            failure_reason=str(error),
-            error_type=error.__class__.__name__,
-        )
-
     def _log_cancelled_response(
         self,
         *,
@@ -666,126 +642,6 @@ class ResponseRunner:
 
         return persist_response_event_id
 
-    def _session_exists(
-        self,
-        *,
-        storage: BaseDb,
-        session_id: str,
-        session_type: SessionType,
-    ) -> bool:
-        if session_type is SessionType.TEAM:
-            return get_team_session(storage, session_id) is not None
-        return get_agent_session(storage, session_id) is not None
-
-    def _should_watch_session_started(
-        self,
-        *,
-        tool_context: ToolRuntimeContext | None,
-        session_id: str,
-        session_type: SessionType,
-        create_storage: Callable[[], BaseDb],
-    ) -> bool:
-        if tool_context is None or not tool_context.hook_registry.has_hooks(EVENT_SESSION_STARTED):
-            return False
-        try:
-            storage = create_storage()
-            try:
-                return not self._session_exists(
-                    storage=storage,
-                    session_id=session_id,
-                    session_type=session_type,
-                )
-            finally:
-                storage.close()
-        except Exception as error:
-            self.deps.logger.exception(
-                "Failed to probe session storage for session:started eligibility",
-                session_id=session_id,
-                session_type=str(session_type),
-                failure_reason=str(error),
-            )
-            return False
-
-    async def _maybe_emit_session_started(
-        self,
-        *,
-        tool_context: ToolRuntimeContext | None,
-        should_watch_session_started: bool,
-        scope: HistoryScope,
-        session_id: str,
-        room_id: str,
-        thread_id: str | None,
-        session_type: SessionType,
-        correlation_id: str,
-        create_storage: Callable[[], BaseDb],
-    ) -> None:
-        if tool_context is None or not should_watch_session_started:
-            return
-        storage = create_storage()
-        try:
-            if not self._session_exists(storage=storage, session_id=session_id, session_type=session_type):
-                return
-        finally:
-            storage.close()
-
-        bindings = resolve_tool_runtime_hook_bindings(tool_context)
-        context = SessionHookContext(
-            event_name=EVENT_SESSION_STARTED,
-            plugin_name="",
-            settings={},
-            config=tool_context.config,
-            runtime_paths=tool_context.runtime_paths,
-            logger=self.deps.logger.bind(event_name=EVENT_SESSION_STARTED, session_id=session_id),
-            correlation_id=correlation_id,
-            message_sender=bindings.message_sender,
-            matrix_admin=bindings.matrix_admin,
-            room_state_querier=bindings.room_state_querier,
-            room_state_putter=bindings.room_state_putter,
-            agent_name=scope.scope_id if scope.kind == "team" else tool_context.agent_name,
-            scope=scope,
-            session_id=session_id,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        await emit(tool_context.hook_registry, EVENT_SESSION_STARTED, context)
-
-    async def _emit_session_started_safely(
-        self,
-        *,
-        tool_context: ToolRuntimeContext | None,
-        should_watch_session_started: bool,
-        scope: HistoryScope,
-        session_id: str,
-        room_id: str,
-        thread_id: str | None,
-        session_type: SessionType,
-        correlation_id: str,
-        create_storage: Callable[[], BaseDb],
-    ) -> None:
-        """Emit session:started without aborting delivery on ordinary failures."""
-        try:
-            await self._maybe_emit_session_started(
-                tool_context=tool_context,
-                should_watch_session_started=should_watch_session_started,
-                scope=scope,
-                session_id=session_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                session_type=session_type,
-                correlation_id=correlation_id,
-                create_storage=create_storage,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            self.deps.logger.exception(
-                "Failed to emit session:started",
-                session_id=session_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                failure_reason=str(error),
-            )
-
     def _request_for_delivery(
         self,
         request: ResponseRequest,
@@ -871,36 +727,6 @@ class ResponseRunner:
             used_streaming=used_streaming,
         )
 
-    def _emit_pipeline_timing_summary(
-        self,
-        request: ResponseRequest,
-        *,
-        outcome: str,
-    ) -> None:
-        """Emit one structured end-to-end timing summary when available."""
-        if request.pipeline_timing is None:
-            return
-        request.pipeline_timing.emit_summary(self.deps.logger, outcome=outcome)
-
-    @staticmethod
-    def _response_outcome(final_delivery_outcome: FinalDeliveryOutcome | None) -> str:
-        """Return one pipeline outcome label for the canonical final delivery outcome."""
-        if final_delivery_outcome is not None and final_delivery_outcome.suppressed:
-            return "suppressed"
-        if final_delivery_outcome is not None and final_delivery_outcome.terminal_status == "cancelled":
-            return "cancelled"
-        if final_delivery_outcome is not None and final_delivery_outcome.terminal_status == "error":
-            return "error"
-        if final_delivery_outcome is not None and final_delivery_outcome.delivery_kind is not None:
-            return final_delivery_outcome.delivery_kind
-        if (
-            final_delivery_outcome is not None
-            and final_delivery_outcome.event_id is not None
-            and final_delivery_outcome.is_visible_response
-        ):
-            return "visible_response_preserved"
-        return "no_visible_response"
-
     def _response_envelope_for_request(
         self,
         request: ResponseRequest,
@@ -950,9 +776,12 @@ class ResponseRunner:
                 resolved_target=request.target,
             )
         return ResponseLifecycle(
-            self,
+            ResponseLifecycleDeps(
+                response_hooks=self.deps.delivery_gateway.deps.response_hooks,
+                logger=self.deps.logger,
+            ),
             response_kind=response_kind,
-            request=request,
+            pipeline_timing=request.pipeline_timing,
             response_envelope=resolved_response_envelope,
             correlation_id=correlation_id or self._correlation_id_for_request(request),
         )

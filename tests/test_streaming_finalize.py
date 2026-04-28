@@ -27,7 +27,7 @@ from mindroom.post_response_effects import (
     ResponseOutcome,
     apply_post_response_effects,
 )
-from mindroom.response_lifecycle import ResponseLifecycle
+from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.streaming import (
     StreamingResponse,
     send_streaming_response,
@@ -652,20 +652,13 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
     response_hooks.apply_before_response.assert_not_awaited()
     response_hooks.apply_final_response_transform.assert_awaited_once()
     gateway.edit_text.assert_awaited_once()
-    runner = SimpleNamespace(
-        deps=SimpleNamespace(
-            delivery_gateway=SimpleNamespace(
-                deps=SimpleNamespace(response_hooks=response_hooks),
-            ),
-        ),
-        _log_post_response_effects_failure=Mock(),
-        _emit_pipeline_timing_summary=Mock(),
-        _response_outcome=Mock(return_value=None),
-    )
     lifecycle = ResponseLifecycle(
-        runner=runner,
+        ResponseLifecycleDeps(
+            response_hooks=response_hooks,
+            logger=get_logger("tests.response_lifecycle"),
+        ),
         response_kind="ai",
-        request=Mock(),
+        pipeline_timing=None,
         response_envelope=envelope,
         correlation_id="corr-final-transform-failure",
     )

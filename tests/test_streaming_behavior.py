@@ -51,7 +51,7 @@ from mindroom.matrix.large_messages import _clear_oversized_nonterminal_streamin
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
-from mindroom.response_lifecycle import ResponseLifecycle
+from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
@@ -4167,20 +4167,13 @@ class TestStreamingBehavior:
         edited_request = gateway.edit_text.await_args.args[0]
         assert edited_request.event_id == "$streaming"
         assert edited_request.new_text == "updated text"
-        runner = SimpleNamespace(
-            deps=SimpleNamespace(
-                delivery_gateway=SimpleNamespace(
-                    deps=SimpleNamespace(response_hooks=response_hooks),
-                ),
-            ),
-            _log_post_response_effects_failure=MagicMock(),
-            _emit_pipeline_timing_summary=MagicMock(),
-            _response_outcome=MagicMock(return_value=None),
-        )
         lifecycle = ResponseLifecycle(
-            runner=runner,
+            ResponseLifecycleDeps(
+                response_hooks=response_hooks,
+                logger=MagicMock(),
+            ),
             response_kind="ai",
-            request=MagicMock(),
+            pipeline_timing=None,
             response_envelope=response_envelope,
             correlation_id="corr-final-transform-success",
         )
@@ -4265,20 +4258,13 @@ class TestStreamingBehavior:
         assert outcome.final_visible_body == "chunk"
         response_hooks.apply_before_response.assert_not_awaited()
         response_hooks.apply_final_response_transform.assert_awaited_once()
-        runner = SimpleNamespace(
-            deps=SimpleNamespace(
-                delivery_gateway=SimpleNamespace(
-                    deps=SimpleNamespace(response_hooks=response_hooks),
-                ),
-            ),
-            _log_post_response_effects_failure=MagicMock(),
-            _emit_pipeline_timing_summary=MagicMock(),
-            _response_outcome=MagicMock(return_value=None),
-        )
         lifecycle = ResponseLifecycle(
-            runner=runner,
+            ResponseLifecycleDeps(
+                response_hooks=response_hooks,
+                logger=MagicMock(),
+            ),
             response_kind="ai",
-            request=MagicMock(),
+            pipeline_timing=None,
             response_envelope=response_envelope,
             correlation_id="corr-final-transform-noop",
         )

@@ -102,6 +102,7 @@ from mindroom.orchestrator import (
     _SignalAwareUvicornServer,
     main,
 )
+from mindroom.response_lifecycle import response_outcome_label
 from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
@@ -3196,7 +3197,7 @@ class TestAgentBot:
     def test_response_outcome_prefers_terminal_status_over_delivery_kind(self) -> None:
         """Pipeline outcome summaries must not report cancelled or error states as plain send/edit success."""
         assert (
-            ResponseRunner._response_outcome(
+            response_outcome_label(
                 _outcome(
                     terminal_status="cancelled",
                     final_visible_event_id="$cancelled",
@@ -3209,7 +3210,7 @@ class TestAgentBot:
             == "cancelled"
         )
         assert (
-            ResponseRunner._response_outcome(
+            response_outcome_label(
                 _outcome(
                     terminal_status="error",
                     final_visible_event_id="$error",

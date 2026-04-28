@@ -15,6 +15,7 @@ CONCRETE_ORCHESTRATOR_IMPORT_ALLOWLIST = {
 RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
 MATRIX_MESSAGE_TOOL_MODULE = Path("src/mindroom/custom_tools/matrix_message.py")
 RESPONSE_RUNNER_MODULE = Path("src/mindroom/response_runner.py")
+RESPONSE_LIFECYCLE_MODULE = Path("src/mindroom/response_lifecycle.py")
 MATRIX_MESSAGE_LOW_LEVEL_IMPORTS = frozenset(
     {
         "mindroom.custom_tools.attachments",
@@ -191,5 +192,33 @@ def test_response_runner_delegates_lifecycle_coordination() -> None:
             found.append(f"{RESPONSE_RUNNER_MODULE}:{node.lineno}: {node.name}")
         if isinstance(node, ast.Name) and node.id in forbidden_names:
             found.append(f"{RESPONSE_RUNNER_MODULE}:{node.lineno}: {node.id}")
+
+    assert found == []
+
+
+def test_response_lifecycle_does_not_reach_into_response_runner_internals() -> None:
+    """Response lifecycle owns its dependencies instead of calling runner-private helpers."""
+    tree = ast.parse(RESPONSE_LIFECYCLE_MODULE.read_text(encoding="utf-8"))
+    forbidden_private_helpers = {
+        "_emit_pipeline_timing_summary",
+        "_emit_session_started_safely",
+        "_log_post_response_effects_failure",
+        "_response_outcome",
+        "_should_watch_session_started",
+    }
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported_from_response_runner = (
+                node.level == 1 and node.module == "response_runner"
+            ) or node.module == "mindroom.response_runner"
+            if imported_from_response_runner:
+                found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: from response_runner")
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in forbidden_private_helpers:
+            found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: {node.name}")
+        if isinstance(node, ast.Name) and node.id in {"ResponseRequest", "ResponseRunner", *forbidden_private_helpers}:
+            found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: {node.id}")
+        if isinstance(node, ast.Attribute) and node.attr in forbidden_private_helpers:
+            found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: {node.attr}")
 
     assert found == []
