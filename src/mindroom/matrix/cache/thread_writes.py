@@ -261,6 +261,30 @@ class ThreadOutboundWritePolicy:
         self._cache_ops = cache_ops
         self._require_client = require_client
 
+    def _emit_outbound_schedule_timing(
+        self,
+        *,
+        barrier_kind: str,
+        room_id: str,
+        thread_id: str | None,
+        event_id: str,
+        event_type: str | None,
+        event_info: EventInfo,
+        has_coalesce_key: bool,
+    ) -> None:
+        emit_timing_event(
+            "Event cache outbound schedule timing",
+            operation="matrix_cache_notify_outbound_event",
+            barrier_kind=barrier_kind,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_id=event_id,
+            event_type=event_type,
+            is_edit=event_info.is_edit,
+            is_reaction=event_info.is_reaction,
+            has_coalesce_key=has_coalesce_key,
+        )
+
     async def _apply_outbound_event_notification(
         self,
         room_id: str,
@@ -310,8 +334,19 @@ class ThreadOutboundWritePolicy:
                 event_source=normalized_event_source,
             )
             coalesce_key, coalesce_log_context = coalesce_context if coalesce_context is not None else (None, None)
+            event_type_value = normalized_event_source.get("type")
+            event_type = event_type_value if isinstance(event_type_value, str) else None
             emit_timing = event_info.is_edit
             if event_info.is_reaction:
+                self._emit_outbound_schedule_timing(
+                    barrier_kind="room",
+                    room_id=room_id,
+                    thread_id=None,
+                    event_id=event_id,
+                    event_type=event_type,
+                    event_info=event_info,
+                    has_coalesce_key=coalesce_key is not None,
+                )
                 persisted_batch: list[tuple[str, str, dict[str, object]]] = [
                     (event_id, room_id, normalized_event_source),
                 ]
@@ -333,6 +368,15 @@ class ThreadOutboundWritePolicy:
                 return
             thread_id = event_info.thread_id or event_info.thread_id_from_edit
             if thread_id is not None:
+                self._emit_outbound_schedule_timing(
+                    barrier_kind="thread",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    event_id=event_id,
+                    event_type=event_type,
+                    event_info=event_info,
+                    has_coalesce_key=coalesce_key is not None,
+                )
                 self._schedule_fail_open_thread_update(
                     room_id,
                     thread_id,
@@ -352,6 +396,15 @@ class ThreadOutboundWritePolicy:
                 )
                 return
             # Lookup-dependent outbound mutations stay on the room barrier because earlier outbound writes can create the lookup rows needed to resolve thread impact. Safe parallelization would require reservation-based routing (see ISSUE-189).
+            self._emit_outbound_schedule_timing(
+                barrier_kind="room",
+                room_id=room_id,
+                thread_id=None,
+                event_id=event_id,
+                event_type=event_type,
+                event_info=event_info,
+                has_coalesce_key=coalesce_key is not None,
+            )
             self._schedule_fail_open_room_update(
                 room_id,
                 lambda: self._apply_outbound_event_notification(

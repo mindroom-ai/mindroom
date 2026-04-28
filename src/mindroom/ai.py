@@ -63,7 +63,7 @@ from mindroom.logging_config import get_logger
 from mindroom.media_fallback import should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
-from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
     extract_tool_completed_info,
@@ -1270,6 +1270,15 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                 continue
 
             if isinstance(event, ToolCallStartedEvent):
+                tool_execution = event.tool
+                emit_timing_event(
+                    "Dispatch tool-call timing",
+                    phase="agno_tool_call_started",
+                    agent_name=agent_name,
+                    tool_name=tool_execution.tool_name if tool_execution is not None else None,
+                    tool_call_id=tool_execution_call_id(tool_execution) if tool_execution is not None else None,
+                    show_tool_calls=show_tool_calls,
+                )
                 _track_stream_tool_started(
                     state,
                     event,

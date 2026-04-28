@@ -25,6 +25,7 @@ from mindroom.hooks import (
     emit_gate,
 )
 from mindroom.logging_config import get_logger
+from mindroom.timing import emit_timing_event
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -279,8 +280,22 @@ def _patch_agno_async_tool_hook_chain() -> None:
 _patch_agno_async_tool_hook_chain()
 
 
-async def _call_tool(func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
-    if inspect.iscoroutinefunction(func):
+async def _call_tool(
+    func: Callable[..., Any],
+    args: dict[str, Any],
+    *,
+    tool_name: str,
+    agent_name: str | None,
+) -> ToolHookResult:
+    async_entrypoint = inspect.iscoroutinefunction(func)
+    emit_timing_event(
+        "Tool hook dispatch timing",
+        phase="tool_entry",
+        tool_name=tool_name,
+        agent_name=agent_name,
+        async_entrypoint=async_entrypoint,
+    )
+    if async_entrypoint:
         result = await func(**args)
     else:
         result = await asyncio.to_thread(func, **args)
@@ -313,6 +328,14 @@ async def _execute_bridge(
     resolved_context = _resolve_tool_context(
         bridge_context=bridge_context,
     )
+    emit_timing_event(
+        "Tool hook dispatch timing",
+        phase="bridge_entry",
+        tool_name=tool_name,
+        agent_name=resolved_context.agent_name or None,
+        has_before_hooks=has_before_hooks,
+        has_after_hooks=has_after_hooks,
+    )
     hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else None
 
     if has_before_hooks:
@@ -320,7 +343,22 @@ async def _execute_bridge(
             **resolved_context.hook_context_kwargs(hook_arguments if hook_arguments is not None else deepcopy(args)),
             tool_name=tool_name,
         )
+        before_hooks_started_at = time.perf_counter()
+        emit_timing_event(
+            "Tool hook dispatch timing",
+            phase="before_hooks_start",
+            tool_name=tool_name,
+            agent_name=resolved_context.agent_name or None,
+        )
         await emit_gate(hook_registry, EVENT_TOOL_BEFORE_CALL, before_context)
+        emit_timing_event(
+            "Tool hook dispatch timing",
+            phase="before_hooks_finish",
+            tool_name=tool_name,
+            agent_name=resolved_context.agent_name or None,
+            declined=before_context.declined,
+            duration_ms=round((time.perf_counter() - before_hooks_started_at) * 1000, 2),
+        )
         if before_context.declined:
             result = _format_declined_result(tool_name, before_context.decline_reason)
             if has_after_hooks:
@@ -340,7 +378,12 @@ async def _execute_bridge(
     result: ToolHookResult = None
     error: BaseException | None = None
     try:
-        result = await _call_tool(func, args)
+        result = await _call_tool(
+            func,
+            args,
+            tool_name=tool_name,
+            agent_name=resolved_context.agent_name or None,
+        )
     except BaseException as exc:
         error = exc
         duration_ms = (time.perf_counter() - started_at) * 1000
