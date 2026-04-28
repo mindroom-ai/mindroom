@@ -294,13 +294,20 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
             }
             stored_memories.setdefault((self.scope_storage_path, user_id), []).append(entry)
 
-        async def search(self, query: str, user_id: str, limit: int = 3) -> dict[str, list[dict[str, object]]]:
+        async def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, object],
+            top_k: int = 3,
+        ) -> dict[str, list[dict[str, object]]]:
+            user_id = filters["user_id"]
             matches = [
                 dict(entry)
                 for entry in stored_memories.get((self.scope_storage_path, user_id), [])
                 if query.lower() in str(entry["memory"]).lower()
             ]
-            return {"results": matches[:limit]}
+            return {"results": matches[:top_k]}
 
     async def create_fake_memory_instance(
         scope_storage_path: Path,

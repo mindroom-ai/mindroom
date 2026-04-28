@@ -1312,8 +1312,9 @@ def _create_team_instance(
         agent.add_history_to_context = False
         agent.add_session_summary_to_context = False
 
+    team_members: list[Agent | Team] = [*agents]
     team = Team(
-        members=agents,  # type: ignore[arg-type]
+        members=team_members,
         id=team_id,
         name=team_display_name,
         model=model,

@@ -115,8 +115,8 @@ def setup_logging(
                 },
             },
             "filters": {
-                "nio_validation": {  # ty: ignore[missing-typed-dict-key]
-                    "()": _NioValidationFilter,  # ty: ignore[invalid-key]
+                "nio_validation": {
+                    "()": _NioValidationFilter,
                 },
             },
             "handlers": {

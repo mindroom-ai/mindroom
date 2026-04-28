@@ -39,6 +39,10 @@ def _mem0_results(payload: object) -> list[MemoryResult]:
     return []
 
 
+def _scope_filter(scope_user_id: str) -> dict[str, object]:
+    return {"user_id": scope_user_id}
+
+
 def _primary_mem0_storage_path(
     agent_name: str,
     storage_path: Path,
@@ -73,7 +77,13 @@ async def _search_mem0_agent_scope(
     agent_name: str,
     limit: int,
 ) -> list[MemoryResult]:
-    return _mem0_results(await memory.search(query, user_id=agent_scope_user_id(agent_name), limit=limit))
+    return _mem0_results(
+        await memory.search(
+            query,
+            filters=_scope_filter(agent_scope_user_id(agent_name)),
+            top_k=limit,
+        ),
+    )
 
 
 @timed("system_prompt_assembly.memory_search.mem0.team_search")
@@ -83,7 +93,7 @@ async def _search_mem0_team_scope(
     team_id: str,
     limit: int,
 ) -> list[MemoryResult]:
-    return _mem0_results(await memory.search(query, user_id=team_id, limit=limit))
+    return _mem0_results(await memory.search(query, filters=_scope_filter(team_id), top_k=limit))
 
 
 async def _get_scoped_memory_by_id(
@@ -96,7 +106,7 @@ async def _get_scoped_memory_by_id(
     if not isinstance(result, dict):
         allowed_user_ids = get_allowed_memory_user_ids(caller_context, config)
         for scope_user_id in sorted(allowed_user_ids):
-            for entry in _mem0_results(await memory.get_all(user_id=scope_user_id, limit=1000)):
+            for entry in _mem0_results(await memory.get_all(filters=_scope_filter(scope_user_id), top_k=1000)):
                 if not isinstance(entry, dict):
                     continue
                 metadata = entry.get("metadata")
@@ -137,7 +147,7 @@ async def _find_mem0_replica_memory_ids(
     replica_key = _mem0_replica_key(anchor_result)
 
     matches: list[str] = []
-    for entry in _mem0_results(await memory.get_all(user_id=scope_user_id, limit=1000)):
+    for entry in _mem0_results(await memory.get_all(filters=_scope_filter(scope_user_id), top_k=1000)):
         if not isinstance(entry, dict):
             continue
         if entry.get("user_id") != scope_user_id:
@@ -350,7 +360,7 @@ async def list_mem0_agent_memories(
         execution_identity=execution_identity,
     )
     result = await create_memory(resolved_storage_path, config)
-    return _mem0_results(await result.get_all(user_id=agent_scope_user_id(agent_name), limit=limit))
+    return _mem0_results(await result.get_all(filters=_scope_filter(agent_scope_user_id(agent_name)), top_k=limit))
 
 
 async def get_mem0_agent_memory(
@@ -485,6 +495,8 @@ async def store_mem0_conversation_memory(
         execution_identity=execution_identity,
     )
 
+    metadata: dict[str, object]
+    failure_context: dict[str, object]
     if isinstance(agent_name, list):
         scope_user_id = build_team_user_id(agent_name)
         metadata = {
@@ -496,7 +508,7 @@ async def store_mem0_conversation_memory(
         if replica_key is not None:
             metadata[MEM0_REPLICA_KEY] = replica_key
         failure_log = "Failed to add team memory"
-        failure_context: dict[str, object] = {"team_id": scope_user_id}
+        failure_context = {"team_id": scope_user_id}
     else:
         scope_user_id = agent_scope_user_id(agent_name)
         metadata = {

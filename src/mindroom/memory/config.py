@@ -56,23 +56,24 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     embedder_provider = app_config.memory.embedder.provider
 
     # Build embedder config from config.yaml
+    embedder_provider_config: dict[str, Any] = {
+        "model": app_config.memory.embedder.config.model,
+    }
     embedder_config: dict[str, Any] = {
         "provider": "huggingface" if embedder_provider == "sentence_transformers" else embedder_provider,
-        "config": {
-            "model": app_config.memory.embedder.config.model,
-        },
+        "config": embedder_provider_config,
     }
 
     # Add provider-specific configuration
     if embedder_provider == "openai":
         api_key = creds_manager.get_api_key("openai")
         if api_key:
-            embedder_config["config"]["api_key"] = api_key
+            embedder_provider_config["api_key"] = api_key
         # Support custom OpenAI-compatible base URL (e.g., llama.cpp)
         if app_config.memory.embedder.config.host:
-            embedder_config["config"]["openai_base_url"] = app_config.memory.embedder.config.host
+            embedder_provider_config["openai_base_url"] = app_config.memory.embedder.config.host
         if app_config.memory.embedder.config.dimensions is not None:
-            embedder_config["config"]["embedding_dims"] = app_config.memory.embedder.config.dimensions
+            embedder_provider_config["embedding_dims"] = app_config.memory.embedder.config.dimensions
     elif embedder_provider == "ollama":
         # Check CredentialsManager for Ollama host
         ollama_creds = creds_manager.load_credentials("ollama")
@@ -80,9 +81,9 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
             host = ollama_creds["host"]
         else:
             host = app_config.memory.embedder.config.host or "http://localhost:11434"
-        embedder_config["config"]["ollama_base_url"] = host
+        embedder_provider_config["ollama_base_url"] = host
     elif embedder_provider == "sentence_transformers" and app_config.memory.embedder.config.dimensions is not None:
-        embedder_config["config"]["embedding_dims"] = app_config.memory.embedder.config.dimensions
+        embedder_provider_config["embedding_dims"] = app_config.memory.embedder.config.dimensions
 
     # Build LLM config from memory configuration
     if app_config.memory.llm:
@@ -173,7 +174,7 @@ async def create_memory_instance(
 
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
-    memory = await AsyncMemory.from_config(config_dict)
+    memory = AsyncMemory.from_config(config_dict)
 
     logger.info("created_memory_instance", path=config_dict["vector_store"]["config"]["path"])
     return memory

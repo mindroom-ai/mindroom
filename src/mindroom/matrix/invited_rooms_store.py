@@ -34,11 +34,16 @@ def load_invited_rooms(path: Path) -> set[str]:
         logger.warning("failed_to_load_invited_rooms", path=str(path), exc_info=True)
         return set()
 
-    if not isinstance(raw, list) or not all(isinstance(room_id, str) for room_id in raw):
+    if not isinstance(raw, list):
         logger.warning("invalid_invited_rooms_file", path=str(path))
         return set()
 
-    return set(raw)
+    room_ids = [room_id for room_id in raw if isinstance(room_id, str)]
+    if len(room_ids) != len(raw):
+        logger.warning("invalid_invited_rooms_file", path=str(path))
+        return set()
+
+    return set(room_ids)
 
 
 def save_invited_rooms(path: Path, room_ids: set[str]) -> None:

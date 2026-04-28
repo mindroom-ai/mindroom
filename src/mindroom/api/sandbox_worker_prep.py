@@ -280,7 +280,7 @@ def prepare_worker_request(
 
     try:
         paths = local_worker_state_paths_from_handle(worker_handle)
-        runtime_overrides = {
+        runtime_overrides: dict[str, object] = {
             "base_dir": resolve_worker_base_dir(
                 paths,
                 sandbox_exec.runner_storage_root(runtime_paths),

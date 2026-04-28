@@ -538,7 +538,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         )
         refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
-        base_entry = {
+        base_entry: dict[str, Any] = {
             "name": base_id,
             "path": str(root),
             "watch": base_config.watch,
@@ -677,7 +677,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     )
     refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
-    payload = {
+    payload: dict[str, Any] = {
         "base_id": base_id,
         "folder_path": str(root),
         "watch": config.knowledge_bases[base_id].watch,

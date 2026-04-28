@@ -32,10 +32,11 @@ class _SerializedConversationTarget(TypedDict):
     """JSON-safe persisted conversation target."""
 
     room_id: str
-    thread_id: str | None
+    source_thread_id: str | None
     resolved_thread_id: str | None
     reply_to_event_id: str | None
     session_id: str
+    thread_id: NotRequired[str | None]
 
 
 class _SerializedHandledTurnRecord(TypedDict):

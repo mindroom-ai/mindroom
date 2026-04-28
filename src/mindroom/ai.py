@@ -409,7 +409,7 @@ def _build_model_request_metrics_fallback(
     totals: dict[str, int],
     first_token_latency: float | None,
 ) -> dict[str, Any] | None:
-    payload = {key: value for key, value in totals.items() if value > 0}
+    payload: dict[str, Any] = {key: value for key, value in totals.items() if value > 0}
     if payload.get("total_tokens") is None:
         input_tokens = payload.get("input_tokens")
         output_tokens = payload.get("output_tokens")

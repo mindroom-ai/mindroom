@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 import nio
@@ -146,7 +146,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
 
     from mindroom.config.main import Config
-    from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
+    from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
@@ -971,7 +971,8 @@ class AgentBot:
         startup = start_from_loaded_token(self._loaded_sync_token_for_certification())
         self._sync_trust_state = startup.state
         self._sync_checkpoint = None
-        self.client.next_batch = startup.sync_token
+        client = cast("Any", self.client)
+        client.next_batch = startup.sync_token
         if startup.legacy_token:
             self.logger.warning("matrix_sync_token_uncertified_legacy")
 
@@ -1000,7 +1001,8 @@ class AgentBot:
         self._sync_trust_state = decision.state
         self._sync_checkpoint = decision.checkpoint_to_save
         if decision.reset_client_token and self.client is not None:
-            self.client.next_batch = None
+            client = cast("Any", self.client)
+            client.next_batch = None
         if decision.clear_saved_token:
             self._clear_saved_sync_token()
         if decision.checkpoint_to_save is not None:
@@ -1660,7 +1662,7 @@ class AgentBot:
         sender: str,
         *,
         runtime_started_at: float | None,
-    ) -> object | None:
+    ) -> AgentMessageSnapshot | None:
         """Read the latest visible cached sender message for hook helpers."""
         event_cache = self._runtime_view.event_cache
         if event_cache is None:

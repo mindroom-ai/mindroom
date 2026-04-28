@@ -194,7 +194,7 @@ test-saas-backend *args:
 
 # Run SaaS platform frontend tests (Jest)
 test-saas-frontend:
-    cd saas-platform/platform-frontend && bun install && bun test
+    cd saas-platform/platform-frontend && bun install && bun run test
 
 # Core frontend tests (vitest)
 # Run core frontend tests (vitest)

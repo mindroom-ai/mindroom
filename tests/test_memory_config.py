@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -373,10 +373,10 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @patch("mindroom.memory.config.ensure_sentence_transformers_dependencies")
-    @patch("mindroom.memory.config.AsyncMemory.from_config", new_callable=AsyncMock)
+    @patch("mindroom.memory.config.AsyncMemory.from_config")
     async def test_create_memory_instance_auto_installs_sentence_transformers(
         self,
-        mock_from_config: AsyncMock,
+        mock_from_config: MagicMock,
         mock_ensure_sentence_transformers_dependencies: MagicMock,
         tmp_path: Path,
     ) -> None:
@@ -396,7 +396,7 @@ class TestMemoryConfig:
 
         assert result is expected_memory
         mock_ensure_sentence_transformers_dependencies.assert_called_once_with(_runtime_paths(tmp_path))
-        mock_from_config.assert_awaited_once()
+        mock_from_config.assert_called_once()
 
     def test_memory_auto_flush_batch_config_is_parameterized(self) -> None:
         """Auto-flush batch/extractor limits should be configurable."""
