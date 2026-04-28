@@ -254,7 +254,7 @@ async def refresh_knowledge_binding_in_subprocess(
 
     if return_code != 0:
         msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
-        await _reconcile_failed_refresh_subprocess(key, error=msg)
+        await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=msg)
         raise RuntimeError(msg)
 
 
@@ -396,10 +396,21 @@ async def _cleanup_cancelled_refresh_subprocess(
         logger.warning("Failed to reconcile cancelled knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
 
 
-async def _reconcile_failed_refresh_subprocess(key: PublishedIndexKey, *, error: str) -> None:
+async def _reconcile_failed_refresh_subprocess(
+    key: PublishedIndexKey,
+    *,
+    initial_state: PublishedIndexState | None,
+    error: str,
+) -> None:
     try:
         source_root = source_root_for_published_index_key(key)
         async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+            state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
+            if _published_state_fingerprint(state) not in {
+                _published_state_fingerprint(initial_state),
+                _refresh_running_fingerprint(key, initial_state),
+            }:
+                return
             await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
     except Exception:
         logger.warning("Failed to reconcile failed knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
@@ -753,6 +764,29 @@ def _published_state_fingerprint(state: PublishedIndexState | None) -> tuple[obj
         state.refresh_job,
         state.reason,
         state.last_error,
+    )
+
+
+def _refresh_running_fingerprint(
+    key: PublishedIndexKey,
+    state: PublishedIndexState | None,
+) -> tuple[object, ...] | None:
+    if state is None:
+        return _published_state_fingerprint(
+            PublishedIndexState(
+                settings=key.indexing_settings,
+                status="indexing",
+                refresh_job="running",
+                reason="refreshing",
+            ),
+        )
+    return _published_state_fingerprint(
+        replace(
+            state,
+            refresh_job="running",
+            reason="refreshing",
+            last_error=None,
+        ),
     )
 
 
