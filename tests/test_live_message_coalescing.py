@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1521,6 +1522,59 @@ async def test_enqueue_for_dispatch_timing_events_include_explicit_scope(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_matrix_ingress_logging_includes_receive_lag(tmp_path: Path) -> None:
+    """Matrix callback logs should include receive lag when origin_server_ts is present."""
+    bot = _make_bot(tmp_path)
+    bot.logger = MagicMock()
+    bot._turn_controller.handle_text_event = AsyncMock()
+    room = _make_room()
+    event = _text_event(event_id="$m1", body="hello", server_timestamp=1000, thread_id="$thread")
+
+    with patch("mindroom.bot.time.time", return_value=2.5):
+        await bot._on_message(room, event)
+
+    bot.logger.info.assert_any_call(
+        "matrix_event_callback_started",
+        callback="message",
+        event_id="$m1",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        agent_name="test_agent",
+        receive_timestamp_ms=2500,
+        origin_server_ts_ms=1000,
+        matrix_event_receive_lag_ms=1500.0,
+    )
+    bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+
+
+@pytest.mark.asyncio
+async def test_matrix_ingress_logging_handles_missing_origin_timestamp(tmp_path: Path) -> None:
+    """Matrix callback logs should tolerate events without origin_server_ts."""
+    bot = _make_bot(tmp_path)
+    bot.logger = MagicMock()
+    bot._turn_controller.handle_text_event = AsyncMock()
+    room = _make_room()
+    event = MagicMock(spec=nio.RoomMessageText)
+    event.event_id = "$m1"
+    event.sender = "@user:localhost"
+    event.source = {"content": {"msgtype": "m.text", "body": "hello"}}
+
+    with patch("mindroom.bot.time.time", return_value=2.5):
+        await bot._on_message(room, event)
+
+    log_call = next(call for call in bot.logger.info.call_args_list if call.args == ("matrix_event_callback_started",))
+    assert log_call.kwargs == {
+        "callback": "message",
+        "event_id": "$m1",
+        "room_id": "!room:localhost",
+        "thread_id": None,
+        "agent_name": "test_agent",
+        "receive_timestamp_ms": 2500,
+    }
+    bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+
+
+@pytest.mark.asyncio
 async def test_handle_coalesced_batch_timing_events_include_dispatch_scope(tmp_path: Path) -> None:
     """Coalesced-batch telemetry emitted before dispatch should carry the batch event scope."""
     bot = _make_bot(tmp_path)
@@ -1647,6 +1701,69 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
     flush_calls = [call for call in mock_emit.call_args_list if call.args and call.args[0] == "coalescing_gate.flush"]
     assert len(flush_calls) == 1
     assert flush_calls[0].kwargs["outcome"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_coalescing_enqueue_logs_pending_count() -> None:
+    """Coalescing enqueue diagnostics should identify the pending scope."""
+    room = _make_room()
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 10.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    with patch("mindroom.coalescing.logger.info") as mock_info:
+        await gate.enqueue(
+            ("!room:localhost", "$thread", "@user:localhost"),
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="first"),
+                room=room,
+                source_kind="message",
+            ),
+        )
+
+    await gate.drain_all()
+    enqueue_call = next(call for call in mock_info.call_args_list if call.args == ("coalescing_gate_message_enqueued",))
+    assert enqueue_call.kwargs["pending_count"] == 1
+    assert enqueue_call.kwargs["event_id"] == "$m1"
+    assert enqueue_call.kwargs["room_id"] == "!room:localhost"
+    assert enqueue_call.kwargs["thread_id"] == "$thread"
+
+
+@pytest.mark.asyncio
+async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
+    """Slow flush diagnostics should carry event, room, and thread identifiers."""
+    room = _make_room()
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    monotonic_values = itertools.chain([100.0, 100.0, 100.0, 106.0], itertools.repeat(106.0))
+
+    with (
+        patch("mindroom.coalescing.time.monotonic", side_effect=lambda: next(monotonic_values)),
+        patch("mindroom.coalescing.logger.warning") as mock_warning,
+    ):
+        await gate.enqueue(
+            ("!room:localhost", "$thread", "@user:localhost"),
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="first"),
+                room=room,
+                source_kind="message",
+            ),
+        )
+
+    mock_warning.assert_called_once()
+    assert mock_warning.call_args.args == ("coalescing_gate_flush_slow",)
+    assert mock_warning.call_args.kwargs["duration_ms"] == 6000.0
+    assert mock_warning.call_args.kwargs["source_event_ids"] == ["$m1"]
+    assert mock_warning.call_args.kwargs["room_id"] == "!room:localhost"
+    assert mock_warning.call_args.kwargs["thread_id"] == "$thread"
+    assert mock_warning.call_args.kwargs["outcome"] == "dispatched"
 
 
 @pytest.mark.asyncio

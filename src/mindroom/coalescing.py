@@ -39,6 +39,7 @@ __all__ = [
 
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
+_COALESCING_FLUSH_WARNING_SECONDS = 5.0
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"hook", "hook_dispatch"})
 logger = get_logger(__name__)
 
@@ -408,6 +409,36 @@ class CoalescingGate:
                 return current_key, current_gate
         return None, None
 
+    @staticmethod
+    def _oldest_pending_age_ms(pending_events: list[PendingEvent]) -> float:
+        """Return the oldest queued event age in milliseconds."""
+        oldest_enqueue_time = min(pending_event.enqueue_time for pending_event in pending_events)
+        return round((time.time() - oldest_enqueue_time) * 1000, 1)
+
+    @staticmethod
+    def _source_event_ids(pending_events: list[PendingEvent]) -> list[str]:
+        """Return source event IDs for diagnostics."""
+        return [pending_event.event.event_id for pending_event in pending_events]
+
+    def _log_enqueued_event(
+        self,
+        key: CoalescingKey,
+        pending_event: PendingEvent,
+        *,
+        pending_count: int,
+    ) -> None:
+        """Log one enqueue without message content."""
+        logger.info(
+            "coalescing_gate_message_enqueued",
+            room_id=key[0],
+            thread_id=key[1],
+            requester_user_id=key[2],
+            event_id=pending_event.event.event_id,
+            pending_count=pending_count,
+            source_kind=pending_event.source_kind,
+            timing_scope=event_timing_scope(pending_event.event.event_id),
+        )
+
     async def enqueue(self, key: CoalescingKey, pending_event: PendingEvent) -> None:
         """Queue one pending event and schedule its eventual flush."""
         enqueue_start = time.monotonic()
@@ -448,6 +479,7 @@ class CoalescingGate:
         if gate.phase is GatePhase.GRACE:
             if _is_media_event(pending_event.event):
                 gate.pending.append(pending_event)
+                self._log_enqueued_event(key, pending_event, pending_count=len(gate.pending))
                 self._schedule_grace(key)
                 emit_elapsed_timing(
                     "coalescing_gate.enqueue",
@@ -468,6 +500,7 @@ class CoalescingGate:
 
         # Path 4: normal append + schedule
         gate.pending.append(pending_event)
+        self._log_enqueued_event(key, pending_event, pending_count=len(gate.pending))
         if gate.phase is GatePhase.IN_FLIGHT:
             emit_elapsed_timing(
                 "coalescing_gate.enqueue",
@@ -615,6 +648,21 @@ class CoalescingGate:
         gate = self._gates.get(key)
         if gate is None or not gate.pending or gate.phase is GatePhase.IN_FLIGHT:
             return None
+        pending_events = list(gate.pending)
+        pending_count = len(pending_events)
+        batch = build_coalesced_batch(key, pending_events)
+        timing_scope = event_timing_scope(batch.primary_event.event_id)
+        flush_context = {
+            "room_id": key[0],
+            "thread_id": key[1],
+            "requester_user_id": key[2],
+            "pending_count": pending_count,
+            "oldest_pending_age_ms": self._oldest_pending_age_ms(pending_events),
+            "bypass_grace": bypass_grace,
+            "source_event_ids": self._source_event_ids(pending_events),
+            "timing_scope": timing_scope,
+        }
+        logger.info("coalescing_gate_flush_started", **flush_context)
         if (
             not bypass_grace
             and gate.phase is not GatePhase.GRACE
@@ -623,23 +671,26 @@ class CoalescingGate:
             and _pending_has_only_text(gate.pending)
         ):
             self._schedule_grace(key)
+            duration_ms = round((time.monotonic() - flush_start) * 1000, 1)
+            logger.info(
+                "coalescing_gate_flush_finished",
+                **flush_context,
+                duration_ms=duration_ms,
+                outcome="scheduled_grace",
+            )
             emit_elapsed_timing(
                 "coalescing_gate.flush",
                 flush_start,
                 outcome="scheduled_grace",
-                pending_count=len(gate.pending),
-                timing_scope=event_timing_scope(build_coalesced_batch(key, gate.pending).primary_event.event_id),
+                pending_count=pending_count,
+                timing_scope=timing_scope,
             )
             return "scheduled_grace"
         # Set IN_FLIGHT before _cancel_timer so the running timer task
         # (which may be the current task) is not self-cancelled.
         gate.phase = GatePhase.IN_FLIGHT
         self._cancel_timer(gate)
-        pending_events = list(gate.pending)
-        pending_count = len(pending_events)
         gate.pending.clear()
-        batch = build_coalesced_batch(key, pending_events)
-        timing_scope = event_timing_scope(batch.primary_event.event_id)
         dispatched = False
         try:
             dispatch_batch_start = time.monotonic()
@@ -662,6 +713,17 @@ class CoalescingGate:
                 bypass_grace=bypass_grace,
                 timing_scope=timing_scope,
             )
+            duration_ms = round((time.monotonic() - flush_start) * 1000, 1)
+            outcome = "dispatched" if dispatched else "failed"
+            log_context = {
+                **flush_context,
+                "duration_ms": duration_ms,
+                "outcome": outcome,
+            }
+            if duration_ms >= _COALESCING_FLUSH_WARNING_SECONDS * 1000:
+                logger.warning("coalescing_gate_flush_slow", **log_context)
+            else:
+                logger.info("coalescing_gate_flush_finished", **log_context)
             current_key, gate = self._resolve_gate_entry(key, gate)
             if gate is not None and current_key is not None:
                 gate.phase = GatePhase.DEBOUNCE

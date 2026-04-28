@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 from uuid import uuid4
 
 import uvicorn
@@ -135,6 +136,26 @@ _CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
 _CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS = 120.0
 
 
+def _signal_name(sig: int) -> str:
+    """Return a stable signal name for lifecycle logs."""
+    for candidate in signal.Signals:
+        if candidate.value == sig:
+            return candidate.name
+    return str(sig)
+
+
+def _raise_embedded_api_server_exit(host: str, port: int, *, reason: str) -> NoReturn:
+    """Raise the fatal lifecycle error for an unexpected API server exit."""
+    logger.error(
+        "fatal_embedded_api_server_exit",
+        host=host,
+        port=port,
+        reason=reason,
+    )
+    msg = "Embedded API server exited unexpectedly"
+    raise RuntimeError(msg)
+
+
 @dataclass
 class _ConfigReloadDrainState:
     """Track response-drain state for a queued config reload."""
@@ -200,6 +221,12 @@ class _SignalAwareUvicornServer(uvicorn.Server):
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
         """Mirror Uvicorn signal handling and surface shutdown to the orchestrator."""
+        signal_number = int(sig)
+        logger.info(
+            "embedded_api_server_signal_received",
+            signal_number=signal_number,
+            signal_name=_signal_name(signal_number),
+        )
         if self._shutdown_requested is not None:
             self._shutdown_requested.set()
         super().handle_exit(sig, frame)
@@ -1666,7 +1693,23 @@ async def _run_api_server(
         api_main.bind_orchestrator_knowledge_refresh_scheduler(api_main.app, knowledge_refresh_scheduler)
     config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
     server = _SignalAwareUvicornServer(config, shutdown_requested)
+    logger.info("embedded_api_server_started", host=host, port=port)
     await server.serve()
+    shutdown_expected = shutdown_requested.is_set() if shutdown_requested is not None else False
+    logger.info(
+        "embedded_api_server_serve_returned",
+        host=host,
+        port=port,
+        shutdown_expected=shutdown_expected,
+        server_should_exit=server.should_exit,
+        server_force_exit=server.force_exit,
+    )
+    if not shutdown_expected:
+        _raise_embedded_api_server_exit(
+            host,
+            port,
+            reason="server.serve() returned while application shutdown was not requested",
+        )
 
 
 async def _run_auxiliary_task_forever(
@@ -1708,6 +1751,48 @@ async def _run_auxiliary_task_forever(
         )
 
 
+async def _wait_for_runtime_completion(
+    *,
+    orchestrator_task: asyncio.Task[None],
+    shutdown_wait_task: asyncio.Task[bool],
+    api_task: asyncio.Task[None] | None,
+    shutdown_requested: asyncio.Event,
+    api_host: str,
+    api_port: int,
+) -> None:
+    """Wait until the orchestrator, API server, or shutdown signal ends the run."""
+    monitored_tasks: set[asyncio.Task] = {orchestrator_task, shutdown_wait_task}
+    if api_task is not None:
+        monitored_tasks.add(api_task)
+    done, _pending = await asyncio.wait(monitored_tasks, return_when=asyncio.FIRST_COMPLETED)
+
+    if api_task is not None and api_task in done:
+        await api_task
+        if shutdown_requested.is_set():
+            logger.info("embedded_api_server_requested_application_shutdown")
+            return
+        _raise_embedded_api_server_exit(
+            api_host,
+            api_port,
+            reason="API task finished while application shutdown was not requested",
+        )
+    if shutdown_wait_task in done:
+        logger.info("application_shutdown_requested")
+        if api_task is not None:
+            await api_task
+        return
+    await orchestrator_task
+
+
+async def _cancel_task_if_pending(task: asyncio.Task | None) -> None:
+    """Cancel and await one task only when it is still pending."""
+    if task is None or task.done():
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
 async def main(
     log_level: str,
     runtime_paths: RuntimePaths,
@@ -1733,6 +1818,9 @@ async def main(
     set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()
+    orchestrator_task: asyncio.Task[None] | None = None
+    shutdown_wait_task: asyncio.Task[bool] | None = None
+    api_task: asyncio.Task[None] | None = None
 
     try:
         auxiliary_specs = [
@@ -1744,24 +1832,6 @@ async def main(
             ("plugins watcher", lambda: watch_plugins_task(orchestrator), "plugins_watcher_supervisor"),
             ("skills watcher", lambda: _watch_skills_task(orchestrator), "skills_watcher_supervisor"),
         ]
-
-        if api:
-            # Optionally run the bundled dashboard/API server alongside the orchestrator.
-            logger.info("starting_bundled_dashboard_api_server", host=api_host, port=api_port)
-            auxiliary_specs.append(
-                (
-                    "bundled API server",
-                    lambda: _run_api_server(
-                        api_host,
-                        api_port,
-                        log_level,
-                        runtime_paths,
-                        orchestrator.knowledge_refresh_scheduler,
-                        shutdown_requested,
-                    ),
-                    "api_server_supervisor",
-                ),
-            )
 
         for task_name, operation, supervisor_name in auxiliary_specs:
             auxiliary_tasks.append(
@@ -1775,17 +1845,42 @@ async def main(
                 ),
             )
 
-        await orchestrator.start()
+        if api:
+            api_task = asyncio.create_task(
+                _run_api_server(
+                    api_host,
+                    api_port,
+                    log_level,
+                    runtime_paths,
+                    orchestrator.knowledge_refresh_scheduler,
+                    shutdown_requested,
+                ),
+                name="api_server",
+            )
+
+        orchestrator_task = asyncio.create_task(orchestrator.start(), name="orchestrator")
+        shutdown_wait_task = asyncio.create_task(shutdown_requested.wait(), name="application_shutdown_wait")
+        await _wait_for_runtime_completion(
+            orchestrator_task=orchestrator_task,
+            shutdown_wait_task=shutdown_wait_task,
+            api_task=api_task,
+            shutdown_requested=shutdown_requested,
+            api_host=api_host,
+            api_port=api_port,
+        )
 
     except KeyboardInterrupt:
         shutdown_requested.set()
         logger.info("Multi-agent bot system stopped by user")
     except Exception:
         shutdown_requested.set()
-        logger.exception("Error in orchestrator")
+        logger.exception("Error in MindRoom runtime")
         raise
     finally:
         shutdown_requested.set()
+        await _cancel_task_if_pending(shutdown_wait_task)
+        await _cancel_task_if_pending(api_task)
+        await _cancel_task_if_pending(orchestrator_task)
         # Cancel auxiliary supervisors before shutting down the orchestrator itself.
         for task in auxiliary_tasks:
             task.cancel()
