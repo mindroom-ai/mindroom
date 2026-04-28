@@ -145,62 +145,61 @@ class IngressHookRunner:
         started = time.monotonic()
         hook_registered = self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH)
         item_count = 0
-        try:
-            envelope = MessageEnvelope(
-                source_event_id=dispatch.envelope.source_event_id,
-                room_id=dispatch.envelope.room_id,
-                target=dispatch.envelope.target,
-                requester_id=dispatch.envelope.requester_id,
-                sender_id=dispatch.envelope.sender_id,
-                body=dispatch.envelope.body,
-                attachment_ids=(
-                    tuple(payload.attachment_ids)
-                    if payload.attachment_ids is not None
-                    else dispatch.envelope.attachment_ids
-                ),
-                mentioned_agents=dispatch.envelope.mentioned_agents,
-                agent_name=target_entity_name,
-                source_kind=dispatch.envelope.source_kind,
-                hook_source=dispatch.envelope.hook_source,
-                message_received_depth=dispatch.envelope.message_received_depth,
-            )
-            model_prompt = payload.model_prompt
-            if hook_registered:
-                context = MessageEnrichContext(
-                    **self.hook_context.base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
-                    envelope=envelope,
-                    target_entity_name=target_entity_name,
-                    target_member_names=target_member_names,
-                )
-                items = await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context)
-                item_count = len(items)
-                if items:
-                    enrichment_block = render_enrichment_block(items)
-                    model_prompt = (
-                        f"{payload.model_prompt.rstrip()}\n\n{enrichment_block}"
-                        if payload.model_prompt
-                        else enrichment_block
-                    )
 
-            return PreparedHookedPayload(
-                payload=DispatchPayload(
-                    prompt=payload.prompt,
-                    model_prompt=model_prompt,
-                    media=payload.media,
-                    attachment_ids=payload.attachment_ids,
-                ),
+        envelope = MessageEnvelope(
+            source_event_id=dispatch.envelope.source_event_id,
+            room_id=dispatch.envelope.room_id,
+            target=dispatch.envelope.target,
+            requester_id=dispatch.envelope.requester_id,
+            sender_id=dispatch.envelope.sender_id,
+            body=dispatch.envelope.body,
+            attachment_ids=(
+                tuple(payload.attachment_ids)
+                if payload.attachment_ids is not None
+                else dispatch.envelope.attachment_ids
+            ),
+            mentioned_agents=dispatch.envelope.mentioned_agents,
+            agent_name=target_entity_name,
+            source_kind=dispatch.envelope.source_kind,
+            hook_source=dispatch.envelope.hook_source,
+            message_received_depth=dispatch.envelope.message_received_depth,
+        )
+        model_prompt = payload.model_prompt
+        if hook_registered:
+            context = MessageEnrichContext(
+                **self.hook_context.base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
                 envelope=envelope,
-                system_enrichment_items=(),
-            )
-        finally:
-            emit_elapsed_timing(
-                "response_payload.apply_message_enrichment",
-                started,
-                room_id=dispatch.envelope.room_id,
                 target_entity_name=target_entity_name,
-                hook_registered=hook_registered,
-                enrichment_item_count=item_count,
+                target_member_names=target_member_names,
             )
+            items = await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context)
+            item_count = len(items)
+            if items:
+                enrichment_block = render_enrichment_block(items)
+                model_prompt = (
+                    f"{payload.model_prompt.rstrip()}\n\n{enrichment_block}"
+                    if payload.model_prompt
+                    else enrichment_block
+                )
+
+        emit_elapsed_timing(
+            "response_payload.apply_message_enrichment",
+            started,
+            room_id=dispatch.envelope.room_id,
+            target_entity_name=target_entity_name,
+            hook_registered=hook_registered,
+            enrichment_item_count=item_count,
+        )
+        return PreparedHookedPayload(
+            payload=DispatchPayload(
+                prompt=payload.prompt,
+                model_prompt=model_prompt,
+                media=payload.media,
+                attachment_ids=payload.attachment_ids,
+            ),
+            envelope=envelope,
+            system_enrichment_items=(),
+        )
 
     async def apply_system_enrichment(
         self,
@@ -213,28 +212,27 @@ class IngressHookRunner:
         """Run system:enrich and return system-prompt enrichment items."""
         started = time.monotonic()
         hook_registered = self.hook_context.registry.has_hooks(EVENT_SYSTEM_ENRICH)
-        item_count = 0
-        try:
-            if not hook_registered:
-                return []
-            context = SystemEnrichContext(
-                **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, dispatch.correlation_id),
-                envelope=envelope,
-                target_entity_name=target_entity_name,
-                target_member_names=target_member_names,
-            )
-            items = await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context)
-            item_count = len(items)
-            return items
-        finally:
+
+        def finish(items: list[EnrichmentItem]) -> list[EnrichmentItem]:
             emit_elapsed_timing(
                 "response_payload.apply_system_enrichment",
                 started,
                 room_id=dispatch.envelope.room_id,
                 target_entity_name=target_entity_name,
                 hook_registered=hook_registered,
-                enrichment_item_count=item_count,
+                enrichment_item_count=len(items),
             )
+            return items
+
+        if not hook_registered:
+            return finish([])
+        context = SystemEnrichContext(
+            **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, dispatch.correlation_id),
+            envelope=envelope,
+            target_entity_name=target_entity_name,
+            target_member_names=target_member_names,
+        )
+        return finish(await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context))
 
 
 @dataclass(frozen=True)
