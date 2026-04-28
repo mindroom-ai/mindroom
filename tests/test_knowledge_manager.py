@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from threading import Event, Lock, get_ident
 from typing import TYPE_CHECKING, ClassVar
@@ -3680,7 +3681,7 @@ async def test_refresh_scheduler_runs_independent_per_binding_tasks(
             raise RuntimeError(msg)
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("a", config=config, runtime_paths=runtime_paths)
     scheduler.schedule_refresh("a", config=config, runtime_paths=runtime_paths)
@@ -3727,7 +3728,7 @@ async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
             second_started.set()
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await first_started.wait()
@@ -3782,6 +3783,57 @@ async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
 
 
 @pytest.mark.asyncio
+async def test_scheduled_refresh_subprocess_receives_config_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The subprocess helper sends the scheduled config snapshot via a one-shot request file."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    config.knowledge_bases["docs"].chunk_size = 1234
+    runtime_paths = runtime_paths_for(config)
+    captured_request: dict[str, object] = {}
+    captured_args: tuple[object, ...] = ()
+    captured_env: dict[str, str] = {}
+
+    class _Process:
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _Process:
+        nonlocal captured_args, captured_env
+        captured_args = args
+        raw_env = kwargs["env"]
+        assert isinstance(raw_env, dict)
+        captured_env = raw_env
+        request_path = Path(args[-1])
+        captured_request.update(json.loads(request_path.read_text(encoding="utf-8")))
+        return _Process()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost"),
+    )
+
+    assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge_refresh_runner")
+    assert captured_env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] == "1"
+    assert captured_request["base_id"] == "docs"
+    assert captured_request["config_path"] == str(runtime_paths.config_path)
+    assert captured_request["storage_root"] == str(runtime_paths.storage_root)
+    assert "runtime_paths" not in captured_request
+    assert captured_request["config_data"]["knowledge_bases"]["docs"]["chunk_size"] == 1234
+    assert captured_request["execution_identity"]["requester_id"] == "@alice:localhost"
+    assert not Path(captured_args[-1]).exists()
+
+
+@pytest.mark.asyncio
 async def test_refresh_scheduler_shutdown_suppresses_completed_refresh_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3797,7 +3849,7 @@ async def test_refresh_scheduler_shutdown_suppresses_completed_refresh_failures(
         msg = "refresh failed"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await asyncio.sleep(0)
@@ -3852,7 +3904,7 @@ async def test_refresh_status_is_visible_across_scheduler_instances(
         await release.wait()
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _blocked_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _blocked_refresh)
 
     matrix_scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await started.wait()
@@ -5458,6 +5510,7 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
         )
 
     monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("docs", config=old_config, runtime_paths=runtime_paths)
     await first_started.wait()

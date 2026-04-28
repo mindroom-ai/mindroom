@@ -12,6 +12,7 @@ from mindroom.knowledge.refresh_runner import (
     mark_refresh_active,
     mark_refresh_inactive,
     refresh_knowledge_binding,
+    refresh_knowledge_binding_in_subprocess,
 )
 from mindroom.knowledge.registry import KnowledgeRefreshTarget, resolve_refresh_target
 from mindroom.logging_config import get_logger
@@ -180,7 +181,7 @@ class KnowledgeRefreshScheduler:
             self._start_task(key, pending_request)
 
     async def _run_refresh(self, key: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
-        await refresh_knowledge_binding(
+        await refresh_knowledge_binding_in_subprocess(
             key.base_id,
             config=request.config,
             runtime_paths=request.runtime_paths,
