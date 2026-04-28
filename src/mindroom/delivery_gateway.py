@@ -61,6 +61,22 @@ if TYPE_CHECKING:
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
+_PLACEHOLDER_DELIVERY_FAILURE_TEXT = "Response delivery failed. Please retry."
+_PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
+    {
+        "delivery_failed",
+        "terminal_update_cancelled",
+        "terminal_update_failed",
+    },
+)
+
+
+def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
+    """Return whether a placeholder-only error came from Matrix delivery itself."""
+    return failure_reason in _PLACEHOLDER_DELIVERY_FAILURE_REASONS or failure_reason.startswith(
+        "terminal_update_exception:",
+    )
+
 
 @dataclass
 class ResponseHookService:
@@ -436,6 +452,60 @@ class DeliveryGateway:
             return failure_reason or f"failed to redact suppressed response {event_id}"
         return None
 
+    async def _deliver_placeholder_failure_update(
+        self,
+        *,
+        target: MessageTarget,
+        event_id: str,
+        response_kind: str,
+        response_envelope: MessageEnvelope,
+        correlation_id: str,
+        failure_reason: str,
+        tool_trace: list[ToolTraceEntry] | None,
+        extra_content: dict[str, Any] | None,
+    ) -> FinalDeliveryOutcome:
+        """Best-effort terminal error edit for a visible placeholder."""
+        failure_extra_content = dict(extra_content or {})
+        failure_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_ERROR
+        edited = await self.edit_text(
+            EditTextRequest(
+                target=target,
+                event_id=event_id,
+                new_text=_PLACEHOLDER_DELIVERY_FAILURE_TEXT,
+                tool_trace=tool_trace,
+                extra_content=failure_extra_content,
+            ),
+        )
+        if edited:
+            return FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id=event_id,
+                is_visible_response=True,
+                final_visible_body=_PLACEHOLDER_DELIVERY_FAILURE_TEXT,
+                delivery_kind="edited",
+                failure_reason=failure_reason,
+                tool_trace=tuple(tool_trace or ()),
+                extra_content=failure_extra_content,
+            )
+
+        self.deps.logger.error(
+            "Failed to deliver placeholder failure update",
+            room_id=target.room_id,
+            event_id=event_id,
+            response_kind=response_kind,
+            source_event_id=response_envelope.source_event_id,
+            correlation_id=correlation_id,
+            failure_reason=failure_reason,
+        )
+        return FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id=event_id,
+            is_visible_response=True,
+            failure_reason=failure_reason,
+            tool_trace=tuple(tool_trace or ()),
+            extra_content=failure_extra_content,
+        )
+
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
         client = self._client()
@@ -709,29 +779,14 @@ class DeliveryGateway:
                 )
 
             if request.existing_event_is_placeholder:
-                cleanup_failure = await self._redact_visible_response_event(
-                    room_id=request.target.room_id,
+                return await self._deliver_placeholder_failure_update(
+                    target=request.target,
                     event_id=request.existing_event_id,
                     response_kind=request.response_kind,
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id,
-                    redaction_reason="Failed placeholder response",
                     failure_reason="delivery_failed",
-                )
-                if cleanup_failure is not None:
-                    return FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=request.existing_event_id,
-                        is_visible_response=True,
-                        failure_reason=cleanup_failure,
-                        tool_trace=tuple(draft.tool_trace or ()),
-                        extra_content=draft.extra_content,
-                    )
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=None,
-                    failure_reason="delivery_failed",
-                    tool_trace=tuple(draft.tool_trace or ()),
+                    tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
                 )
             return FinalDeliveryOutcome(
@@ -1134,7 +1189,26 @@ class DeliveryGateway:
                         )
                 failure_reason = stream_outcome.failure_reason or "stream_finalize_error"
                 if stream_outcome.visible_body_state == "placeholder_only":
-                    cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
+                    if stream_outcome.last_physical_stream_event_id is None:
+                        return FinalDeliveryOutcome(
+                            terminal_status="error",
+                            event_id=None,
+                            failure_reason=failure_reason,
+                            tool_trace=tuple(request.tool_trace or ()),
+                            extra_content=request.extra_content,
+                        )
+                    if _is_placeholder_delivery_failure(failure_reason):
+                        return await self._deliver_placeholder_failure_update(
+                            target=request.target,
+                            event_id=stream_outcome.last_physical_stream_event_id,
+                            response_kind=request.response_kind,
+                            response_envelope=request.response_envelope,
+                            correlation_id=request.correlation_id,
+                            failure_reason=failure_reason,
+                            tool_trace=request.tool_trace,
+                            extra_content=request.extra_content,
+                        )
+                    return await self._cleanup_completed_placeholder_only_stream(
                         room_id=request.target.room_id,
                         streamed_event_id=stream_outcome.last_physical_stream_event_id,
                         response_kind=request.response_kind,
@@ -1142,15 +1216,6 @@ class DeliveryGateway:
                         correlation_id=request.correlation_id,
                         failure_reason=failure_reason,
                         tool_trace=request.tool_trace,
-                        extra_content=request.extra_content,
-                    )
-                    if cleanup_outcome.event_id is not None:
-                        return cleanup_outcome
-                    return FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=None,
-                        failure_reason=failure_reason,
-                        tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
 

@@ -15,7 +15,13 @@ from mindroom import interactive
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalizeStreamedResponseRequest
+from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    DeliveryGatewayDeps,
+    FinalDeliveryRequest,
+    FinalizeStreamedResponseRequest,
+)
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
@@ -365,6 +371,133 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
     assert outcome.terminal_status == "completed"
     assert outcome.rendered_body == "Thinking..."
     assert outcome.visible_body_state == "placeholder_only"
+
+
+@pytest.mark.asyncio
+async def test_final_delivery_failure_replaces_placeholder_with_failure_update(tmp_path: Path) -> None:
+    """A failed final placeholder edit should get one clear terminal failure update when possible."""
+    config = _config(tmp_path)
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(
+            return_value=SimpleNamespace(
+                response_text="final answer",
+                response_kind="ai",
+                tool_trace=None,
+                extra_content=None,
+                envelope=_envelope(),
+                suppress=False,
+            ),
+        ),
+        apply_final_response_transform=AsyncMock(),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=Mock(),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=Mock(),
+            response_hooks=response_hooks,
+        ),
+    )
+    edit_outcomes = [False, True]
+    object.__setattr__(
+        gateway,
+        "edit_text",
+        AsyncMock(side_effect=lambda _request: edit_outcomes.pop(0)),
+    )
+
+    outcome = await gateway.deliver_final(
+        FinalDeliveryRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            existing_event_id="$placeholder",
+            existing_event_is_placeholder=True,
+            response_text="final answer",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-final-delivery-failure",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert outcome.terminal_status == "error"
+    assert outcome.final_visible_event_id == "$placeholder"
+    assert outcome.final_visible_body == "Response delivery failed. Please retry."
+    assert outcome.delivery_kind == "edited"
+    assert outcome.failure_reason == "delivery_failed"
+    assert gateway.edit_text.await_count == 2
+    failure_update_request = gateway.edit_text.await_args_list[-1].args[0]
+    assert failure_update_request.new_text == "Response delivery failed. Please retry."
+    assert failure_update_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+
+
+@pytest.mark.asyncio
+async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failure_update_fails(
+    tmp_path: Path,
+) -> None:
+    """If Matrix rejects the failure update too, finalization still returns a failed visible outcome."""
+    config = _config(tmp_path)
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    logger = Mock()
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=logger,
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=Mock(),
+            response_hooks=response_hooks,
+        ),
+    )
+    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
+
+    outcome = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            stream_transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$placeholder",
+                terminal_status="error",
+                rendered_body="Thinking...",
+                visible_body_state="placeholder_only",
+                failure_reason="terminal_update_failed",
+            ),
+            initial_delivery_kind="edited",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-stream-delivery-failure",
+            tool_trace=None,
+            extra_content=None,
+            existing_event_id="$placeholder",
+            existing_event_is_placeholder=True,
+        ),
+    )
+
+    assert outcome.terminal_status == "error"
+    assert outcome.final_visible_event_id == "$placeholder"
+    assert outcome.final_visible_body is None
+    assert outcome.failure_reason == "terminal_update_failed"
+    assert outcome.mark_handled is True
+    logger.error.assert_called_once_with(
+        "Failed to deliver placeholder failure update",
+        room_id="!room:localhost",
+        event_id="$placeholder",
+        response_kind="ai",
+        source_event_id="$reply",
+        correlation_id="corr-stream-delivery-failure",
+        failure_reason="terminal_update_failed",
+    )
 
 
 @pytest.mark.asyncio

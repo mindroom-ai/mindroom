@@ -14,6 +14,7 @@ from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_s
 from .commands.parsing import command_parser
 from .constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from .hooks.ingress import is_voice_event
+from .logging_config import get_logger
 from .matrix.media import extract_media_caption
 from .timing import emit_elapsed_timing, event_timing_scope
 
@@ -39,6 +40,7 @@ __all__ = [
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"hook", "hook_dispatch"})
+logger = get_logger(__name__)
 
 
 class GatePhase(enum.Enum):
@@ -554,18 +556,39 @@ class CoalescingGate:
                 await asyncio.sleep(max(delay, 0.0))
             except asyncio.CancelledError:
                 return
-            current_key, current_gate = self._resolve_gate_entry(key, gate)
-            if current_key is None or current_gate is None or current_gate.timer_task is not asyncio.current_task():
+            current_key: CoalescingKey | None = None
+            try:
+                current_key, current_gate = self._resolve_gate_entry(key, gate)
+                if current_key is None or current_gate is None or current_gate.timer_task is not asyncio.current_task():
+                    return
+                # Keep timer_task alive through the flush so drain_all can await it.
+                await self._flush(current_key, bypass_grace=phase is GatePhase.GRACE)
+                current_key, current_gate = self._resolve_gate_entry(current_key, gate)
+                if (
+                    current_key is not None
+                    and current_gate is not None
+                    and current_gate.timer_task is asyncio.current_task()
+                ):
+                    current_gate.timer_task = None
+            except asyncio.CancelledError:
                 return
-            # Keep timer_task alive through the flush so drain_all can await it.
-            await self._flush(current_key, bypass_grace=phase is GatePhase.GRACE)
-            current_key, current_gate = self._resolve_gate_entry(current_key, gate)
-            if (
-                current_key is not None
-                and current_gate is not None
-                and current_gate.timer_task is asyncio.current_task()
-            ):
-                current_gate.timer_task = None
+            except Exception as error:
+                log_key = current_key or key
+                logger.exception(
+                    "Coalescing timer callback failed",
+                    room_id=log_key[0],
+                    thread_id=log_key[1],
+                    requester_user_id=log_key[2],
+                    exception_type=error.__class__.__name__,
+                    error_message="Coalesced dispatch failed.",
+                )
+                current_key, current_gate = self._resolve_gate_entry(log_key, gate)
+                if (
+                    current_key is not None
+                    and current_gate is not None
+                    and current_gate.timer_task is asyncio.current_task()
+                ):
+                    current_gate.timer_task = None
 
         gate.timer_task = asyncio.create_task(_timer_callback())
 

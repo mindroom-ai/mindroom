@@ -1650,6 +1650,51 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> None:
+    """Timer callbacks should consume dispatch failures instead of leaking task exceptions."""
+    room = _make_room()
+    loop = asyncio.get_running_loop()
+    loop_exceptions: list[dict[str, object]] = []
+    previous_exception_handler = loop.get_exception_handler()
+
+    async def failing_dispatch_batch(_batch: object) -> None:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    gate = CoalescingGate(
+        dispatch_batch=failing_dispatch_batch,
+        debounce_seconds=lambda: 0.01,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    def capture_loop_exception(_loop: asyncio.AbstractEventLoop, context: dict[str, object]) -> None:
+        loop_exceptions.append(context)
+
+    loop.set_exception_handler(capture_loop_exception)
+    try:
+        with patch("mindroom.coalescing.logger.exception") as mock_exception:
+            await gate.enqueue(
+                ("!room:localhost", None, "@user:localhost"),
+                PendingEvent(
+                    event=_text_event(event_id="$m1", body="first"),
+                    room=room,
+                    source_kind="message",
+                ),
+            )
+            await _wait_for(lambda: mock_exception.called)
+    finally:
+        loop.set_exception_handler(previous_exception_handler)
+
+    assert loop_exceptions == []
+    mock_exception.assert_called_once()
+    assert mock_exception.call_args.args == ("Coalescing timer callback failed",)
+    assert mock_exception.call_args.kwargs["exception_type"] == "RuntimeError"
+    assert mock_exception.call_args.kwargs["error_message"] == "Coalesced dispatch failed."
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
     """Drain pending debounce tasks when a bot is cleaned up."""
     bot = _make_bot(tmp_path, debounce_ms=1000)
