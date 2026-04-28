@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 
 class SyncTrustState(Enum):
@@ -29,6 +30,8 @@ class SyncCacheWriteResult:
     complete: bool
     limited_room_ids: tuple[str, ...] = ()
     errors: tuple[BaseException, ...] = ()
+    runtime_available: bool | None = None
+    task_count: int | None = None
 
     @property
     def certified(self) -> bool:
@@ -145,3 +148,23 @@ def handle_unknown_pos() -> SyncCertificationDecision:
         reason="unknown_pos",
         reset_client_token=True,
     )
+
+
+def sync_cache_write_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str, Any]:
+    """Return structured log fields explaining one sync cache-write result."""
+    diagnostics: dict[str, Any] = {
+        "cache_write_complete": cache_result.complete,
+        "cache_write_certified": cache_result.certified,
+        "cache_limited_room_count": len(cache_result.limited_room_ids),
+        "cache_error_count": len(cache_result.errors),
+    }
+    if cache_result.runtime_available is not None:
+        diagnostics["cache_runtime_available"] = cache_result.runtime_available
+    if cache_result.task_count is not None:
+        diagnostics["cache_task_count"] = cache_result.task_count
+    if cache_result.limited_room_ids:
+        diagnostics["cache_limited_room_ids"] = cache_result.limited_room_ids[:5]
+    if cache_result.errors:
+        diagnostics["cache_error_types"] = tuple(type(error).__name__ for error in cache_result.errors[:5])
+        diagnostics["cache_error_messages"] = tuple(str(error)[:200] for error in cache_result.errors[:5])
+    return diagnostics

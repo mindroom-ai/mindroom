@@ -51,6 +51,7 @@ from mindroom.matrix.sync_certification import (
     certify_sync_response,
     handle_unknown_pos,
     start_from_loaded_token,
+    sync_cache_write_diagnostics,
 )
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import (
@@ -996,7 +997,12 @@ class AgentBot:
         except OSError as exc:
             self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
 
-    def _apply_sync_certification_decision(self, decision: SyncCertificationDecision) -> None:
+    def _apply_sync_certification_decision(
+        self,
+        decision: SyncCertificationDecision,
+        *,
+        cache_result: SyncCacheWriteResult | None = None,
+    ) -> None:
         """Apply a certifier decision to runtime state and token storage."""
         self._sync_trust_state = decision.state
         self._sync_checkpoint = decision.checkpoint_to_save
@@ -1008,9 +1014,11 @@ class AgentBot:
         if decision.checkpoint_to_save is not None:
             self._save_sync_checkpoint(decision.checkpoint_to_save)
         if decision.reason is not None:
+            diagnostics = sync_cache_write_diagnostics(cache_result) if cache_result is not None else {}
             self.logger.warning(
                 "matrix_sync_certification_uncertain",
                 reason=decision.reason,
+                **diagnostics,
             )
 
     async def _sync_cache_result_for_certification(self, response: nio.SyncResponse) -> SyncCacheWriteResult:
@@ -1051,19 +1059,20 @@ class AgentBot:
             try:
                 cache_result = await self._sync_cache_result_for_certification(_response)
             except asyncio.CancelledError as exc:
+                cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
                 decision = self._sync_certification_decision(
                     _response,
-                    cache_result=SyncCacheWriteResult(complete=False, errors=(exc,)),
+                    cache_result=cache_result,
                     first_sync_response=first_sync_response,
                 )
-                self._apply_sync_certification_decision(decision)
+                self._apply_sync_certification_decision(decision, cache_result=cache_result)
                 raise
             decision = self._sync_certification_decision(
                 _response,
                 cache_result=cache_result,
                 first_sync_response=first_sync_response,
             )
-            self._apply_sync_certification_decision(decision)
+            self._apply_sync_certification_decision(decision, cache_result=cache_result)
         self._first_sync_done = True
 
         if first_sync_response:

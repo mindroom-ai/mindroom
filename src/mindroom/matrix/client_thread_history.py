@@ -577,12 +577,36 @@ async def refresh_thread_history_from_source(
                 return stale_history
         raise
     if _thread_history_fetch_is_cacheable(fetch_result.event_sources, thread_id=thread_id):
-        await _store_thread_history_cache(
+        cache_store_written = await _store_thread_history_cache(
             event_cache,
             room_id=room_id,
             thread_id=thread_id,
             event_sources=fetch_result.event_sources,
             fetch_started_at=fetch_started_at,
+        )
+        logger.info(
+            "Thread history cache store completed",
+            room_id=room_id,
+            thread_id=thread_id,
+            cache_store_outcome="stored" if cache_store_written else "not_replaced",
+            cache_store_written=cache_store_written,
+            event_count=len(fetch_result.event_sources),
+            homeserver_scan_pages=fetch_result.room_scan_pages,
+            homeserver_scanned_event_count=fetch_result.scanned_event_count,
+            homeserver_thread_event_count=len(fetch_result.event_sources),
+        )
+    else:
+        logger.info(
+            "Thread history cache store skipped",
+            room_id=room_id,
+            thread_id=thread_id,
+            cache_store_skipped_reason="missing_thread_root",
+            has_thread_root=False,
+            event_count=len(fetch_result.event_sources),
+            history_event_count=len(fetch_result.history),
+            homeserver_scan_pages=fetch_result.room_scan_pages,
+            homeserver_scanned_event_count=fetch_result.scanned_event_count,
+            homeserver_thread_event_count=len(fetch_result.event_sources),
         )
     diagnostics: dict[str, str | int | float | bool] = {
         "cache_read_ms": 0.0,
@@ -625,6 +649,9 @@ async def _store_thread_history_cache(
             "Event cache write failed; continuing without cache",
             room_id=room_id,
             thread_id=thread_id,
+            cache_store_outcome="failed",
+            event_count=len(event_sources),
+            error_type=type(exc).__name__,
             error=str(exc),
         )
         return False

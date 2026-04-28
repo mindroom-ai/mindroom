@@ -13,6 +13,7 @@ from mindroom.matrix.sync_certification import (
     certify_sync_response,
     handle_unknown_pos,
     start_from_loaded_token,
+    sync_cache_write_diagnostics,
 )
 
 
@@ -92,6 +93,31 @@ def test_uncertain_sync_fails_closed(cache_result: SyncCacheWriteResult, reason:
     assert decision.clear_saved_token is True
     assert decision.reset_client_token is False
     assert decision.reason == reason
+
+
+def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
+    """Sync-certification logs should expose the cache-write details behind uncertainty."""
+    diagnostics = sync_cache_write_diagnostics(
+        SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+            errors=(RuntimeError("cache failed"),),
+            runtime_available=False,
+            task_count=3,
+        ),
+    )
+
+    assert diagnostics == {
+        "cache_write_complete": False,
+        "cache_write_certified": False,
+        "cache_limited_room_count": 1,
+        "cache_error_count": 1,
+        "cache_runtime_available": False,
+        "cache_task_count": 3,
+        "cache_limited_room_ids": ("!room:localhost",),
+        "cache_error_types": ("RuntimeError",),
+        "cache_error_messages": ("cache failed",),
+    }
 
 
 def test_pending_first_sync_uncertainty_resets_client_token() -> None:

@@ -1130,11 +1130,15 @@ class ThreadSyncWritePolicy:
     ) -> SyncCacheWriteResult:
         """Persist sync timeline data and report whether it certifies the sync token."""
         if not self._cache_ops.cache_runtime_available():
-            return SyncCacheWriteResult(complete=False)
+            return SyncCacheWriteResult(complete=False, runtime_available=False, task_count=0)
 
         limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
         if validation_errors:
-            return SyncCacheWriteResult(complete=False, errors=validation_errors)
+            return SyncCacheWriteResult(
+                complete=False,
+                errors=validation_errors,
+                runtime_available=self._cache_ops.cache_runtime_available(),
+            )
 
         try:
             tasks = self.cache_sync_timeline(response, raise_on_cache_write_failure=True)
@@ -1147,15 +1151,19 @@ class ThreadSyncWritePolicy:
                 complete=False,
                 limited_room_ids=limited_room_ids,
                 errors=(exc,),
+                runtime_available=self._cache_ops.cache_runtime_available(),
             )
 
         results: list[object | BaseException] = []
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         errors = self._cache_task_errors(results)
-        complete = self._cache_ops.cache_runtime_available() and not errors and not limited_room_ids
+        runtime_available = self._cache_ops.cache_runtime_available()
+        complete = runtime_available and not errors and not limited_room_ids
         return SyncCacheWriteResult(
             complete=complete,
             limited_room_ids=limited_room_ids,
             errors=errors,
+            runtime_available=runtime_available,
+            task_count=len(tasks),
         )
