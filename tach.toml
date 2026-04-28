@@ -107,6 +107,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.api.openai_compat",
+    "mindroom.custom_tools.delegate",
     "mindroom.response_runner",
     "mindroom.teams",
 ]
@@ -194,11 +195,11 @@ depends_on = ["mindroom.memory"]
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
+    "mindroom.agent_run_context",
     "mindroom.agent_descriptions",
     "mindroom.ai",
     "mindroom.config.main",
     "mindroom.constants",
-    "mindroom.hooks",
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.tool_system.runtime_context",
