@@ -440,10 +440,12 @@ async def mark_thread_stale_locked(
         )
         VALUES (%s, %s, %s, NULL, %s, %s)
         ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
-            invalidated_at = GREATEST(
-                mindroom_event_cache_thread_state.invalidated_at,
-                excluded.invalidated_at
-            ),
+            invalidated_at = CASE
+                WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
+                    OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
+                    THEN excluded.invalidated_at
+                ELSE mindroom_event_cache_thread_state.invalidated_at
+            END,
             invalidation_reason = CASE
                 WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
                     OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
@@ -506,10 +508,12 @@ async def mark_room_stale_locked(
         INSERT INTO mindroom_event_cache_room_state(namespace, room_id, invalidated_at, invalidation_reason)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT(namespace, room_id) DO UPDATE SET
-            invalidated_at = GREATEST(
-                mindroom_event_cache_room_state.invalidated_at,
-                excluded.invalidated_at
-            ),
+            invalidated_at = CASE
+                WHEN mindroom_event_cache_room_state.invalidated_at IS NULL
+                    OR excluded.invalidated_at >= mindroom_event_cache_room_state.invalidated_at
+                    THEN excluded.invalidated_at
+                ELSE mindroom_event_cache_room_state.invalidated_at
+            END,
             invalidation_reason = CASE
                 WHEN mindroom_event_cache_room_state.invalidated_at IS NULL
                     OR excluded.invalidated_at >= mindroom_event_cache_room_state.invalidated_at
